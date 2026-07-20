@@ -12,6 +12,7 @@ from email.message import Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from typing import Iterator
+from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import desc, func, select, update
@@ -51,6 +52,10 @@ class MailboxImportError(RuntimeError):
     pass
 
 
+class _RetryClaimLost(MailboxImportError):
+    """A newer request owns this attachment retry now."""
+
+
 _RETRY_LEASE_SECONDS = 180
 _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
     {
@@ -64,6 +69,16 @@ _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Normalize SQLite's naive timestamp reads for lease comparisons."""
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 @contextmanager
@@ -347,13 +362,23 @@ def list_mailbox_imports(session: Session, *, limit: int = 40) -> MailboxImportH
     )
 
 
-def _can_retry(item: EmailAttachmentImport) -> bool:
+def _has_retryable_source(item: EmailAttachmentImport) -> bool:
     return bool(
-        item.status == "failed"
-        and item.source_uidvalidity is not None
+        item.source_uidvalidity is not None
         and item.source_fingerprint
         and item.error not in _NON_RETRYABLE_ATTACHMENT_ERRORS
     )
+
+
+def _can_retry(item: EmailAttachmentImport) -> bool:
+    if not _has_retryable_source(item):
+        return False
+    if item.status == "failed":
+        return True
+    if item.status == "retrying":
+        lease_expires_at = _as_utc(item.retry_lease_expires_at)
+        return lease_expires_at is not None and lease_expires_at <= _utcnow()
+    return False
 
 
 def _import_response(item: EmailAttachmentImport) -> MailboxImportResponse:
@@ -518,6 +543,8 @@ def _ingest_attachment(
         return resume
     except _AttachmentIngestionFailure:
         raise
+    except MailboxImportError:
+        raise
     except UploadValidationError as exc:
         raise _AttachmentIngestionFailure("attachment_validation_failed") from exc
     except (RuntimeError, SQLAlchemyError) as exc:
@@ -557,39 +584,65 @@ def _complete_retry(
     session: Session,
     *,
     import_id: str,
+    claim_token: str,
     status: str,
     error: str | None,
     resume_id: str | None,
 ) -> MailboxImportResponse:
-    """Finish a claimed retry and append an immutable audit attempt."""
+    """Commit a retry only while this request still owns its lease token."""
 
+    now = _utcnow()
+    expected_organization_id = organization_context_id(session)
+    completed = session.execute(
+        update(EmailAttachmentImport)
+        .where(
+            EmailAttachmentImport.id == import_id,
+            EmailAttachmentImport.organization_id == expected_organization_id,
+            EmailAttachmentImport.status == "retrying",
+            EmailAttachmentImport.retry_claim_token == claim_token,
+        )
+        .values(
+            status=status,
+            error=error,
+            resume_id=resume_id,
+            last_attempted_at=now,
+            retry_lease_expires_at=None,
+            retry_claim_token=None,
+            updated_at=now,
+        )
+    )
+    if completed.rowcount != 1:
+        # The candidate/resume created by this stale request remains in the
+        # current transaction, so rolling back here prevents a second import.
+        session.rollback()
+        raise _RetryClaimLost("mailbox_import_retry_superseded")
+
+    session.expire_all()
     record = session.scalar(
         select(EmailAttachmentImport).where(EmailAttachmentImport.id == import_id)
     )
     if record is None:
-        raise MailboxImportError("mailbox_import_not_found")
-    now = _utcnow()
-    next_attempt = max(1, record.attempt_count) + 1
-    record.status = status
-    record.error = error
-    record.resume_id = resume_id
-    record.attempt_count = next_attempt
-    record.last_attempted_at = now
-    record.retry_lease_expires_at = None
-    record.updated_at = now
-    session.add(
-        EmailAttachmentImportAttempt(
-            organization_id=record.organization_id,
-            email_attachment_import_id=record.id,
-            attempt_number=next_attempt,
-            trigger="manual_retry",
+        session.rollback()
+        raise _RetryClaimLost("mailbox_import_retry_superseded")
+    completed_attempt = session.execute(
+        update(EmailAttachmentImportAttempt)
+        .where(
+            EmailAttachmentImportAttempt.organization_id == expected_organization_id,
+            EmailAttachmentImportAttempt.email_attachment_import_id == record.id,
+            EmailAttachmentImportAttempt.attempt_number == record.attempt_count,
+            EmailAttachmentImportAttempt.trigger == "manual_retry",
+            EmailAttachmentImportAttempt.status == "retrying",
+        )
+        .values(
             status=status,
             error=error,
             resume_id=resume_id,
-            started_at=now,
             completed_at=now,
         )
     )
+    if completed_attempt.rowcount != 1:
+        session.rollback()
+        raise _RetryClaimLost("mailbox_import_retry_superseded")
     session.commit()
     return _import_response(record)
 
@@ -608,21 +661,29 @@ def _claim_retry(session: Session, *, import_id: str) -> EmailAttachmentImport:
         raise MailboxImportError("mailbox_import_not_found")
 
     now = _utcnow()
-    if record.status == "retrying":
+    claim_token = uuid4().hex
+    previous_attempt_number = record.attempt_count
+    previous_status = record.status
+    if record.status == "failed":
+        if not _can_retry(record):
+            raise MailboxImportError("mailbox_import_not_retryable")
+        claim_conditions = (EmailAttachmentImport.status == "failed",)
+    elif record.status == "retrying":
+        if not _has_retryable_source(record):
+            raise MailboxImportError("mailbox_import_not_retryable")
+        lease_expires_at = _as_utc(record.retry_lease_expires_at)
         if (
-            record.retry_lease_expires_at is not None
-            and record.retry_lease_expires_at <= now
+            lease_expires_at is None
+            or lease_expires_at > now
         ):
-            record.status = "failed"
-            record.error = "attachment_retry_interrupted"
-            record.retry_lease_expires_at = None
-            record.updated_at = now
-            session.commit()
-            session.refresh(record)
-        else:
             raise MailboxImportError("mailbox_import_retry_in_progress")
-
-    if not _can_retry(record):
+        # Do not first reset the stale row to ``failed``.  The conditional
+        # update below keeps a late finisher from overwriting a newer claim.
+        claim_conditions = (
+            EmailAttachmentImport.status == "retrying",
+            EmailAttachmentImport.retry_lease_expires_at <= now,
+        )
+    else:
         raise MailboxImportError("mailbox_import_not_retryable")
 
     claimed = session.execute(
@@ -630,23 +691,66 @@ def _claim_retry(session: Session, *, import_id: str) -> EmailAttachmentImport:
         .where(
             EmailAttachmentImport.id == record.id,
             EmailAttachmentImport.organization_id == expected_organization_id,
-            EmailAttachmentImport.status == "failed",
+            *claim_conditions,
         )
         .values(
             status="retrying",
+            attempt_count=EmailAttachmentImport.attempt_count + 1,
+            last_attempted_at=now,
             retry_lease_expires_at=now + timedelta(seconds=_RETRY_LEASE_SECONDS),
+            retry_claim_token=claim_token,
             updated_at=now,
         )
     )
     if claimed.rowcount != 1:
         session.rollback()
-        raise MailboxImportError("mailbox_import_retry_in_progress")
-    session.commit()
+        latest = session.scalar(
+            select(EmailAttachmentImport).where(
+                EmailAttachmentImport.id == import_id,
+                EmailAttachmentImport.organization_id == expected_organization_id,
+            )
+        )
+        if latest is None:
+            raise MailboxImportError("mailbox_import_not_found")
+        if latest.status == "retrying":
+            raise MailboxImportError("mailbox_import_retry_in_progress")
+        raise MailboxImportError("mailbox_import_not_retryable")
+    session.expire_all()
     claimed_record = session.scalar(
         select(EmailAttachmentImport).where(EmailAttachmentImport.id == record.id)
     )
-    if claimed_record is None:
+    if claimed_record is None or claimed_record.retry_claim_token != claim_token:
+        session.rollback()
         raise MailboxImportError("mailbox_import_not_found")
+    if previous_status == "retrying":
+        session.execute(
+            update(EmailAttachmentImportAttempt)
+            .where(
+                EmailAttachmentImportAttempt.organization_id == expected_organization_id,
+                EmailAttachmentImportAttempt.email_attachment_import_id == claimed_record.id,
+                EmailAttachmentImportAttempt.attempt_number == previous_attempt_number,
+                EmailAttachmentImportAttempt.status == "retrying",
+            )
+            .values(
+                status="failed",
+                error="attachment_retry_interrupted",
+                completed_at=now,
+            )
+        )
+    session.add(
+        EmailAttachmentImportAttempt(
+            organization_id=claimed_record.organization_id,
+            email_attachment_import_id=claimed_record.id,
+            attempt_number=claimed_record.attempt_count,
+            trigger="manual_retry",
+            status="retrying",
+            error=None,
+            resume_id=None,
+            started_at=now,
+            completed_at=None,
+        )
+    )
+    session.commit()
     return claimed_record
 
 
@@ -659,33 +763,47 @@ def retry_mailbox_attachment(
     """Retry precisely one failed attachment without scanning the mailbox."""
 
     record = _claim_retry(session, import_id=import_id)
+    claim_token = record.retry_claim_token
+    if not claim_token:
+        raise MailboxImportError("mailbox_import_retry_in_progress")
     organization_id = organization_context_id(session)
     mailbox_config_id = record.mailbox_config_id
     client: imaplib.IMAP4_SSL | None = None
+    resume: Resume | None = None
+
+    def complete(
+        *,
+        status: str,
+        error: str | None,
+        resume_id: str | None,
+    ) -> MailboxImportResponse:
+        return _complete_retry(
+            session,
+            import_id=record.id,
+            claim_token=claim_token,
+            status=status,
+            error=error,
+            resume_id=resume_id,
+        )
+
     try:
         config = session.scalar(
             select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id)
         )
         if config is None or config.organization_id != organization_id:
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="attachment_source_unavailable",
                 resume_id=None,
             )
         if not config.enabled:
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="mailbox_not_enabled",
                 resume_id=None,
             )
         if record.source_fingerprint != _mailbox_source_fingerprint(config):
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="attachment_source_changed",
                 resume_id=None,
@@ -695,9 +813,7 @@ def retry_mailbox_attachment(
                 config.encrypted_password.encode("ascii")
             ).decode("utf-8")
         except (MailboxImportError, InvalidToken, UnicodeDecodeError):
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="mailbox_credentials_unavailable",
                 resume_id=None,
@@ -706,27 +822,21 @@ def retry_mailbox_attachment(
         client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
         login_status, _ = client.login(config.email_address, password)
         if login_status != "OK":
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="mailbox_connection_failed",
                 resume_id=None,
             )
         current_uidvalidity, _ = _read_mailbox_status(client, mailbox=config.mailbox)
         if current_uidvalidity != record.source_uidvalidity:
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="attachment_source_changed",
                 resume_id=None,
             )
         select_status, _ = client.select(config.mailbox, readonly=True)
         if select_status != "OK":
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="mailbox_select_failed",
                 resume_id=None,
@@ -735,9 +845,7 @@ def retry_mailbox_attachment(
             "fetch", record.message_uid.encode("ascii"), "(RFC822)"
         )
         if fetch_status != "OK" or not fetched or not isinstance(fetched[0], tuple):
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="attachment_message_unavailable",
                 resume_id=None,
@@ -748,9 +856,7 @@ def retry_mailbox_attachment(
             digest=record.attachment_sha256,
         )
         if attachment is None:
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error="attachment_message_unavailable",
                 resume_id=None,
@@ -771,27 +877,30 @@ def retry_mailbox_attachment(
                 organization_id=organization_id,
                 failure=exc,
             )
-            return _complete_retry(
-                session,
-                import_id=record.id,
+            return complete(
                 status="failed",
                 error=exc.code,
                 resume_id=None,
             )
-        return _complete_retry(
-            session,
-            import_id=record.id,
+        return complete(
             status="imported",
             error=None,
             resume_id=resume.id,
         )
+    except _RetryClaimLost:
+        session.rollback()
+        if resume is not None:
+            discard_uploaded_pdf(
+                settings,
+                storage_key=resume.storage_key,
+                organization_id=organization_id,
+            )
+        raise MailboxImportError("mailbox_import_retry_superseded")
     except MailboxImportError as exc:
         session.rollback()
         if str(exc) == "mailbox_workspace_mismatch":
             raise
-        return _complete_retry(
-            session,
-            import_id=record.id,
+        return complete(
             status="failed",
             error=str(exc)
             if str(exc).startswith("mailbox_")
@@ -800,9 +909,7 @@ def retry_mailbox_attachment(
         )
     except (imaplib.IMAP4.error, OSError, SQLAlchemyError):
         session.rollback()
-        return _complete_retry(
-            session,
-            import_id=record.id,
+        return complete(
             status="failed",
             error="mailbox_connection_failed",
             resume_id=None,

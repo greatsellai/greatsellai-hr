@@ -451,7 +451,12 @@ const mailboxImportErrorMessages: Record<string, string> = {
   mailbox_import_not_found: "这条附件记录已不存在或无法访问。",
   mailbox_import_not_retryable: "这份附件当前不能重新入库。",
   mailbox_import_retry_in_progress: "这份附件正在重新入库，请稍后刷新。",
+  mailbox_import_retry_superseded: "这份附件已由更新的重试请求接管，请刷新后查看结果。",
   mailbox_not_enabled: "该收件邮箱已暂停，请启用后重试。",
+  mailbox_credentials_unavailable: "邮箱授权码无法读取，请重新保存后再同步。",
+  mailbox_connection_failed: "无法连接邮箱，请检查 IMAP 地址、端口和授权码。",
+  mailbox_select_failed: "无法打开指定的邮箱文件夹。",
+  mailbox_status_failed: "无法读取邮箱当前位置，请检查文件夹设置后重试。",
   attachment_validation_failed: "附件未通过文件校验，请候选人重新发送。",
   attachment_text_extraction_failed: "附件文字提取失败，请候选人重新发送清晰原件。",
   attachment_import_failed: "附件暂时无法入库，请稍后重试。",
@@ -466,14 +471,14 @@ function mailboxImportErrorLabel(error: string | null): string {
   return mailboxImportErrorMessages[error] ?? "附件处理没有完成，请稍后重试。";
 }
 
-function mailboxImportStatusLabel(status: string): string {
+function mailboxImportStatusLabel(status: string, canRetry = false): string {
   switch (status) {
     case "imported":
       return "已入库";
     case "skipped":
       return "已跳过";
     case "retrying":
-      return "正在重试";
+      return canRetry ? "可重新入库" : "正在重试";
     case "failed":
       return "处理失败";
     default:
@@ -4916,20 +4921,23 @@ function MailboxPage({
               </thead>
               <tbody>
                 {history.items.map((item) => {
-                  const isRetrying = item.status === "retrying" || retryingImportId === item.import_id;
+                  const isRetrying = (
+                    item.status === "retrying"
+                    && !item.can_retry
+                  ) || retryingImportId === item.import_id;
                   const statusClass = item.status === "imported"
                     ? "is-success"
                     : item.status === "failed"
                       ? "is-error"
                       : item.status === "retrying"
-                        ? "is-progress"
+                        ? item.can_retry ? "is-warning" : "is-progress"
                         : "";
 
                   return (
                     <tr key={item.import_id}>
                       <th scope="row"><strong>{item.attachment_filename}</strong></th>
                       <td>
-                        <span className={`status-pill mailbox-import-status ${statusClass}`}>{mailboxImportStatusLabel(item.status)}</span>
+                        <span className={`status-pill mailbox-import-status ${statusClass}`}>{mailboxImportStatusLabel(item.status, item.can_retry)}</span>
                         {item.error && <small className="mailbox-import-error">{mailboxImportErrorLabel(item.error)}</small>}
                       </td>
                       <td className="mailbox-attempt-cell">{item.attempt_count} 次</td>

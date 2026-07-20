@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from email.message import EmailMessage
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import DataError
 
@@ -623,3 +625,84 @@ def test_attachment_retry_refuses_a_different_attachment_with_the_same_message_u
     with client.app.state.database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Candidate)) == 0
         assert session.scalar(select(func.count()).select_from(Resume)) == 0
+
+
+def test_expired_retry_claim_cannot_be_completed_by_the_previous_request(client) -> None:
+    """A stale retry token cannot overwrite the retry that recovered its lease."""
+
+    encrypted_password = mailbox_import_service._fernet(
+        client.app.state.settings
+    ).encrypt(b"test-authorization-code").decode("ascii")
+    with client.app.state.database.session_factory() as session:
+        config = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="recruiting@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+        )
+        session.add(config)
+        session.flush()
+        record = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="42",
+            message_id="<lease-recovery@example.test>",
+            filename="retry.pdf",
+            attachment_sha256="e" * 64,
+            status="failed",
+            error="attachment_import_failed",
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+        )
+        session.commit()
+        record_id = record.id
+
+        first_claim = mailbox_import_service._claim_retry(session, import_id=record_id)
+        first_token = first_claim.retry_claim_token
+        assert first_token
+        first_claim.retry_lease_expires_at = (
+            mailbox_import_service._utcnow() - timedelta(seconds=1)
+        )
+        session.commit()
+
+        recovered_claim = mailbox_import_service._claim_retry(
+            session,
+            import_id=record_id,
+        )
+        recovered_token = recovered_claim.retry_claim_token
+        assert recovered_token and recovered_token != first_token
+
+        with pytest.raises(mailbox_import_service._RetryClaimLost):
+            mailbox_import_service._complete_retry(
+                session,
+                import_id=record_id,
+                claim_token=first_token,
+                status="failed",
+                error="mailbox_connection_failed",
+                resume_id=None,
+            )
+
+        # The old request lost its conditional write; only the recovered
+        # claim may now complete and append the second audit attempt.
+        completed = mailbox_import_service._complete_retry(
+            session,
+            import_id=record_id,
+            claim_token=recovered_token,
+            status="failed",
+            error="mailbox_connection_failed",
+            resume_id=None,
+        )
+        assert completed.status == "failed"
+        assert completed.attempt_count == 3
+
+        attempts = session.scalars(
+            select(EmailAttachmentImportAttempt).order_by(
+                EmailAttachmentImportAttempt.attempt_number
+            )
+        ).all()
+        assert len(attempts) == 3
+        assert attempts[1].error == "attachment_retry_interrupted"
+        assert attempts[2].status == "failed"

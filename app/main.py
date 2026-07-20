@@ -1116,6 +1116,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             elif code in {
                 "mailbox_import_not_retryable",
                 "mailbox_import_retry_in_progress",
+                "mailbox_import_retry_superseded",
             }:
                 response_status = status.HTTP_409_CONFLICT
             else:

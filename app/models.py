@@ -525,6 +525,7 @@ class EmailAttachmentImport(OrganizationScoped, Base):
     attempt_count: Mapped[int] = mapped_column(Integer, default=1)
     last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retry_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retry_claim_token: Mapped[str | None] = mapped_column(String(64))
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime | None] = mapped_column(

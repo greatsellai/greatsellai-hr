@@ -41,6 +41,9 @@ def upgrade() -> None:
             sa.Column("retry_lease_expires_at", sa.DateTime(timezone=True), nullable=True)
         )
         batch_op.add_column(
+            sa.Column("retry_claim_token", sa.String(length=64), nullable=True)
+        )
+        batch_op.add_column(
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True)
         )
 
@@ -131,6 +134,7 @@ def downgrade() -> None:
     )
     with op.batch_alter_table("email_attachment_imports") as batch_op:
         batch_op.drop_column("updated_at")
+        batch_op.drop_column("retry_claim_token")
         batch_op.drop_column("retry_lease_expires_at")
         batch_op.drop_column("last_attempted_at")
         batch_op.drop_column("attempt_count")

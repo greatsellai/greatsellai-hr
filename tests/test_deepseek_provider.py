@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.services.deepseek_provider import (
     _downgrade_incomplete_work_experiences,
     _flatten_evidence_block_ids,
@@ -10,11 +12,20 @@ from app.services.deepseek_provider import (
     EvidenceBlock,
     extract_resume_core_facts,
     extract_resume_facts,
+    legacy_direct_transport_for_testing,
     redact_nonessential_personal_data,
     resume_core_facts_tool_schema,
     resume_facts_tool_schema,
 )
 from app.services.institution_service import build_985_211_ai_rulebook
+
+
+@pytest.fixture(autouse=True)
+def _enable_retired_transport_only_for_legacy_protocol_contracts():
+    """Keep direct-HTTP assertions isolated from application AI paths."""
+
+    with legacy_direct_transport_for_testing():
+        yield
 
 
 def test_sensitive_contact_data_is_redacted_before_model_input() -> None:

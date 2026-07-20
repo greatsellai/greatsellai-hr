@@ -89,7 +89,7 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     assert payload["ai_total_score"] == 44.0
     assert payload["total_score"] == 44.0
     assert payload["status"] == "succeeded"
-    assert payload["model_name"] == "unit-test-model"
+    assert payload["model_name"] == "gateway-managed"
     assert payload["created_at"]
     assert payload["template_name"] == "Backend Engineer"
     assert payload["template_description"] == "Grounded scoring test template"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -39,6 +40,13 @@ from app.services.deepseek_provider import (
     generate_jd_from_brief,
     match_resume_fact_snapshot_against_requirements,
 )
+from app.services.ai_gateway_service import (
+    AiExecutionSpec,
+    AiGatewayError,
+    ai_gateway_credentials_configured,
+    ai_gateway_execution,
+    gateway_prompt_transport_arguments,
+)
 from app.services.normalization import normalized_contains
 from app.services.resume_eligibility import has_unreliable_source_text
 
@@ -70,6 +78,7 @@ MATCH_CONFIDENCE_RECOMMENDED_THRESHOLD = 60.0
 MATCH_LANE_RECOMMENDED = "recommended"
 MATCH_LANE_PENDING = "pending"
 MATCH_LANE_UNMET = "unmet"
+_NO_KEY_ERROR = "deepseek_api_key_not_configured"
 
 
 _YEAR_PATTERN = re.compile(r"(?<!\d)(\d{1,2})\s*(?:years?|年)(?!\w)", re.IGNORECASE)
@@ -78,6 +87,33 @@ _MONTH_PATTERN = re.compile(r"(?<!\d)(\d{1,3})\s*(?:months?|个月)(?!\w)", re.I
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _require_ai_gateway_credentials(settings: AppSettings) -> None:
+    """Keep the established no-key error while accepting gateway credentials.
+
+    Provider credentials now live behind non-secret references in the gateway
+    control plane.  Existing installations only have the legacy runtime key,
+    so callers and HTTP error mapping must retain their stable
+    ``deepseek_api_key_not_configured`` response when neither source exists.
+    """
+
+    if not ai_gateway_credentials_configured(settings):
+        raise JobServiceError(_NO_KEY_ERROR)
+
+
+def _gateway_compatibility_credentials(settings: AppSettings) -> tuple[str, str, int]:
+    """Return the legacy-provider arguments consumed only by prompt helpers.
+
+    ``deepseek_provider`` owns the existing strict schema and evidence
+    validation.  Once it is called inside ``ai_gateway_execution``, its
+    transport is intercepted and the gateway replaces the model, endpoint,
+    and credential with the platform-approved route.  An empty key is
+    therefore valid here when the selected route resolves a generic
+    credential-map entry.
+    """
+
+    return gateway_prompt_transport_arguments(settings)
 
 
 def _split_clauses(raw_text: str) -> list[str]:
@@ -410,20 +446,36 @@ def publish_original_job(
 
 def generate_job_description(
     *,
+    session: Session,
     payload: JobGenerationRequest,
     settings: AppSettings,
 ) -> JobGenerationResponse:
     """Generate a JD that can be persisted as a confirmed job in one follow-up call."""
 
-    if not settings.deepseek_api_key:
-        raise JobServiceError("deepseek_api_key_not_configured")
-    generated = generate_jd_from_brief(
-        api_key=settings.deepseek_api_key,
-        model=settings.deepseek_model,
-        timeout_seconds=settings.deepseek_timeout_seconds,
-        title=payload.title,
-        brief=payload.brief,
-    )
+    _require_ai_gateway_credentials(settings)
+    api_key, model, timeout_seconds = _gateway_compatibility_credentials(settings)
+    try:
+        with ai_gateway_execution(
+            session,
+            settings=settings,
+            spec=AiExecutionSpec(
+                feature="jd_generate",
+                business_ref_type="job_generation",
+                # The generated JD intentionally has no durable Job row yet.
+                # Never persist title/brief text as a ledger reference.
+                business_ref_id=str(uuid4()),
+                contract_version="jd_generation.v1",
+            ),
+        ):
+            generated = generate_jd_from_brief(
+                api_key=api_key,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                title=payload.title,
+                brief=payload.brief,
+            )
+    except AiGatewayError as exc:
+        raise JobServiceError(str(exc)) from exc
     return JobGenerationResponse.model_validate(generated)
 
 
@@ -511,22 +563,35 @@ def extract_job_version_requirements(
     job_version_id: str,
     settings: AppSettings,
 ) -> JobVersionResponse:
-    if not settings.deepseek_api_key:
-        raise JobServiceError("deepseek_api_key_not_configured")
+    _require_ai_gateway_credentials(settings)
     job_version = session.get(JobVersion, job_version_id)
     if job_version is None:
         raise JobVersionNotFoundError("job_version_not_found")
     if job_version.status != "draft":
         raise JobServiceError("confirmed_job_version_cannot_be_extracted")
-    provider_result = extract_jd_requirements_from_clauses(
-        api_key=settings.deepseek_api_key,
-        model=settings.deepseek_model,
-        timeout_seconds=settings.deepseek_timeout_seconds,
-        clauses=[
-            {"clause_id": clause.clause_id, "text": clause.text}
-            for clause in sorted(job_version.clauses, key=lambda item: item.ordinal)
-        ],
-    )
+    api_key, model, timeout_seconds = _gateway_compatibility_credentials(settings)
+    try:
+        with ai_gateway_execution(
+            session,
+            settings=settings,
+            spec=AiExecutionSpec(
+                feature="jd_requirements_extract",
+                business_ref_type="job_version",
+                business_ref_id=job_version.id,
+                contract_version="jd_requirements.v1",
+            ),
+        ):
+            provider_result = extract_jd_requirements_from_clauses(
+                api_key=api_key,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                clauses=[
+                    {"clause_id": clause.clause_id, "text": clause.text}
+                    for clause in sorted(job_version.clauses, key=lambda item: item.ordinal)
+                ],
+            )
+    except AiGatewayError as exc:
+        raise JobServiceError(str(exc)) from exc
     extracted_requirements = [
         JobRequirementInput(
             requirement_key=requirement["requirement_id"],
@@ -741,9 +806,11 @@ def run_job_match(
     resume_id: str,
     payload: JobMatchCreate,
     settings: AppSettings,
+    pinned_route_policy_version_id: str | None = None,
+    ai_run_business_ref_type: str = "job_match",
+    ai_run_business_ref_id: str | None = None,
 ) -> JobMatchResponse:
-    if not settings.deepseek_api_key:
-        raise JobServiceError("deepseek_api_key_not_configured")
+    _require_ai_gateway_credentials(settings)
     job_version = session.get(JobVersion, payload.job_version_id)
     if job_version is None:
         raise JobVersionNotFoundError("job_version_not_found")
@@ -753,21 +820,39 @@ def run_job_match(
     if not requirements:
         raise JobServiceError("job_version_has_no_requirements")
     resume, snapshot, fact_snapshot = _ready_resume_snapshot(session, resume_id=resume_id)
-    provider_result = match_resume_fact_snapshot_against_requirements(
-        api_key=settings.deepseek_api_key,
-        model=settings.deepseek_model,
-        timeout_seconds=settings.deepseek_timeout_seconds,
-        fact_snapshot=fact_snapshot,
-        confirmed_requirements=[
-            {
-                "requirement_id": requirement.requirement_key,
-                "requirement_text": requirement.raw_requirement,
-                "priority": requirement.priority,
-                "clause_ids": requirement.clause_ids or [],
-            }
-            for requirement in requirements
-        ],
-    )
+    api_key, model, timeout_seconds = _gateway_compatibility_credentials(settings)
+    try:
+        with ai_gateway_execution(
+            session,
+            settings=settings,
+            spec=AiExecutionSpec(
+                feature="jd_match",
+                business_ref_type=ai_run_business_ref_type,
+                business_ref_id=(
+                    ai_run_business_ref_id
+                    or f"{job_version.id}:{resume.id}:{snapshot.id}"
+                ),
+                contract_version="jd_match.v1",
+                pinned_route_policy_version_id=pinned_route_policy_version_id,
+            ),
+        ):
+            provider_result = match_resume_fact_snapshot_against_requirements(
+                api_key=api_key,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                fact_snapshot=fact_snapshot,
+                confirmed_requirements=[
+                    {
+                        "requirement_id": requirement.requirement_key,
+                        "requirement_text": requirement.raw_requirement,
+                        "priority": requirement.priority,
+                        "clause_ids": requirement.clause_ids or [],
+                    }
+                    for requirement in requirements
+                ],
+            )
+    except AiGatewayError as exc:
+        raise JobServiceError(str(exc)) from exc
     result_by_key = {
         result["requirement_id"]: result
         for result in provider_result["requirement_matches"]
@@ -793,7 +878,9 @@ def run_job_match(
             "decision": "advisory_only",
         },
         status="succeeded",
-        model_name=settings.deepseek_model,
+        # Keep the historical API field without coupling this result to the
+        # legacy settings model.  The actual model is on its gateway run.
+        model_name="gateway-managed",
     )
     session.add(job_match)
     session.flush()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from email.utils import parseaddr
@@ -37,6 +38,15 @@ class AppSettings:
     deepseek_api_key: str | None = field(default=None, repr=False)
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_timeout_seconds: int = 90
+    # One-time compatibility bridge for installations created before the AI
+    # gateway. It is used only to create an initial platform route when none
+    # exists; all later feature calls resolve their endpoint/model from DB.
+    legacy_openai_compatible_endpoint: str = "https://api.deepseek.com/beta/chat/completions"
+    # The provider/model used by business features is now resolved from the
+    # database-backed AI route policy.  Credentials remain outside that
+    # control plane: this map is loaded only from the server environment and
+    # maps a non-secret reference (stored in the DB) to its actual API secret.
+    ai_provider_credentials: dict[str, str] = field(default_factory=dict, repr=False)
     ai_extraction_job_max_attempts: int = 3
     ai_extraction_job_lease_seconds: int = 180
     ai_extraction_worker_poll_seconds: float = 2.0
@@ -127,6 +137,13 @@ class AppSettings:
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
             deepseek_timeout_seconds=int(
                 os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "90")
+            ),
+            legacy_openai_compatible_endpoint=os.getenv(
+                "RESUME_V3_LEGACY_OPENAI_COMPATIBLE_ENDPOINT",
+                "https://api.deepseek.com/beta/chat/completions",
+            ).strip(),
+            ai_provider_credentials=_secret_reference_map(
+                "RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON"
             ),
             ai_extraction_job_max_attempts=int(
                 os.getenv("RESUME_V3_AI_EXTRACTION_JOB_MAX_ATTEMPTS", "3")
@@ -225,6 +242,12 @@ class AppSettings:
             raise ValueError("RESUME_V3_DATABASE_MAX_OVERFLOW must not be negative")
         if self.deepseek_timeout_seconds < 1:
             raise ValueError("DEEPSEEK_TIMEOUT_SECONDS must be at least 1")
+        if self.legacy_openai_compatible_endpoint and not self.legacy_openai_compatible_endpoint.startswith(
+            "https://"
+        ):
+            raise ValueError("RESUME_V3_LEGACY_OPENAI_COMPATIBLE_ENDPOINT must be an HTTPS URL")
+        if any(not reference or not secret for reference, secret in self.ai_provider_credentials.items()):
+            raise ValueError("RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON contains an empty value")
         if bool(self.tencent_secret_id) != bool(self.tencent_secret_key):
             raise ValueError(
                 "TENCENT_SECRET_ID and TENCENT_SECRET_KEY must be configured together"
@@ -360,3 +383,32 @@ def _optional_positive_int(name: str) -> int | None:
 
 def _comma_separated_values(raw_value: str) -> tuple[str, ...]:
     return tuple(value.strip() for value in raw_value.split(",") if value.strip())
+
+
+def _secret_reference_map(name: str) -> dict[str, str]:
+    """Parse a server-only credential map without placing secrets in the DB.
+
+    Example: ``{"provider_a_primary": "..."}``.  Model route records hold
+    only ``provider_a_primary``; this helper deliberately returns no values to
+    API responses or logs.
+    """
+
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return {}
+    try:
+        decoded = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be a JSON object") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    normalized: dict[str, str] = {}
+    for raw_reference, raw_secret in decoded.items():
+        if not isinstance(raw_reference, str) or not isinstance(raw_secret, str):
+            raise ValueError(f"{name} must map string references to string secrets")
+        reference = raw_reference.strip()
+        secret = raw_secret.strip()
+        if not reference or not secret:
+            raise ValueError(f"{name} contains an empty reference or secret")
+        normalized[reference] = secret
+    return normalized

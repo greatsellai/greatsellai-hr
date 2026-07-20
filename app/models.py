@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -8,10 +9,12 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Float,
     Index,
     Integer,
     JSON,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -162,6 +165,18 @@ class UserAccount(Base):
     email_verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
+    )
+    published_ai_route_policy_versions: Mapped[list["AiRoutePolicyVersion"]] = relationship(
+        back_populates="published_by_user",
+        foreign_keys="AiRoutePolicyVersion.published_by_user_id",
+    )
+    created_ai_model_price_versions: Mapped[list["AiModelPriceVersion"]] = relationship(
+        back_populates="created_by_user",
+        foreign_keys="AiModelPriceVersion.created_by_user_id",
+    )
+    ai_runs: Mapped[list["AiRun"]] = relationship(
+        back_populates="actor_user",
+        foreign_keys="AiRun.actor_user_id",
     )
 
 
@@ -961,6 +976,13 @@ class ResumeAiExtractionJob(OrganizationScoped, Base):
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, default=3)
     input_facts_version: Mapped[int] = mapped_column(Integer, default=0)
+    # A queued task pins the published route that existed when it was created.
+    # Existing rows remain nullable until the gateway migration begins using it.
+    ai_route_policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_route_policy_versions.id"),
+        nullable=True,
+        index=True,
+    )
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lease_owner: Mapped[str | None] = mapped_column(String(128))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -975,6 +997,7 @@ class ResumeAiExtractionJob(OrganizationScoped, Base):
     )
 
     resume: Mapped[Resume] = relationship(back_populates="ai_extraction_job")
+    ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
 
 
 class ResumeSourceBlock(Base):
@@ -1281,6 +1304,11 @@ class ResumeScoreBatch(OrganizationScoped, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     template_id: Mapped[str] = mapped_column(ForeignKey("score_templates.id"), index=True)
     template_version: Mapped[int] = mapped_column(Integer)
+    ai_route_policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_route_policy_versions.id"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     completed_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -1298,6 +1326,7 @@ class ResumeScoreBatch(OrganizationScoped, Base):
     )
 
     template: Mapped[ScoreTemplate] = relationship()
+    ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
     items: Mapped[list["ResumeScoreBatchItem"]] = relationship(
         back_populates="batch",
         cascade="all, delete-orphan",
@@ -1564,6 +1593,11 @@ class JobMatchBatch(OrganizationScoped, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     job_version_id: Mapped[str] = mapped_column(ForeignKey("job_versions.id"), index=True)
+    ai_route_policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_route_policy_versions.id"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     completed_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -1580,6 +1614,7 @@ class JobMatchBatch(OrganizationScoped, Base):
     )
 
     job_version_record: Mapped[JobVersion] = relationship()
+    ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
     items: Mapped[list["JobMatchBatchItem"]] = relationship(
         back_populates="batch",
         cascade="all, delete-orphan",
@@ -1620,6 +1655,441 @@ class JobMatchBatchItem(OrganizationScoped, Base):
     resume: Mapped[Resume] = relationship()
     fact_snapshot: Mapped[ResumeFactSnapshot] = relationship()
     job_match: Mapped[JobMatch | None] = relationship()
+
+
+class AiProviderProfile(Base):
+    """A platform-managed connection profile for one AI/OCR provider protocol.
+
+    ``credential_ref`` is only a reference to a server-side secret (for
+    example, an environment-variable or secret-manager key).  It must never
+    contain a credential value.  Request defaults are likewise limited to
+    non-secret protocol defaults.
+    """
+
+    __tablename__ = "ai_provider_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    driver: Mapped[str] = mapped_column(String(64), index=True)
+    base_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    credential_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    request_defaults_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    model_profiles: Mapped[list["AiModelProfile"]] = relationship(
+        back_populates="provider_profile",
+    )
+    api_invocations: Mapped[list["ApiInvocation"]] = relationship(
+        back_populates="provider_profile",
+    )
+
+
+class AiModelProfile(Base):
+    """A selectable model/service profile, independent from business features."""
+
+    __tablename__ = "ai_model_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_profile_id",
+            "provider_model_id",
+            name="uq_ai_model_profile_provider_model",
+        ),
+        Index(
+            "ix_ai_model_profiles_provider_enabled",
+            "provider_profile_id",
+            "enabled",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_provider_profiles.id"),
+        index=True,
+    )
+    slug: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    provider_model_id: Mapped[str] = mapped_column(String(255))
+    capabilities_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    data_classification_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    provider_profile: Mapped[AiProviderProfile] = relationship(
+        back_populates="model_profiles",
+    )
+    price_versions: Mapped[list["AiModelPriceVersion"]] = relationship(
+        back_populates="model_profile",
+    )
+    api_invocations: Mapped[list["ApiInvocation"]] = relationship(
+        back_populates="model_profile",
+    )
+
+
+class AiModelPriceVersion(Base):
+    """An immutable, platform-owned price rule snapshot for a model profile.
+
+    Token prices are expressed per one million tokens in ``currency``.  The
+    request and page prices are expressed per one request/page respectively.
+    Nullable units deliberately support providers such as OCR that do not
+    publish LLM token prices.  Historical invocation rows store their own
+    price snapshot and never recalculate from this table.
+    """
+
+    __tablename__ = "ai_model_price_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_profile_id",
+            "version",
+            name="uq_ai_model_price_version",
+        ),
+        Index(
+            "ix_ai_model_price_versions_model_active_effective",
+            "model_profile_id",
+            "is_active",
+            "effective_from",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    model_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_model_profiles.id"),
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    currency: Mapped[str] = mapped_column(String(3))
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    input_price_per_million: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    output_price_per_million: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    cached_read_input_price_per_million: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8)
+    )
+    cached_write_input_price_per_million: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8)
+    )
+    reasoning_price_per_million: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    request_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    page_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    source: Mapped[str] = mapped_column(String(1024))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    model_profile: Mapped[AiModelProfile] = relationship(back_populates="price_versions")
+    created_by_user: Mapped[UserAccount | None] = relationship(
+        back_populates="created_ai_model_price_versions",
+        foreign_keys=[created_by_user_id],
+    )
+    api_invocations: Mapped[list["ApiInvocation"]] = relationship(
+        back_populates="price_version",
+    )
+
+
+class AiRoutePolicy(Base):
+    """The stable, platform-owned policy container for one business feature."""
+
+    __tablename__ = "ai_route_policies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    feature: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "ai_route_policy_versions.id",
+            name="fk_ai_route_policies_active_version",
+            use_alter=True,
+        ),
+        nullable=True,
+        index=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    versions: Mapped[list["AiRoutePolicyVersion"]] = relationship(
+        back_populates="policy",
+        foreign_keys="AiRoutePolicyVersion.policy_id",
+    )
+    active_version: Mapped["AiRoutePolicyVersion | None"] = relationship(
+        foreign_keys=[active_version_id],
+        post_update=True,
+    )
+
+
+class AiRoutePolicyVersion(Base):
+    """An append-only, publishable routing and retry policy snapshot."""
+
+    __tablename__ = "ai_route_policy_versions"
+    __table_args__ = (
+        UniqueConstraint("policy_id", "version", name="uq_ai_route_policy_version"),
+        Index("ix_ai_route_policy_versions_policy_status", "policy_id", "status"),
+        Index("ix_ai_route_policy_versions_published", "status", "published_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    policy_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_route_policies.id"),
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    # The ordered targets and retry/fallback rules are intentionally explicit
+    # snapshots.  They contain profile IDs and limits, never key values.
+    targets_json: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    retry_policy_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    max_cost_guard_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    prompt_revision: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    published_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    supersedes_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_route_policy_versions.id"),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    policy: Mapped[AiRoutePolicy] = relationship(
+        back_populates="versions",
+        foreign_keys=[policy_id],
+    )
+    published_by_user: Mapped[UserAccount | None] = relationship(
+        back_populates="published_ai_route_policy_versions",
+        foreign_keys=[published_by_user_id],
+    )
+    supersedes_version: Mapped["AiRoutePolicyVersion | None"] = relationship(
+        back_populates="superseded_by_versions",
+        foreign_keys=[supersedes_version_id],
+        remote_side="AiRoutePolicyVersion.id",
+    )
+    superseded_by_versions: Mapped[list["AiRoutePolicyVersion"]] = relationship(
+        back_populates="supersedes_version",
+        foreign_keys="AiRoutePolicyVersion.supersedes_version_id",
+    )
+    ai_runs: Mapped[list["AiRun"]] = relationship(
+        back_populates="route_policy_version",
+    )
+
+
+class AiRun(OrganizationScoped, Base):
+    """A tenant-scoped root record for one business-level AI/OCR action.
+
+    It stores safe correlation and version metadata only.  Prompts, candidate
+    source text, tool arguments, model output, headers, and provider keys are
+    intentionally absent from this durable ledger.
+    """
+
+    __tablename__ = "ai_runs"
+    __table_args__ = (
+        # This redundant candidate key lets child ledger rows enforce that a
+        # run and its invocation share the same workspace at the database
+        # level, not merely through service-layer filtering.
+        UniqueConstraint("id", "organization_id", name="uq_ai_run_id_organization"),
+        Index("ix_ai_runs_organization_created", "organization_id", "created_at"),
+        Index(
+            "ix_ai_runs_organization_feature_started",
+            "organization_id",
+            "feature",
+            "started_at",
+        ),
+        Index(
+            "ix_ai_runs_organization_status_started",
+            "organization_id",
+            "status",
+            "started_at",
+        ),
+        Index("ix_ai_runs_organization_business_ref", "organization_id", "business_ref_type", "business_ref_id"),
+        Index("ix_ai_runs_correlation", "correlation_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    feature: Mapped[str] = mapped_column(String(64), index=True)
+    service_kind: Mapped[str] = mapped_column(String(32), default="llm", index=True)
+    business_ref_type: Mapped[str] = mapped_column(String(64))
+    business_ref_id: Mapped[str] = mapped_column(String(128))
+    correlation_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    route_policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_route_policy_versions.id"),
+        nullable=True,
+        index=True,
+    )
+    # Prompt bodies remain code-controlled; the ledger keeps just a safe
+    # revision label and contract marker needed for reproducibility.
+    prompt_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    contract_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_snapshot_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    failure_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    total_cost_reporting_micros: Mapped[int | None] = mapped_column(BigInteger)
+    reporting_currency: Mapped[str] = mapped_column(String(3), default="CNY")
+    # ``known``, ``partial`` and ``unavailable`` let reporting distinguish a
+    # genuine zero-cost cache hit from a provider response with unknown usage.
+    cost_status: Mapped[str] = mapped_column(String(32), default="unavailable")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    actor_user: Mapped[UserAccount | None] = relationship(
+        back_populates="ai_runs",
+        foreign_keys=[actor_user_id],
+    )
+    route_policy_version: Mapped[AiRoutePolicyVersion | None] = relationship(
+        back_populates="ai_runs",
+    )
+    api_invocations: Mapped[list["ApiInvocation"]] = relationship(
+        back_populates="ai_run",
+    )
+
+
+class ApiInvocation(OrganizationScoped, Base):
+    """One immutable external provider attempt belonging to an ``AiRun``.
+
+    This is a usage and cost ledger rather than a request/response archive.
+    It deliberately stores only safe operational metadata and normalized usage
+    buckets; no prompts, source documents, outputs, raw provider errors, or
+    secrets belong here.
+    """
+
+    __tablename__ = "api_invocations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["ai_run_id", "organization_id"],
+            ["ai_runs.id", "ai_runs.organization_id"],
+            name="fk_api_invocations_run_organization",
+        ),
+        # A fallback attempt must be part of the same workspace as the
+        # invocation it follows; a simple self-FK would permit a cross-tenant
+        # chain when writes bypass ORM scope.
+        ForeignKeyConstraint(
+            ["fallback_of_id", "organization_id"],
+            ["api_invocations.id", "api_invocations.organization_id"],
+            name="fk_api_invocations_fallback_organization",
+        ),
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            name="uq_api_invocation_id_organization",
+        ),
+        UniqueConstraint("ai_run_id", "attempt_no", name="uq_api_invocation_run_attempt"),
+        Index("ix_api_invocations_organization_created", "organization_id", "created_at"),
+        Index(
+            "ix_api_invocations_organization_status_started",
+            "organization_id",
+            "status",
+            "started_at",
+        ),
+        Index(
+            "ix_api_invocations_provider_request",
+            "provider_profile_id",
+            "provider_request_id",
+        ),
+        Index(
+            "ix_api_invocations_organization_cost_created",
+            "organization_id",
+            "reporting_currency",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    ai_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer)
+    target_index: Mapped[int] = mapped_column(Integer, default=0)
+    fallback_of_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    provider_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_provider_profiles.id"),
+        index=True,
+    )
+    model_profile_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_model_profiles.id"),
+        index=True,
+    )
+    # These snapshots retain historical meaning if a profile is later edited
+    # or retired; they do not include provider request content.
+    provider_driver: Mapped[str] = mapped_column(String(64))
+    provider_model_id: Mapped[str] = mapped_column(String(255))
+    provider_request_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="started", index=True)
+    error_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    may_have_billed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cached_read_input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    cached_write_input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    image_units: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    page_units: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    request_units: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    usage_source: Mapped[str] = mapped_column(String(32), default="unavailable")
+    usage_details_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    price_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_model_price_versions.id"),
+        nullable=True,
+        index=True,
+    )
+    price_snapshot_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    provider_reported_cost_micros: Mapped[int | None] = mapped_column(BigInteger)
+    calculated_cost_provider_micros: Mapped[int | None] = mapped_column(BigInteger)
+    provider_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    reporting_cost_micros: Mapped[int | None] = mapped_column(BigInteger)
+    reporting_currency: Mapped[str] = mapped_column(String(3), default="CNY")
+    fx_snapshot_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    cost_source: Mapped[str] = mapped_column(String(32), default="unavailable")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    ai_run: Mapped[AiRun] = relationship(back_populates="api_invocations")
+    provider_profile: Mapped[AiProviderProfile] = relationship(
+        back_populates="api_invocations",
+    )
+    model_profile: Mapped[AiModelProfile] = relationship(back_populates="api_invocations")
+    price_version: Mapped[AiModelPriceVersion | None] = relationship(
+        back_populates="api_invocations",
+    )
 
 
 # Register the session-level tenant criteria only after every mapped business

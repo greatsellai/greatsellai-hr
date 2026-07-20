@@ -36,6 +36,13 @@ from app.services.deepseek_provider import (
     EvidenceBlock,
     extract_resume_facts,
 )
+from app.services.ai_gateway_service import (
+    AiExecutionSpec,
+    AiGatewayError,
+    ai_gateway_credentials_configured,
+    ai_gateway_execution,
+    gateway_prompt_transport_arguments,
+)
 from app.services.institution_service import (
     resolve_institution,
     resolve_institution_by_roster_id,
@@ -2228,7 +2235,16 @@ def auto_extract_and_save_facts(
     resume_id: str,
     settings: AppSettings,
 ) -> Resume:
-    if not settings.deepseek_api_key:
+    """Run the legacy synchronous extraction path through the AI gateway.
+
+    New uploads use the durable worker, but this compatibility service is
+    still called by older internal integrations.  It must never become a
+    back door around platform-owned routing, credentials, or the cost ledger.
+    The gateway records the route snapshot on its ``AiRun``; unlike a queued
+    worker item there is no pre-existing durable request to pin beforehand.
+    """
+
+    if not ai_gateway_credentials_configured(settings):
         raise ResumeServiceError("deepseek_api_key_not_configured")
     resume = get_resume(session, resume_id)
     if resume.extraction_status != "text_ready":
@@ -2238,30 +2254,48 @@ def auto_extract_and_save_facts(
         .where(ResumeSourceBlock.resume_id == resume.id)
         .order_by(ResumeSourceBlock.page_no, ResumeSourceBlock.block_id)
     ).all()
+    compatibility_api_key, compatibility_model, compatibility_timeout_seconds = (
+        gateway_prompt_transport_arguments(settings)
+    )
     try:
-        facts = extract_resume_facts(
-            api_key=settings.deepseek_api_key,
-            model=settings.deepseek_model,
-            timeout_seconds=settings.deepseek_timeout_seconds,
-            blocks=[
-                EvidenceBlock(
-                    block_id=block.block_id,
-                    page_no=block.page_no,
-                    block_type=block.block_type,
-                    text=block.text,
-                )
-                for block in source_blocks
-            ],
-        )
+        with ai_gateway_execution(
+            session,
+            settings=settings,
+            spec=AiExecutionSpec(
+                feature="resume_extract_rich",
+                business_ref_type="resume",
+                business_ref_id=resume.id,
+                prompt_revision="resume_facts.rich.v2",
+                contract_version="resume_facts.rich.v2",
+            ),
+        ):
+            # ``extract_resume_facts`` retains the prompt and strict evidence
+            # validation contract.  Under the active gateway context its old
+            # transport parameters are ignored; the platform route supplies
+            # the provider, endpoint, credential, and effective model.
+            facts = extract_resume_facts(
+                api_key=compatibility_api_key,
+                model=compatibility_model,
+                timeout_seconds=compatibility_timeout_seconds,
+                blocks=[
+                    EvidenceBlock(
+                        block_id=block.block_id,
+                        page_no=block.page_no,
+                        block_type=block.block_type,
+                        text=block.text,
+                    )
+                    for block in source_blocks
+                ],
+            )
         return save_facts(
             session,
             resume_id=resume.id,
             request=ResumeFactsSaveRequest(facts=facts),
-            created_by=f"ai:{settings.deepseek_model}",
+            created_by="ai:gateway",
             force_pending_review=True,
             auto_activate=True,
         )
-    except (DeepSeekProviderError, FactValidationError) as exc:
+    except (AiGatewayError, DeepSeekProviderError, FactValidationError) as exc:
         old_snapshot = _fact_snapshot(resume)
         flags = set(resume.quality_flags or [])
         flags.add(f"ai_extraction_{str(exc)}")

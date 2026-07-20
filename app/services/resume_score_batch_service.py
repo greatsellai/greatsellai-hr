@@ -33,6 +33,11 @@ from app.schemas import (
     ResumeScoreCreate,
 )
 from app.services.deepseek_provider import DeepSeekProviderError
+from app.services.ai_gateway_service import (
+    AiGatewayError,
+    ai_gateway_credentials_configured,
+    resolve_active_route_policy_version_id,
+)
 from app.services.resume_eligibility import has_unreliable_source_text
 from app.services.score_service import (
     ScoreServiceError,
@@ -62,6 +67,7 @@ class ClaimedResumeScoreBatchItem:
     resume_id: str
     template_id: str
     template_version: int
+    ai_route_policy_version_id: str | None
 
 
 def _utcnow() -> datetime:
@@ -139,6 +145,31 @@ def _existing_active_batch(
     )
 
 
+def _route_pin_for_new_score_batch(
+    session: Session,
+    *,
+    settings: AppSettings,
+) -> tuple[str | None, str | None]:
+    """Resolve the route once at enqueue time for deterministic retries."""
+
+    if not ai_gateway_credentials_configured(settings):
+        # The HTTP/API contract has historically exposed this stable code.
+        # Preserve it while allowing the generic credential map to enable the
+        # gateway without a legacy provider-specific key.
+        return None, "deepseek_api_key_not_configured"
+    try:
+        return (
+            resolve_active_route_policy_version_id(
+                session,
+                settings=settings,
+                feature="resume_score",
+            ),
+            None,
+        )
+    except AiGatewayError as exc:
+        return None, str(exc)
+
+
 def enqueue_resume_score_batch(
     session: Session,
     *,
@@ -147,9 +178,14 @@ def enqueue_resume_score_batch(
 ) -> ResumeScoreBatchResponse:
     """Queue all currently scoreable resumes for one fixed score template."""
 
-    if not settings.deepseek_api_key:
-        raise ScoreServiceError("deepseek_api_key_not_configured")
     template, _ = _require_scoreable_template(session, template_id=template_id)
+    route_policy_version_id, route_error = _route_pin_for_new_score_batch(
+        session,
+        settings=settings,
+    )
+    if route_error is not None:
+        raise ScoreServiceError(route_error)
+    assert route_policy_version_id is not None
     organization_id = template.organization_id
     existing = _existing_active_batch(
         session,
@@ -193,6 +229,7 @@ def enqueue_resume_score_batch(
         organization_id=organization_id,
         template_id=template.id,
         template_version=template.version,
+        ai_route_policy_version_id=route_policy_version_id,
         status=BATCH_QUEUED if snapshots else BATCH_COMPLETED,
         total_count=len(snapshots),
         completed_count=0,
@@ -382,7 +419,7 @@ def _claim_next_item(
     now = _utcnow()
     with database.session_factory() as session:
         _recover_expired_items(session, now=now)
-        if not settings.deepseek_api_key:
+        if not ai_gateway_credentials_configured(settings):
             session.commit()
             return None
         row = session.execute(
@@ -486,6 +523,7 @@ def _claim_next_item(
                 resume_id=item.resume_id,
                 template_id=batch.template_id,
                 template_version=batch.template_version,
+                ai_route_policy_version_id=batch.ai_route_policy_version_id,
             )
 
 
@@ -516,6 +554,8 @@ def _process_claimed_item(
                     or batch.id != claimed.batch_id
                     or batch.template_id != claimed.template_id
                     or batch.template_version != claimed.template_version
+                    or batch.ai_route_policy_version_id
+                    != claimed.ai_route_policy_version_id
                 ):
                     raise ScoreServiceError("resume_score_workspace_mismatch")
                 template, _ = _require_scoreable_template(
@@ -569,6 +609,7 @@ def _process_claimed_item(
                         resume_id=item.resume_id,
                         payload=ResumeScoreCreate(template_id=claimed.template_id),
                         settings=settings,
+                        pinned_route_policy_version_id=claimed.ai_route_policy_version_id,
                     )
                     persisted_score = session.get(ResumeScore, response.score_id)
                     if (

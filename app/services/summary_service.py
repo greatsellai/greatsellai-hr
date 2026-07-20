@@ -15,6 +15,13 @@ from app.services.deepseek_provider import (
     DeepSeekProviderError,
     summarize_resume_fact_snapshot,
 )
+from app.services.ai_gateway_service import (
+    AiExecutionSpec,
+    AiGatewayError,
+    ai_gateway_credentials_configured,
+    ai_gateway_execution,
+    gateway_prompt_transport_arguments,
+)
 from app.services.resume_eligibility import has_unreliable_source_text
 
 
@@ -96,15 +103,36 @@ def generate_resume_summary(
     resume_id: str,
     settings: AppSettings,
 ) -> ResumeSummaryResponse:
-    if not settings.deepseek_api_key:
+    # A generic server-side credential map is sufficient after the gateway
+    # migration.  Preserve the pre-existing stable error for installations
+    # where neither the legacy key nor any configured credential is present.
+    if not ai_gateway_credentials_configured(settings):
         raise SummaryServiceError("deepseek_api_key_not_configured")
     resume, snapshot, fact_snapshot = _ready_resume_snapshot(session, resume_id=resume_id)
-    content = summarize_resume_fact_snapshot(
-        api_key=settings.deepseek_api_key,
-        model=settings.deepseek_model,
-        timeout_seconds=settings.deepseek_timeout_seconds,
-        fact_snapshot=fact_snapshot,
+    compatibility_api_key, compatibility_model, compatibility_timeout_seconds = (
+        gateway_prompt_transport_arguments(settings)
     )
+    try:
+        with ai_gateway_execution(
+            session,
+            settings=settings,
+            spec=AiExecutionSpec(
+                feature="resume_summary",
+                business_ref_type="resume_summary",
+                business_ref_id=f"{resume.id}:facts{snapshot.facts_version}",
+                contract_version="resume_summary.v1",
+            ),
+        ):
+            content = summarize_resume_fact_snapshot(
+                # Retained only for the legacy prompt helper.  The active
+                # gateway transport resolves the actual model and credential.
+                api_key=compatibility_api_key,
+                model=compatibility_model,
+                timeout_seconds=compatibility_timeout_seconds,
+                fact_snapshot=fact_snapshot,
+            )
+    except AiGatewayError as exc:
+        raise SummaryServiceError(str(exc)) from exc
     _set_current(
         session,
         resume_id=resume.id,
@@ -118,7 +146,9 @@ def generate_resume_summary(
         source="ai",
         is_current=True,
         status="succeeded",
-        model_name=settings.deepseek_model,
+        # The resolved model belongs to the gateway ledger, not a legacy
+        # settings-bound result field.
+        model_name="gateway-managed",
     )
     session.add(summary)
     session.flush()

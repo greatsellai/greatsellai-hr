@@ -34,6 +34,13 @@ from app.services.deepseek_provider import (
     DeepSeekProviderError,
     score_resume_fact_snapshot,
 )
+from app.services.ai_gateway_service import (
+    AiExecutionSpec,
+    AiGatewayError,
+    ai_gateway_credentials_configured,
+    ai_gateway_execution,
+    gateway_prompt_transport_arguments,
+)
 from app.services.resume_eligibility import has_unreliable_source_text
 
 
@@ -487,8 +494,13 @@ def run_resume_score(
     resume_id: str,
     payload: ResumeScoreCreate,
     settings: AppSettings,
+    pinned_route_policy_version_id: str | None = None,
 ) -> ResumeScoreResponse:
-    if not settings.deepseek_api_key:
+    # The settings-level model/key fields remain legacy call arguments while
+    # older prompt helpers are being migrated.  They are deliberately not the
+    # source of the actual provider, endpoint, credential, or model choice:
+    # the gateway resolves those from the published platform route.
+    if not ai_gateway_credentials_configured(settings):
         raise ScoreServiceError("deepseek_api_key_not_configured")
     template = session.get(ScoreTemplate, payload.template_id)
     if template is None or template.is_archived:
@@ -503,21 +515,45 @@ def run_resume_score(
         session,
         resume_id=resume_id,
     )
-    provider_result = score_resume_fact_snapshot(
-        api_key=settings.deepseek_api_key,
-        model=settings.deepseek_model,
-        timeout_seconds=settings.deepseek_timeout_seconds,
-        fact_snapshot=fact_snapshot,
-        dimensions=[
-            {
-                "key": dimension.key,
-                "label": dimension.label,
-                "weight": dimension.weight,
-                "guidance": dimension.guidance,
-            }
-            for dimension in dimensions
-        ],
+    compatibility_api_key, compatibility_model, compatibility_timeout_seconds = (
+        gateway_prompt_transport_arguments(settings)
     )
+    try:
+        with ai_gateway_execution(
+            session,
+            settings=settings,
+            spec=AiExecutionSpec(
+                feature="resume_score",
+                business_ref_type="resume_score",
+                business_ref_id=(
+                    f"{resume.id}:{template.id}:v{template.version}:facts{snapshot.facts_version}"
+                ),
+                contract_version="resume_score.v1",
+                pinned_route_policy_version_id=pinned_route_policy_version_id,
+            ),
+        ):
+            provider_result = score_resume_fact_snapshot(
+                # These legacy arguments are consumed only by the existing
+                # prompt/schema helper.  Inside the gateway context its
+                # transport ignores them and uses the resolved route instead.
+                api_key=compatibility_api_key,
+                model=compatibility_model,
+                timeout_seconds=compatibility_timeout_seconds,
+                fact_snapshot=fact_snapshot,
+                dimensions=[
+                    {
+                        "key": dimension.key,
+                        "label": dimension.label,
+                        "weight": dimension.weight,
+                        "guidance": dimension.guidance,
+                    }
+                    for dimension in dimensions
+                ],
+            )
+    except AiGatewayError as exc:
+        # Keep domain callers/provider-agnostic HTTP handling independent of
+        # the current gateway implementation while preserving stable errors.
+        raise ScoreServiceError(str(exc)) from exc
     dimension_scores, ai_total_score = _dimension_records(
         dimensions=dimensions,
         provider_result=provider_result,
@@ -539,7 +575,10 @@ def run_resume_score(
         dimension_scores=dimension_scores,
         analysis=analysis,
         status=("needs_review" if provider_result["needs_human_review"] else "succeeded"),
-        model_name=settings.deepseek_model,
+        # The legacy result column remains for API compatibility only.  The
+        # actual resolved model is recorded in the immutable gateway ledger,
+        # so this business record must not claim a settings-bound model.
+        model_name="gateway-managed",
     )
     session.add(score)
     session.flush()

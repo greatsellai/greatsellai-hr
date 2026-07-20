@@ -22,6 +22,14 @@ from app.services.deepseek_provider import (
     extract_resume_core_facts,
     extract_resume_facts,
 )
+from app.services.ai_gateway_service import (
+    AiExecutionSpec,
+    AiGatewayError,
+    ai_gateway_credentials_configured,
+    ai_gateway_execution,
+    gateway_prompt_transport_arguments,
+    resolve_active_route_policy_version_id,
+)
 from app.services.resume_service import (
     FactValidationError,
     _assert_raw_value_grounded,
@@ -67,10 +75,33 @@ class ClaimedAiExtractionJob:
     input_facts_version: int
     job_kind: str
     previous_error: str | None
+    ai_route_policy_version_id: str | None
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _route_pin_for_new_extraction_job(
+    session: Session,
+    *,
+    settings: AppSettings,
+) -> tuple[str | None, str | None]:
+    """Pin the current extraction route or make the queue state actionable."""
+
+    if not ai_gateway_credentials_configured(settings):
+        return None, _NO_KEY_ERROR
+    try:
+        return (
+            resolve_active_route_policy_version_id(
+                session,
+                settings=settings,
+                feature="resume_extract_rich",
+            ),
+            None,
+        )
+    except AiGatewayError as exc:
+        return None, str(exc)
 
 
 @contextmanager
@@ -124,20 +155,25 @@ def enqueue_uploaded_resume_ai_extraction(
     if existing is not None:
         return existing
     now = utcnow()
+    route_policy_version_id, availability_error = _route_pin_for_new_extraction_job(
+        session,
+        settings=settings,
+    )
     job = ResumeAiExtractionJob(
         organization_id=resume.organization_id,
         resume_id=resume.id,
         job_kind="initial",
         status=(
             AI_EXTRACTION_QUEUED
-            if settings.deepseek_api_key
+            if availability_error is None
             else AI_EXTRACTION_UNAVAILABLE
         ),
         attempt_count=0,
         max_attempts=settings.ai_extraction_job_max_attempts,
         input_facts_version=resume.facts_version,
-        next_attempt_at=now if settings.deepseek_api_key else None,
-        last_error=None if settings.deepseek_api_key else _NO_KEY_ERROR,
+        ai_route_policy_version_id=route_policy_version_id,
+        next_attempt_at=now if availability_error is None else None,
+        last_error=availability_error,
         requested_at=now,
     )
     session.add(job)
@@ -177,16 +213,21 @@ def request_resume_ai_extraction(
         raise AiExtractionJobError("resume_has_no_native_text_for_ai_extraction")
 
     now = utcnow()
+    route_policy_version_id, availability_error = _route_pin_for_new_extraction_job(
+        session,
+        settings=settings,
+    )
     job.status = (
-        AI_EXTRACTION_QUEUED if settings.deepseek_api_key else AI_EXTRACTION_UNAVAILABLE
+        AI_EXTRACTION_QUEUED if availability_error is None else AI_EXTRACTION_UNAVAILABLE
     )
     job.attempt_count = 0
     job.max_attempts = settings.ai_extraction_job_max_attempts
     job.input_facts_version = resume.facts_version
-    job.next_attempt_at = now if settings.deepseek_api_key else None
+    job.ai_route_policy_version_id = route_policy_version_id
+    job.next_attempt_at = now if availability_error is None else None
     job.lease_owner = None
     job.lease_expires_at = None
-    job.last_error = None if settings.deepseek_api_key else _NO_KEY_ERROR
+    job.last_error = availability_error
     job.requested_at = now
     job.started_at = None
     job.completed_at = None
@@ -219,17 +260,22 @@ def request_resume_filter_v2_enrichment(
     elif job.status in {AI_EXTRACTION_QUEUED, AI_EXTRACTION_RUNNING}:
         return resume
     now = utcnow()
+    route_policy_version_id, availability_error = _route_pin_for_new_extraction_job(
+        session,
+        settings=settings,
+    )
     job.job_kind = "filter_v2_enrichment"
     job.status = (
-        AI_EXTRACTION_QUEUED if settings.deepseek_api_key else AI_EXTRACTION_UNAVAILABLE
+        AI_EXTRACTION_QUEUED if availability_error is None else AI_EXTRACTION_UNAVAILABLE
     )
     job.attempt_count = 0
     job.max_attempts = settings.ai_extraction_job_max_attempts
     job.input_facts_version = resume.facts_version
-    job.next_attempt_at = now if settings.deepseek_api_key else None
+    job.ai_route_policy_version_id = route_policy_version_id
+    job.next_attempt_at = now if availability_error is None else None
     job.lease_owner = None
     job.lease_expires_at = None
-    job.last_error = None if settings.deepseek_api_key else _NO_KEY_ERROR
+    job.last_error = availability_error
     job.requested_at = now
     job.started_at = None
     job.completed_at = None
@@ -253,7 +299,7 @@ def backfill_unnamed_candidate_names(
 
     if limit < 1:
         return 0, 0
-    if not settings.deepseek_api_key:
+    if not ai_gateway_credentials_configured(settings):
         raise AiExtractionJobError(_NO_KEY_ERROR)
 
     with database.session_factory() as session:
@@ -299,14 +345,29 @@ def backfill_unnamed_candidate_names(
         if not blocks:
             skipped += 1
             continue
+        compatibility_api_key, compatibility_model, compatibility_timeout_seconds = (
+            gateway_prompt_transport_arguments(settings)
+        )
         try:
-            draft = extract_resume_candidate_name(
-                api_key=settings.deepseek_api_key,
-                model=settings.deepseek_model,
-                timeout_seconds=settings.deepseek_timeout_seconds,
-                blocks=blocks,
-            )
-        except DeepSeekProviderError:
+            with database.session_factory() as gateway_session:
+                with _organization_session(gateway_session, organization_id):
+                    with ai_gateway_execution(
+                        gateway_session,
+                        settings=settings,
+                        spec=AiExecutionSpec(
+                            feature="candidate_name_backfill",
+                            business_ref_type="resume",
+                            business_ref_id=resume_id,
+                            contract_version="candidate_name.v1",
+                        ),
+                    ):
+                        draft = extract_resume_candidate_name(
+                            api_key=compatibility_api_key,
+                            model=compatibility_model,
+                            timeout_seconds=compatibility_timeout_seconds,
+                            blocks=blocks,
+                        )
+        except (DeepSeekProviderError, AiGatewayError):
             skipped += 1
             continue
         if draft.value is None:
@@ -380,7 +441,7 @@ def _claim_next_job(
 ) -> ClaimedAiExtractionJob | None:
     now = utcnow()
     with database.session_factory() as session:
-        if not settings.deepseek_api_key:
+        if not ai_gateway_credentials_configured(settings):
             _mark_jobs_unavailable_without_key(session, now=now)
             session.commit()
             return None
@@ -419,6 +480,7 @@ def _claim_next_job(
                 ResumeAiExtractionJob.input_facts_version,
                 ResumeAiExtractionJob.job_kind,
                 ResumeAiExtractionJob.last_error,
+                ResumeAiExtractionJob.ai_route_policy_version_id,
             )
             .where(eligible)
             .order_by(
@@ -439,6 +501,7 @@ def _claim_next_job(
             input_facts_version,
             job_kind,
             previous_error,
+            route_policy_version_id,
         ) = candidate
         if not organization_id:
             # A row without a workspace must never be handed to a model call.
@@ -491,6 +554,7 @@ def _claim_next_job(
             input_facts_version=input_facts_version,
             job_kind=job_kind,
             previous_error=previous_error,
+            ai_route_policy_version_id=route_policy_version_id,
         )
         session.commit()
         return claimed
@@ -590,22 +654,43 @@ def _process_claimed_job(
         claimed.job_kind == "initial"
         and claimed.previous_error in _RETRYABLE_STRUCTURED_RESPONSE_ERRORS
     )
+    compatibility_api_key, compatibility_model, compatibility_timeout_seconds = (
+        gateway_prompt_transport_arguments(settings)
+    )
     try:
-        if core_fallback:
-            facts = extract_resume_core_facts(
-                api_key=settings.deepseek_api_key or "",
-                model=settings.deepseek_model,
-                timeout_seconds=settings.deepseek_timeout_seconds,
-                blocks=blocks,
-            )
-        else:
-            facts = extract_resume_facts(
-                api_key=settings.deepseek_api_key or "",
-                model=settings.deepseek_model,
-                timeout_seconds=settings.deepseek_timeout_seconds,
-                blocks=blocks,
-            )
-    except DeepSeekProviderError as exc:
+        with database.session_factory() as gateway_session:
+            with _organization_session(gateway_session, claimed.organization_id):
+                # The durable job pins the rich-extraction route.  A compact
+                # prompt retry intentionally stays on that same route version
+                # so a model switch cannot change an already queued resume.
+                with ai_gateway_execution(
+                    gateway_session,
+                    settings=settings,
+                    spec=AiExecutionSpec(
+                        feature="resume_extract_rich",
+                        business_ref_type="resume_ai_extraction_job",
+                        business_ref_id=claimed.job_id,
+                        contract_version=(
+                            "resume_facts.core.v1" if core_fallback else "resume_facts.rich.v2"
+                        ),
+                        pinned_route_policy_version_id=claimed.ai_route_policy_version_id,
+                    ),
+                ):
+                    if core_fallback:
+                        facts = extract_resume_core_facts(
+                            api_key=compatibility_api_key,
+                            model=compatibility_model,
+                            timeout_seconds=compatibility_timeout_seconds,
+                            blocks=blocks,
+                        )
+                    else:
+                        facts = extract_resume_facts(
+                            api_key=compatibility_api_key,
+                            model=compatibility_model,
+                            timeout_seconds=compatibility_timeout_seconds,
+                            blocks=blocks,
+                        )
+    except (DeepSeekProviderError, AiGatewayError) as exc:
         error = str(exc)
         _finish_failure(
             database,
@@ -634,7 +719,6 @@ def _process_claimed_job(
             worker_id=worker_id,
             claimed=claimed,
             facts=facts,
-            model=settings.deepseek_model,
             core_fallback=core_fallback,
         )
     except FactValidationError as exc:
@@ -718,7 +802,6 @@ def _save_completed_ai_facts(
     worker_id: str,
     claimed: ClaimedAiExtractionJob,
     facts: ResumeFactsSubmission,
-    model: str,
     core_fallback: bool = False,
 ) -> None:
     with database.session_factory() as session:
@@ -775,7 +858,9 @@ def _save_completed_ai_facts(
                     session,
                     resume_id=resume.id,
                     request=ResumeFactsSaveRequest(facts=facts_to_save),
-                    created_by=f"ai:{model}",
+                    # Model provenance lives in the immutable gateway ledger;
+                    # facts must not claim the legacy settings model.
+                    created_by="ai:gateway",
                     force_pending_review=True,
                     auto_activate=auto_activate,
                 )
@@ -904,7 +989,15 @@ def _is_retryable_deepseek_error(error: str) -> bool:
     }:
         return True
     matched = re.fullmatch(r"deepseek_http_(\d{3})", error)
-    return bool(matched and int(matched.group(1)) in _RETRYABLE_HTTP_STATUSES)
+    if matched and int(matched.group(1)) in _RETRYABLE_HTTP_STATUSES:
+        return True
+    return error in {
+        "ai_provider_network",
+        "ai_provider_timeout",
+        "ai_provider_rate_limited",
+        "ai_provider_quota_exhausted",
+        "ai_provider_provider_5xx",
+    }
 
 
 __all__ = [

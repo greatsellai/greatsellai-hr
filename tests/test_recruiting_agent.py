@@ -4,7 +4,11 @@ import json
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from app.ai import CompletionResult, NormalizedUsage, ToolCall
+from app.models import AiRun, ApiInvocation
+from app.services.ai_gateway_service import AiGatewayError
 from app.services.recruiting_agent_service import ResolvedJob, _TOOLS, _resolve_job
 from test_filter_mvp_contract import _save_ready_resume
 from test_score_service import _fake_score_provider, _template_payload
@@ -76,12 +80,12 @@ def test_agent_timeout_is_returned_as_a_retryable_service_error(
     ai_client: TestClient,
     monkeypatch,
 ) -> None:
-    def timeout(*args, **kwargs):
-        raise TimeoutError("model request timed out")
+    def timeout_executor(_payload):
+        raise AiGatewayError("ai_provider_timeout")
 
     monkeypatch.setattr(
-        "app.services.recruiting_agent_service.urllib.request.urlopen",
-        timeout,
+        "app.services.recruiting_agent_service.active_legacy_payload_executor",
+        lambda: timeout_executor,
     )
 
     response = ai_client.post(
@@ -91,6 +95,112 @@ def test_agent_timeout_is_returned_as_a_retryable_service_error(
 
     assert response.status_code == 503
     assert response.json()["detail"] == "agent_model_timeout"
+
+
+def test_agent_tool_loop_records_one_gateway_run_with_one_invocation_per_model_step(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    completion_calls = 0
+
+    def fake_complete(_self, request, route):
+        nonlocal completion_calls
+        completion_calls += 1
+        assert request.feature == "recruiting_agent_turn"
+        assert route.provider_model_id == "unit-test-model"
+        if completion_calls == 1:
+            tool_call = ToolCall(
+                id="call-search",
+                name="search_candidates",
+                arguments=json.dumps({"is_985_211": True}),
+            )
+            return CompletionResult(
+                content=None,
+                tool_calls=(tool_call,),
+                finish_reason="tool_calls",
+                provider_request_id="provider-request-1",
+                usage=NormalizedUsage(input_tokens=20, output_tokens=5, request_units=1),
+                raw_status_code=200,
+                model_id="unit-test-model",
+                raw_response={
+                    "id": "response-1",
+                    "model": "unit-test-model",
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-search",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "search_candidates",
+                                            "arguments": json.dumps({"is_985_211": True}),
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+            )
+
+        assert [message.role for message in request.messages][-2:] == ["assistant", "tool"]
+        assert request.messages[-2].tool_calls[0].id == "call-search"
+        assert request.messages[-1].tool_call_id == "call-search"
+        return CompletionResult(
+            content="## 筛选结果\n\n已按 985/211 条件检索。",
+            tool_calls=(),
+            finish_reason="stop",
+            provider_request_id="provider-request-2",
+            usage=NormalizedUsage(input_tokens=30, output_tokens=8, request_units=1),
+            raw_status_code=200,
+            model_id="unit-test-model",
+            raw_response={
+                "id": "response-2",
+                "model": "unit-test-model",
+                "usage": {"prompt_tokens": 30, "completion_tokens": 8},
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "## 筛选结果\n\n已按 985/211 条件检索。",
+                        },
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        "app.services.ai_gateway_service.OpenAICompatibleAdapter.complete",
+        fake_complete,
+    )
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "筛选 985/211 候选人"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["message"] == "## 筛选结果\n\n已按 985/211 条件检索。"
+    assert completion_calls == 2
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        runs = list(
+            session.scalars(
+                select(AiRun).where(AiRun.feature == "recruiting_agent_turn")
+            )
+        )
+        invocations = list(session.scalars(select(ApiInvocation)))
+    assert len(runs) == 1
+    assert runs[0].status == "succeeded"
+    assert len(invocations) == 2
+    assert {item.ai_run_id for item in invocations} == {runs[0].id}
+    assert [item.attempt_no for item in invocations] == [1, 2]
 
 
 def test_agent_unexpected_exception_never_becomes_raw_internal_server_error(

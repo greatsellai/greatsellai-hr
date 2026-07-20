@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from datetime import datetime
 from ipaddress import ip_address, ip_network
 import logging
 import mimetypes
@@ -34,6 +35,17 @@ from app.schemas import (
     AuthLogin,
     AuthRegistration,
     AuthSession,
+    AiModelPriceVersionCreate,
+    AiModelPriceVersionResponse,
+    AiModelProfileCreate,
+    AiModelProfileResponse,
+    AiProviderProfileCreate,
+    AiProviderProfileResponse,
+    AiRoutePolicyPublish,
+    AiRoutePolicyResponse,
+    AiRoutePolicyVersionResponse,
+    AiRunUsageSummaryResponse,
+    AiUsageAggregateResponse,
     EmailVerificationComplete,
     EmailVerificationResendResult,
     OrganizationInvitationAccept,
@@ -148,6 +160,24 @@ from app.tenant_scope import organization_context_id, set_organization_context
 from app.services.institution_service import (
     is_institution_registry_seeded,
     seed_institution_registry,
+)
+from app.services.ai_gateway_configuration_service import (
+    AiGatewayConfigurationError,
+    create_model_price_version,
+    create_model_profile,
+    create_provider_profile,
+    list_model_price_versions,
+    list_model_profiles,
+    list_provider_profiles,
+    list_route_policies,
+    list_route_policy_versions,
+    publish_route_policy,
+)
+from app.services.ai_usage_reporting_service import (
+    AiUsageQuery,
+    AiUsageReportingError,
+    list_platform_ai_run_summaries,
+    summarize_platform_ai_usage,
 )
 from app.services.ai_extraction_job_service import (
     AiExtractionJobError,
@@ -351,6 +381,26 @@ def _commit_or_raise(session: Session) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail="database_conflict",
         ) from exc
+
+
+def _raise_ai_gateway_configuration_error(exc: AiGatewayConfigurationError) -> None:
+    code = str(exc)
+    if code in {
+        "ai_provider_not_found",
+        "ai_model_not_found",
+        "ai_route_policy_not_found",
+        "ai_route_model_not_found",
+    }:
+        response_status = status.HTTP_404_NOT_FOUND
+    elif code in {
+        "ai_provider_slug_exists",
+        "ai_model_slug_exists",
+        "ai_gateway_configuration_conflict",
+    }:
+        response_status = status.HTTP_409_CONFLICT
+    else:
+        response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+    raise HTTPException(status_code=response_status, detail=code) from exc
 
 
 def _mailbox_error_http_exception(exc: MailboxImportError) -> HTTPException:
@@ -679,6 +729,23 @@ async def require_organization_admin(
 ) -> AuthPrincipal:
     if principal.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="organization_admin_required")
+    return principal
+
+
+async def require_platform_admin(
+    principal: AuthPrincipal = Depends(require_single_admin),
+) -> AuthPrincipal:
+    """Gate platform-wide AI control plane endpoints.
+
+    A workspace administrator is intentionally not sufficient: these routes
+    change the model and credential-reference policy used by every customer.
+    """
+
+    if not principal.is_platform_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="platform_admin_required",
+        )
     return principal
 
 
@@ -1108,6 +1175,244 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         except IdentityServiceError as exc:
             session.rollback()
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.get(
+        "/v1/platform/ai/providers",
+        response_model=list[AiProviderProfileResponse],
+    )
+    def get_platform_ai_providers(
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> list[AiProviderProfileResponse]:
+        return list_provider_profiles(session)
+
+    @app.post(
+        "/v1/platform/ai/providers",
+        response_model=AiProviderProfileResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def post_platform_ai_provider(
+        payload: AiProviderProfileCreate,
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> AiProviderProfileResponse:
+        try:
+            response = create_provider_profile(session, payload=payload)
+            _commit_or_raise(session)
+            return response
+        except AiGatewayConfigurationError as exc:
+            session.rollback()
+            _raise_ai_gateway_configuration_error(exc)
+
+    @app.get(
+        "/v1/platform/ai/models",
+        response_model=list[AiModelProfileResponse],
+    )
+    def get_platform_ai_models(
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> list[AiModelProfileResponse]:
+        return list_model_profiles(session)
+
+    @app.post(
+        "/v1/platform/ai/models",
+        response_model=AiModelProfileResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def post_platform_ai_model(
+        payload: AiModelProfileCreate,
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> AiModelProfileResponse:
+        try:
+            response = create_model_profile(session, payload=payload)
+            _commit_or_raise(session)
+            return response
+        except AiGatewayConfigurationError as exc:
+            session.rollback()
+            _raise_ai_gateway_configuration_error(exc)
+
+    @app.get(
+        "/v1/platform/ai/model-prices",
+        response_model=list[AiModelPriceVersionResponse],
+    )
+    def get_platform_ai_model_prices(
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> list[AiModelPriceVersionResponse]:
+        return list_model_price_versions(session)
+
+    @app.post(
+        "/v1/platform/ai/model-prices",
+        response_model=AiModelPriceVersionResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def post_platform_ai_model_price(
+        payload: AiModelPriceVersionCreate,
+        principal: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> AiModelPriceVersionResponse:
+        try:
+            response = create_model_price_version(
+                session,
+                payload=payload,
+                created_by_user_id=principal.user.id,
+            )
+            _commit_or_raise(session)
+            return response
+        except AiGatewayConfigurationError as exc:
+            session.rollback()
+            _raise_ai_gateway_configuration_error(exc)
+
+    @app.get(
+        "/v1/platform/ai/routes",
+        response_model=list[AiRoutePolicyResponse],
+    )
+    def get_platform_ai_routes(
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> list[AiRoutePolicyResponse]:
+        return list_route_policies(session)
+
+    @app.get(
+        "/v1/platform/ai/routes/{feature}/versions",
+        response_model=list[AiRoutePolicyVersionResponse],
+    )
+    def get_platform_ai_route_versions(
+        feature: str,
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> list[AiRoutePolicyVersionResponse]:
+        try:
+            return list_route_policy_versions(session, feature=feature)
+        except AiGatewayConfigurationError as exc:
+            _raise_ai_gateway_configuration_error(exc)
+
+    @app.put(
+        "/v1/platform/ai/routes/{feature}",
+        response_model=AiRoutePolicyVersionResponse,
+    )
+    def put_platform_ai_route(
+        feature: str,
+        payload: AiRoutePolicyPublish,
+        principal: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> AiRoutePolicyVersionResponse:
+        try:
+            response = publish_route_policy(
+                session,
+                feature=feature,
+                payload=payload,
+                published_by_user_id=principal.user.id,
+            )
+            _commit_or_raise(session)
+            return response
+        except AiGatewayConfigurationError as exc:
+            session.rollback()
+            _raise_ai_gateway_configuration_error(exc)
+
+    @app.get(
+        "/v1/platform/ai/usage/runs",
+        response_model=list[AiRunUsageSummaryResponse],
+    )
+    def get_platform_ai_usage_runs(
+        organization_id: str | None = Query(default=None, min_length=1, max_length=64),
+        feature: str | None = Query(default=None, min_length=1, max_length=64),
+        started_at_from: datetime | None = Query(default=None),
+        started_at_to: datetime | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> list[AiRunUsageSummaryResponse]:
+        """List safe ledger metadata without candidate or prompt content."""
+
+        try:
+            rows = list_platform_ai_run_summaries(
+                session,
+                query=AiUsageQuery(
+                    organization_id=organization_id,
+                    feature=feature,
+                    started_at_from=started_at_from,
+                    started_at_to=started_at_to,
+                    limit=limit,
+                    offset=offset,
+                ),
+            )
+        except AiUsageReportingError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        return [
+            AiRunUsageSummaryResponse(
+                run_id=row.run_id,
+                organization_id=row.organization_id,
+                feature=row.feature,
+                service_kind=row.service_kind,
+                status=row.status,
+                started_at=row.started_at,
+                finished_at=row.finished_at,
+                total_cost_cny_micros=row.total_cost_cny_micros,
+                cost_status=row.cost_status,
+                invocation_count=row.invocation_count,
+                potentially_billed_invocation_count=(
+                    row.potentially_billed_invocation_count
+                ),
+            )
+            for row in rows
+        ]
+
+    @app.get(
+        "/v1/platform/ai/usage/summary",
+        response_model=list[AiUsageAggregateResponse],
+    )
+    def get_platform_ai_usage_summary(
+        organization_id: str | None = Query(default=None, min_length=1, max_length=64),
+        feature: str | None = Query(default=None, min_length=1, max_length=64),
+        started_at_from: datetime | None = Query(default=None),
+        started_at_to: datetime | None = Query(default=None),
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> list[AiUsageAggregateResponse]:
+        """Aggregate platform AI usage by workspace, feature, and model."""
+
+        try:
+            rows = summarize_platform_ai_usage(
+                session,
+                query=AiUsageQuery(
+                    organization_id=organization_id,
+                    feature=feature,
+                    started_at_from=started_at_from,
+                    started_at_to=started_at_to,
+                    # Aggregation is not paginated; it has one bounded group
+                    # per workspace/feature/model and does not expose rows.
+                    limit=500,
+                ),
+            )
+        except AiUsageReportingError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        return [
+            AiUsageAggregateResponse(
+                organization_id=row.organization_id,
+                feature=row.feature,
+                model_slug=row.model_slug,
+                invocation_count=row.invocation_count,
+                costed_invocation_count=row.costed_invocation_count,
+                unavailable_cost_invocation_count=row.unavailable_cost_invocation_count,
+                potentially_billed_invocation_count=(
+                    row.potentially_billed_invocation_count
+                ),
+                reported_cost_cny_micros=row.reported_cost_cny_micros,
+                known_run_count=row.known_run_count,
+                partial_run_count=row.partial_run_count,
+                unavailable_run_count=row.unavailable_run_count,
+            )
+            for row in rows
+        ]
 
     @app.get(
         "/v1/mailboxes",
@@ -2492,11 +2797,16 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     )
     def post_generate_job_description(
         payload: JobGenerationRequest,
+        session: Session = Depends(get_session),
     ) -> JobGenerationResponse:
         """Generate an editable JD before the client persists one confirmed version."""
 
         try:
-            return generate_job_description(payload=payload, settings=settings)
+            return generate_job_description(
+                session=session,
+                payload=payload,
+                settings=settings,
+            )
         except JobServiceError as exc:
             _raise_job_service_error(exc)
         except JobDeepSeekProviderError as exc:

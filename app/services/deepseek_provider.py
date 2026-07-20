@@ -6,8 +6,10 @@ import re
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 from app.schemas import (
     CANDIDATE_NAME_LABEL_PATTERN,
@@ -16,9 +18,14 @@ from app.schemas import (
 )
 from app.services.institution_service import build_985_211_ai_rulebook
 from app.services.normalization import normalized_contains
+from app.services.ai_gateway_service import AiGatewayError, active_legacy_payload_executor
 
 
 API_URL = "https://api.deepseek.com/beta/chat/completions"
+_LEGACY_DIRECT_TRANSPORT_ENABLED: ContextVar[bool] = ContextVar(
+    "greatsell_legacy_direct_ai_transport_enabled",
+    default=False,
+)
 EMAIL_PATTERN = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)")
 LABELED_PERSONAL_LINE = re.compile(
@@ -28,6 +35,74 @@ LABELED_PERSONAL_LINE = re.compile(
 
 class DeepSeekProviderError(RuntimeError):
     pass
+
+
+@contextmanager
+def legacy_direct_transport_for_testing() -> Iterator[None]:
+    """Temporarily enable the retired transport for isolated protocol tests.
+
+    Application code must always enter ``ai_gateway_execution`` first.  This
+    narrow context exists solely for tests that verify the old prompt/schema
+    helper's HTTP serialization; it is never enabled by runtime settings.
+    """
+
+    token = _LEGACY_DIRECT_TRANSPORT_ENABLED.set(True)
+    try:
+        yield
+    finally:
+        _LEGACY_DIRECT_TRANSPORT_ENABLED.reset(token)
+
+
+def _post_chat_completion(
+    *,
+    api_key: str,
+    timeout_seconds: int,
+    payload: dict[str, Any],
+) -> Mapping[str, Any]:
+    """Send a chat payload through the active gateway or legacy transport.
+
+    Prompts and strict response validation remain in this module.  The gateway
+    owns routing, credentials, external transport, cost accounting, and
+    durable attempt records.  Application calls without a gateway context are
+    rejected so future code cannot silently bypass the platform policy or
+    ledger.  The old HTTP implementation is available only in an explicit
+    test-only context for protocol contract coverage.
+    """
+
+    gateway_executor = active_legacy_payload_executor()
+    if gateway_executor is not None:
+        try:
+            raw_response = gateway_executor(payload)
+        except AiGatewayError as exc:
+            raise DeepSeekProviderError(str(exc)) from exc
+        if not isinstance(raw_response, Mapping):
+            raise DeepSeekProviderError("deepseek_invalid_structured_response")
+        return raw_response
+
+    if not _LEGACY_DIRECT_TRANSPORT_ENABLED.get():
+        raise DeepSeekProviderError("ai_gateway_context_required")
+
+    request = urllib.request.Request(
+        API_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise DeepSeekProviderError(f"deepseek_http_{exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise DeepSeekProviderError("deepseek_network_error") from exc
+    except TimeoutError as exc:
+        raise DeepSeekProviderError("deepseek_timeout") from exc
+    if not isinstance(raw_response, Mapping):
+        raise DeepSeekProviderError("deepseek_invalid_structured_response")
+    return raw_response
 
 
 @dataclass(frozen=True)
@@ -1494,24 +1569,11 @@ def extract_resume_facts(
             "function": {"name": "submit_resume_facts"},
         },
     }
-    request = urllib.request.Request(
-        API_URL,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    raw_response = _post_chat_completion(
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
+        payload=payload,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise DeepSeekProviderError(f"deepseek_http_{exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise DeepSeekProviderError("deepseek_network_error") from exc
-    except TimeoutError as exc:
-        raise DeepSeekProviderError("deepseek_timeout") from exc
 
     choices = raw_response.get("choices") if isinstance(raw_response, Mapping) else None
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
@@ -1726,24 +1788,11 @@ def call_strict_function(
         ],
         "tool_choice": {"type": "function", "function": {"name": function_name}},
     }
-    request = urllib.request.Request(
-        API_URL,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    raw_response = _post_chat_completion(
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
+        payload=payload,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise DeepSeekProviderError(f"deepseek_http_{exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise DeepSeekProviderError("deepseek_network_error") from exc
-    except TimeoutError as exc:
-        raise DeepSeekProviderError("deepseek_timeout") from exc
 
     choices = raw_response.get("choices") if isinstance(raw_response, Mapping) else None
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):

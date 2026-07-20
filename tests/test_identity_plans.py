@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -125,3 +125,121 @@ def test_legacy_platform_admin_can_list_and_update_product_plans(
     assert updated_offer.status_code == 200, updated_offer.text
     assert updated_offer.json()["plan_code"] == "advanced"
     assert updated_offer.json()["trial_days"] == 21
+
+
+def test_platform_admin_alone_can_publish_ai_model_route(
+    identity_client: TestClient,
+) -> None:
+    _register_workspace(identity_client)
+
+    denied = identity_client.get("/v1/platform/ai/providers")
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"] == "platform_admin_required"
+
+    usage_denied = identity_client.get("/v1/platform/ai/usage/runs")
+    assert usage_denied.status_code == 403, usage_denied.text
+    assert usage_denied.json()["detail"] == "platform_admin_required"
+
+    legacy_login = identity_client.post(
+        "/v1/auth/login",
+        json={"password": "legacy-platform-test-token"},
+    )
+    assert legacy_login.status_code == 200, legacy_login.text
+
+    usage_runs = identity_client.get("/v1/platform/ai/usage/runs")
+    assert usage_runs.status_code == 200, usage_runs.text
+    assert usage_runs.json() == []
+    usage_summary = identity_client.get("/v1/platform/ai/usage/summary")
+    assert usage_summary.status_code == 200, usage_summary.text
+    assert usage_summary.json() == []
+
+    insecure_provider = identity_client.post(
+        "/v1/platform/ai/providers",
+        json={
+            "slug": "insecure-provider",
+            "display_name": "Insecure provider",
+            "driver": "openai_compatible",
+            "endpoint_url": "http://127.0.0.1/v1/chat/completions",
+            "credential_ref": "ignored",
+        },
+    )
+    assert insecure_provider.status_code == 422, insecure_provider.text
+    assert "ai_endpoint_url" in insecure_provider.text
+
+    secret_defaults = identity_client.post(
+        "/v1/platform/ai/providers",
+        json={
+            "slug": "secret-defaults-provider",
+            "display_name": "Secret defaults provider",
+            "driver": "openai_compatible",
+            "endpoint_url": "https://api.example.test/v1/chat/completions",
+            "credential_ref": "ignored",
+            "request_defaults": {"nested": {"Authorization": "must-not-store"}},
+        },
+    )
+    assert secret_defaults.status_code == 422, secret_defaults.text
+    assert "ai_request_defaults_protected_key" in secret_defaults.text
+
+    provider = identity_client.post(
+        "/v1/platform/ai/providers",
+        json={
+            "slug": "test-provider",
+            "display_name": "Test provider",
+            "driver": "openai_compatible",
+            "endpoint_url": "https://api.example.test/v1/chat/completions",
+            "credential_ref": "test-provider-credential",
+            "request_defaults": {"thinking": {"type": "disabled"}},
+        },
+    )
+    assert provider.status_code == 201, provider.text
+    assert provider.json()["credential_ref"] == "test-provider-credential"
+
+    model = identity_client.post(
+        "/v1/platform/ai/models",
+        json={
+            "slug": "test-model",
+            "provider_slug": "test-provider",
+            "display_name": "Test model",
+            "provider_model_id": "provider-side-model-id",
+            "capabilities": ["chat", "tools", "json_schema"],
+        },
+    )
+    assert model.status_code == 201, model.text
+    assert model.json()["provider_slug"] == "test-provider"
+
+    price = identity_client.post(
+        "/v1/platform/ai/model-prices",
+        json={
+            "model_slug": "test-model",
+            "effective_from": datetime.now(timezone.utc).isoformat(),
+            "input_per_million": "1.25",
+            "output_per_million": "2.50",
+            "source": "platform-test",
+        },
+    )
+    assert price.status_code == 201, price.text
+    assert price.json()["model_slug"] == "test-model"
+    assert price.json()["source"] == "platform-test"
+
+    published = identity_client.put(
+        "/v1/platform/ai/routes/resume_score",
+        json={
+            "display_name": "Resume score route",
+            "description": "Platform-owned test route",
+            "targets": [{"model_slug": "test-model", "max_attempts": 2}],
+            "prompt_revision": "resume-score.prompt.v1",
+        },
+    )
+    assert published.status_code == 200, published.text
+    assert published.json()["feature"] == "resume_score"
+    assert published.json()["version"] == 1
+    assert published.json()["targets"] == [{"model_slug": "test-model", "max_attempts": 2}]
+
+    listed = identity_client.get("/v1/platform/ai/routes")
+    assert listed.status_code == 200, listed.text
+    policy = next(item for item in listed.json() if item["feature"] == "resume_score")
+    assert policy["current_version"] == 1
+
+    versions = identity_client.get("/v1/platform/ai/routes/resume_score/versions")
+    assert versions.status_code == 200, versions.text
+    assert versions.json()[0]["prompt_revision"] == "resume-score.prompt.v1"

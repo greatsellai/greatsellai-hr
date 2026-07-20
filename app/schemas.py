@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.ai.contracts import GatewayContractError, validate_external_https_endpoint
 from app.services.normalization import normalized_contains, normalized_key
 
 
@@ -67,6 +69,7 @@ CANDIDATE_NAME_LABEL_PATTERN = re.compile(
     r"(?i)^\s*(?:\u59d3\u540d|name)\s*[:\uff1a]"
 )
 CANDIDATE_NAME_UNSAFE_CHARACTER_PATTERN = re.compile(r"[\r\n@]")
+AI_CONFIG_SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 
 
 def clean_string_list(values: list[str]) -> list[str]:
@@ -229,6 +232,303 @@ class ProductPlanUpdate(ApiModel):
 class OrganizationPlanAssign(ApiModel):
     plan_code: str = Field(min_length=1, max_length=64)
     plan_status: Literal["trial", "active", "expired", "suspended"] | None = None
+
+
+class AiProviderProfileCreate(ApiModel):
+    """A platform-only provider connection profile.
+
+    ``credential_ref`` is deliberately a non-secret environment reference;
+    the actual credential is never accepted or returned by the API.
+    """
+
+    slug: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(min_length=1, max_length=120)
+    driver: Literal["openai_compatible"]
+    endpoint_url: str = Field(min_length=8, max_length=1000)
+    credential_ref: str = Field(min_length=1, max_length=120)
+    request_defaults: dict[str, object] = Field(default_factory=dict)
+    is_enabled: bool = True
+
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not AI_CONFIG_SLUG_PATTERN.fullmatch(normalized):
+            raise ValueError("invalid_ai_config_slug")
+        return normalized
+
+    @field_validator("display_name", "credential_ref")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value_must_not_be_blank")
+        return normalized
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def validate_endpoint_url(cls, value: str) -> str:
+        try:
+            return validate_external_https_endpoint(
+                value,
+                field_name="ai_endpoint_url",
+            )
+        except GatewayContractError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("request_defaults")
+    @classmethod
+    def validate_safe_request_defaults(cls, value: dict[str, object]) -> dict[str, object]:
+        """Reject connection, credential, and protected transport controls.
+
+        Provider-specific non-secret payload defaults (for example a thinking
+        toggle) remain configurable.  Authentication, endpoints, model
+        selection, headers, and request-controlled fields belong exclusively
+        to the server route/adapter and must never be persisted or echoed by
+        the platform API.
+        """
+
+        forbidden = {
+            "apikey",
+            "authorization",
+            "credential",
+            "secret",
+            "token",
+            "password",
+            "model",
+            "messages",
+            "tools",
+            "toolchoice",
+            "maxtokens",
+            "maxoutputtokens",
+            "temperature",
+            "stream",
+            "url",
+            "endpoint",
+            "baseurl",
+            "headers",
+        }
+
+        def walk(item: object) -> None:
+            if isinstance(item, dict):
+                for key, nested in item.items():
+                    if not isinstance(key, str):
+                        raise ValueError("ai_request_defaults_key_invalid")
+                    normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
+                    if normalized_key in forbidden:
+                        raise ValueError("ai_request_defaults_protected_key")
+                    walk(nested)
+            elif isinstance(item, list):
+                for nested in item:
+                    walk(nested)
+
+        walk(value)
+        return value
+
+
+class AiProviderProfileResponse(ApiModel):
+    provider_id: str
+    slug: str
+    display_name: str
+    driver: str
+    endpoint_url: str
+    credential_ref: str
+    request_defaults: dict[str, object] = Field(default_factory=dict)
+    is_enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AiModelProfileCreate(ApiModel):
+    slug: str = Field(min_length=2, max_length=64)
+    provider_slug: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(min_length=1, max_length=120)
+    provider_model_id: str = Field(min_length=1, max_length=255)
+    capabilities: list[Literal["chat", "tools", "json_schema"]] = Field(default_factory=lambda: ["chat"])
+    context_window_tokens: int | None = Field(default=None, ge=1, le=20_000_000)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=2_000_000)
+    is_enabled: bool = True
+
+    @field_validator("slug", "provider_slug")
+    @classmethod
+    def validate_model_slug(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not AI_CONFIG_SLUG_PATTERN.fullmatch(normalized):
+            raise ValueError("invalid_ai_config_slug")
+        return normalized
+
+    @field_validator("display_name", "provider_model_id")
+    @classmethod
+    def normalize_model_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value_must_not_be_blank")
+        return normalized
+
+
+class AiModelProfileResponse(ApiModel):
+    model_id: str
+    slug: str
+    provider_id: str
+    provider_slug: str
+    display_name: str
+    provider_model_id: str
+    capabilities: list[str] = Field(default_factory=list)
+    context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
+    is_enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AiModelPriceVersionCreate(ApiModel):
+    model_slug: str = Field(min_length=2, max_length=64)
+    currency: str = Field(default="CNY", min_length=3, max_length=3)
+    effective_from: datetime
+    effective_to: datetime | None = None
+    input_per_million: Decimal | None = Field(default=None, ge=0)
+    cached_read_input_per_million: Decimal | None = Field(default=None, ge=0)
+    cached_write_input_per_million: Decimal | None = Field(default=None, ge=0)
+    output_per_million: Decimal | None = Field(default=None, ge=0)
+    reasoning_per_million: Decimal | None = Field(default=None, ge=0)
+    request_unit_price: Decimal | None = Field(default=None, ge=0)
+    page_unit_price: Decimal | None = Field(default=None, ge=0)
+    source: str = Field(min_length=1, max_length=120)
+    is_active: bool = True
+
+    @field_validator("model_slug")
+    @classmethod
+    def validate_price_model_slug(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not AI_CONFIG_SLUG_PATTERN.fullmatch(normalized):
+            raise ValueError("invalid_ai_config_slug")
+        return normalized
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_currency(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", normalized):
+            raise ValueError("invalid_currency")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_price_window(self) -> "AiModelPriceVersionCreate":
+        if self.effective_to is not None and self.effective_to <= self.effective_from:
+            raise ValueError("price_effective_to_must_follow_effective_from")
+        return self
+
+
+class AiModelPriceVersionResponse(ApiModel):
+    price_version_id: str
+    model_id: str
+    model_slug: str
+    currency: str
+    effective_from: datetime
+    effective_to: datetime | None = None
+    input_per_million: Decimal | None = None
+    cached_read_input_per_million: Decimal | None = None
+    cached_write_input_per_million: Decimal | None = None
+    output_per_million: Decimal | None = None
+    reasoning_per_million: Decimal | None = None
+    request_unit_price: Decimal | None = None
+    page_unit_price: Decimal | None = None
+    source: str
+    is_active: bool
+    created_at: datetime
+
+
+class AiRouteTargetInput(ApiModel):
+    model_slug: str = Field(min_length=2, max_length=64)
+    max_attempts: int = Field(default=1, ge=1, le=3)
+
+    @field_validator("model_slug")
+    @classmethod
+    def validate_route_model_slug(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not AI_CONFIG_SLUG_PATTERN.fullmatch(normalized):
+            raise ValueError("invalid_ai_config_slug")
+        return normalized
+
+
+class AiRoutePolicyPublish(ApiModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+    targets: list[AiRouteTargetInput] = Field(min_length=1, max_length=4)
+    prompt_revision: str | None = Field(default=None, max_length=120)
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_route_display_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value_must_not_be_blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_unique_route_targets(self) -> "AiRoutePolicyPublish":
+        slugs = [target.model_slug for target in self.targets]
+        if len(slugs) != len(set(slugs)):
+            raise ValueError("duplicate_route_model_target")
+        return self
+
+
+class AiRoutePolicyResponse(ApiModel):
+    policy_id: str
+    feature: str
+    display_name: str
+    description: str | None = None
+    current_version: int | None = None
+    is_enabled: bool
+    updated_at: datetime
+
+
+class AiRoutePolicyVersionResponse(ApiModel):
+    route_policy_version_id: str
+    policy_id: str
+    feature: str
+    version: int
+    targets: list[AiRouteTargetInput]
+    prompt_revision: str | None = None
+    published_at: datetime
+    published_by_user_id: str | None = None
+
+
+class AiRunUsageSummaryResponse(ApiModel):
+    """Safe platform-only view of one AI run.
+
+    It deliberately excludes business references and every candidate/input/
+    output field.  The opaque run ID is sufficient to correlate internal
+    operational support records without exposing resume data.
+    """
+
+    run_id: str
+    organization_id: str
+    feature: str
+    service_kind: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    total_cost_cny_micros: int | None = None
+    cost_status: str
+    invocation_count: int
+    potentially_billed_invocation_count: int
+
+
+class AiUsageAggregateResponse(ApiModel):
+    """Platform-only aggregate by workspace, feature, and model profile."""
+
+    organization_id: str
+    feature: str
+    model_slug: str
+    invocation_count: int
+    costed_invocation_count: int
+    unavailable_cost_invocation_count: int
+    potentially_billed_invocation_count: int
+    reported_cost_cny_micros: int
+    known_run_count: int
+    partial_run_count: int
+    unavailable_run_count: int
 
 
 class MailboxConfigCreate(ApiModel):

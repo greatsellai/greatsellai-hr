@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
@@ -18,7 +17,13 @@ from app.schemas import (
     RecruitingAgentToolTrace,
     ResumeScoreCreate,
 )
-from app.services.deepseek_provider import API_URL
+from app.services.ai_gateway_service import (
+    AiExecutionSpec,
+    AiGatewayError,
+    active_legacy_payload_executor,
+    ai_gateway_credentials_configured,
+    ai_gateway_execution,
+)
 from app.services.job_match_batch_service import enqueue_job_version_match_batch
 from app.services.job_service import (
     JobServiceError,
@@ -325,39 +330,33 @@ _TOOLS: list[dict[str, Any]] = [
 
 
 def _model_completion(*, settings: AppSettings, messages: list[dict[str, Any]]) -> dict[str, Any]:
-    if not settings.deepseek_api_key:
+    """Run one Agent model step through the active platform AI route.
+
+    ``run_recruiting_agent_turn`` installs exactly one gateway execution
+    context around the whole tool loop.  Each call here therefore becomes a
+    separate immutable provider invocation under that one AI run, while this
+    service remains unaware of the provider, model, endpoint, or credential.
+    """
+
+    # Keep ``settings`` in the public helper signature so existing service
+    # tests and callers do not need a compatibility shim.  All connection
+    # settings are deliberately resolved by the gateway, not here.
+    del settings
+    gateway_executor = active_legacy_payload_executor()
+    if gateway_executor is None:
         raise RecruitingAgentServiceError("agent_model_not_configured")
-    request = urllib.request.Request(
-        API_URL,
-        data=json.dumps(
+    try:
+        payload = gateway_executor(
             {
-                "model": settings.deepseek_model,
-                "thinking": {"type": "disabled"},
                 "temperature": 0,
                 "max_tokens": 900,
                 "messages": messages,
                 "tools": _TOOLS,
                 "tool_choice": "auto",
-            },
-            ensure_ascii=False,
-        ).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {settings.deepseek_api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=settings.deepseek_timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise RecruitingAgentServiceError(f"agent_model_http_{exc.code}") from exc
-    except TimeoutError as exc:
-        raise RecruitingAgentServiceError("agent_model_timeout") from exc
-    except (urllib.error.URLError, OSError) as exc:
-        raise RecruitingAgentServiceError("agent_model_network_error") from exc
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RecruitingAgentServiceError("agent_model_invalid_response") from exc
+            }
+        )
+    except AiGatewayError as exc:
+        raise _gateway_error_as_agent_error(exc) from exc
     try:
         message = payload["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -365,6 +364,36 @@ def _model_completion(*, settings: AppSettings, messages: list[dict[str, Any]]) 
     if not isinstance(message, dict):
         raise RecruitingAgentServiceError("agent_model_invalid_response")
     return message
+
+
+def _gateway_error_as_agent_error(exc: AiGatewayError) -> RecruitingAgentServiceError:
+    """Preserve the Agent's stable, non-sensitive public failure vocabulary."""
+
+    code = str(exc)
+    if code == "ai_provider_timeout":
+        return RecruitingAgentServiceError("agent_model_timeout")
+    if code == "ai_provider_network":
+        return RecruitingAgentServiceError("agent_model_network_error")
+    if code in {"ai_provider_structured_invalid", "ai_provider_truncated"}:
+        return RecruitingAgentServiceError("agent_model_invalid_response")
+    if code in {
+        "ai_route_not_configured",
+        "ai_route_disabled",
+        "ai_route_not_published",
+        "ai_route_credential_not_configured",
+        "ai_route_model_unavailable",
+        "ai_route_provider_unavailable",
+        "ai_route_endpoint_missing",
+        "ai_route_capability_missing",
+        "ai_route_output_limit_exceeded",
+        "ai_provider_configuration",
+        "ai_provider_driver_not_supported",
+    }:
+        return RecruitingAgentServiceError("agent_model_not_configured")
+    # The gateway intentionally removes provider response bodies and status
+    # details.  Do not turn a routing/provider issue into a raw 500 or leak
+    # vendor-specific information through the recruiter UI.
+    return RecruitingAgentServiceError("agent_model_unavailable")
 
 
 def _resolve_job(session: Session, requested_job_version_id: str | None) -> ResolvedJob | None:
@@ -735,6 +764,47 @@ def _execute_tool(
 
 
 def run_recruiting_agent_turn(
+    session: Session,
+    *,
+    payload: RecruitingAgentRequest,
+    settings: AppSettings,
+) -> RecruitingAgentResponse:
+    """Run one bounded Agent turn under one durable AI gateway run.
+
+    A recruiting request can require several model completions as it calls
+    tools and then turns their verified results into Markdown.  The gateway
+    context must therefore surround the entire turn instead of an individual
+    completion: every external attempt shares one ``AiRun`` and still gets
+    its own ``ApiInvocation`` record.
+    """
+
+    if not ai_gateway_credentials_configured(settings):
+        raise RecruitingAgentServiceError("agent_model_not_configured")
+
+    turn_id = str(uuid4())
+    try:
+        with ai_gateway_execution(
+            session,
+            settings=settings,
+            spec=AiExecutionSpec(
+                feature="recruiting_agent_turn",
+                business_ref_type="recruiting_agent_turn",
+                business_ref_id=turn_id,
+                correlation_id=turn_id,
+                prompt_revision="recruiting_agent.tools.v1",
+                contract_version="recruiting_agent.tools.v1",
+            ),
+        ):
+            return _run_recruiting_agent_turn_with_tools(
+                session,
+                payload=payload,
+                settings=settings,
+            )
+    except AiGatewayError as exc:
+        raise _gateway_error_as_agent_error(exc) from exc
+
+
+def _run_recruiting_agent_turn_with_tools(
     session: Session,
     *,
     payload: RecruitingAgentRequest,

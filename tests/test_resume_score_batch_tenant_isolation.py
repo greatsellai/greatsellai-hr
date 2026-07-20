@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -48,6 +49,8 @@ def _settings(tmp_path: Path) -> AppSettings:
         database_url="sqlite://",
         allow_unauthenticated=False,
         session_secret="resume-score-batch-tenant-test-secret",
+        transactional_email_provider="test",
+        public_app_url="http://testserver",
         deepseek_api_key="resume-score-batch-tenant-test-key",
         deepseek_model="unit-test-model",
         min_text_chars_per_page=20,
@@ -86,6 +89,17 @@ def _register_and_login(
         },
     )
     assert registered.status_code == 201, registered.text
+    delivery = next(
+        item
+        for item in reversed(client.app.state.transactional_email_provider.deliveries)
+        if item.recipient == email
+    )
+    token = parse_qs(urlsplit(delivery.verification_url).query)["token"][0]
+    verified = client.post(
+        "/v1/auth/email-verification/complete",
+        json={"token": token},
+    )
+    assert verified.status_code == 200, verified.text
     logged_in = client.post(
         "/v1/auth/login",
         json={"email": email, "password": password},

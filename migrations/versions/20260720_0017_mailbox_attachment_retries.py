@@ -1,7 +1,7 @@
 """Add exact retry state and attempt audit for mailbox attachments.
 
-Revision ID: 20260720_0016
-Revises: 20260720_0013
+Revision ID: 20260720_0017
+Revises: 20260720_0015, 20260720_0016
 Create Date: 2026-07-20 13:30:00
 """
 from __future__ import annotations
@@ -12,8 +12,11 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260720_0016"
-down_revision: Union[str, Sequence[str], None] = "20260720_0013"
+revision: str = "20260720_0017"
+down_revision: Union[str, Sequence[str], None] = (
+    "20260720_0015",
+    "20260720_0016",
+)
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -265,10 +265,14 @@ class MailboxSyncResponse(ApiModel):
 
 
 class MailboxImportResponse(ApiModel):
+    import_id: str
     attachment_filename: str
     status: str
     error: str | None = None
     resume_id: str | None = None
+    attempt_count: int = 1
+    last_attempted_at: datetime | None = None
+    can_retry: bool = False
     created_at: datetime
 
 

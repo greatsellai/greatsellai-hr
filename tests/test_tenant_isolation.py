@@ -14,6 +14,7 @@ from app.config import AppSettings
 from app.main import create_app
 from app.models import (
     Candidate,
+    EmailAttachmentImport,
     Job,
     JobVersion,
     MailboxConfig,
@@ -234,6 +235,22 @@ def _seed_workspace_b_private_resources(
         session.add_all((score, summary, extraction_job, job, mailbox_config))
         session.flush()
 
+        mailbox_import = EmailAttachmentImport(
+            mailbox_config_id=mailbox_config.id,
+            message_uid="workspace-b-failed-message",
+            message_id="<workspace-b-failed@example.test>",
+            attachment_filename="workspace-b-failed.pdf",
+            attachment_sha256="f" * 64,
+            source_uidvalidity=9,
+            source_fingerprint="e" * 64,
+            status="failed",
+            error="attachment_import_failed",
+            attempt_count=1,
+            last_attempted_at=task_resume.created_at,
+        )
+        session.add(mailbox_import)
+        session.flush()
+
         job_version = JobVersion(
             job_id=job.id,
             version=1,
@@ -250,6 +267,7 @@ def _seed_workspace_b_private_resources(
             "summary_id": summary.id,
             "job_id": job.id,
             "job_version_id": job_version.id,
+            "mailbox_import_id": mailbox_import.id,
         }
 
 
@@ -435,3 +453,8 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert mailbox_for_a.json()["configured"] is False
     assert mailbox_history_for_a.status_code == 200, mailbox_history_for_a.text
     assert mailbox_history_for_a.json() == {"items": [], "total": 0}
+
+    foreign_mailbox_retry = client_a.post(
+        f"/v1/mailbox/imports/{private['mailbox_import_id']}/retry"
+    )
+    assert foreign_mailbox_retry.status_code == 404, foreign_mailbox_retry.text

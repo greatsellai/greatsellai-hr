@@ -391,6 +391,9 @@ def test_due_mailbox_sync_reopens_only_the_claimed_workspace(
             resume_id=None,
             received_at=None,
         )
+        # Mailbox records now include an attempt-audit row and are flushed by
+        # the helper. The worker service owns the unit-of-work boundary.
+        session.commit()
         observed.append((config.id, organization_context_id(session)))
         return MailboxSyncResponse(configured=True)
 

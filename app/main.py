@@ -49,6 +49,7 @@ from app.schemas import (
     RegistrationOfferResponse,
     MailboxConfigResponse,
     MailboxConfigUpdate,
+    MailboxImportResponse,
     MailboxImportHistoryResponse,
     MailboxSyncResponse,
     CandidateCreate,
@@ -234,6 +235,7 @@ from app.services.mailbox_import_service import (
     MailboxImportError,
     get_mailbox_config,
     list_mailbox_imports,
+    retry_mailbox_attachment,
     save_mailbox_config,
     sync_mailbox,
 )
@@ -1090,6 +1092,35 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 detail="mailbox_not_configured",
             )
         return result
+
+    @app.post(
+        "/v1/mailbox/imports/{import_id}/retry",
+        response_model=MailboxImportResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox_attachment_retry(
+        import_id: str,
+        session: Session = Depends(get_session),
+    ) -> MailboxImportResponse:
+        try:
+            return retry_mailbox_attachment(
+                session,
+                settings=settings,
+                import_id=import_id,
+            )
+        except MailboxImportError as exc:
+            session.rollback()
+            code = str(exc)
+            if code == "mailbox_import_not_found":
+                response_status = status.HTTP_404_NOT_FOUND
+            elif code in {
+                "mailbox_import_not_retryable",
+                "mailbox_import_retry_in_progress",
+            }:
+                response_status = status.HTTP_409_CONFLICT
+            else:
+                response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+            raise HTTPException(status_code=response_status, detail=code) from exc
 
     @app.get(
         "/v1/mailbox/imports",

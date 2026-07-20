@@ -14,12 +14,17 @@ from email.utils import parsedate_to_datetime
 from typing import Iterator
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import AppSettings
-from app.models import Candidate, EmailAttachmentImport, MailboxConfig
+from app.models import (
+    EmailAttachmentImport,
+    EmailAttachmentImportAttempt,
+    MailboxConfig,
+    Resume,
+)
 from app.schemas import (
     MailboxConfigResponse,
     MailboxConfigUpdate,
@@ -27,18 +32,34 @@ from app.schemas import (
     MailboxImportResponse,
     MailboxSyncResponse,
 )
-from app.tenant_scope import clear_organization_context, set_organization_context
+from app.tenant_scope import (
+    clear_organization_context,
+    organization_context_id,
+    set_organization_context,
+)
 from app.services.ai_extraction_job_service import enqueue_uploaded_resume_ai_extraction
 from app.services.document_text_extraction import SUPPORTED_DOCUMENT_EXTENSIONS
 from app.services.resume_service import (
     UploadValidationError,
     create_candidate,
+    discard_uploaded_pdf,
     save_pdf_resume,
 )
 
 
 class MailboxImportError(RuntimeError):
     pass
+
+
+_RETRY_LEASE_SECONDS = 180
+_NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
+    {
+        "attachment_validation_failed",
+        "attachment_message_unavailable",
+        "attachment_source_changed",
+        "attachment_source_unavailable",
+    }
+)
 
 
 def _utcnow() -> datetime:
@@ -201,6 +222,20 @@ def _same_mailbox_source(
     )
 
 
+def _mailbox_source_fingerprint(config: MailboxConfig) -> str:
+    """Return a non-reversible identity for the configured IMAP source."""
+
+    source = "\x1f".join(
+        (
+            config.imap_host.strip().casefold(),
+            str(config.imap_port),
+            config.email_address.strip().casefold(),
+            config.mailbox.strip(),
+        )
+    )
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
 def _config_response(config: MailboxConfig | None) -> MailboxConfigResponse:
     if config is None:
         return MailboxConfigResponse(configured=False)
@@ -299,22 +334,39 @@ def save_mailbox_config(
 def list_mailbox_imports(session: Session, *, limit: int = 40) -> MailboxImportHistoryResponse:
     records = session.scalars(
         select(EmailAttachmentImport)
-        .order_by(desc(EmailAttachmentImport.created_at))
+        .order_by(
+            desc(EmailAttachmentImport.last_attempted_at),
+            desc(EmailAttachmentImport.created_at),
+        )
         .limit(limit)
     ).all()
     total = session.scalar(select(func.count()).select_from(EmailAttachmentImport))
     return MailboxImportHistoryResponse(
-        items=[
-            MailboxImportResponse(
-                attachment_filename=item.attachment_filename,
-                status=item.status,
-                error=item.error,
-                resume_id=item.resume_id,
-                created_at=item.created_at,
-            )
-            for item in records
-        ],
+        items=[_import_response(item) for item in records],
         total=int(total or 0),
+    )
+
+
+def _can_retry(item: EmailAttachmentImport) -> bool:
+    return bool(
+        item.status == "failed"
+        and item.source_uidvalidity is not None
+        and item.source_fingerprint
+        and item.error not in _NON_RETRYABLE_ATTACHMENT_ERRORS
+    )
+
+
+def _import_response(item: EmailAttachmentImport) -> MailboxImportResponse:
+    return MailboxImportResponse(
+        import_id=item.id,
+        attachment_filename=item.attachment_filename,
+        status=item.status,
+        error=item.error,
+        resume_id=item.resume_id,
+        attempt_count=item.attempt_count,
+        last_attempted_at=item.last_attempted_at,
+        can_retry=_can_retry(item),
+        created_at=item.created_at,
     )
 
 
@@ -330,22 +382,46 @@ def _record(
     error: str | None,
     resume_id: str | None,
     received_at: datetime | None,
-) -> None:
+    source_uidvalidity: int | None = None,
+    trigger: str = "automatic",
+) -> EmailAttachmentImport:
+    now = _utcnow()
+    record = EmailAttachmentImport(
+        organization_id=config.organization_id,
+        mailbox_config_id=config.id,
+        message_uid=uid,
+        message_id=message_id[:998] if message_id else None,
+        attachment_filename=filename,
+        attachment_sha256=attachment_sha256,
+        source_uidvalidity=source_uidvalidity,
+        source_fingerprint=(
+            _mailbox_source_fingerprint(config) if source_uidvalidity is not None else None
+        ),
+        status=status,
+        error=error,
+        resume_id=resume_id,
+        attempt_count=1,
+        last_attempted_at=now,
+        received_at=received_at,
+        updated_at=now,
+    )
+    session.add(record)
+    session.flush()
     session.add(
-        EmailAttachmentImport(
+        EmailAttachmentImportAttempt(
             organization_id=config.organization_id,
-            mailbox_config_id=config.id,
-            message_uid=uid,
-            message_id=message_id[:998] if message_id else None,
-            attachment_filename=filename,
-            attachment_sha256=attachment_sha256,
+            email_attachment_import_id=record.id,
+            attempt_number=1,
+            trigger=trigger,
             status=status,
             error=error,
             resume_id=resume_id,
-            received_at=received_at,
+            started_at=now,
+            completed_at=now,
         )
     )
-    session.commit()
+    session.flush()
+    return record
 
 
 def _already_imported(
@@ -398,6 +474,345 @@ def _attachments(message: Message) -> list[tuple[str, bytes]]:
         if payload:
             found.append((_safe_filename(filename), payload))
     return found
+
+
+class _AttachmentIngestionFailure(RuntimeError):
+    """A UI-safe attachment failure plus an optional cleanup target."""
+
+    def __init__(self, code: str, *, storage_key: str | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.storage_key = storage_key
+
+
+def _ingest_attachment(
+    session: Session,
+    *,
+    config: MailboxConfig,
+    filename: str,
+    content: bytes,
+    settings: AppSettings,
+) -> Resume:
+    """Create one candidate/resume through the same path as browser upload."""
+
+    resume: Resume | None = None
+    try:
+        candidate = create_candidate(session, display_name=None)
+        if candidate.organization_id != config.organization_id:
+            raise MailboxImportError("mailbox_workspace_mismatch")
+        resume = save_pdf_resume(
+            session,
+            candidate_id=candidate.id,
+            original_filename=filename,
+            content=content,
+            settings=settings,
+        )
+        if resume.organization_id != config.organization_id:
+            raise MailboxImportError("mailbox_workspace_mismatch")
+        if resume.extraction_status == "failed":
+            raise _AttachmentIngestionFailure(
+                "attachment_text_extraction_failed",
+                storage_key=resume.storage_key,
+            )
+        enqueue_uploaded_resume_ai_extraction(session, resume=resume, settings=settings)
+        return resume
+    except _AttachmentIngestionFailure:
+        raise
+    except UploadValidationError as exc:
+        raise _AttachmentIngestionFailure("attachment_validation_failed") from exc
+    except (RuntimeError, SQLAlchemyError) as exc:
+        raise _AttachmentIngestionFailure(
+            "attachment_import_failed",
+            storage_key=resume.storage_key if resume is not None else None,
+        ) from exc
+
+
+def _discard_failed_attachment(
+    *,
+    settings: AppSettings,
+    organization_id: str,
+    failure: _AttachmentIngestionFailure,
+) -> None:
+    discard_uploaded_pdf(
+        settings,
+        storage_key=failure.storage_key,
+        organization_id=organization_id,
+    )
+
+
+def _attachment_with_digest(
+    message: Message,
+    *,
+    digest: str,
+) -> tuple[str, bytes] | None:
+    """Return only the exact previously-recorded attachment content."""
+
+    for filename, content in _attachments(message):
+        if hashlib.sha256(content).hexdigest() == digest:
+            return filename, content
+    return None
+
+
+def _complete_retry(
+    session: Session,
+    *,
+    import_id: str,
+    status: str,
+    error: str | None,
+    resume_id: str | None,
+) -> MailboxImportResponse:
+    """Finish a claimed retry and append an immutable audit attempt."""
+
+    record = session.scalar(
+        select(EmailAttachmentImport).where(EmailAttachmentImport.id == import_id)
+    )
+    if record is None:
+        raise MailboxImportError("mailbox_import_not_found")
+    now = _utcnow()
+    next_attempt = max(1, record.attempt_count) + 1
+    record.status = status
+    record.error = error
+    record.resume_id = resume_id
+    record.attempt_count = next_attempt
+    record.last_attempted_at = now
+    record.retry_lease_expires_at = None
+    record.updated_at = now
+    session.add(
+        EmailAttachmentImportAttempt(
+            organization_id=record.organization_id,
+            email_attachment_import_id=record.id,
+            attempt_number=next_attempt,
+            trigger="manual_retry",
+            status=status,
+            error=error,
+            resume_id=resume_id,
+            started_at=now,
+            completed_at=now,
+        )
+    )
+    session.commit()
+    return _import_response(record)
+
+
+def _claim_retry(session: Session, *, import_id: str) -> EmailAttachmentImport:
+    """Atomically claim one failed attachment without holding a DB lock over IMAP."""
+
+    expected_organization_id = organization_context_id(session)
+    record = session.scalar(
+        select(EmailAttachmentImport).where(
+            EmailAttachmentImport.id == import_id,
+            EmailAttachmentImport.organization_id == expected_organization_id,
+        )
+    )
+    if record is None:
+        raise MailboxImportError("mailbox_import_not_found")
+
+    now = _utcnow()
+    if record.status == "retrying":
+        if (
+            record.retry_lease_expires_at is not None
+            and record.retry_lease_expires_at <= now
+        ):
+            record.status = "failed"
+            record.error = "attachment_retry_interrupted"
+            record.retry_lease_expires_at = None
+            record.updated_at = now
+            session.commit()
+            session.refresh(record)
+        else:
+            raise MailboxImportError("mailbox_import_retry_in_progress")
+
+    if not _can_retry(record):
+        raise MailboxImportError("mailbox_import_not_retryable")
+
+    claimed = session.execute(
+        update(EmailAttachmentImport)
+        .where(
+            EmailAttachmentImport.id == record.id,
+            EmailAttachmentImport.organization_id == expected_organization_id,
+            EmailAttachmentImport.status == "failed",
+        )
+        .values(
+            status="retrying",
+            retry_lease_expires_at=now + timedelta(seconds=_RETRY_LEASE_SECONDS),
+            updated_at=now,
+        )
+    )
+    if claimed.rowcount != 1:
+        session.rollback()
+        raise MailboxImportError("mailbox_import_retry_in_progress")
+    session.commit()
+    claimed_record = session.scalar(
+        select(EmailAttachmentImport).where(EmailAttachmentImport.id == record.id)
+    )
+    if claimed_record is None:
+        raise MailboxImportError("mailbox_import_not_found")
+    return claimed_record
+
+
+def retry_mailbox_attachment(
+    session: Session,
+    *,
+    settings: AppSettings,
+    import_id: str,
+) -> MailboxImportResponse:
+    """Retry precisely one failed attachment without scanning the mailbox."""
+
+    record = _claim_retry(session, import_id=import_id)
+    organization_id = organization_context_id(session)
+    mailbox_config_id = record.mailbox_config_id
+    client: imaplib.IMAP4_SSL | None = None
+    try:
+        config = session.scalar(
+            select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id)
+        )
+        if config is None or config.organization_id != organization_id:
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="attachment_source_unavailable",
+                resume_id=None,
+            )
+        if not config.enabled:
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="mailbox_not_enabled",
+                resume_id=None,
+            )
+        if record.source_fingerprint != _mailbox_source_fingerprint(config):
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="attachment_source_changed",
+                resume_id=None,
+            )
+        try:
+            password = _fernet(settings).decrypt(
+                config.encrypted_password.encode("ascii")
+            ).decode("utf-8")
+        except (MailboxImportError, InvalidToken, UnicodeDecodeError):
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="mailbox_credentials_unavailable",
+                resume_id=None,
+            )
+
+        client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
+        login_status, _ = client.login(config.email_address, password)
+        if login_status != "OK":
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="mailbox_connection_failed",
+                resume_id=None,
+            )
+        current_uidvalidity, _ = _read_mailbox_status(client, mailbox=config.mailbox)
+        if current_uidvalidity != record.source_uidvalidity:
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="attachment_source_changed",
+                resume_id=None,
+            )
+        select_status, _ = client.select(config.mailbox, readonly=True)
+        if select_status != "OK":
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="mailbox_select_failed",
+                resume_id=None,
+            )
+        fetch_status, fetched = client.uid(
+            "fetch", record.message_uid.encode("ascii"), "(RFC822)"
+        )
+        if fetch_status != "OK" or not fetched or not isinstance(fetched[0], tuple):
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="attachment_message_unavailable",
+                resume_id=None,
+            )
+        message = BytesParser(policy=policy.default).parsebytes(fetched[0][1])
+        attachment = _attachment_with_digest(
+            message,
+            digest=record.attachment_sha256,
+        )
+        if attachment is None:
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error="attachment_message_unavailable",
+                resume_id=None,
+            )
+        filename, content = attachment
+        try:
+            resume = _ingest_attachment(
+                session,
+                config=config,
+                filename=filename,
+                content=content,
+                settings=settings,
+            )
+        except _AttachmentIngestionFailure as exc:
+            session.rollback()
+            _discard_failed_attachment(
+                settings=settings,
+                organization_id=organization_id,
+                failure=exc,
+            )
+            return _complete_retry(
+                session,
+                import_id=record.id,
+                status="failed",
+                error=exc.code,
+                resume_id=None,
+            )
+        return _complete_retry(
+            session,
+            import_id=record.id,
+            status="imported",
+            error=None,
+            resume_id=resume.id,
+        )
+    except MailboxImportError as exc:
+        session.rollback()
+        if str(exc) == "mailbox_workspace_mismatch":
+            raise
+        return _complete_retry(
+            session,
+            import_id=record.id,
+            status="failed",
+            error=str(exc)
+            if str(exc).startswith("mailbox_")
+            else "attachment_import_failed",
+            resume_id=None,
+        )
+    except (imaplib.IMAP4.error, OSError, SQLAlchemyError):
+        session.rollback()
+        return _complete_retry(
+            session,
+            import_id=record.id,
+            status="failed",
+            error="mailbox_connection_failed",
+            resume_id=None,
+        )
+    finally:
+        if client is not None:
+            try:
+                client.logout()
+            except (imaplib.IMAP4.error, OSError):
+                pass
 
 
 def sync_mailbox(
@@ -519,7 +934,9 @@ def sync_mailbox(
                     error="no_supported_attachment",
                     resume_id=None,
                     received_at=received_at,
+                    source_uidvalidity=imap_uidvalidity,
                 )
+                session.commit()
                 skipped += 1
                 known_uids.add(uid)
                 continue
@@ -535,31 +952,69 @@ def sync_mailbox(
                     duplicates += 1
                     continue
                 if not any(filename.lower().endswith(ext) for ext in SUPPORTED_DOCUMENT_EXTENSIONS):
-                    _record(session, config=config, uid=uid, message_id=message_id, filename=filename, attachment_sha256=digest, status="skipped", error="unsupported_document_type", resume_id=None, received_at=received_at)
+                    _record(
+                        session,
+                        config=config,
+                        uid=uid,
+                        message_id=message_id,
+                        filename=filename,
+                        attachment_sha256=digest,
+                        status="skipped",
+                        error="unsupported_document_type",
+                        resume_id=None,
+                        received_at=received_at,
+                        source_uidvalidity=imap_uidvalidity,
+                    )
+                    session.commit()
                     skipped += 1
                     continue
                 try:
-                    candidate = create_candidate(session, display_name=None)
-                    if candidate.organization_id != organization_id:
-                        raise MailboxImportError("mailbox_workspace_mismatch")
-                    resume = save_pdf_resume(
+                    resume = _ingest_attachment(
                         session,
-                        candidate_id=candidate.id,
-                        original_filename=filename,
+                        config=config,
+                        filename=filename,
                         content=content,
                         settings=settings,
                     )
-                    if resume.organization_id != organization_id:
-                        raise MailboxImportError("mailbox_workspace_mismatch")
-                    enqueue_uploaded_resume_ai_extraction(session, resume=resume, settings=settings)
-                    _record(session, config=config, uid=uid, message_id=message_id, filename=filename, attachment_sha256=digest, status="imported", error=None, resume_id=resume.id, received_at=received_at)
+                    _record(
+                        session,
+                        config=config,
+                        uid=uid,
+                        message_id=message_id,
+                        filename=filename,
+                        attachment_sha256=digest,
+                        status="imported",
+                        error=None,
+                        resume_id=resume.id,
+                        received_at=received_at,
+                        source_uidvalidity=imap_uidvalidity,
+                    )
+                    session.commit()
                     imported += 1
-                except (UploadValidationError, RuntimeError, SQLAlchemyError):
+                except _AttachmentIngestionFailure as exc:
                     session.rollback()
+                    _discard_failed_attachment(
+                        settings=settings,
+                        organization_id=organization_id,
+                        failure=exc,
+                    )
                     config = session.get(MailboxConfig, mailbox_config_id)
                     if config is None or config.organization_id != organization_id:
                         raise MailboxImportError("mailbox_config_not_found")
-                    _record(session, config=config, uid=uid, message_id=message_id, filename=filename, attachment_sha256=digest, status="failed", error="attachment_import_failed", resume_id=None, received_at=received_at)
+                    _record(
+                        session,
+                        config=config,
+                        uid=uid,
+                        message_id=message_id,
+                        filename=filename,
+                        attachment_sha256=digest,
+                        status="failed",
+                        error=exc.code,
+                        resume_id=None,
+                        received_at=received_at,
+                        source_uidvalidity=imap_uidvalidity,
+                    )
+                    session.commit()
                     failed += 1
         config = session.get(MailboxConfig, mailbox_config_id)
         if config is None or config.organization_id != organization_id:

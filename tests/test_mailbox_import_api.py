@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from email.message import EmailMessage
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import DataError
 
-from app.models import MailboxConfig
+from app.models import Candidate, EmailAttachmentImport, EmailAttachmentImportAttempt, MailboxConfig, Resume
 from app.services import mailbox_import_service
 
 
@@ -346,3 +346,280 @@ def test_mailbox_sync_records_database_attachment_failure_without_crashing_worke
     assert result.imported_count == 0
     assert result.failed_count == 1
     assert result.last_sync_error is None
+
+
+def test_failed_attachment_retries_exact_uid_and_updates_the_same_record(
+    client,
+    monkeypatch,
+) -> None:
+    message = EmailMessage()
+    message["Message-ID"] = "<retry-exact-attachment@example.test>"
+    message.set_content("Resume attached")
+    message.add_attachment(
+        b"%PDF-1.7 retry attachment",
+        maintype="application",
+        subtype="pdf",
+        filename="retry.pdf",
+    )
+    raw_message = message.as_bytes()
+
+    class RetryImap:
+        calls: list[tuple[str, bytes | None]] = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"1"]
+
+        def uid(self, command: str, *args):
+            first = args[0] if args and isinstance(args[0], bytes) else None
+            self.__class__.calls.append((command, first))
+            if command == "search":
+                return "OK", [b"42"]
+            if command == "fetch":
+                assert args[0] == b"42"
+                return "OK", [(b"42 (RFC822)", raw_message)]
+            raise AssertionError(f"unexpected IMAP command: {command}")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    def database_failure(*args, **kwargs):
+        raise DataError("INSERT", {}, ValueError("temporary database issue"))
+
+    def successful_save(
+        session,
+        *,
+        candidate_id: str,
+        original_filename: str | None,
+        content: bytes,
+        settings,
+    ) -> Resume:
+        resume = Resume(
+            candidate_id=candidate_id,
+            original_filename=original_filename or "retry.pdf",
+            storage_key="retry-success.pdf",
+            sha256="a" * 64,
+            source_page_count=1,
+            parsed_page_count=1,
+            extraction_status="text_ready",
+            quality_flags=[],
+            parser_version="mailbox-retry-test",
+            raw_text="retry test text",
+            is_active=False,
+        )
+        session.add(resume)
+        session.flush()
+        return resume
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", RetryImap)
+    monkeypatch.setattr(mailbox_import_service, "save_pdf_resume", database_failure)
+    saved = client.put(
+        "/v1/mailbox/config",
+        json={
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+            "password": "test-authorization-code",
+            "enabled": True,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    with client.app.state.database.session_factory() as session:
+        result = mailbox_import_service.sync_mailbox(
+            session,
+            settings=client.app.state.settings,
+        )
+    assert result.failed_count == 1
+
+    history = client.get("/v1/mailbox/imports")
+    assert history.status_code == 200, history.text
+    item = history.json()["items"][0]
+    assert item["status"] == "failed"
+    assert item["error"] == "attachment_import_failed"
+    assert item["can_retry"] is True
+    assert item["attempt_count"] == 1
+
+    monkeypatch.setattr(mailbox_import_service, "save_pdf_resume", successful_save)
+    RetryImap.calls.clear()
+    retried = client.post(f"/v1/mailbox/imports/{item['import_id']}/retry")
+    assert retried.status_code == 200, retried.text
+    payload = retried.json()
+    assert payload["import_id"] == item["import_id"]
+    assert payload["status"] == "imported"
+    assert payload["resume_id"]
+    assert payload["attempt_count"] == 2
+    assert payload["can_retry"] is False
+    # A manual retry never runs the incremental mailbox search.
+    assert RetryImap.calls == [("fetch", b"42")]
+
+    repeated = client.post(f"/v1/mailbox/imports/{item['import_id']}/retry")
+    assert repeated.status_code == 409, repeated.text
+
+    with client.app.state.database.session_factory() as session:
+        imports = session.scalars(select(EmailAttachmentImport)).all()
+        attempts = session.scalars(select(EmailAttachmentImportAttempt)).all()
+        candidates = session.scalars(select(Candidate)).all()
+        resumes = session.scalars(select(Resume)).all()
+    assert len(imports) == 1
+    assert len(attempts) == 2
+    assert len(candidates) == 1
+    assert len(resumes) == 1
+
+
+def test_attachment_retry_stops_when_the_imap_source_epoch_changed(
+    client,
+    monkeypatch,
+) -> None:
+    class SourceChangedImap:
+        fetched = False
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 10 UIDNEXT 99)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            raise AssertionError("source mismatch must stop before selecting mail")
+
+        def uid(self, command: str, *args):
+            self.__class__.fetched = True
+            raise AssertionError("source mismatch must never fetch mail")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", SourceChangedImap)
+    encrypted_password = mailbox_import_service._fernet(
+        client.app.state.settings
+    ).encrypt(b"test-authorization-code").decode("ascii")
+    with client.app.state.database.session_factory() as session:
+        config = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="recruiting@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+        )
+        session.add(config)
+        session.flush()
+        record = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="42",
+            message_id="<source-changed@example.test>",
+            filename="retry.pdf",
+            attachment_sha256="c" * 64,
+            status="failed",
+            error="attachment_import_failed",
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+        )
+        session.commit()
+        record_id = record.id
+
+    retried = client.post(f"/v1/mailbox/imports/{record_id}/retry")
+    assert retried.status_code == 200, retried.text
+    payload = retried.json()
+    assert payload["status"] == "failed"
+    assert payload["error"] == "attachment_source_changed"
+    assert payload["can_retry"] is False
+    assert payload["attempt_count"] == 2
+    assert SourceChangedImap.fetched is False
+
+
+def test_attachment_retry_refuses_a_different_attachment_with_the_same_message_uid(
+    client,
+    monkeypatch,
+) -> None:
+    message = EmailMessage()
+    message.set_content("Different attachment")
+    message.add_attachment(
+        b"different content",
+        maintype="application",
+        subtype="pdf",
+        filename="different.pdf",
+    )
+    raw_message = message.as_bytes()
+
+    class HashMismatchImap:
+        fetched = False
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 99)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"1"]
+
+        def uid(self, command: str, *args):
+            assert command == "fetch"
+            assert args[0] == b"42"
+            self.__class__.fetched = True
+            return "OK", [(b"42 (RFC822)", raw_message)]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", HashMismatchImap)
+    encrypted_password = mailbox_import_service._fernet(
+        client.app.state.settings
+    ).encrypt(b"test-authorization-code").decode("ascii")
+    with client.app.state.database.session_factory() as session:
+        config = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="recruiting@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+        )
+        session.add(config)
+        session.flush()
+        record = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="42",
+            message_id="<hash-mismatch@example.test>",
+            filename="retry.pdf",
+            attachment_sha256="d" * 64,
+            status="failed",
+            error="attachment_import_failed",
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+        )
+        session.commit()
+        record_id = record.id
+
+    retried = client.post(f"/v1/mailbox/imports/{record_id}/retry")
+    assert retried.status_code == 200, retried.text
+    payload = retried.json()
+    assert payload["status"] == "failed"
+    assert payload["error"] == "attachment_message_unavailable"
+    assert payload["can_retry"] is False
+    assert HashMismatchImap.fetched is True
+
+    with client.app.state.database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Candidate)) == 0
+        assert session.scalar(select(func.count()).select_from(Resume)) == 0

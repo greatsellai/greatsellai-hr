@@ -493,7 +493,7 @@ class MailboxConfig(OrganizationScoped, Base):
 
 
 class EmailAttachmentImport(OrganizationScoped, Base):
-    """Idempotent audit record for every attachment considered by IMAP sync."""
+    """One idempotent attachment record, including its retryable source identity."""
 
     __tablename__ = "email_attachment_imports"
     __table_args__ = (
@@ -514,13 +514,63 @@ class EmailAttachmentImport(OrganizationScoped, Base):
     message_id: Mapped[str | None] = mapped_column(String(998))
     attachment_filename: Mapped[str] = mapped_column(String(255))
     attachment_sha256: Mapped[str] = mapped_column(String(64))
+    # UID values have meaning only for a single IMAP UIDVALIDITY epoch.  Both
+    # this and the source fingerprint must match before a manual retry can
+    # fetch the original attachment again.
+    source_uidvalidity: Mapped[int | None] = mapped_column(BigInteger)
+    source_fingerprint: Mapped[str | None] = mapped_column(String(64))
     resume_id: Mapped[str | None] = mapped_column(ForeignKey("resumes.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     error: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retry_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
     mailbox_config: Mapped[MailboxConfig] = relationship(back_populates="imports")
+    attempts: Mapped[list["EmailAttachmentImportAttempt"]] = relationship(
+        back_populates="attachment_import",
+        cascade="all, delete-orphan",
+        order_by="EmailAttachmentImportAttempt.attempt_number",
+    )
+
+
+class EmailAttachmentImportAttempt(OrganizationScoped, Base):
+    """Immutable audit result for one automatic or manual import attempt."""
+
+    __tablename__ = "email_attachment_import_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "email_attachment_import_id",
+            "attempt_number",
+            name="uq_email_attachment_import_attempt_number",
+        ),
+        Index(
+            "ix_email_attachment_import_attempts_organization_created",
+            "organization_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    email_attachment_import_id: Mapped[str] = mapped_column(
+        ForeignKey("email_attachment_imports.id", ondelete="CASCADE"),
+        index=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    trigger: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    resume_id: Mapped[str | None] = mapped_column(ForeignKey("resumes.id"), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    attachment_import: Mapped[EmailAttachmentImport] = relationship(back_populates="attempts")
 
 
 class ResumeAiExtractionJob(OrganizationScoped, Base):

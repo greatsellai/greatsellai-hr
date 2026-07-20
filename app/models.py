@@ -506,6 +506,12 @@ class EmailAttachmentImport(OrganizationScoped, Base):
         Index("ix_email_attachment_imports_resume_id", "resume_id"),
         Index("ix_email_attachment_imports_config_created", "mailbox_config_id", "created_at"),
         Index("ix_email_attachment_imports_organization_created", "organization_id", "created_at"),
+        Index(
+            "ix_email_attachment_imports_retry_lease",
+            "organization_id",
+            "status",
+            "retry_lease_expires_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -522,7 +528,11 @@ class EmailAttachmentImport(OrganizationScoped, Base):
     resume_id: Mapped[str | None] = mapped_column(ForeignKey("resumes.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     error: Mapped[str | None] = mapped_column(Text)
-    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+    )
     last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retry_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retry_claim_token: Mapped[str | None] = mapped_column(String(64))

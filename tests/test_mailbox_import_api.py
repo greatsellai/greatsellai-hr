@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import timedelta
 from email.message import EmailMessage
 
@@ -476,6 +477,130 @@ def test_failed_attachment_retries_exact_uid_and_updates_the_same_record(
     assert len(attempts) == 2
     assert len(candidates) == 1
     assert len(resumes) == 1
+
+
+def test_attachment_retry_cleans_uploaded_file_when_completion_audit_fails(
+    client,
+    monkeypatch,
+) -> None:
+    message = EmailMessage()
+    message.set_content("Resume attached")
+    attachment = b"%PDF-1.7 retry cleanup attachment"
+    message.add_attachment(
+        attachment,
+        maintype="application",
+        subtype="pdf",
+        filename="retry-cleanup.pdf",
+    )
+    raw_message = message.as_bytes()
+
+    class RetryImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 99)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"1"]
+
+        def uid(self, command: str, *args):
+            assert command == "fetch"
+            assert args[0] == b"42"
+            return "OK", [(b"42 (RFC822)", raw_message)]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    def successful_save(
+        session,
+        *,
+        candidate_id: str,
+        original_filename: str | None,
+        content: bytes,
+        settings,
+    ) -> Resume:
+        resume = Resume(
+            candidate_id=candidate_id,
+            original_filename=original_filename or "retry-cleanup.pdf",
+            storage_key="retry-cleanup.pdf",
+            sha256="b" * 64,
+            source_page_count=1,
+            parsed_page_count=1,
+            extraction_status="text_ready",
+            quality_flags=[],
+            parser_version="mailbox-retry-test",
+            raw_text="retry cleanup test text",
+            is_active=False,
+        )
+        session.add(resume)
+        session.flush()
+        return resume
+
+    original_complete = mailbox_import_service._complete_retry
+    completion_calls = 0
+
+    def fail_first_completion(*args, **kwargs):
+        nonlocal completion_calls
+        completion_calls += 1
+        if completion_calls == 1:
+            raise DataError("UPDATE", {}, ValueError("audit write failed"))
+        return original_complete(*args, **kwargs)
+
+    discarded: list[tuple[str | None, str]] = []
+
+    def record_discard(settings, *, storage_key: str | None, organization_id: str) -> None:
+        discarded.append((storage_key, organization_id))
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", RetryImap)
+    monkeypatch.setattr(mailbox_import_service, "save_pdf_resume", successful_save)
+    monkeypatch.setattr(mailbox_import_service, "_complete_retry", fail_first_completion)
+    monkeypatch.setattr(mailbox_import_service, "discard_uploaded_pdf", record_discard)
+
+    encrypted_password = mailbox_import_service._fernet(
+        client.app.state.settings
+    ).encrypt(b"test-authorization-code").decode("ascii")
+    with client.app.state.database.session_factory() as session:
+        config = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="recruiting@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+        )
+        session.add(config)
+        session.flush()
+        record = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="42",
+            message_id="<retry-cleanup@example.test>",
+            filename="retry-cleanup.pdf",
+            attachment_sha256=hashlib.sha256(attachment).hexdigest(),
+            status="failed",
+            error="attachment_import_failed",
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+        )
+        session.commit()
+        record_id = record.id
+        organization_id = config.organization_id
+
+    retried = client.post(f"/v1/mailbox/imports/{record_id}/retry")
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "failed"
+    assert retried.json()["error"] == "mailbox_connection_failed"
+    assert completion_calls == 2
+    assert discarded == [("retry-cleanup.pdf", organization_id)]
+
+    with client.app.state.database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Candidate)) == 0
+        assert session.scalar(select(func.count()).select_from(Resume)) == 0
 
 
 def test_attachment_retry_stops_when_the_imap_source_epoch_changed(

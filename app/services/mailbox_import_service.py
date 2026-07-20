@@ -771,6 +771,16 @@ def retry_mailbox_attachment(
     client: imaplib.IMAP4_SSL | None = None
     resume: Resume | None = None
 
+    def discard_retry_resume() -> None:
+        """Remove an uploaded file if this retry transaction later rolls back."""
+
+        if resume is not None:
+            discard_uploaded_pdf(
+                settings,
+                storage_key=resume.storage_key,
+                organization_id=organization_id,
+            )
+
     def complete(
         *,
         status: str,
@@ -889,15 +899,11 @@ def retry_mailbox_attachment(
         )
     except _RetryClaimLost:
         session.rollback()
-        if resume is not None:
-            discard_uploaded_pdf(
-                settings,
-                storage_key=resume.storage_key,
-                organization_id=organization_id,
-            )
+        discard_retry_resume()
         raise MailboxImportError("mailbox_import_retry_superseded")
     except MailboxImportError as exc:
         session.rollback()
+        discard_retry_resume()
         if str(exc) == "mailbox_workspace_mismatch":
             raise
         return complete(
@@ -909,6 +915,7 @@ def retry_mailbox_attachment(
         )
     except (imaplib.IMAP4.error, OSError, SQLAlchemyError):
         session.rollback()
+        discard_retry_resume()
         return complete(
             status="failed",
             error="mailbox_connection_failed",

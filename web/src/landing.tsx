@@ -51,6 +51,30 @@ const comparisons = [
   },
 ];
 
+const efficiencyMetrics = [
+  {
+    label: "批量归档 100 份简历",
+    before: "60 分钟",
+    after: "5 分钟",
+    saving: "约 92%",
+    description: "统一入库、记录来源和处理状态，不再逐份下载改名。",
+  },
+  {
+    label: "整理候选人对比清单",
+    before: "60 分钟",
+    after: "10 分钟",
+    saving: "约 83%",
+    description: "候选人事实、评分和待核实项自动汇总到同一视图。",
+  },
+  {
+    label: "逐项复核 JD 匹配",
+    before: "45 分钟",
+    after: "8 分钟",
+    saving: "约 82%",
+    description: "集中查看匹配项、能力缺口和对应原文证据。",
+  },
+];
+
 const capabilitySteps = [
   {
     number: "01",
@@ -294,6 +318,44 @@ export function LandingPage({
                 </article>
               ))}
             </div>
+          </div>
+        </section>
+
+        <section className="landing-efficiency-section" aria-labelledby="efficiency-title">
+          <div className="landing-shell">
+            <div className="landing-efficiency-heading">
+              <div>
+                <p className="landing-section-kicker">把重复工作交给系统</p>
+                <h2 id="efficiency-title">把筛简历的 3 小时，<br />缩短到 20 分钟</h2>
+              </div>
+              <p>以每天处理约 100 份简历的典型场景估算，系统先完成收集、条件筛选和依据整理，HR 可以更早进入判断和沟通。</p>
+            </div>
+
+            <div className="landing-efficiency-dashboard">
+              <article className="landing-efficiency-primary">
+                <p>100 份简历完成首轮筛选</p>
+                <div className="landing-efficiency-time">
+                  <span><small>传统人工</small>3 小时</span>
+                  <Icon name="arrow-right" size={24} />
+                  <strong><small>AI 工作台</small>20 分钟</strong>
+                </div>
+                <div className="landing-efficiency-saving"><b>约 89%</b><span>初筛时间可用于候选人沟通与推进</span></div>
+              </article>
+
+              <div className="landing-efficiency-metrics">
+                {efficiencyMetrics.map((metric) => (
+                  <article key={metric.label}>
+                    <div className="landing-efficiency-metric-heading">
+                      <p>{metric.label}</p>
+                      <strong>{metric.saving}</strong>
+                    </div>
+                    <p className="landing-efficiency-change"><span>{metric.before}</span><Icon name="arrow-right" size={16} /><b>{metric.after}</b></p>
+                    <p className="landing-efficiency-description">{metric.description}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <p className="landing-efficiency-note">以上为流程示例估算：假设岗位筛选规则已设定、简历结构清晰且系统正常解析。实际用时会随简历质量、岗位复杂度和团队流程而变化，不作为客户实际效果承诺。</p>
           </div>
         </section>
 

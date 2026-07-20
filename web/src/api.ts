@@ -19,6 +19,7 @@ import type {
   MailboxConfig,
   MailboxConfigUpdate,
   MailboxImportHistory,
+  MailboxImportHistoryItem,
   MailboxSync,
   EmailVerificationResendResult,
   OriginalJobPublishInput,
@@ -262,6 +263,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     listMailboxImports(): Promise<MailboxImportHistory> {
       return request<MailboxImportHistory>("/mailbox/imports");
+    },
+
+    retryMailboxImport(importId: string): Promise<MailboxImportHistoryItem> {
+      return request<MailboxImportHistoryItem>(
+        `/mailbox/imports/${encodeURIComponent(importId)}/retry`,
+        { method: "POST" },
+      );
     },
 
     runRecruitingAgentTurn(input: RecruitingAgentTurnInput): Promise<RecruitingAgentTurn> {

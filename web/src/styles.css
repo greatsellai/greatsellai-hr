@@ -3193,6 +3193,71 @@ button {
   border-color: #f1d7bb;
 }
 
+.status-pill.is-success {
+  color: var(--green);
+  background: var(--green-tint);
+  border-color: #c7e6d5;
+}
+
+.status-pill.is-error {
+  color: #9c2721;
+  background: var(--red-tint);
+  border-color: #f1c6c2;
+}
+
+.status-pill.is-progress {
+  color: var(--blue);
+  background: var(--blue-tint);
+  border-color: #cbdcf0;
+}
+
+.mailbox-history .candidate-table {
+  min-width: 60rem;
+}
+
+.mailbox-history .candidate-table tr {
+  cursor: default;
+}
+
+.mailbox-history-table th:last-child,
+.mailbox-history-table td:last-child {
+  white-space: nowrap;
+}
+
+.mailbox-import-status {
+  margin-bottom: 0.25rem;
+}
+
+.mailbox-import-error {
+  display: block;
+  max-width: 22rem;
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.mailbox-attempt-cell {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.mailbox-action-cell {
+  width: 8.5rem;
+}
+
+.mailbox-retry-button {
+  min-height: 2.25rem;
+}
+
+.mailbox-retry-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--ink-muted);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
 .match-batch-details {
   display: grid;
   gap: var(--space-md);

@@ -43,6 +43,7 @@ import type {
   JobVersion,
   MailboxConfig,
   MailboxImportHistory,
+  MailboxImportHistoryItem,
   ResumeDetail,
   ResumeLibraryItem,
   ResumeLibraryResponse,
@@ -446,6 +447,40 @@ function freshDefaultFilter(): FilterDraft {
   };
 }
 
+const mailboxImportErrorMessages: Record<string, string> = {
+  mailbox_import_not_found: "这条附件记录已不存在或无法访问。",
+  mailbox_import_not_retryable: "这份附件当前不能重新入库。",
+  mailbox_import_retry_in_progress: "这份附件正在重新入库，请稍后刷新。",
+  mailbox_not_enabled: "该收件邮箱已暂停，请启用后重试。",
+  attachment_validation_failed: "附件未通过文件校验，请候选人重新发送。",
+  attachment_text_extraction_failed: "附件文字提取失败，请候选人重新发送清晰原件。",
+  attachment_import_failed: "附件暂时无法入库，请稍后重试。",
+  attachment_message_unavailable: "原邮件或附件已无法获取，请候选人重新发送。",
+  attachment_source_changed: "收件邮箱来源已变化，不能安全重试该附件。",
+  attachment_source_unavailable: "原收件邮箱已不可用，不能重试该附件。",
+  attachment_retry_interrupted: "上次重新入库被中断，可再次尝试。",
+};
+
+function mailboxImportErrorLabel(error: string | null): string {
+  if (!error) return "附件处理没有完成，请稍后重试。";
+  return mailboxImportErrorMessages[error] ?? "附件处理没有完成，请稍后重试。";
+}
+
+function mailboxImportStatusLabel(status: string): string {
+  switch (status) {
+    case "imported":
+      return "已入库";
+    case "skipped":
+      return "已跳过";
+    case "retrying":
+      return "正在重试";
+    case "failed":
+      return "处理失败";
+    default:
+      return "处理中";
+  }
+}
+
 function humanizeError(error: unknown): string {
   if (isApiError(error)) {
     const messages: Record<string, string> = {
@@ -502,6 +537,7 @@ function humanizeError(error: unknown): string {
       mailbox_status_failed: "无法读取邮箱当前位置，请检查文件夹设置后重试。",
       mailbox_search_failed: "无法检索邮箱中的附件。",
       mailbox_sync_failed: "邮箱入库暂时异常，请稍后重试。",
+      ...mailboxImportErrorMessages,
       score_template_not_found: "评分规则不存在，请重新选择。",
       resume_score_batch_not_found: "评分任务不存在或已不可访问。",
       job_version_not_found: "岗位版本不存在，请重新创建。",
@@ -4695,6 +4731,7 @@ function MailboxPage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [retryingImportId, setRetryingImportId] = useState<string | null>(null);
   const [imapHost, setImapHost] = useState("imap.feishu.cn");
   const [imapPort, setImapPort] = useState("993");
   const [emailAddress, setEmailAddress] = useState("");
@@ -4773,6 +4810,26 @@ function MailboxPage({
     }
   };
 
+  const retryImport = async (item: MailboxImportHistoryItem) => {
+    if (!item.can_retry || retryingImportId) return;
+
+    setRetryingImportId(item.import_id);
+    try {
+      const result = await api.retryMailboxImport(item.import_id);
+      if (result.status === "imported") {
+        notify("success", `已重新入库：${result.attachment_filename}。`);
+        onImported();
+      } else {
+        notify("error", mailboxImportErrorLabel(result.error));
+      }
+      await load();
+    } catch (error) {
+      notify("error", humanizeError(error));
+    } finally {
+      setRetryingImportId(null);
+    }
+  };
+
   return (
     <div className="page-frame mailbox-page">
       <header className="page-heading">
@@ -4844,8 +4901,60 @@ function MailboxPage({
       </div>
       <section className="panel mailbox-history">
         <div className="panel-heading"><div><h2>最近入库记录</h2><p>只记录附件处理结果，不在这里展示邮件正文。</p></div></div>
+        <span aria-live="polite" className="sr-only">{retryingImportId ? "正在重新入库一份附件。" : ""}</span>
         {loading ? <TableSkeleton /> : history?.items.length ? (
-          <div className="table-scroll"><table className="candidate-table"><thead><tr><th scope="col">附件</th><th scope="col">结果</th><th scope="col">时间</th></tr></thead><tbody>{history.items.map((item, index) => <tr key={`${item.attachment_filename}-${item.created_at}-${index}`}><td><strong>{item.attachment_filename}</strong></td><td><span className="status-pill">{item.status === "imported" ? "已入库" : item.status === "skipped" ? "已跳过" : "处理失败"}</span>{item.error && <small>{item.error}</small>}</td><td>{formatLibraryDate(item.created_at)}</td></tr>)}</tbody></table></div>
+          <div className="table-scroll">
+            <table className="candidate-table mailbox-history-table">
+              <thead>
+                <tr>
+                  <th scope="col">附件</th>
+                  <th scope="col">结果与原因</th>
+                  <th scope="col">尝试</th>
+                  <th scope="col">最后处理</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.items.map((item) => {
+                  const isRetrying = item.status === "retrying" || retryingImportId === item.import_id;
+                  const statusClass = item.status === "imported"
+                    ? "is-success"
+                    : item.status === "failed"
+                      ? "is-error"
+                      : item.status === "retrying"
+                        ? "is-progress"
+                        : "";
+
+                  return (
+                    <tr key={item.import_id}>
+                      <th scope="row"><strong>{item.attachment_filename}</strong></th>
+                      <td>
+                        <span className={`status-pill mailbox-import-status ${statusClass}`}>{mailboxImportStatusLabel(item.status)}</span>
+                        {item.error && <small className="mailbox-import-error">{mailboxImportErrorLabel(item.error)}</small>}
+                      </td>
+                      <td className="mailbox-attempt-cell">{item.attempt_count} 次</td>
+                      <td>{formatLibraryDate(item.last_attempted_at ?? item.created_at)}</td>
+                      <td className="mailbox-action-cell">
+                        {isRetrying ? (
+                          <span className="mailbox-retry-pending"><i className="spinner" />正在重试</span>
+                        ) : item.can_retry ? (
+                          <button
+                            aria-label={`重新入库：${item.attachment_filename}`}
+                            className="button button-ghost upload-row-button mailbox-retry-button"
+                            disabled={Boolean(retryingImportId)}
+                            onClick={() => void retryImport(item)}
+                            type="button"
+                          >
+                            <Icon name="refresh" size={15} />重新入库
+                          </button>
+                        ) : <span className="candidate-meta">—</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         ) : <div className="empty-state"><div className="empty-state-inner"><span className="empty-glyph"><Icon name="inbox" size={23} /></span><h2>还没有附件入库记录</h2><p>绑定后收到的附件会在这里显示，历史邮件不会入库。</p></div></div>}
       </section>
     </div>

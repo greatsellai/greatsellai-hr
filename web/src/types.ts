@@ -166,10 +166,14 @@ export interface MailboxSync {
 }
 
 export interface MailboxImportHistoryItem {
+  import_id: string;
   attachment_filename: string;
   status: string;
   error: string | null;
   resume_id: string | null;
+  attempt_count: number;
+  last_attempted_at: string | null;
+  can_retry: boolean;
   created_at: string;
 }
 

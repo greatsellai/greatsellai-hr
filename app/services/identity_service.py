@@ -13,13 +13,14 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
     Organization,
     OrganizationInvitation,
     OrganizationMembership,
+    EmailVerificationToken,
     PasswordResetToken,
     ProductPlan,
     UserAccount,
@@ -80,6 +81,14 @@ class AuthPrincipal:
     @property
     def is_platform_admin(self) -> bool:
         return bool(self.user.is_platform_admin)
+
+    @property
+    def email_verified(self) -> bool:
+        # The historical password-only entry point is deliberately confined
+        # to its pre-existing legacy workspace.  It cannot be used to enter a
+        # newly registered tenant, so it remains compatible without a real
+        # deliverable email address.
+        return self.legacy_compatibility or self.user.email_verified_at is not None
 
 
 def utcnow() -> datetime:
@@ -250,6 +259,11 @@ def ensure_identity_bootstrap(session: Session) -> None:
         session.add(legacy_user)
     elif not legacy_user.is_platform_admin:
         legacy_user.is_platform_admin = True
+    if legacy_user.email_verified_at is None:
+        # This identity is a compatibility bridge, not a deliverable inbox.
+        # Marking it verified preserves its existing access after the email
+        # gate is introduced and mirrors the one-time production migration.
+        legacy_user.email_verified_at = utcnow()
 
     session.flush()
     membership = session.get(OrganizationMembership, LEGACY_MEMBERSHIP_ID)
@@ -496,11 +510,17 @@ def auth_session_response(
             else None
         ),
         trial=trial_access(principal),
+        email_verified=principal.email_verified,
+        email_verification_required=not principal.email_verified,
     )
 
 
 def require_feature(principal: AuthPrincipal, feature_name: str) -> bool:
-    return trial_access(principal).access_enabled and _feature_flags(principal.plan).get(feature_name, False)
+    return (
+        principal.email_verified
+        and trial_access(principal).access_enabled
+        and _feature_flags(principal.plan).get(feature_name, False)
+    )
 
 
 def current_plan_response(principal: AuthPrincipal) -> OrganizationPlanResponse:
@@ -718,3 +738,141 @@ def complete_password_reset(session: Session, *, token: str, password: str) -> N
         raise IdentityServiceError("password_reset_invalid_or_expired")
     reset.user.password_hash = hash_password(password)
     reset.used_at = utcnow()
+
+
+def issue_email_verification(
+    session: Session,
+    *,
+    user: UserAccount,
+    ttl_seconds: int,
+    resend_cooldown_seconds: int,
+    daily_limit: int,
+    enforce_resend_limit: bool,
+    now: datetime | None = None,
+) -> tuple[EmailVerificationToken, str]:
+    """Create exactly one usable verification token for one account.
+
+    The raw token is returned only to the caller that immediately builds the
+    email link.  The database keeps a digest and delivery metadata only.
+    """
+
+    current_time = now or utcnow()
+    if user.email_verified_at is not None:
+        raise IdentityServiceError("email_already_verified")
+
+    if enforce_resend_limit:
+        most_recent = session.scalar(
+            select(EmailVerificationToken)
+            .where(EmailVerificationToken.user_id == user.id)
+            .order_by(EmailVerificationToken.requested_at.desc(), EmailVerificationToken.id.desc())
+            .limit(1)
+        )
+        if most_recent is not None:
+            requested_at = _aware(most_recent.requested_at) or current_time
+            elapsed_seconds = max(0.0, (current_time - requested_at).total_seconds())
+            if elapsed_seconds < resend_cooldown_seconds:
+                raise IdentityServiceError("email_verification_resend_too_soon")
+
+        earliest = current_time - timedelta(days=1)
+        issued_count = session.scalar(
+            select(func.count())
+            .select_from(EmailVerificationToken)
+            .where(
+                EmailVerificationToken.user_id == user.id,
+                EmailVerificationToken.requested_at >= earliest,
+            )
+        )
+        if int(issued_count or 0) >= daily_limit:
+            raise IdentityServiceError("email_verification_resend_limit_reached")
+
+    # Only the latest link is valid.  Marking a superseded token separately
+    # from `used_at` keeps security/audit semantics accurate.
+    for pending in session.scalars(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.user_id == user.id,
+            EmailVerificationToken.used_at.is_(None),
+            EmailVerificationToken.invalidated_at.is_(None),
+        )
+    ).all():
+        pending.invalidated_at = current_time
+
+    token = secrets.token_urlsafe(32)
+    verification = EmailVerificationToken(
+        user_id=user.id,
+        token_digest=digest_token(token),
+        expires_at=current_time + timedelta(seconds=ttl_seconds),
+        requested_at=current_time,
+    )
+    session.add(verification)
+    session.flush()
+    return verification, token
+
+
+def record_email_verification_delivery(
+    session: Session,
+    *,
+    verification_id: str,
+    delivered: bool,
+    error_code: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    verification = session.get(EmailVerificationToken, verification_id)
+    if verification is None:
+        return
+    verification.delivery_attempt_count += 1
+    verification.last_delivery_error = error_code
+    if delivered:
+        verification.delivered_at = now or utcnow()
+
+
+def complete_email_verification(
+    session: Session,
+    *,
+    token: str,
+    now: datetime | None = None,
+) -> AuthPrincipal:
+    current_time = now or utcnow()
+    verification = session.scalar(
+        select(EmailVerificationToken)
+        .options(joinedload(EmailVerificationToken.user))
+        .where(EmailVerificationToken.token_digest == digest_token(token))
+    )
+    if (
+        verification is None
+        or verification.used_at is not None
+        or verification.invalidated_at is not None
+        or (_aware(verification.expires_at) or current_time) <= current_time
+        or not verification.user.is_active
+    ):
+        raise IdentityServiceError("email_verification_invalid_or_expired")
+
+    verification.used_at = current_time
+    verification.user.email_verified_at = current_time
+    for pending in session.scalars(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.user_id == verification.user_id,
+            EmailVerificationToken.id != verification.id,
+            EmailVerificationToken.used_at.is_(None),
+            EmailVerificationToken.invalidated_at.is_(None),
+        )
+    ).all():
+        pending.invalidated_at = current_time
+
+    memberships = session.scalars(
+        select(OrganizationMembership)
+        .options(joinedload(OrganizationMembership.organization).joinedload(Organization.plan))
+        .where(
+            OrganizationMembership.user_id == verification.user_id,
+            OrganizationMembership.is_active.is_(True),
+        )
+        .order_by(OrganizationMembership.created_at)
+    ).all()
+    if len(memberships) != 1:
+        raise IdentityServiceError("account_workspace_unavailable")
+    membership = memberships[0]
+    return AuthPrincipal(
+        user=verification.user,
+        membership=membership,
+        organization=membership.organization,
+        plan=membership.organization.plan,
+    )

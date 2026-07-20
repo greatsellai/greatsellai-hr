@@ -86,6 +86,8 @@ export interface TrialAccess {
 export interface AuthSession {
   authenticated: boolean;
   login_required: boolean;
+  email_verified: boolean;
+  email_verification_required: boolean;
   user: AuthUser | null;
   organization: AuthOrganization | null;
   role: MembershipRole | null;
@@ -110,6 +112,11 @@ export interface RegistrationOffer {
   plan_code: string;
   plan_name: string;
   trial_days: number;
+}
+
+export interface EmailVerificationResendResult {
+  accepted: boolean;
+  delivery_available: boolean;
 }
 
 /** Deliberately contains no account-existence or reset-token information. */

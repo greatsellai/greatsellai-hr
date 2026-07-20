@@ -33,6 +33,8 @@ from app.schemas import (
     AuthLogin,
     AuthRegistration,
     AuthSession,
+    EmailVerificationComplete,
+    EmailVerificationResendResult,
     OrganizationInvitationAccept,
     OrganizationInvitationCreate,
     OrganizationInvitationResponse,
@@ -101,19 +103,29 @@ from app.services.identity_service import (
     authenticate_email_password,
     clear_session,
     complete_password_reset,
+    complete_email_verification,
     create_invitation,
     create_registration,
     current_plan_response,
     ensure_identity_bootstrap,
     establish_session,
     issue_password_reset,
+    issue_email_verification,
     legacy_principal,
     list_product_plans,
     principal_from_session,
     registration_offer,
+    record_email_verification_delivery,
     require_feature,
     trial_access,
     update_product_plan,
+)
+from app.services.transactional_email import (
+    TransactionalEmailError,
+    TransactionalEmailProvider,
+    VerificationDelivery,
+    build_transactional_email_provider,
+    email_verification_url,
 )
 from app.tenant_scope import organization_context_id, set_organization_context
 from app.services.institution_service import (
@@ -305,6 +317,68 @@ def _commit_or_raise(session: Session) -> None:
         ) from exc
 
 
+def _deliver_email_verification(
+    *,
+    session: Session,
+    settings: AppSettings,
+    provider: TransactionalEmailProvider,
+    verification_id: str,
+    recipient: str,
+    token: str,
+) -> bool:
+    """Send one verification link and retain only non-sensitive delivery state."""
+
+    try:
+        provider.send_email_verification(
+            VerificationDelivery(
+                recipient=recipient,
+                verification_url=email_verification_url(settings, token=token),
+                expires_minutes=max(1, settings.email_verification_ttl_seconds // 60),
+            )
+        )
+    except TransactionalEmailError as exc:
+        record_email_verification_delivery(
+            session,
+            verification_id=verification_id,
+            delivered=False,
+            error_code=str(exc),
+        )
+        try:
+            _commit_or_raise(session)
+        except HTTPException:
+            logger.warning("email_verification_delivery_state_not_recorded")
+        logger.warning("email_verification_delivery_failed")
+        return False
+    except Exception:
+        # The public registration response must not expose a provider error or
+        # accidentally leave a user with an unexplained 500 after the account
+        # row was committed.  The user remains on the verification page and
+        # can resend, while the durable record keeps a safe error code.
+        record_email_verification_delivery(
+            session,
+            verification_id=verification_id,
+            delivered=False,
+            error_code="email_delivery_provider_failed",
+        )
+        try:
+            _commit_or_raise(session)
+        except HTTPException:
+            logger.warning("email_verification_delivery_state_not_recorded")
+        logger.warning("email_verification_delivery_failed")
+        return False
+
+    record_email_verification_delivery(
+        session,
+        verification_id=verification_id,
+        delivered=True,
+    )
+    try:
+        _commit_or_raise(session)
+    except HTTPException:
+        logger.warning("email_verification_delivery_state_not_recorded")
+    return True
+
+
 def _raise_job_service_error(exc: JobServiceError) -> None:
     """Translate predictable JD workflow failures into stable HTTP results."""
 
@@ -436,17 +510,16 @@ def _resume_review_detail(resume: object) -> ResumeReviewDetail:
     )
 
 
-async def require_single_admin(
+async def require_authenticated_member(
     request: Request,
     session: Session = Depends(get_session),
     x_admin_token: Annotated[str | None, Header()] = None,
 ) -> AuthPrincipal:
-    """Resolve one server-verified member and bind its workspace to Session.
+    """Resolve one session member and bind its workspace to Session.
 
-    The historical name remains on existing route declarations while the
-    behavior is now a member-level workspace guard.  The legacy admin token
-    is intentionally mapped only to the legacy workspace; it is never a
-    global cross-tenant bypass.
+    Email verification is intentionally not checked here: an authenticated,
+    unverified account needs this dependency to resend its own link.  Every
+    business route continues through ``require_single_admin`` below.
     """
 
     settings: AppSettings = request.app.state.settings
@@ -473,6 +546,19 @@ async def require_single_admin(
         )
 
     set_organization_context(session, principal.organization_id)
+    return principal
+
+
+async def require_single_admin(
+    principal: AuthPrincipal = Depends(require_authenticated_member),
+) -> AuthPrincipal:
+    """Require an activated, verified workspace member for business APIs."""
+
+    if not principal.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="email_verification_required",
+        )
     if not trial_access(principal).access_enabled:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -529,6 +615,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             session.commit()
         app.state.settings = settings
         app.state.database = database
+        app.state.transactional_email_provider = build_transactional_email_provider(settings)
         try:
             yield
         finally:
@@ -622,8 +709,22 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         request: Request,
         session: Session = Depends(get_session),
     ) -> AuthSession:
+        provider: TransactionalEmailProvider = request.app.state.transactional_email_provider
+        if not provider.configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="email_delivery_not_configured",
+            )
         try:
             principal = create_registration(session, payload)
+            verification, raw_token = issue_email_verification(
+                session,
+                user=principal.user,
+                ttl_seconds=settings.email_verification_ttl_seconds,
+                resend_cooldown_seconds=settings.email_verification_resend_cooldown_seconds,
+                daily_limit=settings.email_verification_daily_limit,
+                enforce_resend_limit=False,
+            )
             _commit_or_raise(session)
         except IdentityServiceError as exc:
             session.rollback()
@@ -636,7 +737,89 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=response_status, detail=code) from exc
         establish_session(request.session, principal)
         set_organization_context(session, principal.organization_id)
+        _deliver_email_verification(
+            session=session,
+            settings=settings,
+            provider=provider,
+            verification_id=verification.id,
+            recipient=principal.user.email,
+            token=raw_token,
+        )
         return auth_session_response(principal, login_required=not settings.allow_unauthenticated)
+
+    @app.post("/v1/auth/email-verification/complete", response_model=AuthSession)
+    async def post_email_verification_complete(
+        payload: EmailVerificationComplete,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> AuthSession:
+        try:
+            principal = complete_email_verification(session, token=payload.token)
+            _commit_or_raise(session)
+        except IdentityServiceError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        establish_session(request.session, principal)
+        set_organization_context(session, principal.organization_id)
+        return auth_session_response(principal, login_required=not settings.allow_unauthenticated)
+
+    @app.post(
+        "/v1/auth/email-verification/resend",
+        response_model=EmailVerificationResendResult,
+    )
+    async def post_email_verification_resend(
+        request: Request,
+        principal: AuthPrincipal = Depends(require_authenticated_member),
+        session: Session = Depends(get_session),
+    ) -> EmailVerificationResendResult:
+        if principal.email_verified:
+            return EmailVerificationResendResult(accepted=True, delivery_available=True)
+
+        settings: AppSettings = request.app.state.settings
+        provider: TransactionalEmailProvider = request.app.state.transactional_email_provider
+        if not provider.configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="email_delivery_not_configured",
+            )
+        try:
+            verification, raw_token = issue_email_verification(
+                session,
+                user=principal.user,
+                ttl_seconds=settings.email_verification_ttl_seconds,
+                resend_cooldown_seconds=settings.email_verification_resend_cooldown_seconds,
+                daily_limit=settings.email_verification_daily_limit,
+                enforce_resend_limit=True,
+            )
+            _commit_or_raise(session)
+        except IdentityServiceError as exc:
+            session.rollback()
+            code = str(exc)
+            response_status = (
+                status.HTTP_429_TOO_MANY_REQUESTS
+                if code in {
+                    "email_verification_resend_too_soon",
+                    "email_verification_resend_limit_reached",
+                }
+                else status.HTTP_422_UNPROCESSABLE_CONTENT
+            )
+            raise HTTPException(status_code=response_status, detail=code) from exc
+
+        delivered = _deliver_email_verification(
+            session=session,
+            settings=settings,
+            provider=provider,
+            verification_id=verification.id,
+            recipient=principal.user.email,
+            token=raw_token,
+        )
+        return EmailVerificationResendResult(
+            accepted=True,
+            delivery_available=delivered,
+        )
 
     @app.post("/v1/auth/password-reset/request", response_model=PasswordResetRequestResult)
     async def post_password_reset_request(

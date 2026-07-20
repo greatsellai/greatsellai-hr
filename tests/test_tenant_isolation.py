@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -69,6 +70,8 @@ def workspace_clients(tmp_path: Path) -> Iterator[tuple[TestClient, TestClient]]
         allow_unauthenticated=False,
         session_secret="tenant-isolation-test-session-secret",
         min_text_chars_per_page=20,
+        transactional_email_provider="test",
+        public_app_url="http://testserver",
     )
     app = create_app(settings)
 
@@ -102,6 +105,12 @@ def _register_and_login(
         },
     )
     assert registered.status_code == 201, registered.text
+
+    provider = client.app.state.transactional_email_provider
+    delivery = next(item for item in reversed(provider.deliveries) if item.recipient == email)
+    token = parse_qs(urlsplit(delivery.verification_url).query)["token"][0]
+    verified = client.post("/v1/auth/email-verification/complete", json={"token": token})
+    assert verified.status_code == 200, verified.text
 
     logged_in = client.post(
         "/v1/auth/login",

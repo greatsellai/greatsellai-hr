@@ -159,6 +159,10 @@ class UserAccount(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    email_verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class OrganizationMembership(Base):
@@ -243,6 +247,29 @@ class PasswordResetToken(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     user: Mapped[UserAccount] = relationship(back_populates="password_reset_tokens")
+
+
+class EmailVerificationToken(Base):
+    """A single-use, digest-only proof of control over an account email."""
+
+    __tablename__ = "email_verification_tokens"
+    __table_args__ = (
+        Index("ix_email_verification_tokens_user_requested", "user_id", "requested_at"),
+        Index("ix_email_verification_tokens_expiry", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_delivery_error: Mapped[str | None] = mapped_column(String(128))
+
+    user: Mapped[UserAccount] = relationship(back_populates="email_verification_tokens")
 
 
 class Candidate(OrganizationScoped, Base):

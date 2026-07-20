@@ -20,6 +20,7 @@ import type {
   MailboxConfigUpdate,
   MailboxImportHistory,
   MailboxSync,
+  EmailVerificationResendResult,
   OriginalJobPublishInput,
   PasswordResetRequestResult,
   RegistrationOffer,
@@ -217,6 +218,19 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     register(input: AuthRegistrationInput): Promise<AuthSession> {
       return request<AuthSession>("/auth/register", { method: "POST", body: input });
+    },
+
+    completeEmailVerification(token: string): Promise<AuthSession> {
+      return request<AuthSession>("/auth/email-verification/complete", {
+        method: "POST",
+        body: { token },
+      });
+    },
+
+    resendEmailVerification(): Promise<EmailVerificationResendResult> {
+      return request<EmailVerificationResendResult>("/auth/email-verification/resend", {
+        method: "POST",
+      });
     },
 
     getRegistrationOffer(): Promise<RegistrationOffer> {

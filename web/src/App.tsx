@@ -71,7 +71,7 @@ type MatchMode = "all" | "any";
 type KeywordMode = "broad" | "precise";
 type ToastKind = "success" | "error";
 type JobWorkspaceMode = "create" | "view";
-type AuthRoute = "login" | "register" | "forgot-password";
+type AuthRoute = "login" | "register" | "forgot-password" | "verify-email";
 type AppSurface =
   | { kind: "landing" }
   | { kind: "workspace"; authRoute: AuthRoute | null };
@@ -451,6 +451,11 @@ function humanizeError(error: unknown): string {
     const messages: Record<string, string> = {
       invalid_login_credentials: "邮箱或密码不正确，请重试。",
       email_already_registered: "该邮箱已注册，请直接登录或找回密码。",
+      email_delivery_not_configured: "注册邮件服务正在配置中，请稍后再试。",
+      email_verification_required: "请先完成工作邮箱验证后再进入工作台。",
+      email_verification_invalid_or_expired: "这条验证链接无效或已过期，请重新发送验证邮件。",
+      email_verification_resend_too_soon: "验证邮件刚刚发送，请稍候一分钟后再试。",
+      email_verification_resend_limit_reached: "今天的验证邮件发送次数已达到上限，请明天再试。",
       invalid_registration_input: "请检查企业名称、姓名、邮箱和密码后重试。",
       password_too_short: "密码至少需要 8 个字符。",
       trial_expired: "试用期已结束。数据已保留，请联系 GreatSell AI 团队继续使用。",
@@ -874,6 +879,7 @@ function authRouteFromPath(pathname: string): AuthRoute | null {
   if (normalized === "/login") return "login";
   if (normalized === "/register") return "register";
   if (normalized === "/forgot-password") return "forgot-password";
+  if (normalized === "/verify-email") return "verify-email";
   return null;
 }
 
@@ -982,6 +988,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       login: "登录｜GreatSell AI 招聘工具",
       register: "免费试用｜GreatSell AI 招聘工具",
       "forgot-password": "找回密码｜GreatSell AI 招聘工具",
+      "verify-email": "验证邮箱｜GreatSell AI 招聘工具",
     };
     document.title = authRoute ? titles[authRoute] : "招聘工作台｜GreatSell AI";
   }, [authRoute]);
@@ -1095,19 +1102,29 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   }, []);
 
   useEffect(() => {
-    if (authState !== "authenticated" || authRoute) return;
+    if (
+      authState !== "authenticated" ||
+      authRoute ||
+      authSession?.email_verification_required
+    )
+      return;
     void runSearch(defaultFilterDraft);
     void refreshSavedFilters();
     void api.getFilterOptions().then(setFilterOptions).catch(() => {
       setFilterOptions(fallbackFilterOptions);
     });
-  }, [authRoute, authState, refreshSavedFilters, runSearch]);
+  }, [authRoute, authSession?.email_verification_required, authState, refreshSavedFilters, runSearch]);
 
   useEffect(() => {
-    if (authState === "authenticated" && authRoute) {
+    if (
+      authState === "authenticated" &&
+      authRoute &&
+      authRoute !== "verify-email" &&
+      !authSession?.email_verification_required
+    ) {
       window.location.replace(workspaceHref());
     }
-  }, [authRoute, authState]);
+  }, [authRoute, authSession?.email_verification_required, authState]);
 
   useEffect(() => {
     if (
@@ -1419,7 +1436,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const establishSession = (session: AuthSession) => {
     setAuthSession(session);
     setAuthState(session.authenticated ? "authenticated" : "unauthenticated");
-    if (session.authenticated) window.location.assign(workspaceHref());
+    if (session.authenticated) {
+      window.location.assign(
+        workspaceHref(session.email_verification_required ? "/verify-email" : ""),
+      );
+    }
     return session;
   };
 
@@ -1462,6 +1483,32 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     }
   };
 
+  const completeEmailVerification = async (token: string) => {
+    setAuthError(null);
+    setAuthLoading(true);
+    try {
+      return establishSession(await api.completeEmailVerification(token));
+    } catch (error) {
+      setAuthError(humanizeError(error));
+      return null;
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const resendEmailVerification = async () => {
+    setAuthError(null);
+    setAuthLoading(true);
+    try {
+      return await api.resendEmailVerification();
+    } catch (error) {
+      setAuthError(humanizeError(error));
+      return null;
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   const logout = async () => {
     await api.logout();
     setSelectedResume(null);
@@ -1483,6 +1530,18 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   if (authState !== "authenticated" && !authRoute) {
     return <ExternalRedirect href={workspaceHref("/login")} />;
+  }
+
+  if (authRoute === "verify-email" || authSession?.email_verification_required) {
+    return (
+      <EmailVerificationPage
+        error={authError}
+        loading={authLoading}
+        session={authSession}
+        onComplete={completeEmailVerification}
+        onResend={resendEmailVerification}
+      />
+    );
   }
 
   if (authState !== "authenticated") {
@@ -1773,12 +1832,12 @@ function RegistrationPage({
       email: email.trim(),
       password,
     });
-    if (session && !session.authenticated) setSubmitted(true);
+    if (session?.email_verification_required) setSubmitted(true);
   };
 
   return (
     <AuthPageLayout
-      description="注册后即获得独立工作区。未来的候选人、原始文件和 AI 结论都只保留在你的团队范围内。"
+      description="创建独立工作区后，请验证工作邮箱。候选人、原始文件和 AI 结论始终只保留在你的团队范围内。"
       eyebrow={offerLoading
         ? "30 天进阶版试用"
         : `${registrationOffer.trial_days} 天${registrationOffer.plan_name}试用`}
@@ -1787,9 +1846,9 @@ function RegistrationPage({
       {submitted ? (
         <div aria-live="polite" className="auth-success-state">
           <span className="auth-success-icon"><Icon name="check" size={20} /></span>
-          <h2>注册信息已提交</h2>
-          <p>请使用刚才填写的邮箱登录。若团队启用了邮箱验证，请按收到的指引完成验证。</p>
-          <a className="button button-primary auth-submit" href={workspaceHref("/login")}>前往登录</a>
+          <h2>请查收验证邮件</h2>
+          <p>请打开刚才填写的工作邮箱，点击验证链接后即可进入工作台。</p>
+          <a className="button button-primary auth-submit" href={workspaceHref("/verify-email")}>查看验证状态</a>
         </div>
       ) : (
         <form
@@ -1822,13 +1881,96 @@ function RegistrationPage({
             </div>
           </div>
           {(formError || error) && <p className="auth-error" id="register-password-error" role="alert">{formError || error}</p>}
-          <p className="auth-consent">注册即表示你代表所在团队创建工作区。系统会在服务端按工作区隔离业务数据。</p>
+          <p className="auth-consent">注册后需要验证工作邮箱。系统会在服务端按工作区隔离业务数据。</p>
           <button className="button button-primary auth-submit" disabled={loading || !organizationName.trim() || !fullName.trim() || !email.trim() || password.length < 8 || !confirmation} type="submit">
             {loading ? <><i className="spinner" />正在创建工作区</> : `开始 ${registrationOffer.trial_days} 天免费试用`}
           </button>
           <p className="auth-footer-copy">已有账号？<a href={workspaceHref("/login")}>返回登录</a></p>
         </form>
       )}
+    </AuthPageLayout>
+  );
+}
+
+function EmailVerificationPage({
+  error,
+  loading,
+  session,
+  onComplete,
+  onResend,
+}: {
+  error: string | null;
+  loading: boolean;
+  session: AuthSession | null;
+  onComplete: (token: string) => Promise<AuthSession | null>;
+  onResend: () => Promise<{ accepted: boolean; delivery_available: boolean } | null>;
+}) {
+  const token = new URLSearchParams(window.location.search).get("token");
+  const completionStarted = useRef(false);
+  const [resendState, setResendState] = useState<"idle" | "sent" | "unavailable">("idle");
+  const email = session?.user?.email ?? null;
+  const canResend = Boolean(session?.authenticated && session.email_verification_required);
+
+  useEffect(() => {
+    if (!token || completionStarted.current) return;
+    completionStarted.current = true;
+    void onComplete(token);
+  }, [onComplete, token]);
+
+  const maskedEmail = email
+    ? email.replace(/^(.{1,2}).*(@.*)$/, "$1•••$2")
+    : null;
+
+  return (
+    <AuthPageLayout
+      description="验证工作邮箱后即可进入你的独立招聘工作区。候选人、简历、岗位和 AI 结论始终按工作区隔离。"
+      eyebrow="账户验证"
+      title={token ? "正在验证邮箱" : "请验证工作邮箱"}
+    >
+      <div aria-live="polite" className="auth-success-state">
+        <span className="auth-success-icon">
+          <Icon name={token ? "check" : "inbox"} size={20} />
+        </span>
+        <h2>{token ? "正在确认你的邮箱" : "请查收验证邮件"}</h2>
+        {token ? (
+          <p>{loading ? "请稍候，正在安全地验证这条链接。" : "验证链接无效或已失效时，你可以登录后重新发送邮件。"}</p>
+        ) : (
+          <p>
+            {maskedEmail
+              ? `请查看 ${maskedEmail} 的收件箱，并在 24 小时内打开验证链接。`
+              : "请登录注册邮箱后打开验证链接，完成后即可进入工作台。"}
+          </p>
+        )}
+        {error && <p className="auth-error" role="alert">{error}</p>}
+        {canResend && !token && (
+          <button
+            className="button button-primary auth-submit"
+            disabled={loading || resendState === "sent"}
+            onClick={() => {
+              void onResend().then((result) => {
+                if (result?.accepted) {
+                  setResendState(result.delivery_available ? "sent" : "unavailable");
+                }
+              });
+            }}
+            type="button"
+          >
+            {loading ? <><i className="spinner" />正在发送</> : resendState === "sent" ? "验证邮件已重新发送" : "重新发送验证邮件"}
+          </button>
+        )}
+        {resendState === "unavailable" && (
+          <p className="auth-error" role="status">暂时无法发送验证邮件，请稍后重试。</p>
+        )}
+        {!canResend && !token && (
+          <a className="button button-primary auth-submit" href={workspaceHref("/login")}>返回登录</a>
+        )}
+        {token && !loading && (
+          <a className="button button-primary auth-submit" href={workspaceHref("/login")}>返回登录</a>
+        )}
+        <p className="auth-footer-copy">
+          验证前不会开放候选人或简历数据访问。
+        </p>
+      </div>
     </AuthPageLayout>
   );
 }

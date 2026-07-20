@@ -123,6 +123,8 @@ class TrialAccessResponse(ApiModel):
 class AuthSession(ApiModel):
     authenticated: bool
     login_required: bool
+    email_verified: bool = False
+    email_verification_required: bool = False
     user: AuthUserResponse | None = None
     organization: AuthOrganizationResponse | None = None
     role: Literal["admin", "recruiter"] | None = None
@@ -143,6 +145,15 @@ class RegistrationOfferResponse(ApiModel):
     plan_code: str
     plan_name: str
     trial_days: int = Field(ge=0)
+
+
+class EmailVerificationComplete(ApiModel):
+    token: str = Field(min_length=20, max_length=512)
+
+
+class EmailVerificationResendResult(ApiModel):
+    accepted: bool = True
+    delivery_available: bool = True
 
 
 class PasswordResetRequest(ApiModel):

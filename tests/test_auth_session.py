@@ -7,6 +7,8 @@ def test_login_session_protects_resume_endpoints(protected_client) -> None:
     assert session.json() == {
         "authenticated": False,
         "login_required": True,
+        "email_verified": False,
+        "email_verification_required": False,
         "user": None,
         "organization": None,
         "role": None,

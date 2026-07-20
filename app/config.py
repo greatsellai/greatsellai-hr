@@ -44,6 +44,17 @@ class AppSettings:
     # recorded, so the worker remains responsive on large mailboxes.
     mailbox_sync_attachment_limit: int = 20
     email_credentials_key: str | None = None
+    # Account verification and password recovery use a transactional sender.
+    # This is deliberately separate from the IMAP credentials used to ingest
+    # resumes from a mailbox.
+    transactional_email_provider: str = "disabled"
+    transactional_email_from: str | None = None
+    public_app_url: str | None = None
+    tencent_ses_region: str = "ap-guangzhou"
+    tencent_ses_verification_template_id: int | None = None
+    email_verification_ttl_seconds: int = 24 * 60 * 60
+    email_verification_resend_cooldown_seconds: int = 60
+    email_verification_daily_limit: int = 5
     max_upload_bytes: int = 15 * 1024 * 1024
     min_text_chars_per_page: int = 80
     tencent_secret_id: str | None = None
@@ -108,6 +119,24 @@ class AppSettings:
                 os.getenv("RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT", "20")
             ),
             email_credentials_key=os.getenv("RESUME_V3_EMAIL_CREDENTIALS_KEY") or None,
+            transactional_email_provider=os.getenv(
+                "RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER", "disabled"
+            ).strip().lower(),
+            transactional_email_from=os.getenv("RESUME_V3_TRANSACTIONAL_EMAIL_FROM") or None,
+            public_app_url=os.getenv("RESUME_V3_PUBLIC_APP_URL") or None,
+            tencent_ses_region=os.getenv("TENCENT_SES_REGION", "ap-guangzhou"),
+            tencent_ses_verification_template_id=_optional_positive_int(
+                "TENCENT_SES_VERIFICATION_TEMPLATE_ID"
+            ),
+            email_verification_ttl_seconds=int(
+                os.getenv("RESUME_V3_EMAIL_VERIFICATION_TTL_SECONDS", str(24 * 60 * 60))
+            ),
+            email_verification_resend_cooldown_seconds=int(
+                os.getenv("RESUME_V3_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS", "60")
+            ),
+            email_verification_daily_limit=int(
+                os.getenv("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT", "5")
+            ),
             tencent_secret_id=os.getenv("TENCENT_SECRET_ID") or None,
             tencent_secret_key=os.getenv("TENCENT_SECRET_KEY") or None,
             tencent_ocr_region=os.getenv("TENCENT_OCR_REGION", "ap-guangzhou"),
@@ -158,6 +187,27 @@ class AppSettings:
             raise ValueError("RESUME_V3_MAILBOX_SYNC_INTERVAL_SECONDS must be positive")
         if self.mailbox_sync_attachment_limit < 1:
             raise ValueError("RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT must be at least 1")
+        if self.transactional_email_provider not in {"disabled", "tencent_ses", "test"}:
+            raise ValueError("RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER is not supported")
+        if self.email_verification_ttl_seconds < 5 * 60:
+            raise ValueError("RESUME_V3_EMAIL_VERIFICATION_TTL_SECONDS must be at least 300")
+        if self.email_verification_resend_cooldown_seconds < 10:
+            raise ValueError(
+                "RESUME_V3_EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS must be at least 10"
+            )
+        if self.email_verification_daily_limit < 1:
+            raise ValueError("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT must be at least 1")
+        if self.transactional_email_provider == "tencent_ses":
+            if not self.tencent_secret_id or not self.tencent_secret_key:
+                raise ValueError("Tencent SES requires TENCENT_SECRET_ID and TENCENT_SECRET_KEY")
+            if not self.transactional_email_from:
+                raise ValueError("RESUME_V3_TRANSACTIONAL_EMAIL_FROM is required for Tencent SES")
+            if not self.public_app_url:
+                raise ValueError("RESUME_V3_PUBLIC_APP_URL is required for Tencent SES")
+            if not self.public_app_url.startswith(("https://", "http://")):
+                raise ValueError("RESUME_V3_PUBLIC_APP_URL must be an absolute HTTP URL")
+            if not self.tencent_ses_verification_template_id:
+                raise ValueError("TENCENT_SES_VERIFICATION_TEMPLATE_ID is required for Tencent SES")
         if self.environment in {"production", "prod"}:
             if self.allow_unauthenticated:
                 raise RuntimeError("production_must_not_allow_unauthenticated")
@@ -167,3 +217,17 @@ class AppSettings:
                 raise RuntimeError("production_must_use_alembic_not_auto_create_schema")
             if self.seed_registry_on_startup:
                 raise RuntimeError("production_must_seed_registry_explicitly")
+            if self.transactional_email_provider == "test":
+                raise RuntimeError("production_must_not_use_test_transactional_email_provider")
+            if self.public_app_url and not self.public_app_url.startswith("https://"):
+                raise RuntimeError("production_public_app_url_must_use_https")
+
+
+def _optional_positive_int(name: str) -> int | None:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return None
+    value = int(raw_value)
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +24,8 @@ def identity_client(tmp_path: Path) -> Iterator[TestClient]:
         admin_token="legacy-platform-test-token",
         session_secret="identity-plan-test-session-secret",
         allow_unauthenticated=False,
+        transactional_email_provider="test",
+        public_app_url="http://testserver",
     )
     with TestClient(create_app(settings)) as client:
         yield client
@@ -39,7 +42,12 @@ def _register_workspace(client: TestClient) -> dict[str, object]:
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    provider = client.app.state.transactional_email_provider
+    delivery = provider.deliveries[-1]
+    token = parse_qs(urlsplit(delivery.verification_url).query)["token"][0]
+    verified = client.post("/v1/auth/email-verification/complete", json={"token": token})
+    assert verified.status_code == 200, verified.text
+    return verified.json()
 
 
 def test_new_registration_uses_advanced_30_day_trial_and_cannot_manage_platform_plans(

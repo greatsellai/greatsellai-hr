@@ -235,7 +235,10 @@ export function LandingPage({
           <div className="landing-shell landing-hero-grid">
             <div className="landing-hero-copy">
               <p className="landing-product-badge">大卖数智 AI 招聘工作台</p>
-              <h1>让每一次招聘决策，<br />都拥有AI驱动的判断能力。</h1>
+              <h1>
+                <span>让每一次招聘决策，</span>
+                <span><span className="landing-hero-phrase">都拥有AI驱动的</span><span className="landing-hero-phrase">判断能力。</span></span>
+              </h1>
               <p className="landing-hero-description">从邮箱和文件夹里的成堆简历，到一眼看清候选人是否值得推进。自动收集、快速筛选、统一评分，并把每个结论对应到简历原文和岗位要求，让 HR 少翻资料，更快做出下一步判断。</p>
               <div className="landing-hero-actions">
                 <a className="landing-button landing-button-primary" href={registerHref}>免费试用 30 天 <Icon name="arrow-right" size={19} /></a>
@@ -281,7 +284,7 @@ export function LandingPage({
           <div className="landing-shell">
             <p className="landing-section-kicker">HR 真正浪费的时间</p>
             <div className="landing-section-heading">
-              <h2 id="pain-title">不是不会判断，<br />而是每次判断前都要重新翻一遍资料</h2>
+              <h2 id="pain-title">判断不慢，<br />翻资料才慢</h2>
               <p>简历散、标准变、岗位多、用人经理催。真正拖慢招聘的，往往是找信息、对口径和补依据。</p>
             </div>
             <div className="landing-pain-grid">
@@ -300,7 +303,7 @@ export function LandingPage({
           <div className="landing-shell">
             <p className="landing-section-kicker">一批简历，两种速度</p>
             <div className="landing-section-heading">
-              <h2 id="comparison-title">传统方式在翻资料，<br />AI 工作台直接整理判断依据</h2>
+              <h2 id="comparison-title">传统方式忙着翻资料，<br />AI 工作台先整理判断依据</h2>
               <p>系统先完成信息整理与依据关联，HR 把注意力放回候选人是否值得推进。</p>
             </div>
             <div className="landing-comparison-grid">
@@ -363,7 +366,7 @@ export function LandingPage({
           <div className="landing-shell">
             <p className="landing-section-kicker">一条更快的招聘判断路径</p>
             <div className="landing-section-heading">
-              <h2 id="capabilities-title">从收到简历，到决定下一步，<br />都在同一个工作台完成</h2>
+              <h2 id="capabilities-title">从收简历到决定下一步，<br />都在同一个工作台完成</h2>
               <p>不是把一个 AI 按钮加进旧流程，而是让收集、筛选、比较和推进自然连接起来。</p>
             </div>
             <div className="landing-capability-grid">
@@ -387,7 +390,7 @@ export function LandingPage({
           <div className="landing-shell landing-trust-grid">
             <div>
               <p className="landing-section-kicker">AI 辅助，不替代 HR</p>
-              <h2 id="trust-title">结论可以复核，<br />决定仍然属于招聘团队</h2>
+              <h2 id="trust-title">结论可以复核，<br />最终决定仍属于招聘团队</h2>
             </div>
             <ul>
               <li><Icon name="check" size={20} /><span><strong>每个结论都能找到依据</strong>可用结论关联简历原文、岗位要求和对应版本，减少“AI 为什么这么说”的疑问。</span></li>
@@ -401,7 +404,7 @@ export function LandingPage({
           <div className="landing-shell">
             <p className="landing-section-kicker">按团队当前阶段开始</p>
             <div className="landing-section-heading landing-pricing-heading">
-              <h2 id="pricing-title">每月 ¥99 起，<br />把翻简历的时间还给招聘判断</h2>
+              <h2 id="pricing-title">¥99 / 月起，<br />把时间留给更重要的招聘判断</h2>
               <p>新账号可先免费试用 30 天进阶版，再选择适合团队当前招聘流程的版本。</p>
             </div>
             <div className="landing-pricing-grid">
@@ -423,7 +426,7 @@ export function LandingPage({
           <div className="landing-shell landing-faq-layout">
             <div>
               <p className="landing-section-kicker">开始之前</p>
-              <h2 id="faq-title">HR 常问的<br />几个问题</h2>
+              <h2 id="faq-title">HR 最关心的<br />6 个问题</h2>
               <a className="landing-inline-link" href={registerHref}>从第一份简历开始试用 <Icon name="arrow-right" size={17} /></a>
             </div>
             <div className="landing-faq-list">
@@ -441,7 +444,7 @@ export function LandingPage({
           <div className="landing-shell landing-final-cta-inner">
             <div>
               <p className="landing-section-kicker">从下一批简历开始</p>
-              <h2 id="final-cta-title">把下一批简历，变成一份更快、更清楚的判断结果</h2>
+              <h2 id="final-cta-title">下一批简历，<br />更快变成清楚的判断依据</h2>
               <p>免费试用 30 天进阶版，从上传第一份简历开始。</p>
             </div>
             <div className="landing-final-actions">

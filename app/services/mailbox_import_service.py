@@ -872,6 +872,24 @@ def _identity_has_canonical_resume(
     )
 
 
+def _content_identity_claim_statement(
+    *,
+    organization_id: str,
+    attachment_sha256: str,
+):
+    """Build the locking read used to handshake owners and waiters."""
+
+    return (
+        select(MailboxAttachmentContentIdentity)
+        .where(
+            MailboxAttachmentContentIdentity.organization_id == organization_id,
+            MailboxAttachmentContentIdentity.attachment_sha256 == attachment_sha256,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
 def _mark_expired_content_owner_failed(
     session: Session,
     *,
@@ -1019,11 +1037,16 @@ def _claim_attachment_content(
 
     now = _utcnow()
     for _ in range(4):
+        # This row is the handshake between an active canonical owner and
+        # every forwarded copy.  The waiter keeps the lock until its
+        # ``deduplicating`` audit row commits.  An owner finishing at the same
+        # time must therefore resolve that committed waiter; if the owner won
+        # the lock first, PostgreSQL returns its new terminal state here and
+        # the copy is written terminally straight away.
         identity = session.scalar(
-            select(MailboxAttachmentContentIdentity).where(
-                MailboxAttachmentContentIdentity.organization_id == organization_id,
-                MailboxAttachmentContentIdentity.attachment_sha256
-                == record.attachment_sha256,
+            _content_identity_claim_statement(
+                organization_id=organization_id,
+                attachment_sha256=record.attachment_sha256,
             )
         )
 
@@ -1142,6 +1165,7 @@ def _claim_attachment_content(
 
         claimed = session.execute(
             update(MailboxAttachmentContentIdentity)
+            .execution_options(synchronize_session=False)
             .where(
                 MailboxAttachmentContentIdentity.id == identity.id,
                 MailboxAttachmentContentIdentity.organization_id == organization_id,
@@ -2534,11 +2558,15 @@ def sync_mailbox(
                     source_uidvalidity=imap_uidvalidity,
                 )
                 if terminal is not None:
-                    # Both a completed duplicate and a forwarded copy waiting
-                    # for its active canonical owner intentionally create no
-                    # new candidate.  The latter becomes ``duplicate`` or a
-                    # retryable ``failed`` record when that owner finishes.
-                    duplicates += 1
+                    # A waiter has not become a duplicate yet: its canonical
+                    # owner may still fail, in which case both audit rows are
+                    # retryable failures.  Count only a terminal duplicate in
+                    # the synchronous result instead of reporting a success
+                    # that the owner can subsequently reverse.
+                    if terminal.status == "duplicate":
+                        duplicates += 1
+                    elif terminal.status == "failed":
+                        failed += 1
                     continue
 
                 assert content_claim is not None

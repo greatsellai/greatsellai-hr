@@ -6,6 +6,7 @@ from email.message import EmailMessage
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import DataError
 
 from app.models import (
@@ -1269,6 +1270,161 @@ def test_expired_retry_claim_cannot_be_completed_by_the_previous_request(client)
         assert len(attempts) == 3
         assert attempts[1].error == "attachment_retry_interrupted"
         assert attempts[2].status == "failed"
+
+
+def test_content_identity_claim_query_locks_the_postgresql_handshake_row() -> None:
+    statement = mailbox_import_service._content_identity_claim_statement(
+        organization_id="00000000-0000-4000-8000-000000000001",
+        attachment_sha256="a" * 64,
+    )
+
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "FOR UPDATE" in compiled
+    assert statement.get_execution_options()["populate_existing"] is True
+
+
+def test_waiting_forward_does_not_count_as_duplicate_when_owner_later_fails(
+    client,
+    monkeypatch,
+) -> None:
+    """An in-flight byte match is not a successful duplicate until its owner succeeds."""
+
+    attachment = b"%PDF-1.7 owner eventually fails"
+    digest = hashlib.sha256(attachment).hexdigest()
+    raw_message = _mail_with_attachment(
+        message_id="<forwarded-while-owner-runs@example.test>",
+        filename="forwarded.pdf",
+        content=attachment,
+    )
+
+    class ForwardedWhileOwnerRunsImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 44)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"1"]
+
+        def uid(self, command: str, *args):
+            if command == "search":
+                return "OK", [b"43"]
+            if command == "fetch":
+                return "OK", [(b"RFC822", raw_message)]
+            raise AssertionError(f"unexpected IMAP command: {command}")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    monkeypatch.setattr(
+        mailbox_import_service.imaplib,
+        "IMAP4_SSL",
+        ForwardedWhileOwnerRunsImap,
+    )
+    encrypted_password = mailbox_import_service._fernet(
+        client.app.state.settings
+    ).encrypt(b"test-authorization-code").decode("ascii")
+    with client.app.state.database.session_factory() as session:
+        owner_config = MailboxConfig(
+            display_name="Owner",
+            display_name_key="owner",
+            imap_host="imap.owner.test",
+            imap_port=993,
+            email_address="owner@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+            import_start_uid=42,
+            imap_uidvalidity=9,
+        )
+        forwarded_config = MailboxConfig(
+            display_name="Forwarded",
+            display_name_key="forwarded",
+            imap_host="imap.forwarded.test",
+            imap_port=993,
+            email_address="forwarded@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+            import_start_uid=43,
+            imap_uidvalidity=9,
+        )
+        session.add_all((owner_config, forwarded_config))
+        session.flush()
+        owner = mailbox_import_service._record(
+            session,
+            config=owner_config,
+            uid="42",
+            message_id="<canonical-owner@example.test>",
+            filename="owner.pdf",
+            attachment_sha256=digest,
+            status="processing",
+            error=None,
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+            attempt_completed=False,
+        )
+        owner_claim = mailbox_import_service._claim_attachment_content(
+            session,
+            record=owner,
+        )
+        assert owner_claim.outcome == "owner"
+        session.commit()
+        owner_id = owner.id
+        forwarded_config_id = forwarded_config.id
+
+    with client.app.state.database.session_factory() as session:
+        result = mailbox_import_service.sync_mailbox(
+            session,
+            settings=client.app.state.settings,
+            config_id=forwarded_config_id,
+        )
+        waiter = session.scalar(
+            select(EmailAttachmentImport).where(
+                EmailAttachmentImport.mailbox_config_id == forwarded_config_id,
+                EmailAttachmentImport.message_uid == "43",
+            )
+        )
+        assert waiter is not None
+        waiter_id = waiter.id
+        assert waiter.status == "deduplicating"
+
+    assert result.imported_count == 0
+    assert result.duplicate_count == 0
+    assert result.failed_count == 0
+
+    with client.app.state.database.session_factory() as session:
+        stored_owner = session.get(EmailAttachmentImport, owner_id)
+        assert stored_owner is not None
+        mailbox_import_service._complete_processing_import(
+            session,
+            record=stored_owner,
+            claim=owner_claim,
+            status="failed",
+            error="attachment_import_failed",
+            resume_id=None,
+        )
+
+    with client.app.state.database.session_factory() as session:
+        stored_waiter = session.get(EmailAttachmentImport, waiter_id)
+        assert stored_waiter is not None
+        waiter_attempt = session.scalar(
+            select(EmailAttachmentImportAttempt).where(
+                EmailAttachmentImportAttempt.email_attachment_import_id == waiter_id,
+            )
+        )
+
+    assert stored_waiter.status == "failed"
+    assert stored_waiter.error == "attachment_import_failed"
+    assert waiter_attempt is not None
+    assert waiter_attempt.status == "failed"
+    assert waiter_attempt.completed_at is not None
 
 
 def test_expired_content_claim_cannot_complete_after_a_forwarded_copy_takes_over(client) -> None:

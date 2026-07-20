@@ -523,6 +523,20 @@ def _claim_next_job(
             session.commit()
             return None
 
+        if route_policy_version_id is None:
+            try:
+                route_policy_version_id = resolve_active_route_policy_version_id(
+                    session,
+                    settings=settings,
+                    feature="resume_extract_rich",
+                )
+            except AiGatewayError:
+                # Let the established execution/failure path record the
+                # actionable route error when no version is available. When a
+                # route exists, the conditional claim below persists it before
+                # any source text is sent to a provider.
+                route_policy_version_id = None
+
         lease_expires_at = now + timedelta(
             seconds=settings.ai_extraction_job_lease_seconds
         )
@@ -541,6 +555,7 @@ def _claim_next_job(
                 lease_expires_at=lease_expires_at,
                 next_attempt_at=None,
                 last_error=None,
+                ai_route_policy_version_id=route_policy_version_id,
             )
             .execution_options(skip_organization_scope=True)
         )

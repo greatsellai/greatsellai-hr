@@ -915,3 +915,38 @@ def test_retryable_provider_failure_is_requeued_with_backoff(ai_client, monkeypa
         assert job.last_error == "deepseek_timeout"
         assert job.next_attempt_at is not None
         assert job.next_attempt_at > job.updated_at - timedelta(seconds=1)
+
+
+def test_worker_claim_persists_route_pin_for_legacy_null_job(ai_client) -> None:
+    uploaded = _upload_new_resume(ai_client)
+    resume_id = str(uploaded["resume_id"])
+    database = ai_client.app.state.database
+    settings = ai_client.app.state.settings
+    with database.session_factory() as session:
+        job = session.scalar(
+            select(ResumeAiExtractionJob).where(
+                ResumeAiExtractionJob.resume_id == resume_id
+            )
+        )
+        assert job is not None
+        expected_route_id = job.ai_route_policy_version_id
+        assert expected_route_id is not None
+        job.ai_route_policy_version_id = None
+        session.commit()
+
+    claimed = job_service._claim_next_job(
+        database,
+        settings=settings,
+        worker_id="legacy-null-pin-test-worker",
+    )
+    assert claimed is not None
+    assert claimed.ai_route_policy_version_id == expected_route_id
+    with database.session_factory() as session:
+        job = session.scalar(
+            select(ResumeAiExtractionJob).where(
+                ResumeAiExtractionJob.resume_id == resume_id
+            )
+        )
+        assert job is not None
+        assert job.ai_route_policy_version_id == expected_route_id
+        assert job.status == "running"

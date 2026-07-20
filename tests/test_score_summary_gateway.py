@@ -161,3 +161,43 @@ def test_score_batch_keeps_enqueue_route_when_active_policy_changes(
         )
         assert run is not None
         assert run.route_policy_version_id == route_policy_version_id
+
+
+def test_score_worker_claim_persists_route_pin_for_legacy_null_batch(
+    ai_client,
+) -> None:
+    _save_ready_resume(
+        ai_client,
+        source_text=(
+            "Education \u6e05\u534e\u5927\u5b66 \u8ba1\u7b97\u673a \u5de5\u4f5c\u7ecf\u5386 "
+            "Acme Python Engineer Skills Python SQL"
+        ),
+    )
+    template = ai_client.post("/v1/score-templates", json=_template_payload())
+    assert template.status_code == 200, template.text
+    queued = ai_client.post(
+        f"/v1/score-templates/{template.json()['template_id']}/score-all"
+    )
+    assert queued.status_code == 200, queued.text
+
+    database = ai_client.app.state.database
+    settings = ai_client.app.state.settings
+    with database.session_factory() as session:
+        batch = session.get(ResumeScoreBatch, queued.json()["batch_id"])
+        assert batch is not None
+        expected_route_id = batch.ai_route_policy_version_id
+        assert expected_route_id is not None
+        batch.ai_route_policy_version_id = None
+        session.commit()
+
+    claimed = resume_score_batch_service._claim_next_item(
+        database,
+        settings=settings,
+        worker_id="legacy-null-score-pin-test-worker",
+    )
+    assert claimed is not None
+    assert claimed.ai_route_policy_version_id == expected_route_id
+    with database.session_factory() as session:
+        batch = session.get(ResumeScoreBatch, queued.json()["batch_id"])
+        assert batch is not None
+        assert batch.ai_route_policy_version_id == expected_route_id

@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from app.models import ResumeScoreBatchItem
 from app.services import resume_score_batch_service
-from app.services.deepseek_provider import FACT_SNAPSHOT_SCHEMA_VERSION
+from app.services.deepseek_provider import DeepSeekProviderError, FACT_SNAPSHOT_SCHEMA_VERSION
 from test_filter_mvp_contract import _save_ready_resume
 
 
@@ -173,3 +173,58 @@ def test_score_batch_deduplicates_active_work_runs_and_reuses_cached_scores(
     assert cached_items.status_code == 200, cached_items.text
     assert {item["status"] for item in cached_items.json()} == {"completed"}
     assert {item["was_cached"] for item in cached_items.json()} == {True}
+
+
+def test_score_batch_does_not_retry_non_transport_provider_failure(
+    ai_client,
+    monkeypatch,
+) -> None:
+    _save_ready_resume(
+        ai_client,
+        source_text=(
+            "Education \u6e05\u534e\u5927\u5b66 \u8ba1\u7b97\u673a \u5de5\u4f5c\u7ecf\u5386 "
+            "Acme Python Engineer Skills Python SQL"
+        ),
+    )
+    provider_calls = 0
+
+    def reject_auth(**kwargs: object) -> dict[str, object]:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise DeepSeekProviderError("ai_provider_auth")
+
+    monkeypatch.setattr(
+        "app.services.score_service.score_resume_fact_snapshot",
+        reject_auth,
+    )
+    template = ai_client.post("/v1/score-templates", json=_template_payload())
+    assert template.status_code == 200, template.text
+    queued = ai_client.post(
+        f"/v1/score-templates/{template.json()['template_id']}/score-all"
+    )
+    assert queued.status_code == 200, queued.text
+    database = ai_client.app.state.database
+    settings = ai_client.app.state.settings
+
+    assert resume_score_batch_service.run_resume_score_batch_worker_once(
+        database,
+        settings=settings,
+        worker_id="score-terminal-error-test-worker",
+    )
+    with database.session_factory() as session:
+        item = session.scalar(
+            select(ResumeScoreBatchItem).where(
+                ResumeScoreBatchItem.batch_id == queued.json()["batch_id"]
+            )
+        )
+        assert item is not None
+        assert item.status == "failed"
+        assert item.attempt_count == 1
+        assert item.next_attempt_at is None
+        assert item.last_error == "ai_provider_auth"
+    assert not resume_score_batch_service.run_resume_score_batch_worker_once(
+        database,
+        settings=settings,
+        worker_id="score-terminal-error-test-worker",
+    )
+    assert provider_calls == 1

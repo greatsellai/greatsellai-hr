@@ -402,6 +402,12 @@ def _normalize_usage(value: object) -> NormalizedUsage | None:
         if reported_total_value is None
         else _usage_int(reported_total_value, field_name="total_tokens")
     )
+    # A provider may expose only ``total_tokens`` without separating input
+    # from output. Those buckets have different prices, so manufacturing zero
+    # input/output usage would turn a real paid call into a false known-zero
+    # ledger entry. Keep the whole usage unknown until it is safely priceable.
+    if reported_total and prompt_total == 0 and completion_total == 0:
+        return None
     return NormalizedUsage(
         input_tokens=prompt_total - cached_read - cached_write,
         cached_read_input_tokens=cached_read,

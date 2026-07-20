@@ -229,6 +229,22 @@ def test_openai_compatible_adapter_treats_empty_usage_as_unknown() -> None:
     assert result.usage is None
 
 
+def test_openai_compatible_adapter_does_not_price_total_tokens_only_as_zero() -> None:
+    def fake_urlopen(*args: object, **kwargs: object) -> _FakeResponse:
+        return _FakeResponse(
+            {
+                "id": "response-total-only-usage",
+                "model": "provider-response-model-001",
+                "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+                "usage": {"total_tokens": 42},
+            }
+        )
+
+    result = OpenAICompatibleAdapter(opener=fake_urlopen).complete(_request(), _route())
+
+    assert result.usage is None
+
+
 @pytest.mark.parametrize(
     ("status_code", "category", "retryable"),
     [

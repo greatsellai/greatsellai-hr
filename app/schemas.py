@@ -441,6 +441,15 @@ class AiModelPriceVersionResponse(ApiModel):
 class AiRouteTargetInput(ApiModel):
     model_slug: str = Field(min_length=2, max_length=64)
     max_attempts: int = Field(default=1, ge=1, le=3)
+    allow_fallback_on: list[
+        Literal[
+            "rate_limited",
+            "quota_exhausted",
+            "timeout",
+            "network",
+            "provider_5xx",
+        ]
+    ] = Field(default_factory=list, max_length=5)
 
     @field_validator("model_slug")
     @classmethod
@@ -449,6 +458,13 @@ class AiRouteTargetInput(ApiModel):
         if not AI_CONFIG_SLUG_PATTERN.fullmatch(normalized):
             raise ValueError("invalid_ai_config_slug")
         return normalized
+
+    @field_validator("allow_fallback_on")
+    @classmethod
+    def validate_unique_fallback_categories(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("duplicate_ai_fallback_category")
+        return value
 
 
 class AiRoutePolicyPublish(ApiModel):

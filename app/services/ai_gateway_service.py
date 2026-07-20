@@ -25,6 +25,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai import (
@@ -224,7 +225,6 @@ def resolve_active_route_policy_version_id(
         settings=settings,
         feature=feature,
         pinned_id=None,
-        commit_bootstrap=False,
     )
     session.flush()
     return version.id
@@ -298,7 +298,6 @@ def _resolve_route_policy_version(
     settings: AppSettings,
     feature: str,
     pinned_id: str | None,
-    commit_bootstrap: bool = True,
 ) -> AiRoutePolicyVersion:
     policy = session.scalar(select(AiRoutePolicy).where(AiRoutePolicy.feature == feature))
     if policy is None:
@@ -306,7 +305,6 @@ def _resolve_route_policy_version(
             session,
             settings=settings,
             feature=feature,
-            commit=commit_bootstrap,
         )
         policy = session.scalar(select(AiRoutePolicy).where(AiRoutePolicy.feature == feature))
     if policy is None:
@@ -345,7 +343,6 @@ def _bootstrap_legacy_route_if_available(
     *,
     settings: AppSettings,
     feature: str,
-    commit: bool,
 ) -> None:
     """Create exactly one compatibility route for pre-gateway deployments.
 
@@ -358,68 +355,137 @@ def _bootstrap_legacy_route_if_available(
     if not settings.deepseek_api_key or not settings.legacy_openai_compatible_endpoint:
         return
 
-    provider = session.scalar(
-        select(AiProviderProfile).where(AiProviderProfile.slug == LEGACY_RUNTIME_PROVIDER_SLUG)
-    )
-    if provider is None:
-        provider = AiProviderProfile(
-            slug=LEGACY_RUNTIME_PROVIDER_SLUG,
-            display_name="Legacy runtime provider",
-            driver="openai_compatible",
-            base_url=settings.legacy_openai_compatible_endpoint,
-            credential_ref=LEGACY_RUNTIME_CREDENTIAL_REF,
-            request_defaults_json={"thinking": {"type": "disabled"}},
-            enabled=True,
-        )
-        session.add(provider)
-        session.flush()
-
-    model = session.scalar(
-        select(AiModelProfile).where(AiModelProfile.slug == LEGACY_RUNTIME_MODEL_SLUG)
-    )
-    if model is None:
-        model = AiModelProfile(
-            provider_profile_id=provider.id,
-            slug=LEGACY_RUNTIME_MODEL_SLUG,
-            display_name="Legacy runtime default model",
-            provider_model_id=settings.deepseek_model,
-            capabilities_json={"chat": True, "tools": True, "json_schema": True},
-            data_classification_json={"candidate_data_allowed": True},
-            enabled=True,
-        )
-        session.add(model)
-        session.flush()
-
-    policy = AiRoutePolicy(
-        feature=feature,
-        display_name=feature,
-        description="Compatibility route created during AI gateway migration.",
-        enabled=True,
-    )
-    session.add(policy)
+    # ``begin_nested`` flushes pending ORM state before opening its savepoint.
+    # Flush caller-owned state explicitly outside every bootstrap race handler
+    # so an unrelated integrity error can never be mistaken for a duplicate
+    # provider/model/policy created by another process. This does not commit or
+    # roll back the caller's outer business transaction.
     session.flush()
-    version = AiRoutePolicyVersion(
-        policy_id=policy.id,
-        version=1,
-        status="published",
-        targets_json=[{"model_profile_id": model.id, "max_attempts": 1}],
-        retry_policy_json={},
-        max_cost_guard_json={},
-        prompt_revision=None,
-        published_at=utcnow(),
-    )
-    session.add(version)
-    session.flush()
-    policy.active_version_id = version.id
-    if not commit:
-        session.flush()
-        return
+    provider = _get_or_create_legacy_provider(session, settings=settings)
+    model = _get_or_create_legacy_model(session, settings=settings, provider=provider)
+    _get_or_create_legacy_policy(session, feature=feature, model=model)
+
+
+def _get_or_create_legacy_provider(
+    session: Session,
+    *,
+    settings: AppSettings,
+) -> AiProviderProfile:
+    def lookup() -> AiProviderProfile | None:
+        return session.scalar(
+            select(AiProviderProfile).where(
+                AiProviderProfile.slug == LEGACY_RUNTIME_PROVIDER_SLUG
+            )
+        )
+
+    provider = lookup()
+    if provider is not None:
+        return provider
     try:
-        session.commit()
-    except Exception:
-        # A competing worker may have created the exact feature policy while
-        # this process was seeding.  Roll back and let the caller resolve it.
-        session.rollback()
+        with session.begin_nested():
+            provider = AiProviderProfile(
+                slug=LEGACY_RUNTIME_PROVIDER_SLUG,
+                display_name="Legacy runtime provider",
+                driver="openai_compatible",
+                base_url=settings.legacy_openai_compatible_endpoint,
+                credential_ref=LEGACY_RUNTIME_CREDENTIAL_REF,
+                request_defaults_json={"thinking": {"type": "disabled"}},
+                enabled=True,
+            )
+            session.add(provider)
+            session.flush([provider])
+    except IntegrityError:
+        provider = lookup()
+        if provider is None:
+            raise
+    return provider
+
+
+def _get_or_create_legacy_model(
+    session: Session,
+    *,
+    settings: AppSettings,
+    provider: AiProviderProfile,
+) -> AiModelProfile:
+    def lookup() -> AiModelProfile | None:
+        return session.scalar(
+            select(AiModelProfile).where(
+                AiModelProfile.slug == LEGACY_RUNTIME_MODEL_SLUG
+            )
+        )
+
+    model = lookup()
+    if model is not None:
+        return model
+    try:
+        with session.begin_nested():
+            model = AiModelProfile(
+                provider_profile_id=provider.id,
+                slug=LEGACY_RUNTIME_MODEL_SLUG,
+                display_name="Legacy runtime default model",
+                provider_model_id=settings.deepseek_model,
+                capabilities_json={"chat": True, "tools": True, "json_schema": True},
+                data_classification_json={"candidate_data_allowed": True},
+                enabled=True,
+            )
+            session.add(model)
+            session.flush([model])
+    except IntegrityError:
+        model = lookup()
+        if model is None:
+            raise
+    return model
+
+
+def _get_or_create_legacy_policy(
+    session: Session,
+    *,
+    feature: str,
+    model: AiModelProfile,
+) -> AiRoutePolicy:
+    def lookup() -> AiRoutePolicy | None:
+        return session.scalar(
+            select(AiRoutePolicy).where(AiRoutePolicy.feature == feature)
+        )
+
+    policy = lookup()
+    if policy is not None:
+        return policy
+    try:
+        with session.begin_nested():
+            policy = AiRoutePolicy(
+                feature=feature,
+                display_name=feature,
+                description="Compatibility route created during AI gateway migration.",
+                enabled=True,
+            )
+            session.add(policy)
+            session.flush([policy])
+            version = AiRoutePolicyVersion(
+                policy_id=policy.id,
+                version=1,
+                status="published",
+                targets_json=[
+                    {
+                        "model_profile_id": model.id,
+                        "max_attempts": 1,
+                        "allow_fallback_on": [],
+                    }
+                ],
+                retry_policy_json={},
+                max_cost_guard_json={},
+                prompt_revision=None,
+                published_at=utcnow(),
+            )
+            session.add(version)
+            session.flush([version])
+            policy.active_version_id = version.id
+            session.flush([policy])
+    except IntegrityError:
+        policy = lookup()
+        if policy is None or policy.active_version_id is None:
+            raise
+    return policy
 
 
 def _execute_legacy_payload(
@@ -634,7 +700,10 @@ def _execute_completion(handle: _ExecutionHandle, request: CompletionRequest) ->
                 last_error = exc
                 if exc.retryable and attempt_index + 1 < max_attempts:
                     continue
-                if exc.fallback_eligible:
+                if exc.fallback_eligible and _target_allows_fallback(
+                    target_data,
+                    category=exc.category,
+                ):
                     break
                 raise AiGatewayError(f"ai_provider_{exc.category.value}") from exc
             except BaseException as exc:
@@ -680,6 +749,36 @@ def _target_max_attempts(target: Mapping[str, object]) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 3:
         raise AiGatewayError("ai_route_retry_policy_invalid")
     return value
+
+
+def _target_allows_fallback(
+    target: Mapping[str, object],
+    *,
+    category: ProviderErrorCategory,
+) -> bool:
+    """Return whether this exact target permits the next configured target.
+
+    Missing policy data deliberately means no fallback.  That keeps route
+    versions created before the allowlist field was introduced conservative:
+    they may retry their current target, but never start a second billable
+    provider request without an explicit platform-admin decision.
+    """
+
+    value = target.get("allow_fallback_on", [])
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise AiGatewayError("ai_route_fallback_policy_invalid")
+    if len(value) != len(set(value)):
+        raise AiGatewayError("ai_route_fallback_policy_invalid")
+    allowed_categories = {
+        ProviderErrorCategory.RATE_LIMITED.value,
+        ProviderErrorCategory.QUOTA_EXHAUSTED.value,
+        ProviderErrorCategory.TIMEOUT.value,
+        ProviderErrorCategory.NETWORK.value,
+        ProviderErrorCategory.PROVIDER_5XX.value,
+    }
+    if any(item not in allowed_categories for item in value):
+        raise AiGatewayError("ai_route_fallback_policy_invalid")
+    return category.value in value
 
 
 def _resolve_route_target(
@@ -959,17 +1058,37 @@ def _refresh_run_cost(handle: _ExecutionHandle) -> None:
             select(ApiInvocation).where(ApiInvocation.ai_run_id == handle.run_id)
         )
     )
+    total_cost, cost_status = _summarize_run_cost(invocations)
+    run.total_cost_reporting_micros = total_cost
+    run.cost_status = cost_status
+    handle.session.commit()
+
+
+def _summarize_run_cost(
+    invocations: list[ApiInvocation],
+) -> tuple[int | None, str]:
+    """Summarize only reporting-currency costs without hiding unknown calls."""
+
     known_costs = [item.reporting_cost_micros for item in invocations if item.reporting_cost_micros is not None]
-    uncertain = any(
+    potentially_billed_unknown = any(
         item.may_have_billed and item.reporting_cost_micros is None for item in invocations
     )
+    successful_or_started_unknown = any(
+        item.reporting_cost_micros is None
+        and item.status in {"started", "succeeded"}
+        for item in invocations
+    )
     if known_costs:
-        run.total_cost_reporting_micros = sum(known_costs)
-        run.cost_status = "partial" if uncertain else "known"
-    else:
-        run.total_cost_reporting_micros = None
-        run.cost_status = "partial" if uncertain else "unavailable"
-    handle.session.commit()
+        return (
+            sum(known_costs),
+            "partial"
+            if potentially_billed_unknown or successful_or_started_unknown
+            else "known",
+        )
+    return (
+        None,
+        "partial" if potentially_billed_unknown else "unavailable",
+    )
 
 
 def _finish_run(handle: _ExecutionHandle, *, status: str, failure_code: str | None) -> None:

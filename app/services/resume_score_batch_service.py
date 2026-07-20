@@ -38,6 +38,7 @@ from app.services.ai_gateway_service import (
     ai_gateway_credentials_configured,
     resolve_active_route_policy_version_id,
 )
+from app.services.ai_retry_policy import is_retryable_ai_transport_error
 from app.services.resume_eligibility import has_unreliable_source_text
 from app.services.score_service import (
     ScoreServiceError,
@@ -168,6 +169,46 @@ def _route_pin_for_new_score_batch(
         )
     except AiGatewayError as exc:
         return None, str(exc)
+
+
+def _persist_legacy_score_batch_route_pin(
+    session: Session,
+    *,
+    batch: ResumeScoreBatch,
+    settings: AppSettings,
+) -> str | None:
+    """Compare-and-set a route for batches created before the pin column.
+
+    Multiple workers may discover different queued items in the same legacy
+    batch. The conditional batch update makes the first resolved version win;
+    every later worker reloads and uses that durable value.
+    """
+
+    if batch.ai_route_policy_version_id is not None:
+        return batch.ai_route_policy_version_id
+    try:
+        resolved_id = resolve_active_route_policy_version_id(
+            session,
+            settings=settings,
+            feature="resume_score",
+        )
+    except AiGatewayError:
+        # Preserve the established worker failure path when no route can be
+        # resolved. No external call occurs, and the item becomes terminal.
+        return None
+    session.execute(
+        update(ResumeScoreBatch)
+        .where(
+            ResumeScoreBatch.id == batch.id,
+            ResumeScoreBatch.organization_id == batch.organization_id,
+            ResumeScoreBatch.ai_route_policy_version_id.is_(None),
+        )
+        .values(ai_route_policy_version_id=resolved_id)
+        .execution_options(synchronize_session=False)
+    )
+    session.flush()
+    session.expire(batch, ["ai_route_policy_version_id"])
+    return batch.ai_route_policy_version_id
 
 
 def enqueue_resume_score_batch(
@@ -468,6 +509,11 @@ def _claim_next_item(
             return None
 
         with _organization_session(session, organization_id):
+            _persist_legacy_score_batch_route_pin(
+                session,
+                batch=candidate_batch,
+                settings=settings,
+            )
             claimed = session.execute(
                 update(ResumeScoreBatchItem)
                 .where(
@@ -628,13 +674,14 @@ def _process_claimed_item(
                 )
                 session.commit()
     except DeepSeekProviderError as exc:
+        error = str(exc)
         _finish_item_failure(
             database,
             item_id=claimed.item_id,
             worker_id=worker_id,
             organization_id=claimed.organization_id,
-            error=str(exc),
-            retryable=True,
+            error=error,
+            retryable=is_retryable_ai_transport_error(error),
         )
     except (ScoreTemplateNotFoundError, ScoreServiceError) as exc:
         _finish_item_failure(

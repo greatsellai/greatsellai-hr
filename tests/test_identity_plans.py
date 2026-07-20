@@ -226,14 +226,26 @@ def test_platform_admin_alone_can_publish_ai_model_route(
         json={
             "display_name": "Resume score route",
             "description": "Platform-owned test route",
-            "targets": [{"model_slug": "test-model", "max_attempts": 2}],
+            "targets": [
+                {
+                    "model_slug": "test-model",
+                    "max_attempts": 2,
+                    "allow_fallback_on": ["timeout", "provider_5xx"],
+                }
+            ],
             "prompt_revision": "resume-score.prompt.v1",
         },
     )
     assert published.status_code == 200, published.text
     assert published.json()["feature"] == "resume_score"
     assert published.json()["version"] == 1
-    assert published.json()["targets"] == [{"model_slug": "test-model", "max_attempts": 2}]
+    assert published.json()["targets"] == [
+        {
+            "model_slug": "test-model",
+            "max_attempts": 2,
+            "allow_fallback_on": ["timeout", "provider_5xx"],
+        }
+    ]
 
     listed = identity_client.get("/v1/platform/ai/routes")
     assert listed.status_code == 200, listed.text

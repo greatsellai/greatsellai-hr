@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import AppSettings
@@ -18,6 +18,7 @@ from app.services.ai_gateway_service import (
     ai_gateway_credentials_configured,
     resolve_active_route_policy_version_id,
 )
+from app.services.ai_retry_policy import is_retryable_ai_transport_error
 from app.services.deepseek_provider import DeepSeekProviderError
 from app.services.job_service import (
     JobServiceError,
@@ -105,6 +106,39 @@ def _route_pin_for_new_batch(
         )
     except AiGatewayError as exc:
         raise JobServiceError(str(exc)) from exc
+
+
+def _persist_legacy_job_match_batch_route_pin(
+    session: Session,
+    *,
+    batch: JobMatchBatch,
+    settings: AppSettings,
+) -> str | None:
+    """Pin one route once for a pre-migration batch before its first call."""
+
+    if batch.ai_route_policy_version_id is not None:
+        return batch.ai_route_policy_version_id
+    try:
+        resolved_id = resolve_active_route_policy_version_id(
+            session,
+            settings=settings,
+            feature="jd_match",
+        )
+    except AiGatewayError:
+        return None
+    session.execute(
+        update(JobMatchBatch)
+        .where(
+            JobMatchBatch.id == batch.id,
+            JobMatchBatch.organization_id == batch.organization_id,
+            JobMatchBatch.ai_route_policy_version_id.is_(None),
+        )
+        .values(ai_route_policy_version_id=resolved_id)
+        .execution_options(synchronize_session=False)
+    )
+    session.flush()
+    session.expire(batch, ["ai_route_policy_version_id"])
+    return batch.ai_route_policy_version_id
 
 
 def enqueue_job_version_match_batch(
@@ -387,6 +421,11 @@ def _claim_next_item(
             session.commit()
             return None
         with _organization_session(session, organization_id):
+            _persist_legacy_job_match_batch_route_pin(
+                session,
+                batch=batch,
+                settings=settings,
+            )
             item.status = ITEM_RUNNING
             item.attempt_count += 1
             item.next_attempt_at = None
@@ -497,13 +536,14 @@ def _process_claimed_item(
                 _finish_item_success(session, item=item, worker_id=worker_id, match_id=match_id)
                 session.commit()
     except DeepSeekProviderError as exc:
+        error = str(exc)
         _finish_item_failure(
             database,
             item_id=claimed.item_id,
             worker_id=worker_id,
             organization_id=claimed.organization_id,
-            error=str(exc),
-            retryable=True,
+            error=error,
+            retryable=is_retryable_ai_transport_error(error),
         )
     except JobServiceError as exc:
         _finish_item_failure(

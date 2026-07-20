@@ -335,6 +335,8 @@ def test_job_match_batch_retry_keeps_enqueue_route_pin(
         assert batch is not None
         route_policy_version_id = batch.ai_route_policy_version_id
         assert route_policy_version_id
+        batch.ai_route_policy_version_id = None
+        session.commit()
 
     # The first retryable failure releases the item back to the queue.  The
     # next attempt must use the pin, even after the currently active policy is
@@ -345,6 +347,9 @@ def test_job_match_batch_retry_keeps_enqueue_route_pin(
         worker_id="jd-route-pin-test-worker",
     )
     with database.session_factory() as session:
+        batch = session.get(JobMatchBatch, queued.json()["batch_id"])
+        assert batch is not None
+        assert batch.ai_route_policy_version_id == route_policy_version_id
         item = session.scalar(
             select(JobMatchBatchItem).where(
                 JobMatchBatchItem.batch_id == queued.json()["batch_id"]
@@ -387,3 +392,67 @@ def test_job_match_batch_retry_keeps_enqueue_route_pin(
         ).all()
     assert len(runs) == 2
     assert {run.route_policy_version_id for run in runs} == {route_policy_version_id}
+
+
+def test_job_match_batch_does_not_retry_non_transport_provider_failure(
+    ai_client,
+    monkeypatch,
+) -> None:
+    _save_ready_resume(
+        ai_client,
+        source_text=(
+            "Education \u6e05\u534e\u5927\u5b66 \u8ba1\u7b97\u673a \u5de5\u4f5c\u7ecf\u5386 "
+            "Acme Python Engineer Skills Python SQL"
+        ),
+    )
+    created = ai_client.post(
+        "/v1/jobs",
+        json=JobCreate(
+            title="Backend Engineer",
+            jd_text="Python experience is required.",
+            requirements=JobRequirements(must_have=["Python experience"]),
+        ).model_dump(),
+    )
+    assert created.status_code == 200, created.text
+
+    provider_calls = 0
+
+    def reject_auth(**kwargs: object) -> dict[str, object]:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise DeepSeekProviderError("ai_provider_auth")
+
+    monkeypatch.setattr(
+        job_service,
+        "match_resume_fact_snapshot_against_requirements",
+        reject_auth,
+    )
+    queued = ai_client.post(
+        f"/v1/job-versions/{created.json()['job_version_id']}/match-all"
+    )
+    assert queued.status_code == 200, queued.text
+    database = ai_client.app.state.database
+    settings = ai_client.app.state.settings
+
+    assert job_match_batch_service.run_job_match_batch_worker_once(
+        database,
+        settings=settings,
+        worker_id="jd-terminal-error-test-worker",
+    )
+    with database.session_factory() as session:
+        item = session.scalar(
+            select(JobMatchBatchItem).where(
+                JobMatchBatchItem.batch_id == queued.json()["batch_id"]
+            )
+        )
+        assert item is not None
+        assert item.status == "failed"
+        assert item.attempt_count == 1
+        assert item.next_attempt_at is None
+        assert item.last_error == "ai_provider_auth"
+    assert not job_match_batch_service.run_job_match_batch_worker_once(
+        database,
+        settings=settings,
+        worker_id="jd-terminal-error-test-worker",
+    )
+    assert provider_calls == 1

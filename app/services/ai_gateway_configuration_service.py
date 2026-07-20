@@ -201,7 +201,11 @@ def publish_route_policy(
         version=int(current_version or 0) + 1,
         status="published",
         targets_json=[
-            {"model_profile_id": model.id, "max_attempts": target.max_attempts}
+            {
+                "model_profile_id": model.id,
+                "max_attempts": target.max_attempts,
+                "allow_fallback_on": list(target.allow_fallback_on),
+            }
             for target, model in zip(payload.targets, models, strict=True)
         ],
         retry_policy_json={},
@@ -328,11 +332,23 @@ def _route_version_response(
             continue
         model_id = target.get("model_profile_id")
         max_attempts = target.get("max_attempts", 1)
-        if not isinstance(model_id, str) or not isinstance(max_attempts, int):
+        allow_fallback_on = target.get("allow_fallback_on", [])
+        if (
+            not isinstance(model_id, str)
+            or not isinstance(max_attempts, int)
+            or not isinstance(allow_fallback_on, list)
+            or any(not isinstance(category, str) for category in allow_fallback_on)
+        ):
             continue
         model_slug = slug_by_id.get(model_id)
         if model_slug is not None:
-            targets.append(AiRouteTargetInput(model_slug=model_slug, max_attempts=max_attempts))
+            targets.append(
+                AiRouteTargetInput(
+                    model_slug=model_slug,
+                    max_attempts=max_attempts,
+                    allow_fallback_on=allow_fallback_on,
+                )
+            )
     return AiRoutePolicyVersionResponse(
         route_policy_version_id=version.id,
         policy_id=policy.id,

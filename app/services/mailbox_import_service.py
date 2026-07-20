@@ -665,6 +665,14 @@ def _has_retryable_source(item: EmailAttachmentImport) -> bool:
     )
 
 
+def mailbox_attachment_has_retryable_remote_source(
+    item: EmailAttachmentImport,
+) -> bool:
+    """Expose only the safe source-availability decision to job enqueueing."""
+
+    return _has_retryable_source(item)
+
+
 def _has_retained_retry_copy(item: EmailAttachmentImport) -> bool:
     now = _utcnow()
     return any(

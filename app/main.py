@@ -1503,12 +1503,14 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     def get_mailbox_tasks(
         mailbox_id: str | None = Query(default=None, min_length=1, max_length=64),
         limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
         session: Session = Depends(get_session),
     ) -> MailboxBackgroundJobHistoryResponse:
         try:
             return list_mailbox_background_jobs(
                 session,
                 limit=limit,
+                offset=offset,
                 mailbox_config_id=mailbox_id,
             )
         except MailboxImportError as exc:

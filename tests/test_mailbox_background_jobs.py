@@ -116,6 +116,38 @@ def test_manual_sync_enqueues_without_connecting_to_imap_then_worker_completes(
     assert completed_payload["failed_count"] == 4
 
 
+def test_history_prune_failure_cannot_change_completed_job(
+    client,
+    monkeypatch,
+) -> None:
+    _create_config(client)
+    queued = client.post("/v1/mailbox/sync")
+    assert queued.status_code == 202, queued.text
+
+    def completed_sync(*args, **kwargs):
+        return MailboxSyncResponse(configured=True, imported_count=1)
+
+    def failed_prune(*args, **kwargs):
+        raise RuntimeError("simulated maintenance failure")
+
+    monkeypatch.setattr(mailbox_background_job_service, "sync_mailbox", completed_sync)
+    monkeypatch.setattr(
+        mailbox_background_job_service,
+        "_prune_terminal_job_history",
+        failed_prune,
+    )
+
+    assert mailbox_background_job_service.run_mailbox_background_job_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="mailbox-prune-failure-test",
+    )
+    completed = client.get(f"/v1/mailbox/tasks/{queued.json()['job_id']}")
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["status"] == "completed"
+    assert completed.json()["last_error"] is None
+
+
 def test_duplicate_sync_requests_coalesce_to_one_active_job(client) -> None:
     _create_config(client)
 
@@ -130,7 +162,7 @@ def test_duplicate_sync_requests_coalesce_to_one_active_job(client) -> None:
         assert session.scalar(select(func.count()).select_from(MailboxBackgroundJob)) == 1
 
 
-def test_task_history_keeps_active_work_beyond_terminal_history_limit(client) -> None:
+def test_task_history_is_strictly_bounded_and_supports_stable_offset(client) -> None:
     config_id, organization_id = _create_config(client)
     now = mailbox_background_job_service._utcnow()
     with client.app.state.database.session_factory() as session:
@@ -165,7 +197,14 @@ def test_task_history_keeps_active_work_beyond_terminal_history_limit(client) ->
     assert history.status_code == 200, history.text
     payload = history.json()
     assert payload["total"] == 2
-    assert {item["status"] for item in payload["items"]} == {"queued", "completed"}
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["status"] == "queued"
+
+    second_page = client.get("/v1/mailbox/tasks?limit=1&offset=1")
+    assert second_page.status_code == 200, second_page.text
+    assert second_page.json()["total"] == 2
+    assert len(second_page.json()["items"]) == 1
+    assert second_page.json()["items"][0]["status"] == "completed"
 
 
 def test_sync_worker_retries_transient_failure_then_records_terminal_failure(
@@ -355,3 +394,135 @@ def test_queued_retry_protects_retained_failure_artifact_from_cleanup(client) ->
             replica,
             now=mailbox_retention_service._utcnow(),
         )
+
+
+def test_retry_enqueue_closes_cleanup_selection_race(client) -> None:
+    config_id, organization_id = _create_config(client)
+    import_id = _create_failed_import(client, config_id=config_id)
+    cleanup_observed_at = mailbox_retention_service._utcnow()
+    with client.app.state.database.session_factory() as session:
+        replica = MailboxContentReplica(
+            organization_id=organization_id,
+            mailbox_config_id=config_id,
+            email_attachment_import_id=import_id,
+            kind="failed_attachment",
+            source_reference=import_id,
+            storage_key=f"{organization_id}/mail-cache/retry-race.pdf",
+            content_sha256=hashlib.sha256(b"retry source").hexdigest(),
+            byte_size=12,
+            expires_at=cleanup_observed_at - timedelta(seconds=1),
+        )
+        session.add(replica)
+        session.commit()
+        replica_id = replica.id
+
+    queued = client.post(f"/v1/mailbox/imports/{import_id}/retry")
+    assert queued.status_code == 202, queued.text
+
+    with client.app.state.database.session_factory() as session:
+        replica = session.get(MailboxContentReplica, replica_id)
+        assert replica is not None
+        assert (
+            mailbox_retention_service._as_utc(replica.expires_at)
+            > cleanup_observed_at
+        )
+        # A cleaner that selected the old expiry before the enqueue committed
+        # must fail its conditional claim after the retry protection update.
+        assert mailbox_retention_service._claim_replica_cleanup(
+            session,
+            replica=replica,
+            now=cleanup_observed_at,
+        ) is None
+
+
+def test_retry_enqueue_rejects_when_cleanup_already_owns_retained_source(client) -> None:
+    config_id, organization_id = _create_config(client)
+    import_id = _create_failed_import(client, config_id=config_id)
+    now = mailbox_retention_service._utcnow()
+    with client.app.state.database.session_factory() as session:
+        session.add(
+            MailboxContentReplica(
+                organization_id=organization_id,
+                mailbox_config_id=config_id,
+                email_attachment_import_id=import_id,
+                kind="failed_attachment",
+                source_reference=import_id,
+                storage_key=f"{organization_id}/mail-cache/cleanup-owned.pdf",
+                content_sha256=hashlib.sha256(b"only retained source").hexdigest(),
+                byte_size=20,
+                expires_at=now + timedelta(minutes=5),
+                cleanup_claim_token="cleanup-owns-this-copy",
+                cleanup_lease_expires_at=now + timedelta(minutes=2),
+            )
+        )
+        session.commit()
+
+    response = client.post(f"/v1/mailbox/imports/{import_id}/retry")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "mailbox_import_not_retryable"
+    with client.app.state.database.session_factory() as session:
+        assert (
+            session.scalar(select(func.count()).select_from(MailboxBackgroundJob))
+            == 0
+        )
+
+
+def test_terminal_job_history_is_retained_but_bounded(client, monkeypatch) -> None:
+    config_id, organization_id = _create_config(client)
+    now = mailbox_background_job_service._utcnow()
+    old_job = MailboxBackgroundJob(
+        organization_id=organization_id,
+        mailbox_config_id=config_id,
+        job_kind="sync",
+        trigger_type="scheduled",
+        status="completed",
+        requested_at=now - timedelta(days=45),
+        completed_at=now - timedelta(days=45),
+    )
+    overflow_job = MailboxBackgroundJob(
+        organization_id=organization_id,
+        mailbox_config_id=config_id,
+        job_kind="sync",
+        trigger_type="scheduled",
+        status="completed",
+        requested_at=now - timedelta(days=2),
+        completed_at=now - timedelta(days=2),
+    )
+    newest_job = MailboxBackgroundJob(
+        organization_id=organization_id,
+        mailbox_config_id=config_id,
+        job_kind="sync",
+        trigger_type="manual",
+        status="failed",
+        requested_at=now - timedelta(days=1),
+        completed_at=now - timedelta(days=1),
+    )
+    active_job = MailboxBackgroundJob(
+        organization_id=organization_id,
+        mailbox_config_id=config_id,
+        job_kind="attachment_retry",
+        trigger_type="manual",
+        status="running",
+        requested_at=now - timedelta(days=60),
+    )
+    with client.app.state.database.session_factory() as session:
+        session.add_all((old_job, overflow_job, newest_job, active_job))
+        session.commit()
+        kept_ids = {newest_job.id, active_job.id}
+
+        monkeypatch.setattr(
+            mailbox_background_job_service,
+            "_TERMINAL_JOB_MAX_PER_ORGANIZATION",
+            1,
+        )
+        monkeypatch.setattr(
+            mailbox_background_job_service,
+            "_TERMINAL_JOB_PRUNE_BATCH_SIZE",
+            10,
+        )
+        deleted = mailbox_background_job_service._prune_terminal_job_history(
+            session,
+            now=now,
+        )
+        assert deleted == 2
+        assert set(session.scalars(select(MailboxBackgroundJob.id)).all()) == kept_ids

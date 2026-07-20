@@ -8,12 +8,13 @@ mailbox synchronization or exact attachment retry.
 """
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterator, Literal
 
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import case, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -28,9 +29,13 @@ from app.schemas import (
 from app.services.mailbox_import_service import (
     MailboxImportError,
     get_retryable_mailbox_attachment,
+    mailbox_attachment_has_retryable_remote_source,
     mailbox_source_fingerprint,
     retry_mailbox_attachment,
     sync_mailbox,
+)
+from app.services.mailbox_retention_service import (
+    protect_retained_failed_attachment_for_retry,
 )
 from app.tenant_scope import (
     clear_organization_context,
@@ -51,6 +56,14 @@ _DEFAULT_MAX_ATTEMPTS = 3
 # is intentionally much longer than a single network timeout, so a healthy
 # worker cannot be superseded just because it is parsing a large batch.
 _MAILBOX_JOB_LEASE_SECONDS = 15 * 60
+# Keep enough task history for operational diagnosis without allowing the
+# ten-minute scheduler to grow this table forever.  The cap is workspace-wide
+# and applies only to terminal rows; queued/running work is never pruned.
+_TERMINAL_JOB_RETENTION = timedelta(days=30)
+_TERMINAL_JOB_MAX_PER_ORGANIZATION = 5_000
+_TERMINAL_JOB_PRUNE_BATCH_SIZE = 500
+
+logger = logging.getLogger(__name__)
 
 _TERMINAL_ERROR_CODES = frozenset(
     {
@@ -309,6 +322,23 @@ def enqueue_mailbox_attachment_retry_job(
     if existing is not None:
         return _job_response(existing, deduplicated=True)
 
+    retained_copy_protection = protect_retained_failed_attachment_for_retry(
+        session,
+        attachment_import=record,
+        protection_seconds=_MAILBOX_JOB_LEASE_SECONDS,
+    )
+    if (
+        retained_copy_protection == "cleanup_claimed"
+        or (
+            retained_copy_protection == "not_found"
+            and not mailbox_attachment_has_retryable_remote_source(record)
+        )
+    ):
+        # Cleanup may already own the only retained source.  Do not commit a
+        # job that can no longer perform the retry it promises.
+        session.rollback()
+        raise MailboxImportError("mailbox_import_not_retryable")
+
     now = _utcnow()
     job = MailboxBackgroundJob(
         organization_id=organization_id,
@@ -356,34 +386,33 @@ def list_mailbox_background_jobs(
     session: Session,
     *,
     limit: int = 20,
+    offset: int = 0,
     mailbox_config_id: str | None = None,
 ) -> MailboxBackgroundJobHistoryResponse:
-    # Never page active work out of the response.  A workspace may have more
-    # than ``limit`` attachment retries queued at once; if an older active job
-    # disappeared from polling, the UI could incorrectly offer the same retry
-    # again while a worker still owns it.  ``limit`` therefore bounds only the
-    # terminal history appended after all active work.
+    # A single bounded, stable page covers both active and terminal work.
+    # Individual task polling remains available by ID, while an accidental
+    # retry is still coalesced by the database's active-job unique indexes.
+    limit = max(1, min(int(limit), 100))
+    offset = max(0, int(offset))
     if mailbox_config_id is not None:
         _mailbox_config_or_error(session, config_id=mailbox_config_id)
     filters = []
     if mailbox_config_id is not None:
         filters.append(MailboxBackgroundJob.mailbox_config_id == mailbox_config_id)
-    active_jobs = session.scalars(
+    jobs = session.scalars(
         select(MailboxBackgroundJob)
-        .where(*filters, MailboxBackgroundJob.status.in_(_ACTIVE_JOB_STATUSES))
-        .order_by(MailboxBackgroundJob.requested_at.desc(), MailboxBackgroundJob.id.desc())
-    ).all()
-    recent_terminal_jobs = session.scalars(
-        select(MailboxBackgroundJob)
-        .where(*filters, MailboxBackgroundJob.status.not_in(_ACTIVE_JOB_STATUSES))
-        .order_by(MailboxBackgroundJob.requested_at.desc(), MailboxBackgroundJob.id.desc())
+        .where(*filters)
+        .order_by(
+            case(
+                (MailboxBackgroundJob.status.in_(_ACTIVE_JOB_STATUSES), 0),
+                else_=1,
+            ),
+            MailboxBackgroundJob.requested_at.desc(),
+            MailboxBackgroundJob.id.desc(),
+        )
+        .offset(offset)
         .limit(limit)
     ).all()
-    jobs = sorted(
-        [*active_jobs, *recent_terminal_jobs],
-        key=lambda job: (job.requested_at, job.id),
-        reverse=True,
-    )
     total = session.scalar(
         select(func.count()).select_from(MailboxBackgroundJob).where(*filters)
     )
@@ -391,6 +420,96 @@ def list_mailbox_background_jobs(
         items=[_job_response(job) for job in jobs],
         total=int(total or 0),
     )
+
+
+def _prune_terminal_job_history(
+    session: Session,
+    *,
+    now: datetime,
+) -> int:
+    """Delete a bounded batch of old terminal rows in the current workspace."""
+
+    organization_id = organization_context_id(session)
+    terminal_filter = (
+        MailboxBackgroundJob.organization_id == organization_id,
+        MailboxBackgroundJob.status.in_((MAILBOX_JOB_COMPLETED, MAILBOX_JOB_FAILED)),
+    )
+    cutoff = now - _TERMINAL_JOB_RETENTION
+    expired_ids = list(
+        session.scalars(
+            select(MailboxBackgroundJob.id)
+            .where(
+                *terminal_filter,
+                MailboxBackgroundJob.completed_at.is_not(None),
+                MailboxBackgroundJob.completed_at <= cutoff,
+            )
+            .order_by(
+                MailboxBackgroundJob.completed_at.asc(),
+                MailboxBackgroundJob.id.asc(),
+            )
+            .limit(_TERMINAL_JOB_PRUNE_BATCH_SIZE)
+        )
+    )
+
+    terminal_count = int(
+        session.scalar(
+            select(func.count())
+            .select_from(MailboxBackgroundJob)
+            .where(*terminal_filter)
+        )
+        or 0
+    )
+    overflow = max(
+        0,
+        terminal_count
+        - len(expired_ids)
+        - _TERMINAL_JOB_MAX_PER_ORGANIZATION,
+    )
+    remaining_capacity = _TERMINAL_JOB_PRUNE_BATCH_SIZE - len(expired_ids)
+    if overflow and remaining_capacity:
+        overflow_statement = (
+            select(MailboxBackgroundJob.id)
+            .where(*terminal_filter)
+            .order_by(
+                MailboxBackgroundJob.completed_at.asc(),
+                MailboxBackgroundJob.requested_at.asc(),
+                MailboxBackgroundJob.id.asc(),
+            )
+            .limit(min(overflow, remaining_capacity))
+        )
+        if expired_ids:
+            overflow_statement = overflow_statement.where(
+                MailboxBackgroundJob.id.not_in(expired_ids)
+            )
+        expired_ids.extend(session.scalars(overflow_statement).all())
+
+    if not expired_ids:
+        return 0
+    deleted = session.execute(
+        delete(MailboxBackgroundJob).where(
+            MailboxBackgroundJob.organization_id == organization_id,
+            MailboxBackgroundJob.id.in_(expired_ids),
+            MailboxBackgroundJob.status.in_(
+                (MAILBOX_JOB_COMPLETED, MAILBOX_JOB_FAILED)
+            ),
+        )
+    )
+    session.commit()
+    return int(deleted.rowcount or 0)
+
+
+def _prune_terminal_job_history_safely(
+    session: Session,
+    *,
+    now: datetime,
+) -> None:
+    """Keep maintenance failure independent from an already durable result."""
+
+    try:
+        _prune_terminal_job_history(session, now=now)
+    except Exception:
+        session.rollback()
+        logger.warning("mailbox_terminal_job_history_prune_failed", exc_info=True)
 
 
 def enqueue_due_mailbox_sync_jobs(*, database: Database, settings: AppSettings) -> bool:
@@ -732,7 +851,10 @@ def _complete_job(
         .execution_options(synchronize_session=False)
     )
     session.commit()
-    return completed.rowcount == 1
+    was_completed = completed.rowcount == 1
+    if was_completed:
+        _prune_terminal_job_history_safely(session, now=now)
+    return was_completed
 
 
 def _fail_job(
@@ -774,7 +896,10 @@ def _fail_job(
         .execution_options(synchronize_session=False)
     )
     session.commit()
-    return updated.rowcount == 1
+    was_updated = updated.rowcount == 1
+    if was_updated and not should_retry:
+        _prune_terminal_job_history_safely(session, now=now)
+    return was_updated
 
 
 def _process_claimed_job(

@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterator, Literal
 from uuid import uuid4
 
-from sqlalchemy import desc, or_, select, update
+from sqlalchemy import case, desc, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.config import AppSettings
@@ -41,6 +41,7 @@ from app.tenant_scope import (
 
 
 RetentionPolicy = Literal["minimal", "standard", "audit"]
+RetrySourceProtection = Literal["not_found", "protected", "cleanup_claimed"]
 
 _CACHE_DIRECTORY = "mail-cache"
 _CLEANUP_LEASE_SECONDS = 120
@@ -434,6 +435,77 @@ def read_retained_failed_attachment(
     return content
 
 
+def protect_retained_failed_attachment_for_retry(
+    session: Session,
+    *,
+    attachment_import: EmailAttachmentImport,
+    protection_seconds: int,
+) -> RetrySourceProtection:
+    """Protect a retained failure source in the retry enqueue transaction.
+
+    Cleanup claims are committed before their file is unlinked.  Refusing to
+    touch an already claimed row means an HTTP retry can never acknowledge a
+    durable job that depends on a file the cleaner already owns.  Conversely,
+    updating ``expires_at`` takes a row lock until the job insert commits; a
+    cleaner that selected the old expiry must then re-check the expiry in its
+    conditional claim and stand down.
+
+    The caller deliberately commits this update together with the background
+    job.  ``cleanup_claimed`` must fail closed even when IMAP metadata still
+    exists: the service cannot know whether that remote message still exists,
+    so it must not discard a retained source during the enqueue race.
+    """
+
+    organization_id = organization_context_id(session)
+    if attachment_import.organization_id != organization_id:
+        raise MailboxRetentionError("mailbox_retention_workspace_mismatch")
+    now = _utcnow()
+    protected_until = now + timedelta(seconds=max(1, protection_seconds))
+    retained_copy_exists = (
+        session.scalar(
+            select(MailboxContentReplica.id).where(
+                MailboxContentReplica.organization_id == organization_id,
+                MailboxContentReplica.email_attachment_import_id
+                == attachment_import.id,
+                MailboxContentReplica.kind == "failed_attachment",
+                MailboxContentReplica.cleaned_at.is_(None),
+            )
+        )
+        is not None
+    )
+    if not retained_copy_exists:
+        return "not_found"
+    protected = session.execute(
+        update(MailboxContentReplica)
+        .where(
+            MailboxContentReplica.organization_id == organization_id,
+            MailboxContentReplica.email_attachment_import_id
+            == attachment_import.id,
+            MailboxContentReplica.kind == "failed_attachment",
+            MailboxContentReplica.cleaned_at.is_(None),
+            # A non-null token means cleanup has durably claimed the only
+            # copy, even if the actual unlink has not happened yet.
+            MailboxContentReplica.cleanup_claim_token.is_(None),
+        )
+        .values(
+            expires_at=case(
+                (
+                    MailboxContentReplica.expires_at < protected_until,
+                    protected_until,
+                ),
+                else_=MailboxContentReplica.expires_at,
+            ),
+            cleanup_error=None,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if protected.rowcount:
+        session.expire_all()
+        return "protected"
+    return "cleanup_claimed"
+
+
 def discard_retained_failed_attachment(
     session: Session,
     *,
@@ -687,10 +759,15 @@ def _claim_replica_cleanup(
     claim_token = uuid4().hex
     claimed = session.execute(
         update(MailboxContentReplica)
+        .execution_options(synchronize_session=False)
         .where(
             MailboxContentReplica.id == replica.id,
             MailboxContentReplica.organization_id == organization_context_id(session),
             MailboxContentReplica.cleaned_at.is_(None),
+            # Re-check the expiry in the same conditional update that owns the
+            # cleanup lease.  A retry enqueue may have extended it after this
+            # cleanup run selected its initial candidate list.
+            MailboxContentReplica.expires_at <= now,
             or_(
                 MailboxContentReplica.cleanup_lease_expires_at.is_(None),
                 MailboxContentReplica.cleanup_lease_expires_at <= now,

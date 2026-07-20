@@ -29,15 +29,15 @@
 
 ## 邮件服务
 
-外发验证邮件与收取简历的 IMAP 是两套服务。生产采用腾讯云 SES API：
+外发验证邮件与收取简历的 IMAP 是两套服务。当前临时使用飞书公共邮箱 SMTP，后续可无迁移地切换到腾讯云 SES API：
 
-- 发件域建议使用独立子域，例如 `mail.greatsellai.net`。
-- 使用腾讯云审核通过的事务邮件模板，模板变量为 `verify_url` 和 `expires_minutes`。
-- 应用从环境读取 Provider、发件地址、公开应用地址、SES 区域和模板 ID；密钥继续只通过环境变量提供，绝不写入仓库或数据库。
+- 飞书：创建独立公共邮箱，例如 `noreply@greatsell.ai`，开启其 SMTP 服务，使用飞书生成的专用密码；不得使用个人邮箱或简历收件 IMAP 凭据。
+- 腾讯云 SES：后续发件域建议使用独立子域，例如 `mail.greatsellai.net`；使用审核通过的事务邮件模板，模板变量为 `verify_url` 和 `expires_minutes`。
+- 应用从环境读取 Provider、发件地址、公开应用地址和对应 Provider 凭据；所有密码、API 密钥都只通过环境变量提供，绝不写入仓库或数据库。
 - 生产反向代理部署还需显式配置可信代理网段，才会按真实浏览器 IP 限流；未配置时系统会安全地按直接代理连接并叠加全局限流。
 - Provider 未配置或发送失败时，注册不会获得业务访问权，页面会明确提示重发或稍后重试。
 
-上线前，部署配置必须将下列非敏感配置传入 API 容器：`RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER`、`RESUME_V3_TRANSACTIONAL_EMAIL_FROM`、`RESUME_V3_PUBLIC_APP_URL`、`TENCENT_SES_REGION`、`TENCENT_SES_VERIFICATION_TEMPLATE_ID` 和 `RESUME_V3_TRUSTED_PROXY_CIDRS`。腾讯云凭据继续由现有受控环境变量注入；未完成这些配置时，注册接口应保持不可用，而不是创建无法验证的账号。
+临时飞书 SMTP 上线时，部署配置必须将下列变量传入 API 容器：`RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER=feishu_smtp`、`RESUME_V3_TRANSACTIONAL_EMAIL_FROM`、`RESUME_V3_PUBLIC_APP_URL`、`RESUME_V3_FEISHU_SMTP_HOST=smtp.feishu.cn`、`RESUME_V3_FEISHU_SMTP_PORT=465`、`RESUME_V3_FEISHU_SMTP_TLS_MODE=ssl`、`RESUME_V3_FEISHU_SMTP_USERNAME`、`RESUME_V3_FEISHU_SMTP_PASSWORD` 和 `RESUME_V3_TRUSTED_PROXY_CIDRS`。后续切 SES 时改回 `tencent_ses` 并配置 SES 区域、模板 ID 与腾讯云受控凭据即可；未完成配置时，注册接口应保持不可用，而不是创建无法验证的账号。
 
 ## API
 

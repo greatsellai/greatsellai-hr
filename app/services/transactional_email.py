@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import smtplib
+import ssl
 from dataclasses import dataclass, field
+from email.message import EmailMessage
+from email.utils import parseaddr
+from html import escape
 from typing import Protocol
 from urllib.parse import urlencode
 
@@ -116,9 +121,105 @@ class TencentSesTransactionalEmailProvider:
             raise TransactionalEmailError("email_delivery_provider_failed") from exc
 
 
+class FeishuSmtpTransactionalEmailProvider:
+    """Temporary SMTP sender backed by one dedicated Feishu public mailbox."""
+
+    def __init__(self, settings: AppSettings) -> None:
+        self._settings = settings
+
+    @property
+    def configured(self) -> bool:
+        return True
+
+    def send_email_verification(self, delivery: VerificationDelivery) -> None:
+        message = _verification_email_message(self._settings, delivery)
+        from_address = parseaddr(self._settings.transactional_email_from or "")[1]
+        context = ssl.create_default_context()
+        try:
+            if self._settings.feishu_smtp_tls_mode == "ssl":
+                with smtplib.SMTP_SSL(
+                    self._settings.feishu_smtp_host,
+                    self._settings.feishu_smtp_port,
+                    timeout=self._settings.feishu_smtp_timeout_seconds,
+                    context=context,
+                ) as client:
+                    _smtp_send_verification(
+                        client,
+                        username=self._settings.feishu_smtp_username or "",
+                        password=self._settings.feishu_smtp_password or "",
+                        message=message,
+                        from_address=from_address,
+                        recipient=delivery.recipient,
+                    )
+            else:
+                with smtplib.SMTP(
+                    self._settings.feishu_smtp_host,
+                    self._settings.feishu_smtp_port,
+                    timeout=self._settings.feishu_smtp_timeout_seconds,
+                ) as client:
+                    client.ehlo()
+                    client.starttls(context=context)
+                    client.ehlo()
+                    _smtp_send_verification(
+                        client,
+                        username=self._settings.feishu_smtp_username or "",
+                        password=self._settings.feishu_smtp_password or "",
+                        message=message,
+                        from_address=from_address,
+                        recipient=delivery.recipient,
+                    )
+        except (smtplib.SMTPException, OSError, TimeoutError, ValueError) as exc:
+            logger.warning("transactional_email_transport_failed provider=feishu_smtp")
+            raise TransactionalEmailError("email_delivery_provider_failed") from exc
+
+
+def _smtp_send_verification(
+    client: smtplib.SMTP,
+    *,
+    username: str,
+    password: str,
+    message: EmailMessage,
+    from_address: str,
+    recipient: str,
+) -> None:
+    client.login(username, password)
+    client.send_message(message, from_addr=from_address, to_addrs=[recipient])
+
+
+def _verification_email_message(
+    settings: AppSettings,
+    delivery: VerificationDelivery,
+) -> EmailMessage:
+    """Build a plain-text and HTML account-verification email in memory."""
+
+    message = EmailMessage()
+    message["From"] = settings.transactional_email_from or ""
+    message["To"] = delivery.recipient
+    message["Subject"] = "验证你的 GreatSell AI 工作邮箱"
+    message.set_content(
+        "您好，\n\n"
+        "请打开以下链接验证你的 GreatSell AI 工作邮箱：\n"
+        f"{delivery.verification_url}\n\n"
+        f"链接将在 {delivery.expires_minutes} 分钟后失效。若不是你本人注册，请忽略此邮件。\n"
+    )
+    verification_url = escape(delivery.verification_url, quote=True)
+    message.add_alternative(
+        "<html><body>"
+        "<p>您好，</p>"
+        "<p>请点击以下按钮验证你的 GreatSell AI 工作邮箱：</p>"
+        f'<p><a href="{verification_url}">验证工作邮箱</a></p>'
+        f"<p>链接将在 {delivery.expires_minutes} 分钟后失效。若不是你本人注册，请忽略此邮件。</p>"
+        "</body></html>",
+        subtype="html",
+    )
+    return message
+
+
 def build_transactional_email_provider(settings: AppSettings) -> TransactionalEmailProvider:
     if settings.transactional_email_provider == "tencent_ses":
         return TencentSesTransactionalEmailProvider(settings)
+    if settings.transactional_email_provider == "feishu_smtp":
+        return FeishuSmtpTransactionalEmailProvider(settings)
     if settings.transactional_email_provider == "test":
         return TestTransactionalEmailProvider()
     return DisabledTransactionalEmailProvider()

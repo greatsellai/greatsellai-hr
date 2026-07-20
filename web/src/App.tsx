@@ -927,7 +927,12 @@ function App() {
   }, []);
 
   if (surface.kind === "landing") {
-    return <LandingPage loginHref={workspaceHref("/login")} />;
+    return (
+      <LandingPage
+        loginHref={workspaceHref("/login")}
+        registerHref={workspaceHref("/register")}
+      />
+    );
   }
 
   return <WorkspaceApp authRoute={surface.authRoute} />;

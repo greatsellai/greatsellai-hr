@@ -1973,56 +1973,64 @@ function RegistrationPage({
 
   return (
     <AuthPageLayout
-      description="创建独立工作区后，请验证工作邮箱。候选人、原始文件和 AI 结论始终只保留在你的团队范围内。"
+      description="注册后即可使用大卖数智 AI 招聘工作台。上传简历，快速筛选、统一评分并查看 JD 匹配依据，把时间留给真正需要你判断的人。"
       eyebrow={offerLoading
-        ? "30 天进阶版试用"
-        : `${registrationOffer.trial_days} 天${registrationOffer.plan_name}试用`}
-      title="从第一份简历开始"
+        ? "30 天免费体验"
+        : `${registrationOffer.trial_days} 天${registrationOffer.plan_name}免费体验`}
+      title="让招聘判断，从第一份简历开始更快"
+      variant="registration"
     >
       {submitted ? (
         <div aria-live="polite" className="auth-success-state">
           <span className="auth-success-icon"><Icon name="check" size={20} /></span>
-          <h2>请查收验证邮件</h2>
-          <p>请打开刚才填写的工作邮箱，点击验证链接后即可进入工作台。</p>
-          <a className="button button-primary auth-submit" href={workspaceHref("/verify-email")}>查看验证状态</a>
+          <h2>验证邮箱，马上进入工作台</h2>
+          <p>验证邮件已发送到你填写的工作邮箱。点击邮件中的链接，即可开始上传第一份简历。</p>
+          <a className="button button-primary auth-submit" href={workspaceHref("/verify-email")}>我已完成邮箱验证</a>
         </div>
       ) : (
-        <form
-          className="auth-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void submit();
-          }}
-        >
-          <div className="auth-form-grid">
-            <div className="field-stack auth-form-span-2">
-              <label className="field-label" htmlFor="register-organization">企业或团队名称</label>
-              <input autoComplete="organization" className="field" id="register-organization" onChange={(event) => setOrganizationName(event.target.value)} placeholder="例如：GreatSell AI" required value={organizationName} />
-            </div>
-            <div className="field-stack">
-              <label className="field-label" htmlFor="register-name">你的姓名</label>
-              <input autoComplete="name" className="field" id="register-name" onChange={(event) => setFullName(event.target.value)} placeholder="如何称呼你" required value={fullName} />
-            </div>
-            <div className="field-stack">
-              <label className="field-label" htmlFor="register-email">工作邮箱</label>
-              <input autoComplete="email" className="field" id="register-email" inputMode="email" onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com" required type="email" value={email} />
-            </div>
-            <div className="field-stack">
-              <label className="field-label" htmlFor="register-password">设置密码</label>
-              <input autoComplete="new-password" className="field" id="register-password" minLength={8} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 个字符" required type="password" value={password} />
-            </div>
-            <div className="field-stack">
-              <label className="field-label" htmlFor="register-password-confirmation">确认密码</label>
-              <input aria-describedby={formError ? "register-password-error" : undefined} aria-invalid={Boolean(formError)} autoComplete="new-password" className="field" id="register-password-confirmation" minLength={8} onChange={(event) => setConfirmation(event.target.value)} placeholder="再次输入密码" required type="password" value={confirmation} />
-            </div>
+        <div className="auth-registration">
+          <div className="auth-registration-heading">
+            <p>免费创建团队工作台</p>
+            <h2>开始 {registrationOffer.trial_days} 天{registrationOffer.plan_name}体验</h2>
+            <span>完成邮箱验证后，即可上传第一份简历。</span>
           </div>
-          {(formError || error) && <p className="auth-error" id="register-password-error" role="alert">{formError || error}</p>}
-          <p className="auth-consent">注册后需要验证工作邮箱。系统会在服务端按工作区隔离业务数据。</p>
-          <button className="button button-primary auth-submit" disabled={loading || !organizationName.trim() || !fullName.trim() || !email.trim() || password.length < 8 || !confirmation} type="submit">
-            {loading ? <><i className="spinner" />正在创建工作区</> : `开始 ${registrationOffer.trial_days} 天免费试用`}
-          </button>
-          <p className="auth-footer-copy">已有账号？<a href={workspaceHref("/login")}>返回登录</a></p>
-        </form>
+          <form
+            className="auth-form auth-registration-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit();
+            }}
+          >
+            <div className="auth-form-grid">
+              <div className="field-stack auth-form-span-2">
+                <label className="field-label" htmlFor="register-organization">公司 / 团队名称</label>
+                <input autoComplete="organization" className="field" id="register-organization" onChange={(event) => setOrganizationName(event.target.value)} placeholder="例如：大卖数智 AI 部" required value={organizationName} />
+              </div>
+              <div className="field-stack">
+                <label className="field-label" htmlFor="register-name">姓名</label>
+                <input autoComplete="name" className="field" id="register-name" onChange={(event) => setFullName(event.target.value)} placeholder="请输入你的姓名" required value={fullName} />
+              </div>
+              <div className="field-stack">
+                <label className="field-label" htmlFor="register-email">工作邮箱</label>
+                <input autoComplete="email" className="field" id="register-email" inputMode="email" onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com" required type="email" value={email} />
+              </div>
+              <div className="field-stack">
+                <label className="field-label" htmlFor="register-password">设置登录密码</label>
+                <input autoComplete="new-password" className="field" id="register-password" minLength={8} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 个字符" required type="password" value={password} />
+              </div>
+              <div className="field-stack">
+                <label className="field-label" htmlFor="register-password-confirmation">再次输入密码</label>
+                <input aria-describedby={formError ? "register-password-error" : undefined} aria-invalid={Boolean(formError)} autoComplete="new-password" className="field" id="register-password-confirmation" minLength={8} onChange={(event) => setConfirmation(event.target.value)} placeholder="请再次输入" required type="password" value={confirmation} />
+              </div>
+            </div>
+            {(formError || error) && <p className="auth-error" id="register-password-error" role="alert">{formError || error}</p>}
+            <p className="auth-consent">提交后，我们会向你的工作邮箱发送验证邮件。完成验证即可进入工作台。</p>
+            <button className="button button-primary auth-submit" disabled={loading || !organizationName.trim() || !fullName.trim() || !email.trim() || password.length < 8 || !confirmation} type="submit">
+              {loading ? <><i className="spinner" />正在创建工作台</> : `免费开启 ${registrationOffer.trial_days} 天体验`}
+            </button>
+            <p className="auth-footer-copy">已有团队账号？<a href={workspaceHref("/login")}>立即登录</a></p>
+          </form>
+        </div>
       )}
     </AuthPageLayout>
   );
@@ -2167,24 +2175,40 @@ function AuthPageLayout({
   description,
   eyebrow,
   title,
+  variant = "default",
 }: {
   children: ReactNode;
   description: string;
   eyebrow: string;
   title: string;
+  variant?: "default" | "registration";
 }) {
+  const isRegistration = variant === "registration";
   return (
-    <main className="auth-page">
+    <main className={`auth-page${isRegistration ? " auth-page-registration" : ""}`}>
       <div className="auth-shell">
         <section className="auth-introduction" aria-labelledby="auth-page-title">
+          <a className="auth-brand" href={workspaceHref("/")} aria-label="大卖数智首页">
+            <img alt="大卖数智 GreatSell AI" src="/brand/greatsell-logo-cn-white.png" />
+          </a>
           <div aria-hidden="true" className="auth-mark" />
           <p className="auth-kicker">{eyebrow}</p>
           <h1 id="auth-page-title">{title}</h1>
           <p>{description}</p>
           <ul className="auth-assurance-list">
-            <li><Icon name="layers" size={17} /><span>独立工作区，候选人信息不与其他团队共享</span></li>
-            <li><Icon name="briefcase" size={17} /><span>注册后可体验已实现的筛选、评分、JD 与邮箱能力</span></li>
-            <li><Icon name="user" size={17} /><span>AI 只提供基于简历事实的辅助结论，最终判断由招聘人员完成</span></li>
+            {isRegistration ? (
+              <>
+                <li><Icon name="spark" size={17} /><span>免费体验进阶版已开放能力，先使用再决定</span></li>
+                <li><Icon name="layers" size={17} /><span>简历、岗位与候选人资料仅限你的团队访问</span></li>
+                <li><Icon name="user" size={17} /><span>AI 先整理判断依据，是否推进始终由 HR 决定</span></li>
+              </>
+            ) : (
+              <>
+                <li><Icon name="layers" size={17} /><span>团队资料集中管理，仅限已授权成员访问</span></li>
+                <li><Icon name="briefcase" size={17} /><span>从筛选、评分到 JD 匹配，在同一个工作台完成</span></li>
+                <li><Icon name="user" size={17} /><span>AI 提供判断依据，最终决定始终属于招聘团队</span></li>
+              </>
+            )}
           </ul>
         </section>
         <section className="auth-panel" aria-label={title}>

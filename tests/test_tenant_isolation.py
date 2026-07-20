@@ -489,3 +489,18 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
         foreign_library_source,
     ):
         assert response.status_code == 404, response.text
+
+    # Background task IDs are tenant-owned resources too. A task accepted in
+    # B must not become a probeable detail or list entry for A.
+    b_task = client_b.post(f"/v1/mailboxes/{private['mailbox_config_id']}/sync")
+    assert b_task.status_code == 202, b_task.text
+    task_id = b_task.json()["job_id"]
+    foreign_task = client_a.get(f"/v1/mailbox/tasks/{task_id}")
+    foreign_task_history = client_a.get(
+        f"/v1/mailbox/tasks?mailbox_id={private['mailbox_config_id']}"
+    )
+    a_task_history = client_a.get("/v1/mailbox/tasks")
+    assert foreign_task.status_code == 404, foreign_task.text
+    assert foreign_task_history.status_code == 404, foreign_task_history.text
+    assert a_task_history.status_code == 200, a_task_history.text
+    assert task_id not in {item["job_id"] for item in a_task_history.json()["items"]}

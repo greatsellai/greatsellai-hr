@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.config import AppSettings
 from app.models import (
     EmailAttachmentImport,
+    MailboxBackgroundJob,
     MailboxConfig,
     MailboxContentReplica,
     MailboxRetentionCleanupRun,
@@ -605,10 +606,26 @@ def _retry_is_active(session: Session, replica: MailboxContentReplica, *, now: d
             EmailAttachmentImport.id == replica.email_attachment_import_id
         )
     )
-    if attachment_import is None or attachment_import.status != "retrying":
-        return False
-    lease_expires_at = _as_utc(attachment_import.retry_lease_expires_at)
-    return lease_expires_at is not None and lease_expires_at > now
+    if attachment_import is not None and attachment_import.status == "retrying":
+        lease_expires_at = _as_utc(attachment_import.retry_lease_expires_at)
+        if lease_expires_at is not None and lease_expires_at > now:
+            return True
+    # The attachment stays ``failed`` while its durable retry is queued so the
+    # worker, rather than an HTTP request, owns the short retry lease.  Treat a
+    # queued/running exact-retry job as active too; otherwise retention cleanup
+    # could remove the only retained source before that worker starts.
+    return (
+        session.scalar(
+            select(MailboxBackgroundJob.id).where(
+                MailboxBackgroundJob.organization_id == replica.organization_id,
+                MailboxBackgroundJob.email_attachment_import_id
+                == replica.email_attachment_import_id,
+                MailboxBackgroundJob.job_kind == "attachment_retry",
+                MailboxBackgroundJob.status.in_(("queued", "running")),
+            )
+        )
+        is not None
+    )
 
 
 def preview_mailbox_retention_cleanup(

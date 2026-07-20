@@ -570,6 +570,9 @@ class MailboxConfig(OrganizationScoped, Base):
         back_populates="source_mailbox_config",
         foreign_keys="Resume.source_mailbox_config_id",
     )
+    background_jobs: Mapped[list["MailboxBackgroundJob"]] = relationship(
+        back_populates="mailbox_config", cascade="all, delete-orphan"
+    )
 
 
 class EmailAttachmentImport(OrganizationScoped, Base):
@@ -631,6 +634,9 @@ class EmailAttachmentImport(OrganizationScoped, Base):
     retention_replicas: Mapped[list["MailboxContentReplica"]] = relationship(
         back_populates="attachment_import",
     )
+    background_jobs: Mapped[list["MailboxBackgroundJob"]] = relationship(
+        back_populates="attachment_import",
+    )
 
 
 class EmailAttachmentImportAttempt(OrganizationScoped, Base):
@@ -665,6 +671,94 @@ class EmailAttachmentImportAttempt(OrganizationScoped, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     attachment_import: Mapped[EmailAttachmentImport] = relationship(back_populates="attempts")
+
+
+class MailboxBackgroundJob(OrganizationScoped, Base):
+    """Durable IMAP work that is never executed by a web request.
+
+    A task stores only source IDs and safe counters. Credentials, RFC822 bytes,
+    and provider-specific errors remain in the worker-owned path.
+    """
+
+    __tablename__ = "mailbox_background_jobs"
+    __table_args__ = (
+        Index("ix_mailbox_background_jobs_claim", "status", "next_attempt_at"),
+        Index(
+            "ix_mailbox_background_jobs_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_mailbox_background_jobs_organization_lease",
+            "organization_id",
+            "status",
+            "lease_expires_at",
+        ),
+        # One active sync per named mailbox avoids concurrent IMAP scans while
+        # allowing different channels in the same workspace to proceed.
+        Index(
+            "uq_mailbox_background_jobs_active_sync",
+            "organization_id",
+            "mailbox_config_id",
+            "job_kind",
+            unique=True,
+            sqlite_where=text("job_kind = 'sync' AND status IN ('queued', 'running')"),
+            postgresql_where=text("job_kind = 'sync' AND status IN ('queued', 'running')"),
+        ),
+        Index(
+            "uq_mailbox_background_jobs_active_attachment_retry",
+            "organization_id",
+            "email_attachment_import_id",
+            unique=True,
+            sqlite_where=text(
+                "job_kind = 'attachment_retry' "
+                "AND status IN ('queued', 'running') "
+                "AND email_attachment_import_id IS NOT NULL"
+            ),
+            postgresql_where=text(
+                "job_kind = 'attachment_retry' "
+                "AND status IN ('queued', 'running') "
+                "AND email_attachment_import_id IS NOT NULL"
+            ),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    mailbox_config_id: Mapped[str] = mapped_column(
+        ForeignKey("mailbox_configs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    email_attachment_import_id: Mapped[str | None] = mapped_column(
+        ForeignKey("email_attachment_imports.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    job_kind: Mapped[str] = mapped_column(String(32), index=True)
+    trigger_type: Mapped[str] = mapped_column(String(32))
+    source_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    imported_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    mailbox_config: Mapped[MailboxConfig] = relationship(back_populates="background_jobs")
+    attachment_import: Mapped[EmailAttachmentImport | None] = relationship(
+        back_populates="background_jobs"
+    )
 
 
 class MailboxContentReplica(OrganizationScoped, Base):

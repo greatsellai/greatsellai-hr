@@ -20,15 +20,15 @@ import type {
   MailboxConfigCreate,
   MailboxConfigList,
   MailboxConfigPatch,
+  MailboxBackgroundJob,
+  MailboxBackgroundJobBatch,
+  MailboxBackgroundJobHistory,
   MailboxImportHistory,
-  MailboxImportHistoryItem,
   MailboxRetentionOverview,
   MailboxRetentionPreview,
   MailboxRetentionRun,
   MailboxRetentionRuns,
   MailboxRetentionUpdate,
-  MailboxSync,
-  MailboxSyncAll,
   EmailVerificationResendResult,
   OriginalJobPublishInput,
   PasswordResetRequestResult,
@@ -277,12 +277,12 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
-    syncMailbox(mailboxId: string): Promise<MailboxSync> {
-      return request<MailboxSync>(`/mailboxes/${resourcePath(mailboxId)}/sync`, { method: "POST" });
+    syncMailbox(mailboxId: string): Promise<MailboxBackgroundJob> {
+      return request<MailboxBackgroundJob>(`/mailboxes/${resourcePath(mailboxId)}/sync`, { method: "POST" });
     },
 
-    syncAllMailboxes(): Promise<MailboxSyncAll> {
-      return request<MailboxSyncAll>("/mailboxes/sync", { method: "POST" });
+    syncAllMailboxes(): Promise<MailboxBackgroundJobBatch> {
+      return request<MailboxBackgroundJobBatch>("/mailboxes/sync", { method: "POST" });
     },
 
     archiveMailbox(mailboxId: string): Promise<MailboxConfig> {
@@ -294,11 +294,20 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return request<MailboxImportHistory>(`/mailbox-imports${query}`);
     },
 
-    retryMailboxImport(importId: string): Promise<MailboxImportHistoryItem> {
-      return request<MailboxImportHistoryItem>(
+    retryMailboxImport(importId: string): Promise<MailboxBackgroundJob> {
+      return request<MailboxBackgroundJob>(
         `/mailbox/imports/${encodeURIComponent(importId)}/retry`,
         { method: "POST" },
       );
+    },
+
+    listMailboxBackgroundJobs(mailboxId?: string | null): Promise<MailboxBackgroundJobHistory> {
+      const query = mailboxId ? `?${new URLSearchParams({ mailbox_id: mailboxId }).toString()}` : "";
+      return request<MailboxBackgroundJobHistory>(`/mailbox/tasks${query}`);
+    },
+
+    getMailboxBackgroundJob(jobId: string): Promise<MailboxBackgroundJob> {
+      return request<MailboxBackgroundJob>(`/mailbox/tasks/${resourcePath(jobId)}`);
     },
 
     getMailboxRetention(mailboxId: string): Promise<MailboxRetentionOverview> {

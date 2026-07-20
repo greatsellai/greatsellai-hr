@@ -178,24 +178,40 @@ export interface MailboxConfigList {
   total: number;
 }
 
-export interface MailboxSync {
-  configured: boolean;
-  mailbox_id: string | null;
-  display_name: string | null;
+export type MailboxBackgroundJobKind = "sync" | "attachment_retry";
+export type MailboxBackgroundJobTrigger = "manual" | "scheduled";
+export type MailboxBackgroundJobStatus = "queued" | "running" | "completed" | "failed";
+
+/** Safe, pollable state for IMAP work that runs in the worker process. */
+export interface MailboxBackgroundJob {
+  job_id: string;
+  mailbox_id: string;
+  job_kind: MailboxBackgroundJobKind;
+  trigger_type: MailboxBackgroundJobTrigger;
+  status: MailboxBackgroundJobStatus;
+  import_id: string | null;
+  attempt_count: number;
+  max_attempts: number;
   imported_count: number;
   duplicate_count: number;
   skipped_count: number;
   failed_count: number;
-  last_synced_at: string | null;
-  last_sync_error: string | null;
+  last_error: string | null;
+  requested_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  deduplicated: boolean;
 }
 
-export interface MailboxSyncAll {
-  items: MailboxSync[];
-  imported_count: number;
-  duplicate_count: number;
-  skipped_count: number;
-  failed_count: number;
+export interface MailboxBackgroundJobHistory {
+  items: MailboxBackgroundJob[];
+  total: number;
+}
+
+export interface MailboxBackgroundJobBatch {
+  items: MailboxBackgroundJob[];
+  queued_count: number;
+  deduplicated_count: number;
 }
 
 export interface MailboxImportHistoryItem {

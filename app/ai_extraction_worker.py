@@ -10,7 +10,10 @@ from app.config import AppSettings
 from app.database import Database
 from app.services.ai_extraction_job_service import run_ai_extraction_worker_once
 from app.services.job_match_batch_service import run_job_match_batch_worker_once
-from app.services.mailbox_import_service import sync_due_mailboxes
+from app.services.mailbox_background_job_service import (
+    enqueue_due_mailbox_sync_jobs,
+    run_mailbox_background_job_worker_once,
+)
 from app.services.mailbox_retention_service import cleanup_due_mailbox_retention
 from app.services.resume_score_batch_service import run_resume_score_batch_worker_once
 from app.services.institution_service import (
@@ -47,6 +50,11 @@ def run_forever(settings: AppSettings) -> None:
     worker_id = _worker_id()
     try:
         while True:
+            ran_mailbox_job = run_mailbox_background_job_worker_once(
+                database,
+                settings=settings,
+                worker_id=worker_id,
+            )
             ran_extraction = run_ai_extraction_worker_once(
                 database,
                 settings=settings,
@@ -62,7 +70,10 @@ def run_forever(settings: AppSettings) -> None:
                 settings=settings,
                 worker_id=worker_id,
             )
-            ran_mailbox_sync = sync_due_mailboxes(database=database, settings=settings)
+            queued_due_mailbox_sync = enqueue_due_mailbox_sync_jobs(
+                database=database,
+                settings=settings,
+            )
             ran_mailbox_retention_cleanup = cleanup_due_mailbox_retention(
                 database=database,
                 settings=settings,
@@ -71,7 +82,8 @@ def run_forever(settings: AppSettings) -> None:
                 not ran_extraction
                 and not ran_job_match
                 and not ran_score_batch
-                and not ran_mailbox_sync
+                and not ran_mailbox_job
+                and not queued_due_mailbox_sync
                 and not ran_mailbox_retention_cleanup
             ):
                 time.sleep(settings.ai_extraction_worker_poll_seconds)
@@ -96,11 +108,19 @@ def main() -> None:
 
     database = _create_worker_database(settings)
     try:
-        ran_extraction = run_ai_extraction_worker_once(
+        ran_mailbox_job = run_mailbox_background_job_worker_once(
             database,
             settings=settings,
             worker_id=_worker_id(),
         )
+        if not ran_mailbox_job:
+            ran_extraction = run_ai_extraction_worker_once(
+                database,
+                settings=settings,
+                worker_id=_worker_id(),
+            )
+        else:
+            ran_extraction = True
         if not ran_extraction:
             ran_job_match = run_job_match_batch_worker_once(
                 database,
@@ -113,7 +133,7 @@ def main() -> None:
                     settings=settings,
                     worker_id=_worker_id(),
                 )
-        sync_due_mailboxes(database=database, settings=settings)
+        enqueue_due_mailbox_sync_jobs(database=database, settings=settings)
         cleanup_due_mailbox_retention(database=database, settings=settings)
     finally:
         database.dispose()

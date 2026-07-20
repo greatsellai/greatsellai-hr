@@ -454,20 +454,28 @@ def test_failed_attachment_retries_retained_copy_and_updates_the_same_record(
 
     monkeypatch.setattr(mailbox_import_service, "save_pdf_resume", successful_save)
     RetryImap.calls.clear()
-    retried = client.post(f"/v1/mailbox/imports/{item['import_id']}/retry")
-    assert retried.status_code == 200, retried.text
-    payload = retried.json()
-    assert payload["import_id"] == item["import_id"]
-    assert payload["status"] == "imported"
-    assert payload["resume_id"]
-    assert payload["attempt_count"] == 2
-    assert payload["can_retry"] is False
+    with client.app.state.database.session_factory() as session:
+        retried = mailbox_import_service.retry_mailbox_attachment(
+            session,
+            settings=client.app.state.settings,
+            import_id=item["import_id"],
+        )
+    assert retried.import_id == item["import_id"]
+    assert retried.status == "imported"
+    assert retried.resume_id
+    assert retried.attempt_count == 2
+    assert retried.can_retry is False
     # A fresh failed import has a short-lived, hash-checked retry copy, so
     # recovery avoids both the incremental search and a second IMAP fetch.
     assert RetryImap.calls == []
 
-    repeated = client.post(f"/v1/mailbox/imports/{item['import_id']}/retry")
-    assert repeated.status_code == 409, repeated.text
+    with client.app.state.database.session_factory() as session:
+        with pytest.raises(mailbox_import_service.MailboxImportError, match="mailbox_import_not_retryable"):
+            mailbox_import_service.retry_mailbox_attachment(
+                session,
+                settings=client.app.state.settings,
+                import_id=item["import_id"],
+            )
 
     with client.app.state.database.session_factory() as session:
         imports = session.scalars(select(EmailAttachmentImport)).all()
@@ -592,10 +600,14 @@ def test_attachment_retry_cleans_uploaded_file_when_completion_audit_fails(
         record_id = record.id
         organization_id = config.organization_id
 
-    retried = client.post(f"/v1/mailbox/imports/{record_id}/retry")
-    assert retried.status_code == 200, retried.text
-    assert retried.json()["status"] == "failed"
-    assert retried.json()["error"] == "mailbox_connection_failed"
+    with client.app.state.database.session_factory() as session:
+        retried = mailbox_import_service.retry_mailbox_attachment(
+            session,
+            settings=client.app.state.settings,
+            import_id=record_id,
+        )
+    assert retried.status == "failed"
+    assert retried.error == "mailbox_connection_failed"
     assert completion_calls == 2
     assert discarded == [("retry-cleanup.pdf", organization_id)]
 
@@ -661,13 +673,16 @@ def test_attachment_retry_stops_when_the_imap_source_epoch_changed(
         session.commit()
         record_id = record.id
 
-    retried = client.post(f"/v1/mailbox/imports/{record_id}/retry")
-    assert retried.status_code == 200, retried.text
-    payload = retried.json()
-    assert payload["status"] == "failed"
-    assert payload["error"] == "attachment_source_changed"
-    assert payload["can_retry"] is False
-    assert payload["attempt_count"] == 2
+    with client.app.state.database.session_factory() as session:
+        retried = mailbox_import_service.retry_mailbox_attachment(
+            session,
+            settings=client.app.state.settings,
+            import_id=record_id,
+        )
+    assert retried.status == "failed"
+    assert retried.error == "attachment_source_changed"
+    assert retried.can_retry is False
+    assert retried.attempt_count == 2
     assert SourceChangedImap.fetched is False
 
 
@@ -740,12 +755,15 @@ def test_attachment_retry_refuses_a_different_attachment_with_the_same_message_u
         session.commit()
         record_id = record.id
 
-    retried = client.post(f"/v1/mailbox/imports/{record_id}/retry")
-    assert retried.status_code == 200, retried.text
-    payload = retried.json()
-    assert payload["status"] == "failed"
-    assert payload["error"] == "attachment_message_unavailable"
-    assert payload["can_retry"] is False
+    with client.app.state.database.session_factory() as session:
+        retried = mailbox_import_service.retry_mailbox_attachment(
+            session,
+            settings=client.app.state.settings,
+            import_id=record_id,
+        )
+    assert retried.status == "failed"
+    assert retried.error == "attachment_message_unavailable"
+    assert retried.can_retry is False
     assert HashMismatchImap.fetched is True
 
     with client.app.state.database.session_factory() as session:

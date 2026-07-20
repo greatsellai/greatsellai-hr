@@ -13,7 +13,7 @@ from email.message import Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -36,7 +36,6 @@ from app.schemas import (
     MailboxConfigUpdate,
     MailboxImportHistoryResponse,
     MailboxImportResponse,
-    MailboxSyncAllResponse,
     MailboxSyncResponse,
 )
 from app.tenant_scope import (
@@ -264,6 +263,17 @@ def _mailbox_source_fingerprint(config: MailboxConfig) -> str:
         )
     )
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def mailbox_source_fingerprint(config: MailboxConfig) -> str:
+    """Expose the safe source identity to the durable job queue.
+
+    The digest deliberately excludes the encrypted password.  A queued sync
+    therefore refuses to run if its host, account, port, or folder changed
+    after it was accepted, without storing a reusable credential in the job.
+    """
+
+    return _mailbox_source_fingerprint(config)
 
 
 def _config_response(config: MailboxConfig | None) -> MailboxConfigResponse:
@@ -676,6 +686,29 @@ def _can_retry(item: EmailAttachmentImport) -> bool:
     return False
 
 
+def get_retryable_mailbox_attachment(
+    session: Session,
+    *,
+    import_id: str,
+) -> EmailAttachmentImport:
+    """Return an attachment that may be queued for an exact retry.
+
+    This intentionally does not claim the attachment or touch IMAP.  The
+    durable worker owns the later claim so an accepted HTTP request remains a
+    cheap database operation and queued work stays distinguishable from work
+    that is actually running.
+    """
+
+    record = session.scalar(
+        select(EmailAttachmentImport).where(EmailAttachmentImport.id == import_id)
+    )
+    if record is None:
+        raise MailboxImportError("mailbox_import_not_found")
+    if not _can_retry(record):
+        raise MailboxImportError("mailbox_import_not_retryable")
+    return record
+
+
 def _import_response(item: EmailAttachmentImport) -> MailboxImportResponse:
     return MailboxImportResponse(
         import_id=item.id,
@@ -988,7 +1021,12 @@ def _complete_retry(
     return _import_response(record)
 
 
-def _claim_retry(session: Session, *, import_id: str) -> EmailAttachmentImport:
+def _claim_retry(
+    session: Session,
+    *,
+    import_id: str,
+    lease_seconds: int = _RETRY_LEASE_SECONDS,
+) -> EmailAttachmentImport:
     """Atomically claim one failed attachment without holding a DB lock over IMAP."""
 
     expected_organization_id = organization_context_id(session)
@@ -1039,7 +1077,7 @@ def _claim_retry(session: Session, *, import_id: str) -> EmailAttachmentImport:
             status="retrying",
             attempt_count=EmailAttachmentImport.attempt_count + 1,
             last_attempted_at=now,
-            retry_lease_expires_at=now + timedelta(seconds=_RETRY_LEASE_SECONDS),
+            retry_lease_expires_at=now + timedelta(seconds=lease_seconds),
             retry_claim_token=claim_token,
             updated_at=now,
         )
@@ -1096,15 +1134,51 @@ def _claim_retry(session: Session, *, import_id: str) -> EmailAttachmentImport:
     return claimed_record
 
 
+def _renew_retry_claim(
+    session: Session,
+    *,
+    import_id: str,
+    claim_token: str,
+    lease_seconds: int,
+) -> None:
+    """Extend an owned attachment claim before a potentially slow operation."""
+
+    now = _utcnow()
+    renewed = session.execute(
+        update(EmailAttachmentImport)
+        .execution_options(synchronize_session=False)
+        .where(
+            EmailAttachmentImport.id == import_id,
+            EmailAttachmentImport.organization_id == organization_context_id(session),
+            EmailAttachmentImport.status == "retrying",
+            EmailAttachmentImport.retry_claim_token == claim_token,
+        )
+        .values(
+            retry_lease_expires_at=now + timedelta(seconds=lease_seconds),
+            updated_at=now,
+        )
+    )
+    if renewed.rowcount != 1:
+        session.rollback()
+        raise _RetryClaimLost("mailbox_import_retry_superseded")
+    session.commit()
+
+
 def retry_mailbox_attachment(
     session: Session,
     *,
     settings: AppSettings,
     import_id: str,
+    retry_lease_seconds: int = _RETRY_LEASE_SECONDS,
+    heartbeat: Callable[[], None] | None = None,
 ) -> MailboxImportResponse:
     """Retry precisely one failed attachment without scanning the mailbox."""
 
-    record = _claim_retry(session, import_id=import_id)
+    record = _claim_retry(
+        session,
+        import_id=import_id,
+        lease_seconds=retry_lease_seconds,
+    )
     claim_token = record.retry_claim_token
     if not claim_token:
         raise MailboxImportError("mailbox_import_retry_in_progress")
@@ -1138,7 +1212,20 @@ def retry_mailbox_attachment(
             resume_id=resume_id,
         )
 
+    def pulse() -> None:
+        """Keep both the durable task and exact attachment claim alive."""
+
+        if heartbeat is not None:
+            heartbeat()
+        _renew_retry_claim(
+            session,
+            import_id=record.id,
+            claim_token=claim_token,
+            lease_seconds=retry_lease_seconds,
+        )
+
     try:
+        pulse()
         config = session.scalar(
             select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id)
         )
@@ -1158,6 +1245,7 @@ def retry_mailbox_attachment(
         # retried even if the sender later deletes the source message.  Its
         # hash is checked by the retention service before it is returned.
         filename = record.attachment_filename
+        pulse()
         content = read_retained_failed_attachment(
             session,
             settings=settings,
@@ -1186,7 +1274,9 @@ def retry_mailbox_attachment(
                     error="mailbox_credentials_unavailable",
                     resume_id=None,
                 )
+            pulse()
             client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
+            pulse()
             login_status, _ = client.login(config.email_address, password)
             if login_status != "OK":
                 return complete(
@@ -1194,6 +1284,7 @@ def retry_mailbox_attachment(
                     error="mailbox_connection_failed",
                     resume_id=None,
                 )
+            pulse()
             current_uidvalidity, _ = _read_mailbox_status(client, mailbox=config.mailbox)
             if current_uidvalidity != record.source_uidvalidity:
                 return complete(
@@ -1201,6 +1292,7 @@ def retry_mailbox_attachment(
                     error="attachment_source_changed",
                     resume_id=None,
                 )
+            pulse()
             select_status, _ = client.select(config.mailbox, readonly=True)
             if select_status != "OK":
                 return complete(
@@ -1208,6 +1300,7 @@ def retry_mailbox_attachment(
                     error="mailbox_select_failed",
                     resume_id=None,
                 )
+            pulse()
             fetch_status, fetched = client.uid(
                 "fetch", record.message_uid.encode("ascii"), "(RFC822)"
             )
@@ -1230,6 +1323,7 @@ def retry_mailbox_attachment(
                 )
             filename, content = attachment
         try:
+            pulse()
             resume = _ingest_attachment(
                 session,
                 config=config,
@@ -1419,6 +1513,34 @@ def _release_mailbox_sync(
     session.expire_all()
 
 
+def _renew_mailbox_sync(
+    session: Session,
+    *,
+    config_id: str,
+    claim_token: str,
+) -> None:
+    """Extend the per-channel IMAP lease while a worker is still healthy."""
+
+    now = _utcnow()
+    renewed = session.execute(
+        update(MailboxConfig)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxConfig.id == config_id,
+            MailboxConfig.organization_id == organization_context_id(session),
+            MailboxConfig.enabled.is_(True),
+            MailboxConfig.archived_at.is_(None),
+            MailboxConfig.sync_lease_token == claim_token,
+        )
+        .values(sync_lease_expires_at=now + timedelta(seconds=_SYNC_LEASE_SECONDS))
+    )
+    if renewed.rowcount != 1:
+        session.rollback()
+        raise MailboxImportError("mailbox_sync_claim_failed")
+    session.commit()
+    session.expire_all()
+
+
 def _sync_config_for_run(
     session: Session,
     *,
@@ -1441,10 +1563,17 @@ def sync_mailbox(
     *,
     settings: AppSettings,
     config_id: str | None = None,
+    expected_source_fingerprint: str | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> MailboxSyncResponse:
     config = _sync_config_for_run(session, config_id=config_id)
     if config is None:
         return MailboxSyncResponse(configured=False)
+    if (
+        expected_source_fingerprint is not None
+        and _mailbox_source_fingerprint(config) != expected_source_fingerprint
+    ):
+        raise MailboxImportError("mailbox_task_source_changed")
     organization_id = config.organization_id
     if not organization_id:
         # A configuration without a workspace is never allowed to read mail
@@ -1475,14 +1604,40 @@ def sync_mailbox(
         )
         return _sync_response(config)
 
+    if (
+        expected_source_fingerprint is not None
+        and _mailbox_source_fingerprint(config) != expected_source_fingerprint
+    ):
+        _release_mailbox_sync(
+            session,
+            config_id=mailbox_config_id,
+            claim_token=claim_token,
+        )
+        raise MailboxImportError("mailbox_task_source_changed")
+
+    def pulse() -> None:
+        """Keep the durable task and channel source lease current."""
+
+        if heartbeat is not None:
+            heartbeat()
+        _renew_mailbox_sync(
+            session,
+            config_id=mailbox_config_id,
+            claim_token=claim_token,
+        )
+
     imported = duplicates = skipped = failed = 0
     client: imaplib.IMAP4_SSL | None = None
     try:
+        pulse()
         password = _decrypt_password(settings, config.encrypted_password)
+        pulse()
         client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
+        pulse()
         login_status, _ = client.login(config.email_address, password)
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
+        pulse()
         imap_uidvalidity, current_uidnext = _read_mailbox_status(
             client,
             mailbox=config.mailbox,
@@ -1507,9 +1662,11 @@ def sync_mailbox(
             config.last_sync_error = "mailbox_source_epoch_changed"
             session.commit()
             raise MailboxImportError("mailbox_source_epoch_changed")
+        pulse()
         status, _ = client.select(config.mailbox, readonly=True)
         if status != "OK":
             raise MailboxImportError("mailbox_select_failed")
+        pulse()
         status, data = client.uid("search", None, f"UID {config.import_start_uid}:*")
         if status != "OK":
             raise MailboxImportError("mailbox_search_failed")
@@ -1533,6 +1690,7 @@ def sync_mailbox(
         uids = list(reversed(selected_uids))
         for raw_uid in uids:
             uid = raw_uid.decode("ascii", errors="ignore")
+            pulse()
             status, fetched = client.uid("fetch", raw_uid, "(RFC822)")
             if status != "OK" or not fetched or not isinstance(fetched[0], tuple):
                 failed += 1
@@ -1609,6 +1767,7 @@ def sync_mailbox(
                     skipped += 1
                     continue
                 try:
+                    pulse()
                     resume = _ingest_attachment(
                         session,
                         config=config,
@@ -1736,101 +1895,14 @@ def sync_mailbox(
             session.rollback()
 
 
-def sync_all_mailboxes(
-    session: Session,
-    *,
-    settings: AppSettings,
-) -> MailboxSyncAllResponse:
-    """Synchronize each active source independently and retain per-source errors."""
-
-    config_ids = list(
-        session.scalars(
-            select(MailboxConfig.id)
-            .where(MailboxConfig.archived_at.is_(None), MailboxConfig.enabled.is_(True))
-            .order_by(MailboxConfig.created_at, MailboxConfig.id)
-        ).all()
-    )
-    results: list[MailboxSyncResponse] = []
-    for config_id in config_ids:
-        try:
-            results.append(sync_mailbox(session, settings=settings, config_id=config_id))
-        except MailboxImportError as exc:
-            session.rollback()
-            config = session.scalar(
-                select(MailboxConfig).where(MailboxConfig.id == config_id)
-            )
-            if config is not None:
-                if config.last_sync_error != str(exc):
-                    config.last_sync_error = str(exc)
-                    session.commit()
-                results.append(_sync_response(config))
-    return MailboxSyncAllResponse(
-        items=results,
-        imported_count=sum(item.imported_count for item in results),
-        duplicate_count=sum(item.duplicate_count for item in results),
-        skipped_count=sum(item.skipped_count for item in results),
-        failed_count=sum(item.failed_count for item in results),
-    )
-
-
 def sync_due_mailboxes(*, database, settings: AppSettings) -> bool:
-    now = _utcnow()
-    cutoff = now - timedelta(seconds=settings.mailbox_sync_interval_seconds)
-    with database.session_factory() as session:
-        claimed = session.execute(
-            select(MailboxConfig.id, MailboxConfig.organization_id)
-            .where(
-                MailboxConfig.enabled.is_(True),
-                MailboxConfig.archived_at.is_(None),
-                or_(
-                    MailboxConfig.sync_lease_expires_at.is_(None),
-                    MailboxConfig.sync_lease_expires_at <= now,
-                ),
-            )
-            .where(
-                (MailboxConfig.import_start_uid.is_(None))
-                | (MailboxConfig.imap_uidvalidity.is_(None))
-                | (MailboxConfig.last_sync_started_at <= cutoff)
-                | and_(
-                    MailboxConfig.last_sync_started_at.is_(None),
-                    or_(
-                        MailboxConfig.last_synced_at.is_(None),
-                        MailboxConfig.last_synced_at <= cutoff,
-                    ),
-                )
-            )
-            .order_by(
-                func.coalesce(
-                    MailboxConfig.last_sync_started_at,
-                    MailboxConfig.last_synced_at,
-                ),
-                MailboxConfig.id,
-            )
-            # One scheduler serves all tenants, so discovery is global.  The
-            # actual IMAP connection and every following write are scoped
-            # immediately below before the config is re-read.
-            .execution_options(skip_organization_scope=True)
-        ).first()
-        if claimed is None:
-            return False
-        config_id, organization_id = claimed
-        if not organization_id:
-            session.execute(
-                MailboxConfig.__table__.update()
-                .where(MailboxConfig.id == config_id)
-                .values(
-                    enabled=False,
-                    last_sync_error="mailbox_workspace_missing",
-                    sync_lease_token=None,
-                    sync_lease_expires_at=None,
-                )
-                .execution_options(skip_organization_scope=True)
-            )
-            session.commit()
-            return True
-        try:
-            with _organization_session(session, organization_id):
-                sync_mailbox(session, settings=settings, config_id=config_id)
-        except MailboxImportError:
-            return True
-        return True
+    """Compatibility wrapper that only queues a due sync.
+
+    The import is intentionally local to avoid a module-level cycle: the
+    durable job service invokes ``sync_mailbox`` while this legacy name is
+    still imported by a few integrations.
+    """
+
+    from app.services.mailbox_background_job_service import enqueue_due_mailbox_sync_jobs
+
+    return enqueue_due_mailbox_sync_jobs(database=database, settings=settings)

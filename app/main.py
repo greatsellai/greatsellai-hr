@@ -52,6 +52,9 @@ from app.schemas import (
     MailboxConfigPatch,
     MailboxConfigResponse,
     MailboxConfigUpdate,
+    MailboxBackgroundJobBatchResponse,
+    MailboxBackgroundJobHistoryResponse,
+    MailboxBackgroundJobResponse,
     MailboxImportResponse,
     MailboxImportHistoryResponse,
     MailboxRetentionCleanupRunHistoryResponse,
@@ -59,8 +62,6 @@ from app.schemas import (
     MailboxRetentionPolicyUpdate,
     MailboxRetentionPreviewResponse,
     MailboxRetentionSummaryResponse,
-    MailboxSyncAllResponse,
-    MailboxSyncResponse,
     CandidateCreate,
     CandidateCreated,
     CandidateSearchRequest,
@@ -248,11 +249,15 @@ from app.services.mailbox_import_service import (
     get_mailbox_config_by_id,
     list_mailbox_configs,
     list_mailbox_imports,
-    retry_mailbox_attachment,
     save_mailbox_config,
-    sync_all_mailboxes,
-    sync_mailbox,
     update_mailbox_config,
+)
+from app.services.mailbox_background_job_service import (
+    enqueue_all_mailbox_sync_jobs,
+    enqueue_mailbox_attachment_retry_job,
+    enqueue_mailbox_sync_job,
+    get_mailbox_background_job,
+    list_mailbox_background_jobs,
 )
 from app.services.mailbox_retention_service import (
     MailboxRetentionError,
@@ -352,7 +357,11 @@ def _mailbox_error_http_exception(exc: MailboxImportError) -> HTTPException:
     """Map stable mailbox service errors without exposing IMAP details."""
 
     code = str(exc)
-    if code in {"mailbox_config_not_found", "mailbox_import_not_found"}:
+    if code in {
+        "mailbox_background_job_not_found",
+        "mailbox_config_not_found",
+        "mailbox_import_not_found",
+    }:
         response_status = status.HTTP_404_NOT_FOUND
     elif code in {
         "mailbox_legacy_endpoint_ambiguous",
@@ -1131,14 +1140,15 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     # the literal word "sync" as a mailbox identifier.
     @app.post(
         "/v1/mailboxes/sync",
-        response_model=MailboxSyncAllResponse,
+        response_model=MailboxBackgroundJobBatchResponse,
+        status_code=status.HTTP_202_ACCEPTED,
         dependencies=[Depends(require_mailbox_feature)],
     )
     def post_all_mailbox_syncs(
         session: Session = Depends(get_session),
-    ) -> MailboxSyncAllResponse:
+    ) -> MailboxBackgroundJobBatchResponse:
         try:
-            return sync_all_mailboxes(session, settings=settings)
+            return enqueue_all_mailbox_sync_jobs(session, settings=settings)
         except MailboxImportError as exc:
             session.rollback()
             raise _mailbox_error_http_exception(exc) from exc
@@ -1180,15 +1190,20 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
 
     @app.post(
         "/v1/mailboxes/{mailbox_id}/sync",
-        response_model=MailboxSyncResponse,
+        response_model=MailboxBackgroundJobResponse,
+        status_code=status.HTTP_202_ACCEPTED,
         dependencies=[Depends(require_mailbox_feature)],
     )
     def post_mailbox_sync_by_id(
         mailbox_id: str,
         session: Session = Depends(get_session),
-    ) -> MailboxSyncResponse:
+    ) -> MailboxBackgroundJobResponse:
         try:
-            return sync_mailbox(session, settings=settings, config_id=mailbox_id)
+            return enqueue_mailbox_sync_job(
+                session,
+                settings=settings,
+                mailbox_config_id=mailbox_id,
+            )
         except MailboxImportError as exc:
             session.rollback()
             raise _mailbox_error_http_exception(exc) from exc
@@ -1419,41 +1434,84 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
 
     @app.post(
         "/v1/mailbox/sync",
-        response_model=MailboxSyncResponse,
+        response_model=MailboxBackgroundJobResponse,
+        status_code=status.HTTP_202_ACCEPTED,
         dependencies=[Depends(require_mailbox_feature)],
     )
     def post_mailbox_sync(
         session: Session = Depends(get_session),
-    ) -> MailboxSyncResponse:
+    ) -> MailboxBackgroundJobResponse:
         try:
-            result = sync_mailbox(session, settings=settings)
+            config = get_mailbox_config(session)
         except MailboxImportError as exc:
             session.rollback()
             raise _mailbox_error_http_exception(exc) from exc
-        if not result.configured:
+        if not config.configured or not config.mailbox_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="mailbox_not_configured",
             )
-        return result
+        try:
+            return enqueue_mailbox_sync_job(
+                session,
+                settings=settings,
+                mailbox_config_id=config.mailbox_id,
+            )
+        except MailboxImportError as exc:
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
 
     @app.post(
         "/v1/mailbox/imports/{import_id}/retry",
-        response_model=MailboxImportResponse,
+        response_model=MailboxBackgroundJobResponse,
+        status_code=status.HTTP_202_ACCEPTED,
         dependencies=[Depends(require_mailbox_feature)],
     )
     def post_mailbox_attachment_retry(
         import_id: str,
         session: Session = Depends(get_session),
-    ) -> MailboxImportResponse:
+    ) -> MailboxBackgroundJobResponse:
         try:
-            return retry_mailbox_attachment(
+            return enqueue_mailbox_attachment_retry_job(
                 session,
                 settings=settings,
                 import_id=import_id,
             )
         except MailboxImportError as exc:
             session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/mailbox/tasks/{job_id}",
+        response_model=MailboxBackgroundJobResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_mailbox_task(
+        job_id: str,
+        session: Session = Depends(get_session),
+    ) -> MailboxBackgroundJobResponse:
+        try:
+            return get_mailbox_background_job(session, job_id=job_id)
+        except MailboxImportError as exc:
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/mailbox/tasks",
+        response_model=MailboxBackgroundJobHistoryResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_mailbox_tasks(
+        mailbox_id: str | None = Query(default=None, min_length=1, max_length=64),
+        limit: int = Query(default=20, ge=1, le=100),
+        session: Session = Depends(get_session),
+    ) -> MailboxBackgroundJobHistoryResponse:
+        try:
+            return list_mailbox_background_jobs(
+                session,
+                limit=limit,
+                mailbox_config_id=mailbox_id,
+            )
+        except MailboxImportError as exc:
             raise _mailbox_error_http_exception(exc) from exc
 
     @app.get(

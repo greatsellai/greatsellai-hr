@@ -41,6 +41,8 @@ import type {
   JobMatch,
   JobRequirements,
   JobVersion,
+  MailboxBackgroundJob,
+  MailboxBackgroundJobHistory,
   MailboxConfig,
   MailboxImportHistory,
   MailboxImportHistoryItem,
@@ -479,6 +481,10 @@ const mailboxImportErrorMessages: Record<string, string> = {
   mailbox_import_not_retryable: "这份附件当前不能重新入库。",
   mailbox_import_retry_in_progress: "这份附件正在重新入库，请稍后刷新。",
   mailbox_import_retry_superseded: "这份附件已由更新的重试请求接管，请刷新后查看结果。",
+  mailbox_background_job_failed: "后台任务暂时失败，系统会按队列策略再次尝试。",
+  mailbox_background_job_lease_expired: "后台任务意外中断，系统正在重新安排处理。",
+  mailbox_task_source_changed: "收件通道配置已变化，旧的同步任务已停止。",
+  mailbox_config_archived: "该收件通道已归档，不能再同步新邮件。",
   mailbox_not_enabled: "该收件邮箱已暂停，请启用后重试。",
   mailbox_credentials_unavailable: "邮箱授权码无法读取，请重新保存后再同步。",
   mailbox_connection_failed: "无法连接邮箱，请检查 IMAP 地址、端口和授权码。",
@@ -512,6 +518,19 @@ function mailboxImportStatusLabel(status: string, canRetry = false): string {
     default:
       return "处理中";
   }
+}
+
+function mailboxBackgroundJobStatusLabel(job: MailboxBackgroundJob): string {
+  if (job.status === "queued") return job.job_kind === "sync" ? "等待后台同步" : "等待后台重试";
+  if (job.status === "running") return job.job_kind === "sync" ? "正在后台同步" : "正在后台重试";
+  if (job.status === "completed") return "已完成";
+  return "处理失败";
+}
+
+function mailboxBackgroundJobStatusClass(job: MailboxBackgroundJob): string {
+  if (job.status === "completed") return "is-success";
+  if (job.status === "failed") return "is-error";
+  return "is-progress";
 }
 
 function mailboxRetentionPolicyLabel(policy: MailboxRetentionPolicy): string {
@@ -4956,24 +4975,50 @@ function MailboxPage({
   const [isCreating, setIsCreating] = useState(true);
   const [retention, setRetention] = useState<MailboxRetentionOverview | null>(null);
   const [retentionRuns, setRetentionRuns] = useState<MailboxRetentionRuns | null>(null);
+  const [mailboxJobs, setMailboxJobs] = useState<MailboxBackgroundJobHistory | null>(null);
   const [loading, setLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [syncingMailboxId, setSyncingMailboxId] = useState<string | null>(null);
-  const [syncingAll, setSyncingAll] = useState(false);
+  const [enqueuingMailboxId, setEnqueuingMailboxId] = useState<string | null>(null);
+  const [enqueuingAll, setEnqueuingAll] = useState(false);
   const [archiving, setArchiving] = useState(false);
-  const [retryingImportId, setRetryingImportId] = useState<string | null>(null);
+  const [enqueuingRetryImportId, setEnqueuingRetryImportId] = useState<string | null>(null);
   const [retentionSaving, setRetentionSaving] = useState(false);
   const [previewingRetention, setPreviewingRetention] = useState(false);
   const [cleaningRetention, setCleaningRetention] = useState(false);
   const [retentionPreview, setRetentionPreview] = useState<MailboxRetentionPreview | null>(null);
   const [retentionPolicy, setRetentionPolicy] = useState<MailboxRetentionPolicy>("standard");
   const retentionRequestRef = useRef(0);
+  const mailboxJobPollInFlightRef = useRef(false);
+  const manualMailboxJobIdsRef = useRef(new Set<string>());
+  const handledMailboxJobIdsRef = useRef(new Set<string>());
 
   const selectedConfig = selectedMailboxId
     ? mailboxes.find((item) => item.mailbox_id === selectedMailboxId) ?? null
     : null;
   const selectedMailboxArchived = Boolean(selectedConfig?.archived_at);
+  const activeMailboxJobs = (mailboxJobs?.items ?? []).filter(
+    (job) => job.status === "queued" || job.status === "running",
+  );
+  const activeSyncMailboxIds = new Set(
+    activeMailboxJobs
+      .filter((job) => job.job_kind === "sync")
+      .map((job) => job.mailbox_id),
+  );
+  const activeRetryImportIds = new Set(
+    activeMailboxJobs
+      .filter((job) => job.job_kind === "attachment_retry" && job.import_id)
+      .flatMap((job) => job.import_id ? [job.import_id] : []),
+  );
+  const selectedSyncJob = selectedMailboxId
+    ? activeMailboxJobs.find(
+      (job) => job.mailbox_id === selectedMailboxId && job.job_kind === "sync",
+    ) ?? null
+    : null;
+  const selectedSyncInProgress = Boolean(
+    selectedMailboxId
+    && (activeSyncMailboxIds.has(selectedMailboxId) || enqueuingMailboxId === selectedMailboxId),
+  );
   const canManageRetention = role === "admin";
   const retentionHasActiveRun = Boolean(retentionRuns?.items.some(
     (run) => run.status === "queued" || run.status === "running",
@@ -5050,16 +5095,76 @@ function MailboxPage({
     }
   }, [historyFilterMailboxId, notify]);
 
+  const upsertMailboxJobs = useCallback((jobs: MailboxBackgroundJob[]) => {
+    setMailboxJobs((current) => {
+      const byId = new Map((current?.items ?? []).map((job) => [job.job_id, job]));
+      for (const job of jobs) byId.set(job.job_id, job);
+      const items = [...byId.values()].sort((left, right) => (
+        right.requested_at.localeCompare(left.requested_at)
+      ));
+      return {
+        items,
+        total: Math.max(current?.total ?? 0, items.length),
+      };
+    });
+  }, []);
+
+  const refreshMailboxJobs = useCallback(async () => {
+    if (mailboxJobPollInFlightRef.current) return;
+    mailboxJobPollInFlightRef.current = true;
+    try {
+      const next = await api.listMailboxBackgroundJobs();
+      setMailboxJobs(next);
+
+      const terminalManualJobs = next.items.filter((job) => (
+        manualMailboxJobIdsRef.current.has(job.job_id)
+        && !handledMailboxJobIdsRef.current.has(job.job_id)
+        && (job.status === "completed" || job.status === "failed")
+      ));
+      if (!terminalManualJobs.length) return;
+
+      for (const job of terminalManualJobs) {
+        handledMailboxJobIdsRef.current.add(job.job_id);
+        const mailboxName = mailboxes.find((item) => item.mailbox_id === job.mailbox_id)?.display_name
+          ?? "收件通道";
+        if (job.status === "failed") {
+          notify("error", mailboxImportErrorLabel(job.last_error));
+          continue;
+        }
+        if (job.job_kind === "attachment_retry") {
+          notify("success", "附件已在后台重新入库。");
+          continue;
+        }
+        const summary = `“${mailboxName}”后台同步完成：入库 ${job.imported_count} 份，重复 ${job.duplicate_count} 份，跳过 ${job.skipped_count} 份。`;
+        notify(
+          job.failed_count ? "error" : "success",
+          job.failed_count ? `${summary} ${job.failed_count} 份处理失败。` : summary,
+        );
+      }
+
+      if (terminalManualJobs.some((job) => job.imported_count > 0)) onImported();
+      void api.listMailboxConfigs(true).then((response) => setMailboxes(response.items)).catch(() => undefined);
+      void loadHistory(historyFilterMailboxId);
+      if (selectedMailboxId) {
+        void loadRetentionActivity(selectedMailboxId).catch(() => undefined);
+      }
+    } finally {
+      mailboxJobPollInFlightRef.current = false;
+    }
+  }, [historyFilterMailboxId, loadHistory, loadRetentionActivity, mailboxes, notify, onImported, selectedMailboxId]);
+
   const loadInitialData = useCallback(async () => {
     setLoading(true);
     setHistoryLoading(true);
     try {
-      const [configResponse, historyResponse] = await Promise.all([
+      const [configResponse, historyResponse, jobsResponse] = await Promise.all([
         api.listMailboxConfigs(true),
         api.listMailboxImports(),
+        api.listMailboxBackgroundJobs(),
       ]);
       applyMailboxList(configResponse.items);
       setHistory(historyResponse);
+      setMailboxJobs(jobsResponse);
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
@@ -5106,6 +5211,15 @@ function MailboxPage({
     selectedConfig?.configured,
     selectedConfig?.mailbox_id,
   ]);
+
+  useEffect(() => {
+    if (!activeMailboxJobs.length) return undefined;
+    void refreshMailboxJobs();
+    const timer = window.setInterval(() => {
+      void refreshMailboxJobs();
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [activeMailboxJobs.length, refreshMailboxJobs]);
 
   const saveMailbox = async () => {
     if (!draft.displayName.trim()) {
@@ -5158,63 +5272,43 @@ function MailboxPage({
     }
   };
 
-  const refreshHistoryForCurrentFilter = async () => {
-    await loadHistory(historyFilterMailboxId);
-  };
-
   const syncMailbox = async (config: MailboxConfig) => {
-    if (!config.enabled || config.archived_at || syncingMailboxId || syncingAll) return;
-    setSyncingMailboxId(config.mailbox_id);
+    if (
+      !config.enabled
+      || config.archived_at
+      || enqueuingMailboxId === config.mailbox_id
+      || activeSyncMailboxIds.has(config.mailbox_id)
+    ) return;
+    setEnqueuingMailboxId(config.mailbox_id);
     try {
-      const result = await api.syncMailbox(config.mailbox_id);
-      setMailboxes((current) => current.map((item) => (
-        item.mailbox_id === config.mailbox_id
-          ? { ...item, last_synced_at: result.last_synced_at, last_sync_error: result.last_sync_error }
-          : item
-      )));
-      const message = `“${result.display_name || config.display_name}”本次入库 ${result.imported_count} 份，重复 ${result.duplicate_count} 份，跳过 ${result.skipped_count} 份。`;
-      notify(result.failed_count ? "error" : "success", result.failed_count ? `${message} ${result.failed_count} 份处理失败。` : message);
-      if (result.imported_count) onImported();
-      await refreshHistoryForCurrentFilter();
-      if (selectedMailboxId === config.mailbox_id) {
-        void loadRetentionActivity(config.mailbox_id).catch(() => undefined);
-      }
+      const job = await api.syncMailbox(config.mailbox_id);
+      manualMailboxJobIdsRef.current.add(job.job_id);
+      upsertMailboxJobs([job]);
+      notify("success", job.deduplicated ? "该收件通道已有后台同步任务。" : "已加入后台同步队列。");
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
-      setSyncingMailboxId(null);
+      setEnqueuingMailboxId(null);
     }
   };
 
   const syncAllMailboxes = async () => {
-    if (syncingMailboxId || syncingAll || !mailboxes.some((item) => item.enabled && !item.archived_at)) return;
-    setSyncingAll(true);
+    if (enqueuingAll || !mailboxes.some((item) => item.enabled && !item.archived_at)) return;
+    setEnqueuingAll(true);
     try {
       const result = await api.syncAllMailboxes();
-      const summaries = new Map(result.items.flatMap((item) => item.mailbox_id ? [[item.mailbox_id, item] as const] : []));
-      setMailboxes((current) => current.map((item) => {
-        const summary = summaries.get(item.mailbox_id);
-        return summary
-          ? { ...item, last_synced_at: summary.last_synced_at, last_sync_error: summary.last_sync_error }
-          : item;
-      }));
-      const message = `已同步 ${result.items.length} 个收件通道，入库 ${result.imported_count} 份，重复 ${result.duplicate_count} 份。`;
-      const failedChannels = result.items.filter((item) => item.last_sync_error).length;
+      for (const job of result.items) manualMailboxJobIdsRef.current.add(job.job_id);
+      upsertMailboxJobs(result.items);
       notify(
-        result.failed_count || failedChannels ? "error" : "success",
-        result.failed_count || failedChannels
-          ? `${message}${result.failed_count ? ` ${result.failed_count} 份附件处理失败。` : ""}${failedChannels ? ` ${failedChannels} 个通道未完成同步。` : ""}`
-          : message,
+        "success",
+        result.queued_count
+          ? `${result.queued_count} 个收件通道已加入后台同步队列。`
+          : "所有可用收件通道都已有后台同步任务。",
       );
-      if (result.imported_count) onImported();
-      await refreshHistoryForCurrentFilter();
-      if (selectedConfig?.configured) {
-        void loadRetentionActivity(selectedConfig.mailbox_id).catch(() => undefined);
-      }
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
-      setSyncingAll(false);
+      setEnqueuingAll(false);
     }
   };
 
@@ -5237,24 +5331,21 @@ function MailboxPage({
   };
 
   const retryImport = async (item: MailboxImportHistoryItem) => {
-    if (!item.can_retry || retryingImportId) return;
-    setRetryingImportId(item.import_id);
+    if (
+      !item.can_retry
+      || enqueuingRetryImportId === item.import_id
+      || activeRetryImportIds.has(item.import_id)
+    ) return;
+    setEnqueuingRetryImportId(item.import_id);
     try {
-      const result = await api.retryMailboxImport(item.import_id);
-      if (result.status === "imported") {
-        notify("success", `已重新入库：${result.attachment_filename}。`);
-        onImported();
-      } else {
-        notify("error", mailboxImportErrorLabel(result.error));
-      }
-      await refreshHistoryForCurrentFilter();
-      if (item.mailbox_config_id === selectedMailboxId) {
-        void loadRetentionActivity(item.mailbox_config_id).catch(() => undefined);
-      }
+      const job = await api.retryMailboxImport(item.import_id);
+      manualMailboxJobIdsRef.current.add(job.job_id);
+      upsertMailboxJobs([job]);
+      notify("success", job.deduplicated ? "该附件已有后台重试任务。" : "已加入后台重新入库队列。");
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
-      setRetryingImportId(null);
+      setEnqueuingRetryImportId(null);
     }
   };
 
@@ -5344,16 +5435,16 @@ function MailboxPage({
           <p>每个收件通道独立保存绑定位置和同步状态，只接收绑定之后到达的附件。</p>
         </div>
         <div className="mailbox-heading-actions">
-          <button className="button" disabled={loading || saving || syncingAll} onClick={startCreatingMailbox} type="button">
+          <button className="button" disabled={loading || saving || enqueuingAll} onClick={startCreatingMailbox} type="button">
             <Icon name="plus" size={16} />新建收件通道
           </button>
           <button
             className="button button-primary"
-            disabled={loading || saving || syncingAll || Boolean(syncingMailboxId) || !mailboxes.some((item) => item.enabled && !item.archived_at)}
+            disabled={loading || saving || enqueuingAll || !mailboxes.some((item) => item.enabled && !item.archived_at)}
             onClick={() => void syncAllMailboxes()}
             type="button"
           >
-            {syncingAll ? <><i className="spinner" />正在同步全部</> : <><Icon name="refresh" size={16} />同步全部</>}
+            {enqueuingAll ? <><i className="spinner" />正在加入队列</> : activeSyncMailboxIds.size ? <><i className="spinner" />后台同步中</> : <><Icon name="refresh" size={16} />同步全部</>}
           </button>
         </div>
       </header>
@@ -5411,23 +5502,23 @@ function MailboxPage({
                 <div className="form-grid">
                   <div className="field-stack span-full">
                     <label className="field-label" htmlFor="mailbox-display-name">通道名称</label>
-                    <input className="field" disabled={selectedMailboxArchived} id="mailbox-display-name" maxLength={32} onChange={(event) => updateDraft("displayName", event.target.value)} placeholder="例如：招聘邮箱" value={draft.displayName} />
+                    <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="mailbox-display-name" maxLength={32} onChange={(event) => updateDraft("displayName", event.target.value)} placeholder="例如：招聘邮箱" value={draft.displayName} />
                   </div>
                   <div className="field-stack">
                     <label className="field-label" htmlFor="imap-host">IMAP 地址</label>
-                    <input className="field" disabled={selectedMailboxArchived} id="imap-host" onChange={(event) => updateDraft("imapHost", event.target.value)} value={draft.imapHost} />
+                    <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-host" onChange={(event) => updateDraft("imapHost", event.target.value)} value={draft.imapHost} />
                   </div>
                   <div className="field-stack">
                     <label className="field-label" htmlFor="imap-port">端口</label>
-                    <input className="field" disabled={selectedMailboxArchived} id="imap-port" inputMode="numeric" onChange={(event) => updateDraft("imapPort", event.target.value)} value={draft.imapPort} />
+                    <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-port" inputMode="numeric" onChange={(event) => updateDraft("imapPort", event.target.value)} value={draft.imapPort} />
                   </div>
                   <div className="field-stack span-full">
                     <label className="field-label" htmlFor="imap-address">接收简历的邮箱</label>
-                    <input autoComplete="email" className="field" disabled={selectedMailboxArchived} id="imap-address" onChange={(event) => updateDraft("emailAddress", event.target.value)} type="email" value={draft.emailAddress} />
+                    <input autoComplete="email" className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-address" onChange={(event) => updateDraft("emailAddress", event.target.value)} type="email" value={draft.emailAddress} />
                   </div>
                   <div className="field-stack">
                     <label className="field-label" htmlFor="imap-folder">邮箱文件夹</label>
-                    <input className="field" disabled={selectedMailboxArchived} id="imap-folder" onChange={(event) => updateDraft("mailbox", event.target.value)} value={draft.mailbox} />
+                    <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-folder" onChange={(event) => updateDraft("mailbox", event.target.value)} value={draft.mailbox} />
                   </div>
                   <div className="field-stack">
                     <label className="field-label" htmlFor="imap-password">邮箱授权码</label>
@@ -5435,7 +5526,7 @@ function MailboxPage({
                       aria-describedby="imap-password-hint"
                       autoComplete="new-password"
                       className="field"
-                      disabled={selectedMailboxArchived}
+                      disabled={selectedMailboxArchived || selectedSyncInProgress}
                       id="imap-password"
                       onChange={(event) => updateDraft("password", event.target.value)}
                       placeholder={isCreating ? "首次保存必填" : "留空则保持原授权码"}
@@ -5445,23 +5536,23 @@ function MailboxPage({
                     <p className="field-help" id="imap-password-hint">授权码仅用于连接该收件通道，不会在页面中回显。</p>
                   </div>
                   <label className="choice-row span-full">
-                    <input checked={draft.enabled} disabled={selectedMailboxArchived} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
+                    <input checked={draft.enabled} disabled={selectedMailboxArchived || selectedSyncInProgress} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
                     启用后台定时同步
                   </label>
                 </div>
               )}
               <div className="review-actions mailbox-form-actions">
                 {!isCreating && selectedConfig && (
-                  <button className="button button-ghost" disabled={archiving || saving || Boolean(syncingMailboxId) || syncingAll || !selectedConfig.enabled || Boolean(selectedConfig.archived_at)} onClick={() => void syncMailbox(selectedConfig)} type="button">
-                    {syncingMailboxId === selectedConfig.mailbox_id ? <><i className="spinner" />正在同步</> : <><Icon name="refresh" size={16} />同步此通道</>}
+                  <button className="button button-ghost" disabled={archiving || saving || selectedSyncInProgress || !selectedConfig.enabled || Boolean(selectedConfig.archived_at)} onClick={() => void syncMailbox(selectedConfig)} type="button">
+                    {enqueuingMailboxId === selectedConfig.mailbox_id ? <><i className="spinner" />正在加入队列</> : selectedSyncJob ? <><i className="spinner" />后台同步中</> : <><Icon name="refresh" size={16} />同步此通道</>}
                   </button>
                 )}
                 {!isCreating && selectedConfig && !selectedConfig.archived_at && (
-                  <button className="button button-danger-ghost" disabled={archiving || saving || Boolean(syncingMailboxId) || syncingAll} onClick={() => void archiveMailbox()} type="button">
+                  <button className="button button-danger-ghost" disabled={archiving || saving || selectedSyncInProgress} onClick={() => void archiveMailbox()} type="button">
                     {archiving ? <><i className="spinner" />正在归档</> : "归档通道"}
                   </button>
                 )}
-                <button className="button button-primary" disabled={loading || saving || archiving || (!isCreating && selectedMailboxArchived)} onClick={() => void saveMailbox()} type="button">
+                <button className="button button-primary" disabled={loading || saving || archiving || selectedSyncInProgress || (!isCreating && selectedMailboxArchived)} onClick={() => void saveMailbox()} type="button">
                   {saving ? <><i className="spinner" />正在保存</> : <><Icon name="check" size={16} />{isCreating ? "创建并开始接收" : selectedMailboxArchived ? "已归档" : "保存通道"}</>}
                 </button>
               </div>
@@ -5473,6 +5564,7 @@ function MailboxPage({
                 <div className="fact-list">
                   <div className="fact-row"><strong>开始接收</strong><span>{selectedConfig.import_started_at ? formatLibraryDate(selectedConfig.import_started_at) : "正在初始化"}</span></div>
                   <div className="fact-row"><strong>最近同步</strong><span>{selectedConfig.last_synced_at ? formatLibraryDate(selectedConfig.last_synced_at) : "尚未同步"}</span></div>
+                  {selectedSyncJob && <div className="fact-row"><strong>后台任务</strong><span className={`status-pill ${mailboxBackgroundJobStatusClass(selectedSyncJob)}`}>{mailboxBackgroundJobStatusLabel(selectedSyncJob)}</span></div>}
                   <div className="fact-row"><strong>已载入记录</strong><span>{historyFilterMailboxId === selectedConfig.mailbox_id ? `${history?.total ?? 0} 条` : "可在下方按来源筛选"}</span></div>
                   <div className="fact-row"><strong>支持格式</strong><span>PDF、Word、图片、Excel、HTML</span></div>
                   {retention && <>
@@ -5589,7 +5681,7 @@ function MailboxPage({
                 </div>
               </div>
             </div>
-            <span aria-live="polite" className="sr-only">{retryingImportId ? "正在重新入库一份附件。" : syncingAll ? "正在同步全部收件通道。" : syncingMailboxId ? "正在同步收件通道。" : ""}</span>
+            <span aria-live="polite" className="sr-only">{activeRetryImportIds.size ? "附件正在后台重新入库。" : activeSyncMailboxIds.size ? "收件通道正在后台同步。" : ""}</span>
             {historyLoading ? <TableSkeleton /> : history?.items.length ? (
               <div className="table-scroll">
                 <table className="candidate-table mailbox-history-table">
@@ -5605,7 +5697,9 @@ function MailboxPage({
                   </thead>
                   <tbody>
                     {history.items.map((item) => {
-                      const isRetrying = (item.status === "retrying" && !item.can_retry) || retryingImportId === item.import_id;
+                      const isRetrying = (item.status === "retrying" && !item.can_retry)
+                        || activeRetryImportIds.has(item.import_id)
+                        || enqueuingRetryImportId === item.import_id;
                       const statusClass = item.status === "imported"
                         ? "is-success"
                         : item.status === "failed"
@@ -5627,7 +5721,7 @@ function MailboxPage({
                             {isRetrying ? (
                               <span className="mailbox-retry-pending"><i className="spinner" />正在重试</span>
                             ) : item.can_retry ? (
-                              <button aria-label={`重新入库：${item.attachment_filename}`} className="button button-ghost upload-row-button mailbox-retry-button" disabled={Boolean(retryingImportId)} onClick={() => void retryImport(item)} type="button">
+                              <button aria-label={`重新入库：${item.attachment_filename}`} className="button button-ghost upload-row-button mailbox-retry-button" disabled={activeRetryImportIds.has(item.import_id) || enqueuingRetryImportId === item.import_id} onClick={() => void retryImport(item)} type="button">
                                 <Icon name="refresh" size={15} />重新入库
                               </button>
                             ) : <span className="candidate-meta">—</span>}

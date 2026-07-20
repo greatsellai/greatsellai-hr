@@ -7,7 +7,7 @@ from email.message import EmailMessage
 import pytest
 
 from app.models import MailboxConfig
-from app.services import mailbox_import_service
+from app.services import mailbox_background_job_service, mailbox_import_service
 
 
 class _MailboxImap:
@@ -103,10 +103,23 @@ def test_named_mailboxes_are_independent_and_legacy_endpoint_does_not_guess(
 
     first_sync = client.post(f"/v1/mailboxes/{first['mailbox_id']}/sync")
     second_sync = client.post(f"/v1/mailboxes/{second['mailbox_id']}/sync")
-    assert first_sync.status_code == 200, first_sync.text
-    assert second_sync.status_code == 200, second_sync.text
+    assert first_sync.status_code == 202, first_sync.text
+    assert second_sync.status_code == 202, second_sync.text
     assert first_sync.json()["mailbox_id"] == first["mailbox_id"]
     assert second_sync.json()["mailbox_id"] == second["mailbox_id"]
+    assert _MailboxImap.fetches == []
+    assert mailbox_background_job_service.run_mailbox_background_job_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="first-named-mailbox-test",
+    )
+    assert mailbox_background_job_service.run_mailbox_background_job_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="second-named-mailbox-test",
+    )
+    assert client.get(f"/v1/mailbox/tasks/{first_sync.json()['job_id']}").json()["status"] == "completed"
+    assert client.get(f"/v1/mailbox/tasks/{second_sync.json()['job_id']}").json()["status"] == "completed"
     assert set(_MailboxImap.fetches) == {
         ("imap.social.test", b"42"),
         ("imap.campus.test", b"42"),
@@ -118,6 +131,50 @@ def test_named_mailboxes_are_independent_and_legacy_endpoint_does_not_guess(
         first["mailbox_id"],
         second["mailbox_id"],
     }
+
+
+def test_sync_all_queues_each_named_channel_without_opening_imap(client, monkeypatch) -> None:
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", _MailboxImap)
+    first = _create_mailbox(client, label="同步全部一", host="imap.sync-all-one.test")
+    second = _create_mailbox(client, label="同步全部二", host="imap.sync-all-two.test")
+
+    def unexpected_imap(*args, **kwargs):
+        raise AssertionError("sync-all HTTP request must not open IMAP")
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", unexpected_imap)
+    queued = client.post("/v1/mailboxes/sync")
+    assert queued.status_code == 202, queued.text
+    payload = queued.json()
+    assert payload["queued_count"] == 2
+    assert payload["deduplicated_count"] == 0
+    assert {item["mailbox_id"] for item in payload["items"]} == {
+        first["mailbox_id"],
+        second["mailbox_id"],
+    }
+    assert all(item["status"] == "queued" for item in payload["items"])
+
+    duplicate = client.post("/v1/mailboxes/sync")
+    assert duplicate.status_code == 202, duplicate.text
+    assert duplicate.json()["queued_count"] == 0
+    assert duplicate.json()["deduplicated_count"] == 2
+
+
+def test_task_history_can_be_scoped_to_one_named_channel(client, monkeypatch) -> None:
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", _MailboxImap)
+    first = _create_mailbox(client, label="任务筛选一", host="imap.task-one.test")
+    second = _create_mailbox(client, label="任务筛选二", host="imap.task-two.test")
+    assert client.post(f"/v1/mailboxes/{first['mailbox_id']}/sync").status_code == 202
+    assert client.post(f"/v1/mailboxes/{second['mailbox_id']}/sync").status_code == 202
+
+    first_history = client.get(f"/v1/mailbox/tasks?mailbox_id={first['mailbox_id']}")
+    assert first_history.status_code == 200, first_history.text
+    assert {item["mailbox_id"] for item in first_history.json()["items"]} == {
+        first["mailbox_id"]
+    }
+
+    missing = client.get("/v1/mailbox/tasks?mailbox_id=foreign-workspace-mailbox")
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["detail"] == "mailbox_config_not_found"
 
 
 def test_named_mailbox_locks_source_after_import_but_allows_safe_edits(
@@ -221,9 +278,18 @@ def test_archive_keeps_history_but_prevents_retrying_against_a_removed_source(
 
     _MailboxImap.fetches.clear()
     retried = client.post(f"/v1/mailbox/imports/{failed_id}/retry")
-    assert retried.status_code == 200, retried.text
-    assert retried.json()["error"] == "attachment_source_unavailable"
-    assert retried.json()["can_retry"] is False
+    assert retried.status_code == 202, retried.text
+    assert retried.json()["status"] == "queued"
+    assert _MailboxImap.fetches == []
+    assert mailbox_background_job_service.run_mailbox_background_job_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="archived-named-mailbox-test",
+    )
+    task = client.get(f"/v1/mailbox/tasks/{retried.json()['job_id']}")
+    assert task.status_code == 200, task.text
+    assert task.json()["status"] == "failed"
+    assert task.json()["last_error"] == "attachment_source_unavailable"
     assert _MailboxImap.fetches == []
 
 
@@ -307,15 +373,30 @@ def test_due_sync_prioritizes_another_channel_after_one_channel_started(
 
     observed: list[str] = []
 
-    def fake_sync(session, *, settings, config_id: str | None = None):
+    def fake_sync(
+        session,
+        *,
+        settings,
+        config_id: str | None = None,
+        expected_source_fingerprint: str | None = None,
+        heartbeat=None,
+    ):
         assert config_id is not None
+        assert heartbeat is not None
+        heartbeat()
         observed.append(config_id)
         return mailbox_import_service.MailboxSyncResponse(configured=True)
 
-    monkeypatch.setattr(mailbox_import_service, "sync_mailbox", fake_sync)
+    monkeypatch.setattr(mailbox_background_job_service, "sync_mailbox", fake_sync)
     assert mailbox_import_service.sync_due_mailboxes(
         database=client.app.state.database,
         settings=client.app.state.settings,
+    )
+    assert observed == []
+    assert mailbox_background_job_service.run_mailbox_background_job_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="due-named-mailbox-test",
     )
     assert observed == [second["mailbox_id"]]
 
@@ -339,8 +420,16 @@ def test_uidvalidity_change_pauses_the_channel_without_rebinding_it(
     assert before.json()["enabled"] is True
 
     sync = client.post(f"/v1/mailboxes/{mailbox['mailbox_id']}/sync")
-    assert sync.status_code == 422, sync.text
-    assert sync.json()["detail"] == "mailbox_source_epoch_changed"
+    assert sync.status_code == 202, sync.text
+    assert mailbox_background_job_service.run_mailbox_background_job_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="epoch-named-mailbox-test",
+    )
+    task = client.get(f"/v1/mailbox/tasks/{sync.json()['job_id']}")
+    assert task.status_code == 200, task.text
+    assert task.json()["status"] == "failed"
+    assert task.json()["last_error"] == "mailbox_source_epoch_changed"
 
     after = client.get(f"/v1/mailboxes/{mailbox['mailbox_id']}")
     assert after.status_code == 200, after.text

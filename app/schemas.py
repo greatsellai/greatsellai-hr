@@ -305,12 +305,39 @@ class MailboxSyncResponse(ApiModel):
     last_sync_error: str | None = None
 
 
-class MailboxSyncAllResponse(ApiModel):
-    items: list[MailboxSyncResponse]
+class MailboxBackgroundJobResponse(ApiModel):
+    """Safe, pollable state for one durable IMAP operation."""
+
+    job_id: str
+    mailbox_id: str
+    job_kind: Literal["sync", "attachment_retry"]
+    trigger_type: Literal["manual", "scheduled"]
+    status: Literal["queued", "running", "completed", "failed"]
+    import_id: str | None = None
+    attempt_count: int = 0
+    max_attempts: int = 1
     imported_count: int = 0
     duplicate_count: int = 0
     skipped_count: int = 0
     failed_count: int = 0
+    last_error: str | None = None
+    requested_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    deduplicated: bool = False
+
+
+class MailboxBackgroundJobHistoryResponse(ApiModel):
+    items: list[MailboxBackgroundJobResponse]
+    total: int
+
+
+class MailboxBackgroundJobBatchResponse(ApiModel):
+    """The independent tasks created by a single "sync all" request."""
+
+    items: list[MailboxBackgroundJobResponse]
+    queued_count: int = 0
+    deduplicated_count: int = 0
 
 
 class MailboxImportResponse(ApiModel):

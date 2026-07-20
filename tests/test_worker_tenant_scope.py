@@ -24,7 +24,12 @@ from app.models import (
     ResumeFactSnapshot,
     ResumeSourceBlock,
 )
-from app.services import ai_extraction_job_service, job_match_batch_service, mailbox_import_service
+from app.services import (
+    ai_extraction_job_service,
+    job_match_batch_service,
+    mailbox_background_job_service,
+    mailbox_import_service,
+)
 from app.services.ai_extraction_job_service import (
     AI_EXTRACTION_NEEDS_ATTENTION,
     AI_EXTRACTION_QUEUED,
@@ -372,6 +377,8 @@ def test_due_mailbox_sync_reopens_only_the_claimed_workspace(
         *,
         settings: AppSettings,
         config_id: str | None = None,
+        expected_source_fingerprint: str | None = None,
+        heartbeat=None,
     ) -> MailboxSyncResponse:
         assert config_id == config_a_id
         assert organization_context_id(session) == organization_a
@@ -397,9 +404,15 @@ def test_due_mailbox_sync_reopens_only_the_claimed_workspace(
         observed.append((config.id, organization_context_id(session)))
         return MailboxSyncResponse(configured=True)
 
-    monkeypatch.setattr(mailbox_import_service, "sync_mailbox", _scoped_sync)
+    monkeypatch.setattr(mailbox_background_job_service, "sync_mailbox", _scoped_sync)
 
     assert sync_due_mailboxes(database=database, settings=settings)
+    assert observed == []
+    assert mailbox_background_job_service.run_mailbox_background_job_worker_once(
+        database,
+        settings=settings,
+        worker_id="mailbox-worker-scope-test",
+    )
     assert observed == [(config_a_id, organization_a)]
 
     with database.session_factory() as session:

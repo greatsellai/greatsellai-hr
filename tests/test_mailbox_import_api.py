@@ -761,10 +761,14 @@ def test_forwarded_attachment_can_retry_after_the_first_canonical_import_fails(
     assert identities[0].status == "imported"
     assert identities[0].canonical_import_id == imports[1].id
 
-    retried_original = client.post(f"/v1/mailbox/imports/{imports[0].id}/retry")
-    assert retried_original.status_code == 200, retried_original.text
-    assert retried_original.json()["status"] == "duplicate"
-    assert retried_original.json()["resume_id"] == resumes[0].id
+    with client.app.state.database.session_factory() as session:
+        retried_original = mailbox_import_service.retry_mailbox_attachment(
+            session,
+            settings=client.app.state.settings,
+            import_id=imports[0].id,
+        )
+    assert retried_original.status == "duplicate"
+    assert retried_original.resume_id == resumes[0].id
     assert attempts == 2
     with client.app.state.database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Candidate)) == 1

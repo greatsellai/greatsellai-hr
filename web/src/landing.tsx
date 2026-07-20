@@ -118,10 +118,6 @@ function setCanonical(url: string) {
 function BrandLogo() {
   return (
     <span className="landing-brand" aria-label="大卖数智 GreatSell AI">
-      <span className="landing-brand-fallback" aria-hidden="true">
-        <i />
-        大卖数智
-      </span>
       <img
         alt="大卖数智 GreatSell AI"
         onError={(event) => {

@@ -17,8 +17,6 @@
 .landing-brand-link { display: inline-flex; flex: 0 0 auto; text-decoration: none; }
 .landing-brand { position: relative; display: inline-flex; width: 8.9rem; height: 2.1rem; align-items: center; }
 .landing-brand img { position: absolute; z-index: 1; width: 100%; height: 100%; object-fit: contain; object-position: left center; }
-.landing-brand-fallback { display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 750; letter-spacing: 0.03em; }
-.landing-brand-fallback i { width: 1.2rem; height: 1.2rem; border-radius: 0.22rem; background: linear-gradient(90deg, transparent 42%, #fff 42% 58%, transparent 58%), linear-gradient(#fff 0 0) center / 0.32rem 0.32rem no-repeat, var(--landing-red); }
 .landing-nav { display: flex; align-items: center; justify-content: center; gap: 1.8rem; margin-left: auto; }
 .landing-nav a { color: #625b58; font-size: 0.9rem; text-decoration: none; transition: color 160ms ease; }
 .landing-nav a:hover { color: var(--landing-red); }

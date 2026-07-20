@@ -30,7 +30,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import AppSettings
 from app.database import Database, get_session
 from app.filter_options import filter_options_payload
-from app.models import Candidate, MailboxConfig, Resume
+from app.models import Candidate, MailboxConfig, Organization, ProductPlan, Resume
 from app.schemas import (
     AuthLogin,
     AuthRegistration,
@@ -58,6 +58,14 @@ from app.schemas import (
     PasswordResetRequestResult,
     ProductPlanResponse,
     ProductPlanUpdate,
+    PlatformAuditEventListResponse,
+    PlatformDashboardResponse,
+    PlatformOrganizationDetailResponse,
+    PlatformOrganizationListResponse,
+    PlatformOrganizationPatch,
+    PlatformUserDetailResponse,
+    PlatformUserListResponse,
+    PlatformUserPatch,
     RegistrationOfferResponse,
     MailboxConfigCreate,
     MailboxConfigListResponse,
@@ -178,6 +186,20 @@ from app.services.ai_usage_reporting_service import (
     AiUsageReportingError,
     list_platform_ai_run_summaries,
     summarize_platform_ai_usage,
+)
+from app.services.platform_admin_service import (
+    PlatformAdminServiceError,
+    get_platform_dashboard,
+    get_platform_organization,
+    get_platform_user,
+    list_platform_audit_events,
+    list_platform_organizations,
+    list_platform_users,
+    organization_control_snapshot,
+    patch_platform_organization,
+    patch_platform_user,
+    product_plan_snapshot,
+    record_platform_audit_event,
 )
 from app.services.ai_extraction_job_service import (
     AiExtractionJobError,
@@ -398,6 +420,20 @@ def _raise_ai_gateway_configuration_error(exc: AiGatewayConfigurationError) -> N
         "ai_gateway_configuration_conflict",
     }:
         response_status = status.HTTP_409_CONFLICT
+    else:
+        response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+    raise HTTPException(status_code=response_status, detail=code) from exc
+
+
+def _raise_platform_admin_service_error(exc: PlatformAdminServiceError) -> None:
+    code = str(exc)
+    if code in {"platform_organization_not_found", "platform_user_not_found", "platform_plan_not_found"}:
+        response_status = status.HTTP_404_NOT_FOUND
+    elif code in {
+        "platform_admin_self_deactivation_forbidden",
+        "platform_admin_deactivation_forbidden",
+    }:
+        response_status = status.HTTP_403_FORBIDDEN
     else:
         response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
     raise HTTPException(status_code=response_status, detail=code) from exc
@@ -733,7 +769,7 @@ async def require_organization_admin(
 
 
 async def require_platform_admin(
-    principal: AuthPrincipal = Depends(require_single_admin),
+    principal: AuthPrincipal = Depends(require_authenticated_member),
 ) -> AuthPrincipal:
     """Gate platform-wide AI control plane endpoints.
 
@@ -741,6 +777,11 @@ async def require_platform_admin(
     change the model and credential-reference policy used by every customer.
     """
 
+    if not principal.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="email_verification_required",
+        )
     if not principal.is_platform_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1119,26 +1160,198 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         set_organization_context(session, principal.organization_id)
         return auth_session_response(principal, login_required=True)
 
+    @app.get(
+        "/v1/platform/dashboard",
+        response_model=PlatformDashboardResponse,
+    )
+    def get_platform_dashboard_endpoint(
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> PlatformDashboardResponse:
+        return get_platform_dashboard(session)
+
+    @app.get(
+        "/v1/platform/organizations",
+        response_model=PlatformOrganizationListResponse,
+    )
+    def get_platform_organizations(
+        search: str | None = Query(default=None, max_length=200),
+        plan_code: str | None = Query(default=None, min_length=1, max_length=64),
+        plan_status: str | None = Query(default=None, pattern="^(trial|active|expired|suspended|legacy)$"),
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> PlatformOrganizationListResponse:
+        return list_platform_organizations(
+            session,
+            search=search,
+            plan_code=plan_code,
+            plan_status=plan_status,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/v1/platform/organizations/{organization_id}",
+        response_model=PlatformOrganizationDetailResponse,
+    )
+    def get_platform_organization_endpoint(
+        organization_id: str,
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> PlatformOrganizationDetailResponse:
+        try:
+            return get_platform_organization(session, organization_id=organization_id)
+        except PlatformAdminServiceError as exc:
+            _raise_platform_admin_service_error(exc)
+
+    @app.patch(
+        "/v1/platform/organizations/{organization_id}",
+        response_model=PlatformOrganizationDetailResponse,
+    )
+    def patch_platform_organization_endpoint(
+        organization_id: str,
+        payload: PlatformOrganizationPatch,
+        principal: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
+    ) -> PlatformOrganizationDetailResponse:
+        try:
+            response = patch_platform_organization(
+                session,
+                organization_id=organization_id,
+                payload=payload,
+                actor_user_id=principal.user.id,
+                request_id=x_request_id,
+            )
+            _commit_or_raise(session)
+            return response
+        except PlatformAdminServiceError as exc:
+            session.rollback()
+            _raise_platform_admin_service_error(exc)
+
+    @app.get(
+        "/v1/platform/users",
+        response_model=PlatformUserListResponse,
+    )
+    def get_platform_users(
+        search: str | None = Query(default=None, max_length=320),
+        is_active: bool | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> PlatformUserListResponse:
+        return list_platform_users(
+            session,
+            search=search,
+            is_active=is_active,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/v1/platform/users/{user_id}",
+        response_model=PlatformUserDetailResponse,
+    )
+    def get_platform_user_endpoint(
+        user_id: str,
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> PlatformUserDetailResponse:
+        try:
+            return get_platform_user(session, user_id=user_id)
+        except PlatformAdminServiceError as exc:
+            _raise_platform_admin_service_error(exc)
+
+    @app.patch(
+        "/v1/platform/users/{user_id}",
+        response_model=PlatformUserDetailResponse,
+    )
+    def patch_platform_user_endpoint(
+        user_id: str,
+        payload: PlatformUserPatch,
+        principal: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
+    ) -> PlatformUserDetailResponse:
+        try:
+            response = patch_platform_user(
+                session,
+                user_id=user_id,
+                payload=payload,
+                actor_user_id=principal.user.id,
+                request_id=x_request_id,
+            )
+            _commit_or_raise(session)
+            return response
+        except PlatformAdminServiceError as exc:
+            session.rollback()
+            _raise_platform_admin_service_error(exc)
+
+    @app.get(
+        "/v1/platform/audit-events",
+        response_model=PlatformAuditEventListResponse,
+    )
+    def get_platform_audit_events(
+        actor_user_id: str | None = Query(default=None, min_length=1, max_length=64),
+        action: str | None = Query(default=None, min_length=1, max_length=100),
+        target_type: str | None = Query(default=None, min_length=1, max_length=64),
+        organization_id: str | None = Query(default=None, min_length=1, max_length=64),
+        created_at_from: datetime | None = Query(default=None),
+        created_at_to: datetime | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> PlatformAuditEventListResponse:
+        try:
+            return list_platform_audit_events(
+                session,
+                actor_user_id=actor_user_id,
+                action=action,
+                target_type=target_type,
+                organization_id=organization_id,
+                created_at_from=created_at_from,
+                created_at_to=created_at_to,
+                limit=limit,
+                offset=offset,
+            )
+        except PlatformAdminServiceError as exc:
+            _raise_platform_admin_service_error(exc)
+
     @app.get("/v1/platform/plans", response_model=list[ProductPlanResponse])
     def get_platform_plans(
-        principal: AuthPrincipal = Depends(require_single_admin),
+        _: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
     ) -> list[ProductPlanResponse]:
-        if not principal.is_platform_admin:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="platform_admin_required")
         return list_product_plans(session)
 
     @app.put("/v1/platform/plans/{plan_code}", response_model=ProductPlanResponse)
     def put_platform_plan(
         plan_code: str,
         payload: ProductPlanUpdate,
-        principal: AuthPrincipal = Depends(require_single_admin),
+        principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
+        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> ProductPlanResponse:
-        if not principal.is_platform_admin:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="platform_admin_required")
         try:
+            plan = session.scalar(select(ProductPlan).where(ProductPlan.code == plan_code))
+            before = product_plan_snapshot(plan) if plan is not None else {}
             response = update_product_plan(session, code=plan_code, payload=payload)
+            plan = session.scalar(select(ProductPlan).where(ProductPlan.code == plan_code))
+            record_platform_audit_event(
+                session,
+                actor_user_id=principal.user.id,
+                action="product_plan.updated",
+                target_type="product_plan",
+                target_id=plan.id if plan is not None else plan_code,
+                reason=payload.reason or "platform_plan_updated",
+                before_state=before,
+                after_state=product_plan_snapshot(plan) if plan is not None else {},
+                request_id=x_request_id,
+            )
             _commit_or_raise(session)
             return response
         except IdentityServiceError as exc:
@@ -1159,16 +1372,34 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     def put_platform_organization_plan(
         organization_id: str,
         payload: OrganizationPlanAssign,
-        principal: AuthPrincipal = Depends(require_single_admin),
+        principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
+        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> OrganizationPlanResponse:
-        if not principal.is_platform_admin:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="platform_admin_required")
         try:
+            organization = session.get(Organization, organization_id)
+            before = organization_control_snapshot(organization) if organization is not None else {}
             response = assign_organization_plan(
                 session,
                 organization_id=organization_id,
                 payload=payload,
+            )
+            organization = session.get(Organization, organization_id)
+            record_platform_audit_event(
+                session,
+                actor_user_id=principal.user.id,
+                action="organization.plan_assigned",
+                target_type="organization",
+                target_id=organization_id,
+                organization_id=organization_id,
+                reason=payload.reason or "platform_organization_plan_assigned",
+                before_state=before,
+                after_state=(
+                    organization_control_snapshot(organization)
+                    if organization is not None
+                    else {}
+                ),
+                request_id=x_request_id,
             )
             _commit_or_raise(session)
             return response
@@ -1193,11 +1424,27 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     )
     def post_platform_ai_provider(
         payload: AiProviderProfileCreate,
-        _: AuthPrincipal = Depends(require_platform_admin),
+        principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
+        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiProviderProfileResponse:
         try:
             response = create_provider_profile(session, payload=payload)
+            record_platform_audit_event(
+                session,
+                actor_user_id=principal.user.id,
+                action="ai_provider.created",
+                target_type="ai_provider",
+                target_id=response.provider_id,
+                reason=payload.reason or "platform_ai_provider_created",
+                after_state={
+                    "provider_id": response.provider_id,
+                    "slug": response.slug,
+                    "driver": response.driver,
+                    "is_enabled": response.is_enabled,
+                },
+                request_id=x_request_id,
+            )
             _commit_or_raise(session)
             return response
         except AiGatewayConfigurationError as exc:
@@ -1221,11 +1468,28 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     )
     def post_platform_ai_model(
         payload: AiModelProfileCreate,
-        _: AuthPrincipal = Depends(require_platform_admin),
+        principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
+        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiModelProfileResponse:
         try:
             response = create_model_profile(session, payload=payload)
+            record_platform_audit_event(
+                session,
+                actor_user_id=principal.user.id,
+                action="ai_model.created",
+                target_type="ai_model",
+                target_id=response.model_id,
+                reason=payload.reason or "platform_ai_model_created",
+                after_state={
+                    "model_id": response.model_id,
+                    "slug": response.slug,
+                    "provider_slug": response.provider_slug,
+                    "capabilities": list(response.capabilities),
+                    "is_enabled": response.is_enabled,
+                },
+                request_id=x_request_id,
+            )
             _commit_or_raise(session)
             return response
         except AiGatewayConfigurationError as exc:
@@ -1251,12 +1515,54 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: AiModelPriceVersionCreate,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
+        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiModelPriceVersionResponse:
         try:
             response = create_model_price_version(
                 session,
                 payload=payload,
                 created_by_user_id=principal.user.id,
+            )
+            record_platform_audit_event(
+                session,
+                actor_user_id=principal.user.id,
+                action="ai_model_price.created",
+                target_type="ai_model_price",
+                target_id=response.price_version_id,
+                reason=payload.reason or "platform_ai_model_price_created",
+                after_state={
+                    "price_version_id": response.price_version_id,
+                    "model_slug": response.model_slug,
+                    "currency": response.currency,
+                    "effective_from": response.effective_from.isoformat(),
+                    "effective_to": (
+                        response.effective_to.isoformat()
+                        if response.effective_to is not None
+                        else None
+                    ),
+                    "input_per_million": (
+                        str(response.input_per_million)
+                        if response.input_per_million is not None
+                        else None
+                    ),
+                    "output_per_million": (
+                        str(response.output_per_million)
+                        if response.output_per_million is not None
+                        else None
+                    ),
+                    "request_unit_price": (
+                        str(response.request_unit_price)
+                        if response.request_unit_price is not None
+                        else None
+                    ),
+                    "page_unit_price": (
+                        str(response.page_unit_price)
+                        if response.page_unit_price is not None
+                        else None
+                    ),
+                    "is_active": response.is_active,
+                },
+                request_id=x_request_id,
             )
             _commit_or_raise(session)
             return response
@@ -1297,13 +1603,48 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: AiRoutePolicyPublish,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
+        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiRoutePolicyVersionResponse:
         try:
+            current_policy = next(
+                (policy for policy in list_route_policies(session) if policy.feature == feature),
+                None,
+            )
             response = publish_route_policy(
                 session,
                 feature=feature,
                 payload=payload,
                 published_by_user_id=principal.user.id,
+            )
+            record_platform_audit_event(
+                session,
+                actor_user_id=principal.user.id,
+                action="ai_route.published",
+                target_type="ai_route",
+                target_id=response.policy_id,
+                reason=payload.reason or "platform_ai_route_published",
+                before_state=(
+                    {
+                        "feature": current_policy.feature,
+                        "current_version": current_policy.current_version,
+                        "is_enabled": current_policy.is_enabled,
+                    }
+                    if current_policy is not None
+                    else {}
+                ),
+                after_state={
+                    "feature": response.feature,
+                    "version": response.version,
+                    "targets": [
+                        {
+                            "model_slug": target.model_slug,
+                            "max_attempts": target.max_attempts,
+                            "allow_fallback_on": list(target.allow_fallback_on),
+                        }
+                        for target in response.targets
+                    ],
+                },
+                request_id=x_request_id,
             )
             _commit_or_raise(session)
             return response

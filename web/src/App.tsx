@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useRef,
@@ -72,6 +74,8 @@ import type {
 } from "./types";
 import { Icon, type IconName } from "./icons";
 
+const AdminApp = lazy(() => import("./admin/AdminApp"));
+
 type View = "library" | "filter" | "upload" | "inbox" | "score" | "match";
 type DrawerTab = "original" | "summary" | "evidence";
 type SchoolFilter = "any" | "yes" | "no";
@@ -82,6 +86,7 @@ type JobWorkspaceMode = "create" | "view";
 type AuthRoute = "login" | "register" | "forgot-password" | "verify-email";
 type AppSurface =
   | { kind: "landing" }
+  | { kind: "platform" }
   | { kind: "workspace"; authRoute: AuthRoute | null };
 
 interface FilterDraft {
@@ -1033,6 +1038,14 @@ function workspaceHref(path = "") {
   return normalizedPath || "/";
 }
 
+function platformHref() {
+  const { pathname } = window.location;
+  return pathname === ROOT_WORKSPACE_BASE_PATH ||
+    pathname.startsWith(`${ROOT_WORKSPACE_BASE_PATH}/`)
+    ? `${ROOT_WORKSPACE_BASE_PATH}/platform`
+    : "/platform";
+}
+
 function authRouteFromPath(pathname: string): AuthRoute | null {
   const normalized = pathname.replace(/\/+$/, "") || "/";
   if (normalized === "/login") return "login";
@@ -1044,6 +1057,21 @@ function authRouteFromPath(pathname: string): AuthRoute | null {
 
 function resolveAppSurface(): AppSurface {
   const { hostname, pathname } = window.location;
+  const compatibilityPlatformPath = `${ROOT_WORKSPACE_BASE_PATH}/platform`;
+  const isPrimaryPlatformPath =
+    pathname === "/platform" || pathname.startsWith("/platform/");
+  const isCompatibilityPlatformPath =
+    pathname === compatibilityPlatformPath ||
+    pathname.startsWith(`${compatibilityPlatformPath}/`);
+  if (
+    isCompatibilityPlatformPath ||
+    (
+      isPrimaryPlatformPath &&
+      (hostname === "hr.greatsellai.net" || isLocalDevelopmentHost(hostname))
+    )
+  ) {
+    return { kind: "platform" };
+  }
   const isWorkspacePath =
     pathname === ROOT_WORKSPACE_BASE_PATH ||
     pathname.startsWith(`${ROOT_WORKSPACE_BASE_PATH}/`);
@@ -1097,6 +1125,22 @@ function App() {
         loginHref={workspaceHref("/login")}
         registerHref={workspaceHref("/register")}
       />
+    );
+  }
+
+  if (surface.kind === "platform") {
+    return (
+      <Suspense
+        fallback={(
+          <main className="login-page" aria-live="polite">
+            <div className="login-panel login-redirect-panel">
+              <i className="spinner" /> 正在打开平台管理…
+            </div>
+          </main>
+        )}
+      >
+        <AdminApp />
+      </Suspense>
     );
   }
 
@@ -1596,6 +1640,20 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     setAuthSession(session);
     setAuthState(session.authenticated ? "authenticated" : "unauthenticated");
     if (session.authenticated) {
+      const nextPath = new URLSearchParams(window.location.search).get("next");
+      if (
+        nextPath &&
+        (
+          nextPath === "/platform" ||
+          nextPath.startsWith("/platform/") ||
+          nextPath === `${ROOT_WORKSPACE_BASE_PATH}/platform` ||
+          nextPath.startsWith(`${ROOT_WORKSPACE_BASE_PATH}/platform/`)
+        ) &&
+        session.is_platform_admin
+      ) {
+        window.location.assign(nextPath);
+        return session;
+      }
       window.location.assign(
         workspaceHref(session.email_verification_required ? "/verify-email" : ""),
       );
@@ -1734,6 +1792,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           onLogout={() => void logout()}
           onNewUpload={() => setView("upload")}
           organizationName={authSession?.organization?.name ?? null}
+          platformAdmin={authSession?.is_platform_admin ?? false}
           planName={authSession?.plan?.name ?? null}
           role={authSession?.role ?? null}
           trial={authSession?.trial ?? null}
@@ -2316,6 +2375,7 @@ function Topbar({
   onLogout,
   onNewUpload,
   organizationName,
+  platformAdmin,
   planName,
   role,
   trial,
@@ -2327,6 +2387,7 @@ function Topbar({
   onLogout: () => void;
   onNewUpload: () => void;
   organizationName: string | null;
+  platformAdmin: boolean;
   planName: string | null;
   role: "admin" | "recruiter" | null;
   trial: TrialAccess | null;
@@ -2365,6 +2426,7 @@ function Topbar({
       </label>
       <div className="topbar-actions">
         {trialLabel && <span className={`topbar-trial${trial?.plan_status === "expired" ? " is-expired" : ""}`}>{trialLabel}</span>}
+        {platformAdmin && <a className="button button-ghost" href={platformHref()}><Icon name="layers" size={16} />平台管理</a>}
         <button
           className="button button-agent"
           onClick={onOpenAgent}

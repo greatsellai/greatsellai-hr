@@ -126,6 +126,7 @@ class TrialAccessResponse(ApiModel):
 class AuthSession(ApiModel):
     authenticated: bool
     login_required: bool
+    is_platform_admin: bool = False
     email_verified: bool = False
     email_verification_required: bool = False
     user: AuthUserResponse | None = None
@@ -227,11 +228,186 @@ class ProductPlanUpdate(ApiModel):
     is_available_for_signup: bool | None = None
     is_default_trial: bool | None = None
     sort_order: int | None = Field(default=None, ge=0, le=1000)
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_optional_plan_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_audit_reason_required")
+        return normalized
 
 
 class OrganizationPlanAssign(ApiModel):
     plan_code: str = Field(min_length=1, max_length=64)
     plan_status: Literal["trial", "active", "expired", "suspended"] | None = None
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_optional_assignment_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_audit_reason_required")
+        return normalized
+
+
+class PlatformDashboardResponse(ApiModel):
+    generated_at: datetime
+    organizations_total: int
+    organizations_by_status: dict[str, int] = Field(default_factory=dict)
+    trials_expiring_within_7_days: int
+    users_total: int
+    users_active: int
+    users_verified: int
+    resumes_total: int
+    jobs_total: int
+    mailboxes_total: int
+    ai_runs_total: int
+    ai_runs_succeeded: int
+    ai_runs_failed: int
+    ai_cost_cny_micros: int
+    ai_cost_unavailable_runs: int
+
+
+class PlatformOrganizationListItem(ApiModel):
+    organization_id: str
+    name: str
+    plan_id: str | None = None
+    plan_code: str | None = None
+    plan_name: str | None = None
+    plan_status: Literal["trial", "active", "expired", "suspended", "legacy"]
+    trial_started_at: datetime | None = None
+    trial_ends_at: datetime | None = None
+    member_count: int
+    active_member_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlatformOrganizationListResponse(ApiModel):
+    items: list[PlatformOrganizationListItem] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
+
+
+class PlatformOrganizationMemberResponse(ApiModel):
+    membership_id: str
+    user_id: str
+    full_name: str
+    email: str
+    role: Literal["admin", "recruiter"]
+    is_active: bool
+    user_is_active: bool
+    email_verified: bool
+    last_login_at: datetime | None = None
+    joined_at: datetime
+
+
+class PlatformOrganizationDetailResponse(PlatformOrganizationListItem):
+    resume_count: int
+    job_count: int
+    mailbox_count: int
+    ai_run_count: int
+    members: list[PlatformOrganizationMemberResponse] = Field(default_factory=list)
+
+
+class PlatformOrganizationPatch(ApiModel):
+    name: str | None = Field(default=None, min_length=2, max_length=200)
+    plan_code: str | None = Field(default=None, min_length=1, max_length=64)
+    plan_status: Literal["trial", "active", "expired", "suspended"] | None = None
+    trial_ends_at: datetime | None = None
+    confirmation_name: str | None = Field(default=None, min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("name", "plan_code", "confirmation_name", "reason")
+    @classmethod
+    def strip_platform_organization_patch_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_patch_text_must_not_be_blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def require_platform_organization_change(self) -> "PlatformOrganizationPatch":
+        change_fields = {"name", "plan_code", "plan_status", "trial_ends_at"}
+        if not self.model_fields_set.intersection(change_fields):
+            raise ValueError("platform_organization_change_required")
+        return self
+
+
+class PlatformUserListItem(ApiModel):
+    user_id: str
+    full_name: str
+    email: str
+    is_active: bool
+    is_platform_admin: bool
+    email_verified: bool
+    last_login_at: datetime | None = None
+    created_at: datetime
+    membership_count: int
+
+
+class PlatformUserListResponse(ApiModel):
+    items: list[PlatformUserListItem] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
+
+
+class PlatformUserMembershipResponse(ApiModel):
+    membership_id: str
+    organization_id: str
+    organization_name: str
+    role: Literal["admin", "recruiter"]
+    is_active: bool
+    joined_at: datetime
+
+
+class PlatformUserDetailResponse(PlatformUserListItem):
+    memberships: list[PlatformUserMembershipResponse] = Field(default_factory=list)
+
+
+class PlatformUserPatch(ApiModel):
+    is_active: bool
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_platform_user_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_audit_reason_required")
+        return normalized
+
+
+class PlatformAuditEventResponse(ApiModel):
+    audit_id: str
+    actor_user_id: str
+    action: str
+    target_type: str
+    target_id: str
+    organization_id: str | None = None
+    reason: str
+    before_state: dict[str, object] = Field(default_factory=dict)
+    after_state: dict[str, object] = Field(default_factory=dict)
+    request_id: str | None = None
+    created_at: datetime
+
+
+class PlatformAuditEventListResponse(ApiModel):
+    items: list[PlatformAuditEventResponse] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
 
 
 class AiProviderProfileCreate(ApiModel):
@@ -248,6 +424,7 @@ class AiProviderProfileCreate(ApiModel):
     credential_ref: str = Field(min_length=1, max_length=120)
     request_defaults: dict[str, object] = Field(default_factory=dict)
     is_enabled: bool = True
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("slug")
     @classmethod
@@ -263,6 +440,16 @@ class AiProviderProfileCreate(ApiModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("value_must_not_be_blank")
+        return normalized
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_provider_audit_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_audit_reason_required")
         return normalized
 
     @field_validator("endpoint_url")
@@ -348,6 +535,7 @@ class AiModelProfileCreate(ApiModel):
     context_window_tokens: int | None = Field(default=None, ge=1, le=20_000_000)
     max_output_tokens: int | None = Field(default=None, ge=1, le=2_000_000)
     is_enabled: bool = True
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("slug", "provider_slug")
     @classmethod
@@ -363,6 +551,16 @@ class AiModelProfileCreate(ApiModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("value_must_not_be_blank")
+        return normalized
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_model_audit_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_audit_reason_required")
         return normalized
 
 
@@ -395,6 +593,7 @@ class AiModelPriceVersionCreate(ApiModel):
     page_unit_price: Decimal | None = Field(default=None, ge=0)
     source: str = Field(min_length=1, max_length=120)
     is_active: bool = True
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("model_slug")
     @classmethod
@@ -417,6 +616,16 @@ class AiModelPriceVersionCreate(ApiModel):
         if self.effective_to is not None and self.effective_to <= self.effective_from:
             raise ValueError("price_effective_to_must_follow_effective_from")
         return self
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_price_audit_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_audit_reason_required")
+        return normalized
 
 
 class AiModelPriceVersionResponse(ApiModel):
@@ -472,6 +681,7 @@ class AiRoutePolicyPublish(ApiModel):
     description: str | None = Field(default=None, max_length=1000)
     targets: list[AiRouteTargetInput] = Field(min_length=1, max_length=4)
     prompt_revision: str | None = Field(default=None, max_length=120)
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("display_name")
     @classmethod
@@ -479,6 +689,16 @@ class AiRoutePolicyPublish(ApiModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("value_must_not_be_blank")
+        return normalized
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_route_audit_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("platform_audit_reason_required")
         return normalized
 
     @model_validator(mode="after")

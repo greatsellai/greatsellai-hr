@@ -255,3 +255,17 @@ def test_platform_admin_alone_can_publish_ai_model_route(
     versions = identity_client.get("/v1/platform/ai/routes/resume_score/versions")
     assert versions.status_code == 200, versions.text
     assert versions.json()[0]["prompt_revision"] == "resume-score.prompt.v1"
+
+    audits = identity_client.get("/v1/platform/audit-events")
+    assert audits.status_code == 200, audits.text
+    actions = {event["action"] for event in audits.json()["items"]}
+    assert {
+        "ai_provider.created",
+        "ai_model.created",
+        "ai_model_price.created",
+        "ai_route.published",
+    }.issubset(actions)
+    serialized_audits = audits.text.casefold()
+    assert "credential_ref" not in serialized_audits
+    assert "test-provider-credential" not in serialized_audits
+    assert "prompt_revision" not in serialized_audits

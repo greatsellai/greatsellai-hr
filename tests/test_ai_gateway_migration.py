@@ -27,7 +27,23 @@ def test_ai_gateway_migration_upgrades_a_file_sqlite_database(tmp_path) -> None:
             "ai_route_policy_versions",
             "ai_runs",
             "api_invocations",
+            "platform_audit_events",
         }.issubset(tables)
+        audit_columns = {
+            column["name"] for column in inspector.get_columns("platform_audit_events")
+        }
+        assert {
+            "actor_user_id",
+            "action",
+            "target_type",
+            "target_id",
+            "organization_id",
+            "reason",
+            "before_json",
+            "after_json",
+            "request_id",
+            "created_at",
+        }.issubset(audit_columns)
         foreign_keys = inspector.get_foreign_keys("api_invocations")
         assert any(
             foreign_key["constrained_columns"] == ["ai_run_id", "organization_id"]

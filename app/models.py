@@ -180,6 +180,40 @@ class UserAccount(Base):
     )
 
 
+class PlatformAuditEvent(Base):
+    """Immutable, privacy-safe record of one platform control-plane change.
+
+    Snapshots are deliberately restricted by the calling service to account,
+    workspace, plan, and routing metadata.  Candidate data, document content,
+    prompts, provider responses, password material, and credentials must never
+    be written to this table.
+    """
+
+    __tablename__ = "platform_audit_events"
+    __table_args__ = (
+        Index("ix_platform_audit_events_created", "created_at", "id"),
+        Index("ix_platform_audit_events_actor_created", "actor_user_id", "created_at"),
+        Index("ix_platform_audit_events_target_created", "target_type", "target_id", "created_at"),
+        Index("ix_platform_audit_events_organization_created", "organization_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    target_type: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(128), index=True)
+    organization_id: Mapped[str | None] = mapped_column(
+        ForeignKey("organizations.id"),
+        nullable=True,
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(String(500))
+    before_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    after_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class OrganizationMembership(Base):
     """A user's role in one recruiting workspace."""
 

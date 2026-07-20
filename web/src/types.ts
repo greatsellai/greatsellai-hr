@@ -86,6 +86,7 @@ export interface TrialAccess {
 export interface AuthSession {
   authenticated: boolean;
   login_required: boolean;
+  is_platform_admin: boolean;
   email_verified: boolean;
   email_verification_required: boolean;
   user: AuthUser | null;

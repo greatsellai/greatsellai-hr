@@ -490,6 +490,7 @@ def auth_session_response(
     return AuthSession(
         authenticated=True,
         login_required=login_required,
+        is_platform_admin=principal.is_platform_admin,
         user=AuthUserResponse(
             user_id=principal.user.id,
             display_name=principal.user.full_name,
@@ -570,6 +571,9 @@ def update_product_plan(
     if plan is None:
         raise IdentityServiceError("product_plan_not_found")
     updates = payload.model_dump(exclude_unset=True)
+    # ``reason`` belongs to the platform audit event and is intentionally not
+    # persisted on the reusable plan catalogue row.
+    updates.pop("reason", None)
     if "name" in updates:
         plan.name = _normalize_text(str(updates["name"]), code="invalid_plan_name", maximum=120)
     for field in ("monthly_price_cents", "trial_days", "is_active", "is_available_for_signup", "sort_order"):

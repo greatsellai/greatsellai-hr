@@ -404,13 +404,12 @@ def _normalize_score_dimensions(
     for dimension in dimensions:
         if not isinstance(dimension, Mapping):
             raise _contract_error("dimension")
-        required = {"key", "label", "weight", "max_raw_score", "guidance"}
+        required = {"key", "label", "weight", "guidance"}
         if not required.issubset(dimension):
             raise _contract_error("dimension_fields")
         key = dimension["key"]
         label = dimension["label"]
         weight = dimension["weight"]
-        max_raw_score = dimension["max_raw_score"]
         guidance = dimension["guidance"]
         if (
             not isinstance(key, str)
@@ -420,9 +419,6 @@ def _normalize_score_dimensions(
             or isinstance(weight, bool)
             or not isinstance(weight, int)
             or not 0 <= weight <= 100
-            or isinstance(max_raw_score, bool)
-            or not isinstance(max_raw_score, int)
-            or not 1 <= max_raw_score <= 100
             or (guidance is not None and not isinstance(guidance, str))
         ):
             raise _contract_error("dimension_values")
@@ -431,7 +427,6 @@ def _normalize_score_dimensions(
                 "key": key,
                 "label": label.strip(),
                 "weight": weight,
-                "max_raw_score": max_raw_score,
                 "guidance": guidance.strip() if isinstance(guidance, str) else None,
             }
         )
@@ -1070,11 +1065,11 @@ def _validate_fact_references(
     )
 
 
-def _valid_score_value(value: object, *, max_raw_score: int) -> float:
+def _valid_score_value(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise _contract_error("score_value")
     numeric_value = float(value)
-    if not math.isfinite(numeric_value) or not 0 <= numeric_value <= max_raw_score:
+    if not math.isfinite(numeric_value) or not 0 <= numeric_value <= 100:
         raise _contract_error("score_value")
     return numeric_value
 
@@ -1139,10 +1134,7 @@ def validate_resume_score_output(
         normalized_scores.append(
             {
                 "key": key,
-                "raw_score": _valid_score_value(
-                    item["raw_score"],
-                    max_raw_score=by_key[key]["max_raw_score"],
-                ),
+                "raw_score": _valid_score_value(item["raw_score"]),
                 "rationale": rationale.strip(),
                 "fact_ids": _validate_fact_references(
                     item["fact_ids"],
@@ -1283,7 +1275,7 @@ def score_resume_fact_snapshot(
         ),
         system_prompt=(
             "Score only the supplied structured resume facts. Do not infer, invent, or "
-            "use personal data. Return one raw score for every supplied dimension. "
+            "use personal data. Return one raw score from 0 to 100 for every supplied dimension. "
             "Cite only supplied fact IDs. A missing fact is an uncertainty, not evidence. "
             "Do not calculate a weighted total; the server does that deterministically."
         ),

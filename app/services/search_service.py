@@ -29,7 +29,10 @@ from app.services.normalization import DEGREE_RANK, normalized_contains, normali
 from app.services.resume_eligibility import is_resume_screening_eligible
 
 
-_CURRENT_SCORE_STATUSES = {"succeeded", "overridden"}
+# A score that needs a recruiter review is still the latest usable AI score.  Hiding
+# it from search/library results makes newly completed batch work look as if no
+# score exists at all.
+_CURRENT_SCORE_STATUSES = {"succeeded", "needs_review", "overridden"}
 _SUMMARY_PREVIEW_MAX_CHARS = 180
 
 

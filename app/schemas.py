@@ -903,7 +903,6 @@ class ScoreDimensionInput(ApiModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
     label: str = Field(min_length=1, max_length=120)
     weight: int = Field(ge=0, le=100)
-    max_raw_score: int = Field(default=100, ge=1, le=100)
     guidance: str | None = Field(default=None, max_length=1000)
 
 
@@ -957,7 +956,6 @@ class ResumeScoreDimensionResponse(ApiModel):
     key: str
     label: str
     weight: int
-    max_raw_score: int
     ai_raw_score: float
     final_raw_score: float
     # ``weighted_score`` remains for clients of the original API.  It is the
@@ -1027,6 +1025,37 @@ class ResumeScoreResponse(ApiModel):
 
 class ResumeScoreCreate(ApiModel):
     template_id: str
+
+
+class ResumeScoreBatchResponse(ApiModel):
+    batch_id: str
+    template_id: str
+    template_name: str | None
+    template_version: int
+    status: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    cached_count: int
+    requested_at: str
+    started_at: str | None
+    completed_at: str | None
+    last_error: str | None
+
+
+class ResumeScoreBatchItemResponse(ApiModel):
+    item_id: str
+    resume_id: str
+    candidate_id: str
+    candidate_display_name: str | None
+    facts_version: int
+    status: str
+    attempt_count: int
+    last_error: str | None
+    resume_score_id: str | None
+    was_cached: bool
+    completed_at: str | None
+    updated_at: str
 
 
 class ResumeScoreOverride(ApiModel):

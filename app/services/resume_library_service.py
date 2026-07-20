@@ -17,7 +17,9 @@ _SUMMARY_SECTION_ORDER = (
     "core_skills",
     "strengths",
 )
-_CURRENT_SCORE_STATUSES = {"succeeded", "overridden"}
+# Keep review-needed AI scores visible in the recruiter library.  They remain
+# clearly labelled by their status and are never an automatic hiring decision.
+_CURRENT_SCORE_STATUSES = {"succeeded", "needs_review", "overridden"}
 _PREVIEW_MAX_CHARS = 220
 
 

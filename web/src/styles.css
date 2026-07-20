@@ -2781,7 +2781,7 @@ button {
 
 .model-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 6.5rem 3.25rem;
+  grid-template-columns: minmax(0, 1fr) minmax(8.75rem, 10rem) 3.25rem;
   gap: 0.625rem;
   align-items: center;
 }

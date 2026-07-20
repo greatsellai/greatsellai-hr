@@ -76,7 +76,9 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["quality_flags"] == []
     assert item["summary_preview"] == "Backend-oriented candidate."
     assert item["summary_created_at"] == summary.json()["created_at"]
-    assert item["score_total"] == 50.0
+    # All scoring dimensions now use a fixed 100-point scale: 40 * 60% +
+    # 50 * 40% = 44.
+    assert item["score_total"] == 44.0
     assert item["score_status"] == "succeeded"
     assert item["score_template_name"] == "Backend Engineer"
     assert item["score_created_at"] == score.json()["created_at"]

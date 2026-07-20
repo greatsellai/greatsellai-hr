@@ -567,7 +567,6 @@ export interface ScoreDimensionInput {
   key: string;
   label: string;
   weight: number;
-  max_raw_score?: number;
   guidance?: string | null;
 }
 
@@ -589,7 +588,6 @@ export interface ResumeScoreDimension {
   key: string;
   label: string;
   weight: number;
-  max_raw_score: number;
   ai_raw_score: number;
   final_raw_score: number;
   /** Final weighted contribution; kept for compatibility with earlier API responses. */
@@ -671,6 +669,37 @@ export interface ResumeScore {
 
 export interface ResumeScoreCreate {
   template_id: string;
+}
+
+export interface ResumeScoreBatch {
+  batch_id: string;
+  template_id: string;
+  template_name: string | null;
+  template_version: number;
+  status: string;
+  total_count: number;
+  completed_count: number;
+  failed_count: number;
+  cached_count: number;
+  requested_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  last_error: string | null;
+}
+
+export interface ResumeScoreBatchItem {
+  item_id: string;
+  resume_id: string;
+  candidate_id: string;
+  candidate_display_name: string | null;
+  facts_version: number;
+  status: string;
+  attempt_count: number;
+  last_error: string | null;
+  resume_score_id: string | null;
+  was_cached: boolean;
+  completed_at: string | null;
+  updated_at: string;
 }
 
 export interface ResumeScoreOverride {

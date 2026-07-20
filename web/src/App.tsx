@@ -48,6 +48,8 @@ import type {
   ResumeLibraryResponse,
   ResumeReviewDetail,
   ResumeScore,
+  ResumeScoreBatch,
+  ResumeScoreBatchItem,
   ResumeSummary,
   ResumeUploadResponse,
   RegistrationOffer,
@@ -399,7 +401,6 @@ const defaultTemplateDimensions: TemplateDraftDimension[] = [
     key: "skill_fit",
     label: "技能匹配",
     weight: 40,
-    max_raw_score: 100,
     guidance: "重点看核心技术栈、工具与岗位场景的可验证匹配。",
   },
   {
@@ -407,7 +408,6 @@ const defaultTemplateDimensions: TemplateDraftDimension[] = [
     key: "experience_depth",
     label: "经历深度",
     weight: 35,
-    max_raw_score: 100,
     guidance: "重点看工作年限、职责范围、成果与复杂度。",
   },
   {
@@ -415,7 +415,6 @@ const defaultTemplateDimensions: TemplateDraftDimension[] = [
     key: "education_basis",
     label: "教育背景",
     weight: 25,
-    max_raw_score: 100,
     guidance: "重点看学历、专业及必要的院校条件。",
   },
 ];
@@ -497,6 +496,7 @@ function humanizeError(error: unknown): string {
       mailbox_search_failed: "无法检索邮箱中的附件。",
       mailbox_sync_failed: "邮箱入库暂时异常，请稍后重试。",
       score_template_not_found: "评分规则不存在，请重新选择。",
+      resume_score_batch_not_found: "评分任务不存在或已不可访问。",
       job_version_not_found: "岗位版本不存在，请重新创建。",
       jd_generation_response_truncated:
         "岗位需求较长，AI 未能完整生成 JD。请精简后重试。",
@@ -987,6 +987,10 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     window.setTimeout(() => {
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, 5200);
+  }, []);
+
+  const refreshLibraryScores = useCallback(() => {
+    setLibraryRefreshToken((current) => current + 1);
   }, []);
 
   const refreshSavedFilters = useCallback(async () => {
@@ -1556,9 +1560,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             <ScorePage
               selected={selectedResume}
               notify={notify}
-              onScoreCreated={() =>
-                setLibraryRefreshToken((current) => current + 1)
-              }
+              onScoreCreated={refreshLibraryScores}
             />
           )}
           {view === "match" && (
@@ -5257,9 +5259,13 @@ function ScorePage({
   const [loadingTemplates, setLoadingTemplates] = useState(false);
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [scoring, setScoring] = useState(false);
+  const [startingScoreBatch, setStartingScoreBatch] = useState(false);
   const [score, setScore] = useState<ResumeScore | null>(null);
   const [scoreHistory, setScoreHistory] = useState<ResumeScore[]>([]);
   const [loadingScoreHistory, setLoadingScoreHistory] = useState(false);
+  const [scoreBatch, setScoreBatch] = useState<ResumeScoreBatch | null>(null);
+  const [scoreBatchItems, setScoreBatchItems] = useState<ResumeScoreBatchItem[]>([]);
+  const [scoreBatchRefreshError, setScoreBatchRefreshError] = useState<string | null>(null);
 
   const loadTemplates = useCallback(async () => {
     setLoadingTemplates(true);
@@ -5328,13 +5334,10 @@ function ScorePage({
       dimensions.some(
         (item) =>
           !/^[a-z][a-z0-9_]{1,63}$/.test(item.key) ||
-          !item.label.trim() ||
-          !Number.isFinite(Number(item.max_raw_score)) ||
-          Number(item.max_raw_score) < 1 ||
-          Number(item.max_raw_score) > 100,
+          !item.label.trim(),
       )
     ) {
-      notify("error", "每个维度都需要合法英文 key、显示名称和 1 至 100 的满分。");
+      notify("error", "每个维度都需要合法英文 key 和显示名称。");
       return;
     }
     setSavingTemplate(true);
@@ -5380,6 +5383,67 @@ function ScorePage({
       setScoring(false);
     }
   };
+  const runAllScores = async () => {
+    if (!templateId) {
+      notify("error", "请先选择或创建一套评分规则。");
+      return;
+    }
+    setStartingScoreBatch(true);
+    setScoreBatchRefreshError(null);
+    try {
+      const response = await api.enqueueAllResumeScores(templateId);
+      setScoreBatch(response);
+      setScoreBatchItems([]);
+      const cachedNotice = response.cached_count
+        ? `，其中 ${response.cached_count} 份复用当前评分`
+        : "";
+      notify(
+        "success",
+        `已将 ${response.total_count} 份简历加入评分队列${cachedNotice}。`,
+      );
+    } catch (error) {
+      notify("error", humanizeError(error));
+    } finally {
+      setStartingScoreBatch(false);
+    }
+  };
+  useEffect(() => {
+    if (!scoreBatch) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const [next, items] = await Promise.all([
+          api.getResumeScoreBatch(scoreBatch.batch_id),
+          api.listResumeScoreBatchItems(scoreBatch.batch_id),
+        ]);
+        if (cancelled) return;
+        const wasTerminal = ["completed", "partial"].includes(scoreBatch.status);
+        const isTerminal = ["completed", "partial"].includes(next.status);
+        setScoreBatch(next);
+        setScoreBatchItems(items);
+        setScoreBatchRefreshError(null);
+        if (isTerminal && !wasTerminal) {
+          onScoreCreated();
+          void loadScoreHistory();
+        }
+      } catch {
+        if (!cancelled) {
+          setScoreBatchRefreshError("暂时无法更新进度，任务仍在服务端继续运行。");
+        }
+      }
+    };
+    void refresh();
+    if (["completed", "partial"].includes(scoreBatch.status)) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = window.setInterval(() => void refresh(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [loadScoreHistory, onScoreCreated, scoreBatch?.batch_id, scoreBatch?.status]);
   const overrideDimension = async (
     scoreId: string,
     dimensionKey: string,
@@ -5404,6 +5468,8 @@ function ScorePage({
       throw error;
     }
   };
+  const scoreBatchIsRunning =
+    scoreBatch?.status === "queued" || scoreBatch?.status === "running";
 
   return (
     <div className="page-frame">
@@ -5540,26 +5606,7 @@ function ScorePage({
                       type="number"
                       value={dimension.weight}
                     />
-                    <label
-                      className="sr-only"
-                      htmlFor={`dimension-max-score-${dimension.id}`}
-                    >
-                      满分
-                    </label>
-                    <input
-                      className="field"
-                      id={`dimension-max-score-${dimension.id}`}
-                      max="100"
-                      min="1"
-                      onChange={(event) =>
-                        updateDimension(dimension.id, {
-                          max_raw_score: Number(event.target.value),
-                        })
-                      }
-                      type="number"
-                      value={dimension.max_raw_score ?? 100}
-                    />
-                    <span className="dimension-numeric-hint">上：权重 % · 下：满分</span>
+                    <span className="dimension-numeric-hint">权重 % · 单项满分固定 100</span>
                   </div>
                   <button
                     aria-label={`删除 ${dimension.label}`}
@@ -5588,7 +5635,6 @@ function ScorePage({
                       key: "new_dimension",
                       label: "新评分维度",
                       weight: 0,
-                      max_raw_score: 100,
                       guidance: "",
                     },
                   ])
@@ -5655,8 +5701,8 @@ function ScorePage({
             </div>
             <div className="review-actions">
               <button
-                className="button button-primary"
-                disabled={!selected || !templateId || scoring}
+                className="button"
+                disabled={!selected || !templateId || scoring || scoreBatchIsRunning}
                 onClick={() => void runScore()}
                 type="button"
               >
@@ -5668,12 +5714,37 @@ function ScorePage({
                 ) : (
                   <>
                     <Icon name="spark" size={16} />
-                    对当前简历评分
+                    生成当前候选人评分
+                  </>
+                )}
+              </button>
+              <button
+                className="button button-primary"
+                disabled={!templateId || startingScoreBatch || scoreBatchIsRunning}
+                onClick={() => void runAllScores()}
+                type="button"
+              >
+                {startingScoreBatch || scoreBatchIsRunning ? (
+                  <>
+                    <i className="spinner" />
+                    {startingScoreBatch ? "正在创建任务…" : "评分队列运行中…"}
+                  </>
+                ) : (
+                  <>
+                    <Icon name="layers" size={16} />
+                    一键生成全部评分
                   </>
                 )}
               </button>
             </div>
           </section>
+          {scoreBatch && (
+            <ScoreBatchDetails
+              batch={scoreBatch}
+              items={scoreBatchItems}
+              refreshError={scoreBatchRefreshError}
+            />
+          )}
           {score && (
             <ScoreResult
               onOverride={overrideDimension}
@@ -5788,7 +5859,7 @@ function ScoreResult({
     dimension: ResumeScore["dimension_scores"][number],
   ) => {
     const rawScore = Number(draftRawScore);
-    if (!Number.isFinite(rawScore) || rawScore < 0 || rawScore > dimension.max_raw_score) {
+    if (!Number.isFinite(rawScore) || rawScore < 0 || rawScore > 100) {
       return;
     }
     if (!draftReason.trim()) return;
@@ -5834,15 +5905,15 @@ function ScoreResult({
                   <div className="score-bar">
                     <i
                       style={{
-                        width: `${Math.max(0, Math.min(100, (dimension.final_raw_score / dimension.max_raw_score) * 100))}%`,
+                        width: `${Math.max(0, Math.min(100, dimension.final_raw_score))}%`,
                       }}
                     />
                   </div>
-                  <strong>{dimension.final_raw_score.toFixed(0)} / {dimension.max_raw_score}</strong>
+                  <strong>{dimension.final_raw_score.toFixed(0)} / 100</strong>
                 </div>
                 <div className="score-dimension-meta">
-                  <span>AI 原始分 {dimension.ai_raw_score.toFixed(0)} / {dimension.max_raw_score} · 权重 {dimension.weight}%</span>
-                  {hasManualAdjustment && <span className="score-manual-mark">人工调整后 {dimension.final_raw_score.toFixed(0)} / {dimension.max_raw_score}</span>}
+                  <span>AI 原始分 {dimension.ai_raw_score.toFixed(0)} / 100 · 权重 {dimension.weight}%</span>
+                  {hasManualAdjustment && <span className="score-manual-mark">人工调整后 {dimension.final_raw_score.toFixed(0)} / 100</span>}
                 </div>
                 <p className="score-dimension-rationale">{dimension.rationale || "信息不足，未提供可验证判断依据。"}</p>
                 <div className="score-evidence-row">
@@ -5867,10 +5938,10 @@ function ScoreResult({
                     }}
                   >
                     <label className="field-stack">
-                      <span className="field-label">人工原始分（0 至 {dimension.max_raw_score}）</span>
+                      <span className="field-label">人工原始分（0 至 100）</span>
                       <input
                         className="field"
-                        max={dimension.max_raw_score}
+                        max="100"
                         min="0"
                         onChange={(event) => setDraftRawScore(event.target.value)}
                         step="0.1"
@@ -5962,6 +6033,84 @@ function ScoreResult({
           )}
         </div>
       </div>
+    </section>
+  );
+}
+
+function ScoreBatchDetails({
+  batch,
+  items,
+  refreshError,
+}: {
+  batch: ResumeScoreBatch;
+  items: ResumeScoreBatchItem[];
+  refreshError: string | null;
+}) {
+  const failed = items.filter((item) => item.status === "failed");
+  const inProgress = items.filter(
+    (item) => item.status === "queued" || item.status === "running",
+  );
+  const isTerminal = ["completed", "partial"].includes(batch.status);
+  const statusLabel =
+    batch.status === "partial"
+      ? "部分完成"
+      : batch.status === "completed"
+        ? "已完成"
+        : batch.status === "queued"
+          ? "等待处理"
+          : "运行中";
+  return (
+    <section className="panel match-batch-details score-batch-details" aria-live="polite">
+      <div className="panel-heading">
+        <div>
+          <h2>批量评分任务</h2>
+          <p>
+            {batch.completed_count + batch.failed_count} / {batch.total_count} 已结束
+            {batch.cached_count ? `，${batch.cached_count} 份已复用当前评分` : ""}
+            {inProgress.length ? `，仍有 ${inProgress.length} 份在队列中` : ""}。
+          </p>
+        </div>
+        <span className={`status-pill${batch.failed_count ? " is-warning" : ""}`}>
+          {statusLabel}
+        </span>
+      </div>
+      {refreshError && (
+        <p className="library-error" role="alert">
+          {refreshError}
+        </p>
+      )}
+      {failed.length ? (
+        <div className="table-scroll">
+          <table className="candidate-table batch-failure-table">
+            <thead>
+              <tr>
+                <th scope="col">候选人</th>
+                <th scope="col">事实版本</th>
+                <th scope="col">尝试次数</th>
+                <th scope="col">失败原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {failed.map((item) => (
+                <tr key={item.item_id}>
+                  <td>{item.candidate_display_name?.trim() || "未命名候选人"}</td>
+                  <td>v{item.facts_version}</td>
+                  <td>{item.attempt_count}</td>
+                  <td>{item.last_error || "未知错误"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : batch.failed_count ? (
+        <p className="library-error">任务报告了失败项，正在读取具体原因。</p>
+      ) : (
+        <p className="candidate-meta">
+          {isTerminal
+            ? "本批简历均已完成评分。"
+            : "评分在服务端队列中运行，当前页面可以继续处理其他工作。"}
+        </p>
+      )}
     </section>
   );
 }

@@ -388,7 +388,7 @@ def test_agent_runs_current_candidate_score_with_existing_template(
     assert payload["tool_trace"] == [
         {
             "tool": "候选人评分",
-            "summary": "已按“Backend Engineer”v1 为当前候选人生成 50.0 分评分",
+            "summary": "已按“Backend Engineer”v1 为当前候选人生成 44.0 分评分",
         }
     ]
     assert payload["actions"] == [

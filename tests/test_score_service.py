@@ -13,14 +13,12 @@ def _template_payload() -> dict[str, object]:
                 "key": "skills",
                 "label": "Skills",
                 "weight": 60,
-                "max_raw_score": 80,
                 "guidance": "Assess explicit relevant skills only.",
             },
             {
                 "key": "experience",
                 "label": "Experience",
                 "weight": 40,
-                "max_raw_score": 100,
                 "guidance": "Assess explicit work evidence only.",
             },
         ],
@@ -79,7 +77,7 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     template = ai_client.post("/v1/score-templates", json=_template_payload())
     assert template.status_code == 200, template.text
     template_id = template.json()["template_id"]
-    assert template.json()["dimensions"][0]["max_raw_score"] == 80
+    assert "max_raw_score" not in template.json()["dimensions"][0]
 
     score = ai_client.post(
         f"/v1/resumes/{resume_id}/scores",
@@ -88,8 +86,8 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     assert score.status_code == 200, score.text
     payload = score.json()
     assert payload["fact_snapshot_id"]
-    assert payload["ai_total_score"] == 50.0
-    assert payload["total_score"] == 50.0
+    assert payload["ai_total_score"] == 44.0
+    assert payload["total_score"] == 44.0
     assert payload["status"] == "succeeded"
     assert payload["model_name"] == "unit-test-model"
     assert payload["created_at"]
@@ -114,8 +112,8 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
         }
     ]
     assert payload["dimension_scores"][0]["ai_raw_score"] == 40.0
-    assert payload["dimension_scores"][0]["ai_weighted_score"] == 30.0
-    assert payload["dimension_scores"][0]["final_weighted_score"] == 30.0
+    assert payload["dimension_scores"][0]["ai_weighted_score"] == 24.0
+    assert payload["dimension_scores"][0]["final_weighted_score"] == 24.0
     assert payload["dimension_scores"][0]["evidence_state"] == "grounded"
     assert payload["dimension_scores"][0]["fact_evidence"] == [
         {
@@ -134,8 +132,8 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
         json={"raw_score": 80, "reason": "Verified with portfolio evidence."},
     )
     assert overridden.status_code == 200, overridden.text
-    assert overridden.json()["ai_total_score"] == 50.0
-    assert overridden.json()["total_score"] == 80.0
+    assert overridden.json()["ai_total_score"] == 44.0
+    assert overridden.json()["total_score"] == 68.0
     assert overridden.json()["status"] == "overridden"
     assert overridden.json()["dimension_scores"][0]["manual_reason"] == (
         "Verified with portfolio evidence."
@@ -143,9 +141,9 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     overridden_dimension = overridden.json()["dimension_scores"][0]
     assert overridden_dimension["ai_raw_score"] == 40.0
     assert overridden_dimension["final_raw_score"] == 80.0
-    assert overridden_dimension["weighted_score"] == 60.0
-    assert overridden_dimension["ai_weighted_score"] == 30.0
-    assert overridden_dimension["final_weighted_score"] == 60.0
+    assert overridden_dimension["weighted_score"] == 48.0
+    assert overridden_dimension["ai_weighted_score"] == 24.0
+    assert overridden_dimension["final_weighted_score"] == 48.0
     assert overridden_dimension["manual_adjustment"] == {
         "raw_score": 80.0,
         "reason": "Verified with portfolio evidence.",
@@ -174,8 +172,8 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
         json={"raw_score": 60, "reason": "Adjusted after a second review."},
     )
     assert overridden_again.status_code == 200, overridden_again.text
-    assert overridden_again.json()["total_score"] == 65.0
-    assert overridden_again.json()["dimension_scores"][0]["final_weighted_score"] == 45.0
+    assert overridden_again.json()["total_score"] == 56.0
+    assert overridden_again.json()["dimension_scores"][0]["final_weighted_score"] == 36.0
     assert [entry["previous_final_raw_score"] for entry in overridden_again.json()["audit_trail"]] == [
         40.0,
         80.0,
@@ -211,12 +209,11 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     assert stale_detail.status_code == 200, stale_detail.text
     assert stale_detail.json()["is_current_facts_version"] is False
 
-    exceeds_max = ai_client.post(
+    exceeds_hundred = ai_client.post(
         f"/v1/resume-scores/{payload['score_id']}/dimensions/skills/override",
-        json={"raw_score": 81, "reason": "Too high."},
+        json={"raw_score": 101, "reason": "Too high."},
     )
-    assert exceeds_max.status_code == 422
-    assert exceeds_max.json()["detail"] == "score_override_exceeds_dimension_max"
+    assert exceeds_hundred.status_code == 422
 
 
 def test_score_requires_server_side_model_key(client) -> None:

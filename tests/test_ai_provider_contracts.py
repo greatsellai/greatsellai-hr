@@ -122,14 +122,12 @@ def _dimensions() -> list[dict[str, object]]:
             "key": "skills",
             "label": "核心技能",
             "weight": 40,
-            "max_raw_score": 40,
             "guidance": "Assess only explicit skills.",
         },
         {
             "key": "experience",
             "label": "相关经历",
             "weight": 60,
-            "max_raw_score": 60,
             "guidance": None,
         },
     ]
@@ -257,9 +255,9 @@ def test_score_output_requires_each_unique_dimension_and_known_fact_ids() -> Non
         )
 
 
-def test_score_output_rejects_scores_above_dimension_maximum() -> None:
+def test_score_output_rejects_scores_above_hundred() -> None:
     invalid_score = _valid_score_output()
-    invalid_score["dimension_scores"][0]["raw_score"] = 41  # type: ignore[index]
+    invalid_score["dimension_scores"][0]["raw_score"] = 101  # type: ignore[index]
     with pytest.raises(DeepSeekProviderError, match="score_value"):
         validate_resume_score_output(
             invalid_score,

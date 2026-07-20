@@ -30,6 +30,8 @@ import type {
   ResumeReviewDetail,
   ResumeReviewQueueResponse,
   ResumeScore,
+  ResumeScoreBatch,
+  ResumeScoreBatchItem,
   ResumeScoreCreate,
   ResumeScoreOverride,
   ResumeSummary,
@@ -391,6 +393,25 @@ export function createApiClient(options: ApiClientOptions = {}) {
         method: "POST",
         body: input,
       });
+    },
+
+    enqueueAllResumeScores(templateId: string): Promise<ResumeScoreBatch> {
+      return request<ResumeScoreBatch>(
+        `/score-templates/${resourcePath(templateId)}/score-all`,
+        { method: "POST" },
+      );
+    },
+
+    getResumeScoreBatch(batchId: string): Promise<ResumeScoreBatch> {
+      return request<ResumeScoreBatch>(
+        `/resume-score-batches/${resourcePath(batchId)}`,
+      );
+    },
+
+    listResumeScoreBatchItems(batchId: string): Promise<ResumeScoreBatchItem[]> {
+      return request<ResumeScoreBatchItem[]>(
+        `/resume-score-batches/${resourcePath(batchId)}/items`,
+      );
     },
 
     getScore(scoreId: string): Promise<ResumeScore> {

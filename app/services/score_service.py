@@ -54,7 +54,6 @@ def _dimension_input(dimension: ScoreTemplateDimension) -> ScoreDimensionInput:
         key=dimension.key,
         label=dimension.label,
         weight=dimension.weight,
-        max_raw_score=dimension.max_raw_score,
         guidance=dimension.guidance,
     )
 
@@ -224,13 +223,12 @@ def _dimension_response(
     key = _optional_string(record.get("key")) or "unknown"
     label = _optional_string(record.get("label")) or key
     weight = _optional_int(record.get("weight")) or 0
-    max_raw_score = _optional_int(record.get("max_raw_score")) or 100
     ai_raw_score = _optional_float(record.get("ai_raw_score")) or 0.0
     final_raw_score = _optional_float(record.get("final_raw_score"))
     if final_raw_score is None:
         final_raw_score = ai_raw_score
-    ai_weighted_score = round(ai_raw_score / max_raw_score * weight, 4)
-    final_weighted_score = round(final_raw_score / max_raw_score * weight, 4)
+    ai_weighted_score = round(ai_raw_score / 100 * weight, 4)
+    final_weighted_score = round(final_raw_score / 100 * weight, 4)
     fact_ids = _string_list(record.get("fact_ids"))
     fact_evidence = [
         fact_evidence_by_id[fact_id]
@@ -258,7 +256,6 @@ def _dimension_response(
         key=key,
         label=label,
         weight=weight,
-        max_raw_score=max_raw_score,
         ai_raw_score=ai_raw_score,
         final_raw_score=final_raw_score,
         weighted_score=final_weighted_score,
@@ -396,7 +393,6 @@ def create_score_template(
                 key=dimension.key,
                 label=dimension.label.strip(),
                 weight=dimension.weight,
-                max_raw_score=dimension.max_raw_score,
                 guidance=dimension.guidance.strip() if dimension.guidance else None,
                 sort_order=sort_order,
             )
@@ -462,14 +458,13 @@ def _dimension_records(
         if provider_dimension is None:
             raise ScoreServiceError("score_provider_missing_dimension")
         raw_score = float(provider_dimension["raw_score"])
-        weighted_score = raw_score / dimension.max_raw_score * dimension.weight
+        weighted_score = raw_score / 100 * dimension.weight
         total += weighted_score
         records.append(
             {
                 "key": dimension.key,
                 "label": dimension.label,
                 "weight": dimension.weight,
-                "max_raw_score": dimension.max_raw_score,
                 "ai_raw_score": raw_score,
                 "final_raw_score": raw_score,
                 "weighted_score": round(weighted_score, 4),
@@ -518,7 +513,6 @@ def run_resume_score(
                 "key": dimension.key,
                 "label": dimension.label,
                 "weight": dimension.weight,
-                "max_raw_score": dimension.max_raw_score,
                 "guidance": dimension.guidance,
             }
             for dimension in dimensions
@@ -590,10 +584,9 @@ def list_resume_scores(
 def _recalculate_final_total(dimension_scores: list[dict[str, object]]) -> float:
     total = 0.0
     for dimension in dimension_scores:
-        max_raw_score = float(dimension["max_raw_score"])
         final_raw_score = float(dimension["final_raw_score"])
         weight = float(dimension["weight"])
-        total += final_raw_score / max_raw_score * weight
+        total += final_raw_score / 100 * weight
     return round(total, 2)
 
 
@@ -611,13 +604,10 @@ def override_score_dimension(
     target = next((record for record in records if record.get("key") == dimension_key), None)
     if target is None:
         raise ScoreServiceError("score_dimension_not_found")
-    max_raw_score = float(target["max_raw_score"])
-    if payload.raw_score > max_raw_score:
-        raise ScoreServiceError("score_override_exceeds_dimension_max")
     old_value = target.get("final_raw_score")
     final_raw_score = float(payload.raw_score)
     final_weighted_score = round(
-        final_raw_score / max_raw_score * float(target["weight"]),
+        final_raw_score / 100 * float(target["weight"]),
         4,
     )
     target["final_raw_score"] = final_raw_score

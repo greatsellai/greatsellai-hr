@@ -749,11 +749,6 @@ class ScoreTemplateDimension(Base):
     key: Mapped[str] = mapped_column(String(64))
     label: Mapped[str] = mapped_column(String(120))
     weight: Mapped[int] = mapped_column(Integer)
-    max_raw_score: Mapped[int] = mapped_column(
-        Integer,
-        default=100,
-        server_default=text("100"),
-    )
     guidance: Mapped[str | None] = mapped_column(Text)
     sort_order: Mapped[int] = mapped_column(Integer)
 
@@ -784,6 +779,103 @@ class ResumeScore(OrganizationScoped, Base):
     resume: Mapped[Resume] = relationship(back_populates="scores")
     fact_snapshot: Mapped[ResumeFactSnapshot | None] = relationship(back_populates="scores")
     template: Mapped[ScoreTemplate] = relationship(back_populates="scores")
+
+
+class ResumeScoreBatch(OrganizationScoped, Base):
+    """A durable, template-scoped batch of AI resume scores.
+
+    Each batch freezes the template version at request time.  Individual
+    items keep their own immutable resume fact version so the worker can
+    safely retry without ever scoring facts from another workspace or a newer
+    resume version by accident.
+    """
+
+    __tablename__ = "resume_score_batches"
+    __table_args__ = (
+        Index(
+            "ix_resume_score_batches_organization_claim",
+            "organization_id",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "uq_resume_score_batches_active_template",
+            "organization_id",
+            "template_id",
+            "template_version",
+            unique=True,
+            sqlite_where=text("status IN ('queued', 'running')"),
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    template_id: Mapped[str] = mapped_column(ForeignKey("score_templates.id"), index=True)
+    template_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    cached_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=2)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    template: Mapped[ScoreTemplate] = relationship()
+    items: Mapped[list["ResumeScoreBatchItem"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+    )
+
+
+class ResumeScoreBatchItem(OrganizationScoped, Base):
+    """One resume's durable place in a score batch."""
+
+    __tablename__ = "resume_score_batch_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "resume_id", name="uq_resume_score_batch_item_resume"),
+        Index("ix_resume_score_batch_item_claim", "status", "next_attempt_at"),
+        Index(
+            "ix_resume_score_batch_item_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("resume_score_batches.id"), index=True)
+    resume_id: Mapped[str] = mapped_column(ForeignKey("resumes.id"), index=True)
+    fact_snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("resume_fact_snapshots.id"), index=True
+    )
+    facts_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    resume_score_id: Mapped[str | None] = mapped_column(
+        ForeignKey("resume_scores.id"), nullable=True
+    )
+    was_cached: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    batch: Mapped[ResumeScoreBatch] = relationship(back_populates="items")
+    resume: Mapped[Resume] = relationship()
+    fact_snapshot: Mapped[ResumeFactSnapshot] = relationship()
+    resume_score: Mapped[ResumeScore | None] = relationship()
 
 
 class ResumeSummary(OrganizationScoped, Base):

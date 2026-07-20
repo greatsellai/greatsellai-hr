@@ -397,7 +397,6 @@ def _score_template_context(session: Session) -> list[dict[str, object]]:
                     "key": dimension.key,
                     "label": dimension.label,
                     "weight": dimension.weight,
-                    "max_raw_score": dimension.max_raw_score,
                 }
                 for dimension in template.dimensions
             ],
@@ -649,7 +648,6 @@ def _score_current_candidate(
         {
             "label": dimension.label,
             "weight": dimension.weight,
-            "max_raw_score": dimension.max_raw_score,
             "ai_raw_score": dimension.ai_raw_score,
             "final_raw_score": dimension.final_raw_score,
             "rationale": dimension.rationale,

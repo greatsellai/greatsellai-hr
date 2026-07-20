@@ -6,6 +6,7 @@ import imaplib
 import re
 import unicodedata
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email import policy
 from email.header import decode_header, make_header
@@ -13,7 +14,7 @@ from email.message import Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Literal
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -25,6 +26,7 @@ from app.config import AppSettings
 from app.models import (
     EmailAttachmentImport,
     EmailAttachmentImportAttempt,
+    MailboxAttachmentContentIdentity,
     MailboxConfig,
     Resume,
 )
@@ -69,8 +71,13 @@ class _RetryClaimLost(MailboxImportError):
     """A newer request owns this attachment retry now."""
 
 
+class _ContentClaimLost(MailboxImportError):
+    """A newer mailbox attachment owns this content identity now."""
+
+
 _RETRY_LEASE_SECONDS = 180
 _SYNC_LEASE_SECONDS = 600
+_CONTENT_CLAIM_LEASE_SECONDS = 180
 _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
     {
         "attachment_validation_failed",
@@ -747,8 +754,10 @@ def _record(
     error: str | None,
     resume_id: str | None,
     received_at: datetime | None,
+    canonical_import_id: str | None = None,
     source_uidvalidity: int | None = None,
     trigger: str = "automatic",
+    attempt_completed: bool = True,
 ) -> EmailAttachmentImport:
     now = _utcnow()
     record = EmailAttachmentImport(
@@ -765,6 +774,7 @@ def _record(
         status=status,
         error=error,
         resume_id=resume_id,
+        canonical_import_id=canonical_import_id,
         attempt_count=1,
         last_attempted_at=now,
         received_at=received_at,
@@ -782,11 +792,692 @@ def _record(
             error=error,
             resume_id=resume_id,
             started_at=now,
-            completed_at=now,
+            completed_at=now if attempt_completed else None,
         )
     )
     session.flush()
     return record
+
+
+@dataclass(frozen=True)
+class _ContentClaim:
+    """The outcome of claiming one workspace-scoped attachment byte identity."""
+
+    outcome: Literal["owner", "duplicate", "waiting"]
+    identity_id: str
+    owner_import_id: str | None = None
+    claim_token: str | None = None
+    canonical_import_id: str | None = None
+    canonical_resume_id: str | None = None
+
+
+def _content_claim_is_active(
+    identity: MailboxAttachmentContentIdentity,
+    *,
+    now: datetime,
+) -> bool:
+    lease_expires_at = _as_utc(identity.claim_lease_expires_at)
+    return bool(
+        identity.status == "processing"
+        and identity.claim_token
+        and lease_expires_at is not None
+        and lease_expires_at > now
+    )
+
+
+def _historical_canonical_import(
+    session: Session,
+    *,
+    organization_id: str,
+    attachment_sha256: str,
+) -> EmailAttachmentImport | None:
+    """Adopt a successful pre-identity import on first forwarded duplicate.
+
+    The migration only creates schema.  Reading a historical successful import
+    here keeps the upgrade safe across SQLite and PostgreSQL without a
+    potentially long data migration, while still making the new unique table
+    the concurrency boundary from this first lookup onward.
+    """
+
+    return session.scalar(
+        select(EmailAttachmentImport)
+        .join(Resume, Resume.id == EmailAttachmentImport.resume_id)
+        .where(
+            EmailAttachmentImport.organization_id == organization_id,
+            EmailAttachmentImport.attachment_sha256 == attachment_sha256,
+            EmailAttachmentImport.status == "imported",
+            EmailAttachmentImport.resume_id.is_not(None),
+            Resume.organization_id == organization_id,
+        )
+        .order_by(EmailAttachmentImport.created_at, EmailAttachmentImport.id)
+    )
+
+
+def _identity_has_canonical_resume(
+    session: Session,
+    *,
+    identity: MailboxAttachmentContentIdentity,
+    organization_id: str,
+) -> bool:
+    if not identity.canonical_import_id or not identity.canonical_resume_id:
+        return False
+    return (
+        session.scalar(
+            select(Resume.id).where(
+                Resume.id == identity.canonical_resume_id,
+                Resume.organization_id == organization_id,
+            )
+        )
+        is not None
+    )
+
+
+def _mark_expired_content_owner_failed(
+    session: Session,
+    *,
+    organization_id: str,
+    previous_owner_import_id: str | None,
+    current_import_id: str,
+    now: datetime,
+) -> None:
+    """Release an abandoned owner audit row before another mail takes over."""
+
+    if not previous_owner_import_id or previous_owner_import_id == current_import_id:
+        return
+    session.execute(
+        update(EmailAttachmentImport)
+        .where(
+            EmailAttachmentImport.id == previous_owner_import_id,
+            EmailAttachmentImport.organization_id == organization_id,
+            EmailAttachmentImport.status.in_(("processing", "retrying")),
+        )
+        .values(
+            status="failed",
+            error="attachment_content_claim_expired",
+            resume_id=None,
+            canonical_import_id=None,
+            last_attempted_at=now,
+            retry_lease_expires_at=None,
+            retry_claim_token=None,
+            updated_at=now,
+        )
+    )
+    session.execute(
+        update(EmailAttachmentImportAttempt)
+        .where(
+            EmailAttachmentImportAttempt.organization_id == organization_id,
+            EmailAttachmentImportAttempt.email_attachment_import_id
+            == previous_owner_import_id,
+            EmailAttachmentImportAttempt.status.in_(("processing", "retrying")),
+            EmailAttachmentImportAttempt.completed_at.is_(None),
+        )
+        .values(
+            status="failed",
+            error="attachment_content_claim_expired",
+            completed_at=now,
+        )
+    )
+
+
+def _recover_expired_content_claims(
+    session: Session,
+    *,
+    organization_id: str,
+) -> int:
+    """Release abandoned canonical claims before an incremental mailbox scan.
+
+    The owner lease is committed before document conversion deliberately, so a
+    second forwarded copy can see and wait for it.  If that process exits
+    between the claim commit and completion, the source UID would otherwise be
+    considered handled forever by ``_known_message_uids``.  Close the owner
+    and every waiter as retryable failures once the lease expires; a manual
+    retry or a later forwarded copy can safely claim the bytes again.
+    """
+
+    now = _utcnow()
+    identities = list(
+        session.scalars(
+            select(MailboxAttachmentContentIdentity).where(
+                MailboxAttachmentContentIdentity.organization_id == organization_id,
+                MailboxAttachmentContentIdentity.status == "processing",
+                or_(
+                    MailboxAttachmentContentIdentity.claim_lease_expires_at.is_(None),
+                    MailboxAttachmentContentIdentity.claim_lease_expires_at <= now,
+                ),
+            )
+        ).all()
+    )
+    recovered = 0
+    for identity in identities:
+        previous_owner_import_id = identity.processing_import_id
+        attachment_sha256 = identity.attachment_sha256
+        released = session.execute(
+            update(MailboxAttachmentContentIdentity)
+            .where(
+                MailboxAttachmentContentIdentity.id == identity.id,
+                MailboxAttachmentContentIdentity.organization_id == organization_id,
+                MailboxAttachmentContentIdentity.status == "processing",
+                or_(
+                    MailboxAttachmentContentIdentity.claim_lease_expires_at.is_(None),
+                    MailboxAttachmentContentIdentity.claim_lease_expires_at <= now,
+                ),
+            )
+            .values(
+                status="failed",
+                processing_import_id=None,
+                canonical_import_id=None,
+                canonical_resume_id=None,
+                claim_token=None,
+                claim_lease_expires_at=None,
+                last_error="attachment_content_claim_expired",
+                updated_at=now,
+            )
+        )
+        if released.rowcount != 1:
+            session.expire_all()
+            continue
+        _mark_expired_content_owner_failed(
+            session,
+            organization_id=organization_id,
+            previous_owner_import_id=previous_owner_import_id,
+            current_import_id="",
+            now=now,
+        )
+        _resolve_waiting_content_imports(
+            session,
+            organization_id=organization_id,
+            attachment_sha256=attachment_sha256,
+            canonical_import_id=None,
+            canonical_resume_id=None,
+            status="failed",
+            error="attachment_content_claim_expired",
+            now=now,
+        )
+        recovered += 1
+    if recovered:
+        session.commit()
+    return recovered
+
+
+def _claim_attachment_content(
+    session: Session,
+    *,
+    record: EmailAttachmentImport,
+) -> _ContentClaim:
+    """Atomically make one import the owner of its attachment bytes.
+
+    The caller has already created an audit row for the mail attachment.  A
+    SAVEPOINT isolates a duplicate-key race from that audit row, then the
+    unique `(organization_id, attachment_sha256)` constraint decides which
+    worker may create a candidate.  Slow file parsing happens only after the
+    winning claim is committed.
+    """
+
+    organization_id = organization_context_id(session)
+    if record.organization_id != organization_id:
+        raise MailboxImportError("mailbox_workspace_mismatch")
+
+    now = _utcnow()
+    for _ in range(4):
+        identity = session.scalar(
+            select(MailboxAttachmentContentIdentity).where(
+                MailboxAttachmentContentIdentity.organization_id == organization_id,
+                MailboxAttachmentContentIdentity.attachment_sha256
+                == record.attachment_sha256,
+            )
+        )
+
+        if identity is None:
+            historical = _historical_canonical_import(
+                session,
+                organization_id=organization_id,
+                attachment_sha256=record.attachment_sha256,
+            )
+            if historical is not None:
+                candidate_identity = MailboxAttachmentContentIdentity(
+                    organization_id=organization_id,
+                    attachment_sha256=record.attachment_sha256,
+                    status="imported",
+                    canonical_import_id=historical.id,
+                    canonical_resume_id=historical.resume_id,
+                    last_error=None,
+                )
+                outcome: Literal["owner", "duplicate"] = "duplicate"
+                token = None
+            else:
+                token = uuid4().hex
+                candidate_identity = MailboxAttachmentContentIdentity(
+                    organization_id=organization_id,
+                    attachment_sha256=record.attachment_sha256,
+                    status="processing",
+                    processing_import_id=record.id,
+                    claim_token=token,
+                    claim_lease_expires_at=now
+                    + timedelta(seconds=_CONTENT_CLAIM_LEASE_SECONDS),
+                    last_error=None,
+                )
+                outcome = "owner"
+            try:
+                # ``begin_nested`` keeps the newly-created mail audit record
+                # alive if a second worker committed the same identity first.
+                with session.begin_nested():
+                    session.add(candidate_identity)
+                    session.flush()
+            except IntegrityError:
+                session.expire_all()
+                continue
+            if outcome == "duplicate":
+                return _ContentClaim(
+                    outcome="duplicate",
+                    identity_id=candidate_identity.id,
+                    canonical_import_id=historical.id,
+                    canonical_resume_id=historical.resume_id,
+                )
+            return _ContentClaim(
+                outcome="owner",
+                identity_id=candidate_identity.id,
+                owner_import_id=record.id,
+                claim_token=token,
+            )
+
+        if identity.status == "imported":
+            if _identity_has_canonical_resume(
+                session,
+                identity=identity,
+                organization_id=organization_id,
+            ):
+                return _ContentClaim(
+                    outcome="duplicate",
+                    identity_id=identity.id,
+                    canonical_import_id=identity.canonical_import_id,
+                    canonical_resume_id=identity.canonical_resume_id,
+                )
+            # A manually removed canonical resume must never leave this hash
+            # permanently blocked.  Convert the stale identity back to a
+            # retryable state, then claim it in the next loop iteration.
+            reset = session.execute(
+                update(MailboxAttachmentContentIdentity)
+                .where(
+                    MailboxAttachmentContentIdentity.id == identity.id,
+                    MailboxAttachmentContentIdentity.organization_id == organization_id,
+                    MailboxAttachmentContentIdentity.status == "imported",
+                )
+                .values(
+                    status="failed",
+                    processing_import_id=None,
+                    canonical_import_id=None,
+                    canonical_resume_id=None,
+                    claim_token=None,
+                    claim_lease_expires_at=None,
+                    last_error="canonical_resume_unavailable",
+                    updated_at=now,
+                )
+            )
+            if reset.rowcount == 1:
+                session.expire_all()
+            continue
+
+        if _content_claim_is_active(identity, now=now):
+            return _ContentClaim(
+                outcome="waiting",
+                identity_id=identity.id,
+                owner_import_id=identity.processing_import_id,
+            )
+
+        claim_token = uuid4().hex
+        previous_owner_import_id = identity.processing_import_id
+        if identity.status == "failed":
+            claim_conditions = (MailboxAttachmentContentIdentity.status == "failed",)
+        elif identity.status == "processing":
+            claim_conditions = (
+                MailboxAttachmentContentIdentity.status == "processing",
+                or_(
+                    MailboxAttachmentContentIdentity.claim_lease_expires_at.is_(None),
+                    MailboxAttachmentContentIdentity.claim_lease_expires_at <= now,
+                ),
+            )
+        else:
+            # Future/invalid values are never trusted as a completed import.
+            claim_conditions = (MailboxAttachmentContentIdentity.status == identity.status,)
+
+        claimed = session.execute(
+            update(MailboxAttachmentContentIdentity)
+            .where(
+                MailboxAttachmentContentIdentity.id == identity.id,
+                MailboxAttachmentContentIdentity.organization_id == organization_id,
+                *claim_conditions,
+            )
+            .values(
+                status="processing",
+                processing_import_id=record.id,
+                canonical_import_id=None,
+                canonical_resume_id=None,
+                claim_token=claim_token,
+                claim_lease_expires_at=now
+                + timedelta(seconds=_CONTENT_CLAIM_LEASE_SECONDS),
+                last_error=None,
+                updated_at=now,
+            )
+        )
+        if claimed.rowcount != 1:
+            session.expire_all()
+            continue
+        if identity.status == "processing":
+            _mark_expired_content_owner_failed(
+                session,
+                organization_id=organization_id,
+                previous_owner_import_id=previous_owner_import_id,
+                current_import_id=record.id,
+                now=now,
+            )
+        return _ContentClaim(
+            outcome="owner",
+            identity_id=identity.id,
+            owner_import_id=record.id,
+            claim_token=claim_token,
+        )
+
+    raise MailboxImportError("mailbox_content_claim_conflict")
+
+
+def _resolve_waiting_content_imports(
+    session: Session,
+    *,
+    organization_id: str,
+    attachment_sha256: str,
+    canonical_import_id: str | None,
+    canonical_resume_id: str | None,
+    status: Literal["imported", "failed"],
+    error: str | None,
+    now: datetime,
+) -> None:
+    """Finish forwarded mails that arrived while the canonical bytes ran."""
+
+    waiting_ids = list(
+        session.scalars(
+            select(EmailAttachmentImport.id).where(
+                EmailAttachmentImport.organization_id == organization_id,
+                EmailAttachmentImport.attachment_sha256 == attachment_sha256,
+                EmailAttachmentImport.status == "deduplicating",
+            )
+        ).all()
+    )
+    if not waiting_ids:
+        return
+
+    terminal_status = "duplicate" if status == "imported" else "failed"
+    terminal_error = None if status == "imported" else error
+    session.execute(
+        update(EmailAttachmentImport)
+        .where(
+            EmailAttachmentImport.organization_id == organization_id,
+            EmailAttachmentImport.id.in_(waiting_ids),
+            EmailAttachmentImport.status == "deduplicating",
+        )
+        .values(
+            status=terminal_status,
+            error=terminal_error,
+            resume_id=canonical_resume_id if status == "imported" else None,
+            canonical_import_id=canonical_import_id if status == "imported" else None,
+            last_attempted_at=now,
+            updated_at=now,
+        )
+    )
+    session.execute(
+        update(EmailAttachmentImportAttempt)
+        .where(
+            EmailAttachmentImportAttempt.organization_id == organization_id,
+            EmailAttachmentImportAttempt.email_attachment_import_id.in_(waiting_ids),
+            EmailAttachmentImportAttempt.status == "deduplicating",
+            EmailAttachmentImportAttempt.completed_at.is_(None),
+        )
+        .values(
+            status=terminal_status,
+            error=terminal_error,
+            resume_id=canonical_resume_id if status == "imported" else None,
+            completed_at=now,
+        )
+    )
+
+
+def _complete_content_claim(
+    session: Session,
+    *,
+    claim: _ContentClaim,
+    attachment_sha256: str,
+    status: Literal["imported", "failed"],
+    error: str | None,
+    canonical_import_id: str | None,
+    canonical_resume_id: str | None,
+) -> None:
+    """Close a content identity only if this request still owns its token."""
+
+    if claim.outcome != "owner" or not claim.owner_import_id or not claim.claim_token:
+        raise _ContentClaimLost("mailbox_content_claim_lost")
+    organization_id = organization_context_id(session)
+    now = _utcnow()
+    completed = session.execute(
+        update(MailboxAttachmentContentIdentity)
+        .where(
+            MailboxAttachmentContentIdentity.id == claim.identity_id,
+            MailboxAttachmentContentIdentity.organization_id == organization_id,
+            MailboxAttachmentContentIdentity.status == "processing",
+            MailboxAttachmentContentIdentity.processing_import_id == claim.owner_import_id,
+            MailboxAttachmentContentIdentity.claim_token == claim.claim_token,
+        )
+        .values(
+            status=status,
+            processing_import_id=None,
+            canonical_import_id=canonical_import_id if status == "imported" else None,
+            canonical_resume_id=canonical_resume_id if status == "imported" else None,
+            claim_token=None,
+            claim_lease_expires_at=None,
+            last_error=None if status == "imported" else error,
+            updated_at=now,
+        )
+    )
+    if completed.rowcount != 1:
+        session.rollback()
+        raise _ContentClaimLost("mailbox_content_claim_lost")
+    _resolve_waiting_content_imports(
+        session,
+        organization_id=organization_id,
+        attachment_sha256=attachment_sha256,
+        canonical_import_id=canonical_import_id,
+        canonical_resume_id=canonical_resume_id,
+        status=status,
+        error=error,
+        now=now,
+    )
+
+
+def _complete_processing_import(
+    session: Session,
+    *,
+    record: EmailAttachmentImport,
+    claim: _ContentClaim,
+    status: Literal["imported", "failed"],
+    error: str | None,
+    resume_id: str | None,
+) -> MailboxImportResponse:
+    """Finish an automatic canonical import and its forwarded waiters."""
+
+    organization_id = organization_context_id(session)
+    now = _utcnow()
+    completed = session.execute(
+        update(EmailAttachmentImport)
+        .where(
+            EmailAttachmentImport.id == record.id,
+            EmailAttachmentImport.organization_id == organization_id,
+            EmailAttachmentImport.status == "processing",
+        )
+        .values(
+            status=status,
+            error=error,
+            resume_id=resume_id,
+            canonical_import_id=record.id if status == "imported" else None,
+            last_attempted_at=now,
+            updated_at=now,
+        )
+    )
+    if completed.rowcount != 1:
+        session.rollback()
+        raise _ContentClaimLost("mailbox_content_claim_lost")
+    _complete_content_claim(
+        session,
+        claim=claim,
+        attachment_sha256=record.attachment_sha256,
+        status=status,
+        error=error,
+        canonical_import_id=record.id if status == "imported" else None,
+        canonical_resume_id=resume_id if status == "imported" else None,
+    )
+    session.expire_all()
+    stored = session.scalar(
+        select(EmailAttachmentImport).where(
+            EmailAttachmentImport.id == record.id,
+            EmailAttachmentImport.organization_id == organization_id,
+        )
+    )
+    if stored is None:
+        session.rollback()
+        raise _ContentClaimLost("mailbox_content_claim_lost")
+    attempt = session.execute(
+        update(EmailAttachmentImportAttempt)
+        .where(
+            EmailAttachmentImportAttempt.organization_id == organization_id,
+            EmailAttachmentImportAttempt.email_attachment_import_id == stored.id,
+            EmailAttachmentImportAttempt.attempt_number == stored.attempt_count,
+            EmailAttachmentImportAttempt.status == "processing",
+            EmailAttachmentImportAttempt.completed_at.is_(None),
+        )
+        .values(
+            status=status,
+            error=error,
+            resume_id=resume_id,
+            completed_at=now,
+        )
+    )
+    if attempt.rowcount != 1:
+        session.rollback()
+        raise _ContentClaimLost("mailbox_content_claim_lost")
+    session.commit()
+    return _import_response(stored)
+
+
+def _complete_non_owner_processing_import(
+    session: Session,
+    *,
+    record: EmailAttachmentImport,
+    claim: _ContentClaim,
+) -> MailboxImportResponse:
+    """Persist either a completed duplicate or an in-flight forwarding audit."""
+
+    organization_id = organization_context_id(session)
+    now = _utcnow()
+    if claim.outcome == "duplicate":
+        status = "duplicate"
+        error = None
+        resume_id = claim.canonical_resume_id
+        canonical_import_id = claim.canonical_import_id
+    elif claim.outcome == "waiting":
+        status = "deduplicating"
+        error = None
+        resume_id = None
+        canonical_import_id = None
+    else:
+        raise MailboxImportError("mailbox_content_claim_conflict")
+
+    completed = session.execute(
+        update(EmailAttachmentImport)
+        .where(
+            EmailAttachmentImport.id == record.id,
+            EmailAttachmentImport.organization_id == organization_id,
+            EmailAttachmentImport.status == "processing",
+        )
+        .values(
+            status=status,
+            error=error,
+            resume_id=resume_id,
+            canonical_import_id=canonical_import_id,
+            last_attempted_at=now,
+            updated_at=now,
+        )
+    )
+    if completed.rowcount != 1:
+        session.rollback()
+        raise _ContentClaimLost("mailbox_content_claim_lost")
+    session.expire_all()
+    stored = session.scalar(
+        select(EmailAttachmentImport).where(
+            EmailAttachmentImport.id == record.id,
+            EmailAttachmentImport.organization_id == organization_id,
+        )
+    )
+    if stored is None:
+        session.rollback()
+        raise _ContentClaimLost("mailbox_content_claim_lost")
+    attempt = session.execute(
+        update(EmailAttachmentImportAttempt)
+        .where(
+            EmailAttachmentImportAttempt.organization_id == organization_id,
+            EmailAttachmentImportAttempt.email_attachment_import_id == stored.id,
+            EmailAttachmentImportAttempt.attempt_number == stored.attempt_count,
+            EmailAttachmentImportAttempt.status == "processing",
+            EmailAttachmentImportAttempt.completed_at.is_(None),
+        )
+        .values(
+            status=status,
+            error=error,
+            resume_id=resume_id,
+            completed_at=now if status == "duplicate" else None,
+        )
+    )
+    if attempt.rowcount != 1:
+        session.rollback()
+        raise _ContentClaimLost("mailbox_content_claim_lost")
+    session.commit()
+    return _import_response(stored)
+
+
+def _begin_automatic_content_import(
+    session: Session,
+    *,
+    config: MailboxConfig,
+    uid: str,
+    message_id: str | None,
+    filename: str,
+    attachment_sha256: str,
+    received_at: datetime | None,
+    source_uidvalidity: int | None,
+) -> tuple[EmailAttachmentImport, _ContentClaim | None, MailboxImportResponse | None]:
+    """Create the per-email audit row, then reserve or reuse its bytes."""
+
+    record = _record(
+        session,
+        config=config,
+        uid=uid,
+        message_id=message_id,
+        filename=filename,
+        attachment_sha256=attachment_sha256,
+        status="processing",
+        error=None,
+        resume_id=None,
+        received_at=received_at,
+        source_uidvalidity=source_uidvalidity,
+        attempt_completed=False,
+    )
+    claim = _claim_attachment_content(session, record=record)
+    if claim.outcome == "owner":
+        # Do not keep a database write or unique-index lock while document
+        # conversion runs.  The committed lease is what protects the owner.
+        session.commit()
+        return record, claim, None
+    return record, None, _complete_non_owner_processing_import(
+        session,
+        record=record,
+        claim=claim,
+    )
 
 
 def _already_imported(
@@ -969,6 +1660,8 @@ def _complete_retry(
     status: str,
     error: str | None,
     resume_id: str | None,
+    canonical_import_id: str | None = None,
+    content_claim: _ContentClaim | None = None,
 ) -> MailboxImportResponse:
     """Commit a retry only while this request still owns its lease token."""
 
@@ -987,6 +1680,7 @@ def _complete_retry(
             status=status,
             error=error,
             resume_id=resume_id,
+            canonical_import_id=canonical_import_id,
             last_attempted_at=now,
             retry_lease_expires_at=None,
             retry_claim_token=None,
@@ -998,6 +1692,29 @@ def _complete_retry(
         # current transaction, so rolling back here prevents a second import.
         session.rollback()
         raise _RetryClaimLost("mailbox_import_retry_superseded")
+
+    if content_claim is not None and content_claim.outcome == "owner":
+        if status not in {"imported", "failed"}:
+            session.rollback()
+            raise _ContentClaimLost("mailbox_content_claim_lost")
+        attachment_sha256 = session.scalar(
+            select(EmailAttachmentImport.attachment_sha256).where(
+                EmailAttachmentImport.id == import_id,
+                EmailAttachmentImport.organization_id == expected_organization_id,
+            )
+        )
+        if not attachment_sha256:
+            session.rollback()
+            raise _ContentClaimLost("mailbox_content_claim_lost")
+        _complete_content_claim(
+            session,
+            claim=content_claim,
+            attachment_sha256=attachment_sha256,
+            status=status,
+            error=error,
+            canonical_import_id=import_id if status == "imported" else None,
+            canonical_resume_id=resume_id if status == "imported" else None,
+        )
 
     session.expire_all()
     record = session.scalar(
@@ -1019,7 +1736,7 @@ def _complete_retry(
             status=status,
             error=error,
             resume_id=resume_id,
-            completed_at=now,
+            completed_at=None if status == "deduplicating" else now,
         )
     )
     if completed_attempt.rowcount != 1:
@@ -1194,6 +1911,7 @@ def retry_mailbox_attachment(
     mailbox_config_id = record.mailbox_config_id
     client: imaplib.IMAP4_SSL | None = None
     resume: Resume | None = None
+    content_claim: _ContentClaim | None = None
 
     def discard_retry_resume() -> None:
         """Remove an uploaded file if this retry transaction later rolls back."""
@@ -1210,6 +1928,7 @@ def retry_mailbox_attachment(
         status: str,
         error: str | None,
         resume_id: str | None,
+        canonical_import_id: str | None = None,
     ) -> MailboxImportResponse:
         return _complete_retry(
             session,
@@ -1218,6 +1937,8 @@ def retry_mailbox_attachment(
             status=status,
             error=error,
             resume_id=resume_id,
+            canonical_import_id=canonical_import_id,
+            content_claim=content_claim,
         )
 
     def pulse() -> None:
@@ -1233,6 +1954,31 @@ def retry_mailbox_attachment(
         )
 
     try:
+        pulse()
+        content_claim = _claim_attachment_content(session, record=record)
+        if content_claim.outcome == "duplicate":
+            result = complete(
+                status="duplicate",
+                error=None,
+                resume_id=content_claim.canonical_resume_id,
+                canonical_import_id=content_claim.canonical_import_id,
+            )
+            discard_retained_failed_attachment(
+                session,
+                settings=settings,
+                attachment_import_id=record.id,
+            )
+            return result
+        if content_claim.outcome == "waiting":
+            return complete(
+                status="deduplicating",
+                error=None,
+                resume_id=None,
+            )
+        # Persist the ownership lease before any IMAP, document conversion, or
+        # candidate write.  A concurrent forwarded copy now becomes an audit
+        # row that waits for this one canonical result.
+        session.commit()
         pulse()
         config = session.scalar(
             select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id)
@@ -1346,6 +2092,11 @@ def retry_mailbox_attachment(
                 organization_id=organization_id,
                 failure=exc,
             )
+            result = complete(
+                status="failed",
+                error=exc.code,
+                resume_id=None,
+            )
             latest_config = session.scalar(
                 select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id)
             )
@@ -1368,11 +2119,7 @@ def retry_mailbox_attachment(
                         suffix=Path(filename).suffix,
                     ),
                 )
-            return complete(
-                status="failed",
-                error=exc.code,
-                resume_id=None,
-            )
+            return result
         result = complete(
             status="imported",
             error=None,
@@ -1402,7 +2149,7 @@ def retry_mailbox_attachment(
             attachment_import_id=record.id,
         )
         return result
-    except _RetryClaimLost:
+    except (_RetryClaimLost, _ContentClaimLost):
         session.rollback()
         discard_retry_resume()
         raise MailboxImportError("mailbox_import_retry_superseded")
@@ -1638,6 +2385,8 @@ def sync_mailbox(
     client: imaplib.IMAP4_SSL | None = None
     try:
         pulse()
+        _recover_expired_content_claims(session, organization_id=organization_id)
+        pulse()
         password = _decrypt_password(settings, config.encrypted_password)
         pulse()
         client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
@@ -1774,6 +2523,26 @@ def sync_mailbox(
                     session.commit()
                     skipped += 1
                     continue
+                record, content_claim, terminal = _begin_automatic_content_import(
+                    session,
+                    config=config,
+                    uid=uid,
+                    message_id=message_id,
+                    filename=filename,
+                    attachment_sha256=digest,
+                    received_at=received_at,
+                    source_uidvalidity=imap_uidvalidity,
+                )
+                if terminal is not None:
+                    # Both a completed duplicate and a forwarded copy waiting
+                    # for its active canonical owner intentionally create no
+                    # new candidate.  The latter becomes ``duplicate`` or a
+                    # retryable ``failed`` record when that owner finishes.
+                    duplicates += 1
+                    continue
+
+                assert content_claim is not None
+                resume: Resume | None = None
                 try:
                     pulse()
                     resume = _ingest_attachment(
@@ -1783,31 +2552,39 @@ def sync_mailbox(
                         content=content,
                         settings=settings,
                     )
-                    record = _record(
+                    _complete_processing_import(
                         session,
-                        config=config,
-                        uid=uid,
-                        message_id=message_id,
-                        filename=filename,
-                        attachment_sha256=digest,
+                        record=record,
+                        claim=content_claim,
                         status="imported",
                         error=None,
                         resume_id=resume.id,
-                        received_at=received_at,
-                        source_uidvalidity=imap_uidvalidity,
                     )
-                    session.commit()
-                    _store_replica_safely(
+                    source_config = _mailbox_config_or_error(
                         session,
-                        lambda: store_success_attachment_copy(
-                            session,
-                            settings=settings,
-                            config=config,
-                            attachment_import=record,
-                            content=content,
-                            suffix=Path(filename).suffix,
-                        ),
+                        config_id=mailbox_config_id,
+                        include_archived=True,
                     )
+                    stored_record = session.scalar(
+                        select(EmailAttachmentImport).where(
+                            EmailAttachmentImport.id == record.id,
+                            EmailAttachmentImport.organization_id == organization_id,
+                        )
+                    )
+                    if stored_record is None:
+                        raise MailboxImportError("mailbox_config_not_found")
+                    if source_config.archived_at is None:
+                        _store_replica_safely(
+                            session,
+                            lambda: store_success_attachment_copy(
+                                session,
+                                settings=settings,
+                                config=source_config,
+                                attachment_import=stored_record,
+                                content=content,
+                                suffix=Path(filename).suffix,
+                            ),
+                        )
                     imported += 1
                 except _AttachmentIngestionFailure as exc:
                     session.rollback()
@@ -1816,40 +2593,58 @@ def sync_mailbox(
                         organization_id=organization_id,
                         failure=exc,
                     )
-                    config = _mailbox_config_or_error(
+                    source_config = _mailbox_config_or_error(
                         session,
                         config_id=mailbox_config_id,
                         include_archived=True,
                     )
-                    if config.archived_at is not None:
-                        raise MailboxImportError("mailbox_config_archived")
-                    record = _record(
-                        session,
-                        config=config,
-                        uid=uid,
-                        message_id=message_id,
-                        filename=filename,
-                        attachment_sha256=digest,
-                        status="failed",
-                        error=exc.code,
-                        resume_id=None,
-                        received_at=received_at,
-                        source_uidvalidity=imap_uidvalidity,
+                    try:
+                        _complete_processing_import(
+                            session,
+                            record=record,
+                            claim=content_claim,
+                            status="failed",
+                            error=exc.code,
+                            resume_id=None,
+                        )
+                    except _ContentClaimLost:
+                        session.rollback()
+                        duplicates += 1
+                        continue
+                    failed_record = session.scalar(
+                        select(EmailAttachmentImport).where(
+                            EmailAttachmentImport.id == record.id,
+                            EmailAttachmentImport.organization_id == organization_id,
+                        )
                     )
-                    session.commit()
-                    if exc.code not in _NON_RETRYABLE_ATTACHMENT_ERRORS:
+                    if (
+                        source_config.archived_at is None
+                        and exc.code not in _NON_RETRYABLE_ATTACHMENT_ERRORS
+                        and failed_record is not None
+                    ):
                         _store_replica_safely(
                             session,
                             lambda: store_failed_attachment_copy(
                                 session,
                                 settings=settings,
-                                config=config,
-                                attachment_import=record,
+                                config=source_config,
+                                attachment_import=failed_record,
                                 content=content,
                                 suffix=Path(filename).suffix,
                             ),
                         )
+                    if source_config.archived_at is not None:
+                        raise MailboxImportError("mailbox_config_archived")
                     failed += 1
+                except _ContentClaimLost:
+                    session.rollback()
+                    if resume is not None:
+                        discard_uploaded_pdf(
+                            settings,
+                            storage_key=resume.storage_key,
+                            organization_id=organization_id,
+                        )
+                    duplicates += 1
         config = _mailbox_config_or_error(
             session,
             config_id=mailbox_config_id,

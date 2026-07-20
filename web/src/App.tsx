@@ -498,6 +498,7 @@ const mailboxImportErrorMessages: Record<string, string> = {
   attachment_source_changed: "收件邮箱来源已变化，不能安全重试该附件。",
   attachment_source_unavailable: "原收件邮箱已不可用，不能重试该附件。",
   attachment_retry_interrupted: "上次重新入库被中断，可再次尝试。",
+  attachment_content_claim_expired: "相同附件的处理未完成，现可重新入库。",
 };
 
 function mailboxImportErrorLabel(error: string | null): string {
@@ -509,6 +510,10 @@ function mailboxImportStatusLabel(status: string, canRetry = false): string {
   switch (status) {
     case "imported":
       return "已入库";
+    case "duplicate":
+      return "已去重";
+    case "deduplicating":
+      return "等待去重";
     case "skipped":
       return "已跳过";
     case "retrying":
@@ -5452,7 +5457,7 @@ function MailboxPage({
       <div className="mailbox-workspace">
         <aside className="panel mailbox-channel-panel" aria-label="收件通道">
           <div className="panel-heading mailbox-channel-heading">
-            <div><h2>收件通道</h2><p>每个通道独立去重和同步。</p></div>
+            <div><h2>收件通道</h2><p>各通道独立同步；同一工作区内的相同附件统一去重。</p></div>
             <span className="tiny-badge">{mailboxes.length}</span>
           </div>
           {loading ? <TableSkeleton /> : mailboxes.length ? (
@@ -5559,13 +5564,13 @@ function MailboxPage({
             </section>
 
             <aside className="panel mailbox-status-panel">
-              <div className="panel-heading"><div><h2>同步与保留状态</h2><p>每个通道独立去重、同步与清理，失败不会影响其他通道。</p></div></div>
+              <div className="panel-heading"><div><h2>同步与保留状态</h2><p>各通道独立同步与清理；同一工作区内已处理邮件或相同内容附件不会重复创建候选人，每封邮件仍保留一条处理记录。</p></div></div>
               {selectedConfig ? (
                 <div className="fact-list">
                   <div className="fact-row"><strong>开始接收</strong><span>{selectedConfig.import_started_at ? formatLibraryDate(selectedConfig.import_started_at) : "正在初始化"}</span></div>
                   <div className="fact-row"><strong>最近同步</strong><span>{selectedConfig.last_synced_at ? formatLibraryDate(selectedConfig.last_synced_at) : "尚未同步"}</span></div>
                   {selectedSyncJob && <div className="fact-row"><strong>后台任务</strong><span className={`status-pill ${mailboxBackgroundJobStatusClass(selectedSyncJob)}`}>{mailboxBackgroundJobStatusLabel(selectedSyncJob)}</span></div>}
-                  <div className="fact-row"><strong>已载入记录</strong><span>{historyFilterMailboxId === selectedConfig.mailbox_id ? `${history?.total ?? 0} 条` : "可在下方按来源筛选"}</span></div>
+                  <div className="fact-row"><strong>附件处理记录</strong><span>{historyFilterMailboxId === selectedConfig.mailbox_id ? `${history?.total ?? 0} 条` : "可在下方按来源筛选"}</span></div>
                   <div className="fact-row"><strong>支持格式</strong><span>PDF、Word、图片、Excel、HTML</span></div>
                   {retention && <>
                     <div className="fact-row"><strong>当前保留</strong><span>{mailboxRetentionPolicyLabel(retention.retention_policy)}</span></div>
@@ -5665,7 +5670,7 @@ function MailboxPage({
 
           <section className="panel mailbox-history">
             <div className="panel-heading mailbox-history-heading">
-              <div><h2>附件入库记录</h2><p>只记录附件处理结果，不在这里展示邮件正文。</p></div>
+              <div><h2>附件入库记录</h2><p>每封新邮件保留一条附件处理记录；相同内容只关联既有入库结果，不展示邮件正文或候选人信息。</p></div>
               <div className="mailbox-history-filter">
                 <label className="field-label" htmlFor="mailbox-history-filter">来源</label>
                 <div className="select-wrap">
@@ -5700,13 +5705,15 @@ function MailboxPage({
                       const isRetrying = (item.status === "retrying" && !item.can_retry)
                         || activeRetryImportIds.has(item.import_id)
                         || enqueuingRetryImportId === item.import_id;
-                      const statusClass = item.status === "imported"
+                      const statusClass = item.status === "imported" || item.status === "duplicate"
                         ? "is-success"
                         : item.status === "failed"
                           ? "is-error"
-                          : item.status === "retrying"
-                            ? item.can_retry ? "is-warning" : "is-progress"
-                            : "";
+                          : item.status === "retrying" && item.can_retry
+                            ? "is-warning"
+                            : item.status === "retrying" || item.status === "deduplicating" || item.status === "processing"
+                              ? "is-progress"
+                              : "";
                       return (
                         <tr key={item.import_id}>
                           <th scope="row"><strong>{item.attachment_filename}</strong></th>

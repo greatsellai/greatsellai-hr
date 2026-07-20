@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from email.message import EmailMessage
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -9,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from sqlalchemy import select
 
 from app.config import AppSettings
 from app.main import create_app
@@ -18,13 +20,15 @@ from app.models import (
     Job,
     JobVersion,
     MailboxConfig,
+    MailboxAttachmentContentIdentity,
     Resume,
     ResumeAiExtractionJob,
     ResumeScore,
     ResumeSummary,
     ScoreTemplate,
 )
-from app.tenant_scope import set_organization_context
+from app.services import mailbox_import_service
+from app.tenant_scope import bypass_organization_scope, set_organization_context
 
 
 # Tenant-auth contract under test:
@@ -504,3 +508,109 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert foreign_task_history.status_code == 404, foreign_task_history.text
     assert a_task_history.status_code == 200, a_task_history.text
     assert task_id not in {item["job_id"] for item in a_task_history.json()["items"]}
+
+
+def test_identical_mailbox_attachment_is_not_deduplicated_across_workspaces(
+    workspace_clients: tuple[TestClient, TestClient],
+    monkeypatch,
+) -> None:
+    """The byte identity is workspace-scoped, never global across customers."""
+
+    client_a, client_b = workspace_clients
+    session_a = _register_and_login(
+        client_a,
+        organization_name="Dedup Alpha",
+        full_name="Alpha Recruiter",
+        email="dedup-alpha@example.test",
+        password="tenant-test-password-a",
+    )
+    session_b = _register_and_login(
+        client_b,
+        organization_name="Dedup Beta",
+        full_name="Beta Recruiter",
+        email="dedup-beta@example.test",
+        password="tenant-test-password-b",
+    )
+
+    pdf = _pdf_with_text("Tenant-safe shared mailbox attachment Python SQL " * 8)
+    message = EmailMessage()
+    message["Message-ID"] = "<same-bytes-different-workspaces@example.test>"
+    message.set_content("Resume attached")
+    message.add_attachment(
+        pdf,
+        maintype="application",
+        subtype="pdf",
+        filename="same-resume.pdf",
+    )
+    raw_message = message.as_bytes()
+
+    class SharedAttachmentImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"1"]
+
+        def uid(self, command: str, *args):
+            if command == "search":
+                return "OK", [b"42"]
+            if command == "fetch":
+                return "OK", [(b"42 (RFC822)", raw_message)]
+            raise AssertionError(f"unexpected IMAP command: {command}")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", SharedAttachmentImap)
+    organization_a_id = str(session_a["organization"]["organization_id"])
+    organization_b_id = str(session_b["organization"]["organization_id"])
+    for client, email_address, organization_id in (
+        (client_a, "alpha-resumes@example.test", organization_a_id),
+        (client_b, "beta-resumes@example.test", organization_b_id),
+    ):
+        configured = client.put(
+            "/v1/mailbox/config",
+            json={
+                "imap_host": "imap.example.test",
+                "imap_port": 993,
+                "email_address": email_address,
+                "mailbox": "INBOX",
+                "password": "test-authorization-code",
+                "enabled": True,
+            },
+        )
+        assert configured.status_code == 200, configured.text
+        with client.app.state.database.session_factory() as database_session:
+            set_organization_context(database_session, organization_id)
+            synced = mailbox_import_service.sync_mailbox(
+                database_session,
+                settings=client.app.state.settings,
+                config_id=configured.json()["mailbox_id"],
+            )
+        assert synced.imported_count == 1
+        assert synced.duplicate_count == 0
+
+    assert client_a.get("/v1/mailbox/imports").json()["total"] == 1
+    assert client_b.get("/v1/mailbox/imports").json()["total"] == 1
+
+    with client_a.app.state.database.session_factory() as database_session:
+        with bypass_organization_scope(database_session):
+            identities = database_session.scalars(
+                select(MailboxAttachmentContentIdentity).order_by(
+                    MailboxAttachmentContentIdentity.organization_id
+                )
+            ).all()
+            resumes = database_session.scalars(select(Resume)).all()
+        assert len(identities) == 2
+        assert {identity.organization_id for identity in identities} == {
+            organization_a_id,
+            organization_b_id,
+        }
+        assert len({identity.attachment_sha256 for identity in identities}) == 1
+        assert len(resumes) == 2

@@ -214,12 +214,21 @@ export interface MailboxBackgroundJobBatch {
   deduplicated_count: number;
 }
 
+export type MailboxImportStatus =
+  | "processing"
+  | "deduplicating"
+  | "imported"
+  | "duplicate"
+  | "skipped"
+  | "failed"
+  | "retrying";
+
 export interface MailboxImportHistoryItem {
   import_id: string;
   mailbox_config_id: string;
   mailbox_display_name: string | null;
   attachment_filename: string;
-  status: string;
+  status: MailboxImportStatus;
   error: string | null;
   resume_id: string | null;
   attempt_count: number;

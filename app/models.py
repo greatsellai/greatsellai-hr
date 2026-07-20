@@ -587,6 +587,10 @@ class EmailAttachmentImport(OrganizationScoped, Base):
             name="uq_email_attachment_import_message_attachment",
         ),
         Index("ix_email_attachment_imports_resume_id", "resume_id"),
+        Index(
+            "ix_email_attachment_imports_canonical_import_id",
+            "canonical_import_id",
+        ),
         Index("ix_email_attachment_imports_config_created", "mailbox_config_id", "created_at"),
         Index("ix_email_attachment_imports_organization_created", "organization_id", "created_at"),
         Index(
@@ -609,6 +613,13 @@ class EmailAttachmentImport(OrganizationScoped, Base):
     source_uidvalidity: Mapped[int | None] = mapped_column(BigInteger)
     source_fingerprint: Mapped[str | None] = mapped_column(String(64))
     resume_id: Mapped[str | None] = mapped_column(ForeignKey("resumes.id"), nullable=True)
+    # A duplicate mail attachment points at the one canonical import that
+    # created the resume.  The field stays nullable for canonical, failed,
+    # skipped, and historical rows.
+    canonical_import_id: Mapped[str | None] = mapped_column(
+        ForeignKey("email_attachment_imports.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(32), index=True)
     error: Mapped[str | None] = mapped_column(Text)
     attempt_count: Mapped[int] = mapped_column(
@@ -636,6 +647,59 @@ class EmailAttachmentImport(OrganizationScoped, Base):
     )
     background_jobs: Mapped[list["MailboxBackgroundJob"]] = relationship(
         back_populates="attachment_import",
+    )
+
+
+class MailboxAttachmentContentIdentity(OrganizationScoped, Base):
+    """One workspace-scoped byte identity for mailbox attachment ingestion.
+
+    This intentionally does not use ``Resume.sha256``.  A resume can be
+    uploaded through other sources or have historical duplicate rows, whereas
+    the mailbox needs one short-lived, atomic ownership claim before it can
+    create a candidate.  The unique organization/hash pair is the database
+    boundary that prevents two forwarded copies from creating two candidates.
+    """
+
+    __tablename__ = "mailbox_attachment_content_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "attachment_sha256",
+            name="uq_mailbox_attachment_content_identity_org_sha",
+        ),
+        Index(
+            "ix_mailbox_attachment_content_identity_claim",
+            "organization_id",
+            "status",
+            "claim_lease_expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    attachment_sha256: Mapped[str] = mapped_column(String(64))
+    # ``processing`` owns an ingestion lease, ``imported`` has a canonical
+    # resume, and ``failed`` may be safely claimed by a later forwarded copy.
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    processing_import_id: Mapped[str | None] = mapped_column(
+        ForeignKey("email_attachment_imports.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    canonical_import_id: Mapped[str | None] = mapped_column(
+        ForeignKey("email_attachment_imports.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    canonical_resume_id: Mapped[str | None] = mapped_column(
+        ForeignKey("resumes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    claim_token: Mapped[str | None] = mapped_column(String(64))
+    claim_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
 

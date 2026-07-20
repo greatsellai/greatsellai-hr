@@ -8,7 +8,14 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import DataError
 
-from app.models import Candidate, EmailAttachmentImport, EmailAttachmentImportAttempt, MailboxConfig, Resume
+from app.models import (
+    Candidate,
+    EmailAttachmentImport,
+    EmailAttachmentImportAttempt,
+    MailboxAttachmentContentIdentity,
+    MailboxConfig,
+    Resume,
+)
 from app.services import mailbox_import_service
 
 
@@ -26,6 +33,54 @@ class StatusOnlyImap:
 
     def logout(self) -> tuple[str, list[bytes]]:
         return "BYE", [b"logged out"]
+
+
+def _mail_with_attachment(
+    *,
+    message_id: str,
+    filename: str,
+    content: bytes,
+) -> bytes:
+    message = EmailMessage()
+    message["Message-ID"] = message_id
+    message.set_content("Resume attached")
+    message.add_attachment(
+        content,
+        maintype="application",
+        subtype="pdf",
+        filename=filename,
+    )
+    return message.as_bytes()
+
+
+def _successful_mailbox_save(calls: list[bytes]):
+    def save(
+        session,
+        *,
+        candidate_id: str,
+        original_filename: str | None,
+        content: bytes,
+        settings,
+    ) -> Resume:
+        calls.append(content)
+        resume = Resume(
+            candidate_id=candidate_id,
+            original_filename=original_filename or "resume.pdf",
+            storage_key=f"mailbox-dedup-{len(calls)}.pdf",
+            sha256=hashlib.sha256(content).hexdigest(),
+            source_page_count=1,
+            parsed_page_count=1,
+            extraction_status="text_ready",
+            quality_flags=[],
+            parser_version="mailbox-dedup-test",
+            raw_text="mailbox dedup source text",
+            is_active=False,
+        )
+        session.add(resume)
+        session.flush()
+        return resume
+
+    return save
 
 
 def test_mailbox_configuration_never_returns_the_authorization_code(client, monkeypatch) -> None:
@@ -349,6 +404,370 @@ def test_mailbox_sync_records_database_attachment_failure_without_crashing_worke
     assert result.imported_count == 0
     assert result.failed_count == 1
     assert result.last_sync_error is None
+
+
+def test_forwarded_identical_attachment_creates_one_resume_and_two_audit_records(
+    client,
+    monkeypatch,
+) -> None:
+    attachment = b"%PDF-1.7 exact forwarded attachment"
+    messages = {
+        b"42": _mail_with_attachment(
+            message_id="<original@example.test>",
+            filename="original.pdf",
+            content=attachment,
+        ),
+        b"43": _mail_with_attachment(
+            message_id="<forwarded@example.test>",
+            filename="forwarded-copy.pdf",
+            content=attachment,
+        ),
+    }
+
+    class ForwardedImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"2"]
+
+        def uid(self, command: str, *args):
+            if command == "search":
+                return "OK", [b"42 43"]
+            if command == "fetch":
+                return "OK", [(b"RFC822", messages[args[0]])]
+            raise AssertionError(f"unexpected IMAP command: {command}")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    save_calls: list[bytes] = []
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", ForwardedImap)
+    monkeypatch.setattr(mailbox_import_service, "save_pdf_resume", _successful_mailbox_save(save_calls))
+
+    saved = client.put(
+        "/v1/mailbox/config",
+        json={
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+            "password": "test-authorization-code",
+            "enabled": True,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    with client.app.state.database.session_factory() as session:
+        result = mailbox_import_service.sync_mailbox(
+            session,
+            settings=client.app.state.settings,
+        )
+        imports = session.scalars(
+            select(EmailAttachmentImport).order_by(EmailAttachmentImport.message_uid)
+        ).all()
+        identities = session.scalars(select(MailboxAttachmentContentIdentity)).all()
+        candidates = session.scalars(select(Candidate)).all()
+        resumes = session.scalars(select(Resume)).all()
+
+    assert result.imported_count == 1
+    assert result.duplicate_count == 1
+    assert save_calls == [attachment]
+    assert len(candidates) == 1
+    assert len(resumes) == 1
+    assert len(imports) == 2
+    assert [item.status for item in imports] == ["imported", "duplicate"]
+    assert imports[0].resume_id == resumes[0].id
+    assert imports[1].resume_id == resumes[0].id
+    assert imports[1].canonical_import_id == imports[0].id
+    assert len(identities) == 1
+    assert identities[0].status == "imported"
+    assert identities[0].canonical_import_id == imports[0].id
+    assert identities[0].canonical_resume_id == resumes[0].id
+
+    history = client.get("/v1/mailbox/imports")
+    assert history.status_code == 200, history.text
+    assert {item["status"] for item in history.json()["items"]} == {"imported", "duplicate"}
+
+
+def test_same_filename_with_different_attachment_bytes_imports_two_resumes(
+    client,
+    monkeypatch,
+) -> None:
+    messages = {
+        b"42": _mail_with_attachment(
+            message_id="<first@example.test>",
+            filename="resume.pdf",
+            content=b"%PDF-1.7 first distinct attachment",
+        ),
+        b"43": _mail_with_attachment(
+            message_id="<second@example.test>",
+            filename="resume.pdf",
+            content=b"%PDF-1.7 second distinct attachment",
+        ),
+    }
+
+    class DistinctBytesImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"2"]
+
+        def uid(self, command: str, *args):
+            if command == "search":
+                return "OK", [b"42 43"]
+            if command == "fetch":
+                return "OK", [(b"RFC822", messages[args[0]])]
+            raise AssertionError(f"unexpected IMAP command: {command}")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    save_calls: list[bytes] = []
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", DistinctBytesImap)
+    monkeypatch.setattr(mailbox_import_service, "save_pdf_resume", _successful_mailbox_save(save_calls))
+
+    saved = client.put(
+        "/v1/mailbox/config",
+        json={
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+            "password": "test-authorization-code",
+            "enabled": True,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    with client.app.state.database.session_factory() as session:
+        result = mailbox_import_service.sync_mailbox(
+            session,
+            settings=client.app.state.settings,
+        )
+        imports = session.scalars(select(EmailAttachmentImport)).all()
+        identities = session.scalars(select(MailboxAttachmentContentIdentity)).all()
+        resumes = session.scalars(select(Resume)).all()
+
+    assert result.imported_count == 2
+    assert result.duplicate_count == 0
+    assert len(save_calls) == 2
+    assert len(imports) == 2
+    assert {item.status for item in imports} == {"imported"}
+    assert len(identities) == 2
+    assert len(resumes) == 2
+
+
+def test_forwarded_duplicate_adopts_a_successful_import_created_before_identity_schema(
+    client,
+) -> None:
+    """Existing mailbox records become canonical lazily after deployment."""
+
+    attachment = b"%PDF-1.7 historical mailbox attachment"
+    digest = hashlib.sha256(attachment).hexdigest()
+    encrypted_password = mailbox_import_service._fernet(
+        client.app.state.settings
+    ).encrypt(b"test-authorization-code").decode("ascii")
+    with client.app.state.database.session_factory() as session:
+        config = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="recruiting@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+        )
+        candidate = Candidate(display_name=None)
+        session.add_all((config, candidate))
+        session.flush()
+        resume = Resume(
+            candidate_id=candidate.id,
+            original_filename="historical.pdf",
+            storage_key="historical-mailbox-resume.pdf",
+            sha256=digest,
+            source_page_count=1,
+            parsed_page_count=1,
+            extraction_status="text_ready",
+            quality_flags=[],
+            parser_version="historical-mailbox-test",
+            raw_text="historical mailbox source text",
+            is_active=False,
+        )
+        session.add(resume)
+        session.flush()
+        historical = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="42",
+            message_id="<historical@example.test>",
+            filename="historical.pdf",
+            attachment_sha256=digest,
+            status="imported",
+            error=None,
+            resume_id=resume.id,
+            received_at=None,
+            source_uidvalidity=9,
+        )
+        session.commit()
+        historical_id = historical.id
+        resume_id = resume.id
+
+        forwarded = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="43",
+            message_id="<forwarded-after-upgrade@example.test>",
+            filename="forwarded.pdf",
+            attachment_sha256=digest,
+            status="processing",
+            error=None,
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+            attempt_completed=False,
+        )
+        claim = mailbox_import_service._claim_attachment_content(session, record=forwarded)
+        assert claim.outcome == "duplicate"
+        assert claim.canonical_import_id == historical_id
+        assert claim.canonical_resume_id == resume_id
+        completed = mailbox_import_service._complete_non_owner_processing_import(
+            session,
+            record=forwarded,
+            claim=claim,
+        )
+        identity = session.scalar(select(MailboxAttachmentContentIdentity))
+
+    assert completed.status == "duplicate"
+    assert completed.resume_id == resume_id
+    assert identity is not None
+    assert identity.status == "imported"
+    assert identity.canonical_import_id == historical_id
+    assert identity.canonical_resume_id == resume_id
+
+
+def test_forwarded_attachment_can_retry_after_the_first_canonical_import_fails(
+    client,
+    monkeypatch,
+) -> None:
+    attachment = b"%PDF-1.7 retry after forwarded failure"
+    messages = {
+        b"42": _mail_with_attachment(
+            message_id="<failed-original@example.test>",
+            filename="resume.pdf",
+            content=attachment,
+        ),
+        b"43": _mail_with_attachment(
+            message_id="<forwarded-retry@example.test>",
+            filename="resume-copy.pdf",
+            content=attachment,
+        ),
+    }
+
+    class FailureThenForwardedImap:
+        search_payload = b"42"
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"2"]
+
+        def uid(self, command: str, *args):
+            if command == "search":
+                return "OK", [self.__class__.search_payload]
+            if command == "fetch":
+                return "OK", [(b"RFC822", messages[args[0]])]
+            raise AssertionError(f"unexpected IMAP command: {command}")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    success_calls: list[bytes] = []
+    successful_save = _successful_mailbox_save(success_calls)
+    attempts = 0
+
+    def fail_once_then_save(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise DataError("INSERT", {}, ValueError("temporary database issue"))
+        return successful_save(*args, **kwargs)
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", FailureThenForwardedImap)
+    monkeypatch.setattr(mailbox_import_service, "save_pdf_resume", fail_once_then_save)
+
+    saved = client.put(
+        "/v1/mailbox/config",
+        json={
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+            "password": "test-authorization-code",
+            "enabled": True,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    with client.app.state.database.session_factory() as session:
+        first = mailbox_import_service.sync_mailbox(
+            session,
+            settings=client.app.state.settings,
+        )
+    assert first.failed_count == 1
+
+    FailureThenForwardedImap.search_payload = b"42 43"
+    with client.app.state.database.session_factory() as session:
+        second = mailbox_import_service.sync_mailbox(
+            session,
+            settings=client.app.state.settings,
+        )
+        imports = session.scalars(
+            select(EmailAttachmentImport).order_by(EmailAttachmentImport.message_uid)
+        ).all()
+        identities = session.scalars(select(MailboxAttachmentContentIdentity)).all()
+        candidates = session.scalars(select(Candidate)).all()
+        resumes = session.scalars(select(Resume)).all()
+
+    assert second.imported_count == 1
+    assert second.duplicate_count == 0
+    assert attempts == 2
+    assert success_calls == [attachment]
+    assert len(candidates) == 1
+    assert len(resumes) == 1
+    assert [item.status for item in imports] == ["failed", "imported"]
+    assert imports[1].resume_id == resumes[0].id
+    assert len(identities) == 1
+    assert identities[0].status == "imported"
+    assert identities[0].canonical_import_id == imports[1].id
+
+    retried_original = client.post(f"/v1/mailbox/imports/{imports[0].id}/retry")
+    assert retried_original.status_code == 200, retried_original.text
+    assert retried_original.json()["status"] == "duplicate"
+    assert retried_original.json()["resume_id"] == resumes[0].id
+    assert attempts == 2
+    with client.app.state.database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Candidate)) == 1
+        assert session.scalar(select(func.count()).select_from(Resume)) == 1
 
 
 def test_failed_attachment_retries_retained_copy_and_updates_the_same_record(
@@ -850,3 +1269,198 @@ def test_expired_retry_claim_cannot_be_completed_by_the_previous_request(client)
         assert len(attempts) == 3
         assert attempts[1].error == "attachment_retry_interrupted"
         assert attempts[2].status == "failed"
+
+
+def test_expired_content_claim_cannot_complete_after_a_forwarded_copy_takes_over(client) -> None:
+    """The byte-identity lease, not timing, decides which mail may import."""
+
+    attachment = b"%PDF-1.7 content-claim-lease"
+    digest = hashlib.sha256(attachment).hexdigest()
+    encrypted_password = mailbox_import_service._fernet(
+        client.app.state.settings
+    ).encrypt(b"test-authorization-code").decode("ascii")
+    with client.app.state.database.session_factory() as session:
+        config = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="recruiting@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+        )
+        session.add(config)
+        session.flush()
+        first_record = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="42",
+            message_id="<first-owner@example.test>",
+            filename="resume.pdf",
+            attachment_sha256=digest,
+            status="processing",
+            error=None,
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+            attempt_completed=False,
+        )
+        session.commit()
+        first_claim = mailbox_import_service._claim_attachment_content(
+            session,
+            record=first_record,
+        )
+        assert first_claim.outcome == "owner"
+        session.commit()
+
+        identity = session.scalar(select(MailboxAttachmentContentIdentity))
+        assert identity is not None
+        identity.claim_lease_expires_at = mailbox_import_service._utcnow() - timedelta(seconds=1)
+        session.commit()
+
+        second_record = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="43",
+            message_id="<forwarded-owner@example.test>",
+            filename="resume-copy.pdf",
+            attachment_sha256=digest,
+            status="processing",
+            error=None,
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+            attempt_completed=False,
+        )
+        second_claim = mailbox_import_service._claim_attachment_content(
+            session,
+            record=second_record,
+        )
+        assert second_claim.outcome == "owner"
+        assert second_claim.claim_token != first_claim.claim_token
+        session.commit()
+
+        with pytest.raises(mailbox_import_service._ContentClaimLost):
+            mailbox_import_service._complete_content_claim(
+                session,
+                claim=first_claim,
+                attachment_sha256=digest,
+                status="failed",
+                error="attachment_import_failed",
+                canonical_import_id=None,
+                canonical_resume_id=None,
+            )
+
+        mailbox_import_service._complete_content_claim(
+            session,
+            claim=second_claim,
+            attachment_sha256=digest,
+            status="failed",
+            error="attachment_import_failed",
+            canonical_import_id=None,
+            canonical_resume_id=None,
+        )
+        session.commit()
+
+        identity = session.scalar(select(MailboxAttachmentContentIdentity))
+        first_stored = session.get(EmailAttachmentImport, first_record.id)
+        assert identity is not None
+        assert identity.status == "failed"
+        assert first_stored is not None
+        assert first_stored.status == "failed"
+        assert first_stored.error == "attachment_content_claim_expired"
+
+
+def test_expired_content_claim_is_recovered_to_retryable_mail_audits(client) -> None:
+    """A crashed owner cannot leave known mailbox UIDs stuck in processing."""
+
+    attachment = b"%PDF-1.7 abandoned content-claim"
+    digest = hashlib.sha256(attachment).hexdigest()
+    encrypted_password = mailbox_import_service._fernet(
+        client.app.state.settings
+    ).encrypt(b"test-authorization-code").decode("ascii")
+    with client.app.state.database.session_factory() as session:
+        config = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="recruiting@example.test",
+            mailbox="INBOX",
+            encrypted_password=encrypted_password,
+            enabled=True,
+        )
+        session.add(config)
+        session.flush()
+        owner = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="42",
+            message_id="<abandoned-owner@example.test>",
+            filename="resume.pdf",
+            attachment_sha256=digest,
+            status="processing",
+            error=None,
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+            attempt_completed=False,
+        )
+        waiter = mailbox_import_service._record(
+            session,
+            config=config,
+            uid="43",
+            message_id="<abandoned-forward@example.test>",
+            filename="resume-copy.pdf",
+            attachment_sha256=digest,
+            status="deduplicating",
+            error=None,
+            resume_id=None,
+            received_at=None,
+            source_uidvalidity=9,
+            attempt_completed=False,
+        )
+        session.commit()
+
+        claim = mailbox_import_service._claim_attachment_content(session, record=owner)
+        assert claim.outcome == "owner"
+        session.commit()
+
+        identity = session.scalar(select(MailboxAttachmentContentIdentity))
+        assert identity is not None
+        identity.claim_lease_expires_at = mailbox_import_service._utcnow() - timedelta(
+            seconds=1
+        )
+        session.commit()
+
+        assert (
+            mailbox_import_service._recover_expired_content_claims(
+                session,
+                organization_id=config.organization_id,
+            )
+            == 1
+        )
+        session.expire_all()
+
+        stored_owner = session.get(EmailAttachmentImport, owner.id)
+        stored_waiter = session.get(EmailAttachmentImport, waiter.id)
+        stored_identity = session.get(MailboxAttachmentContentIdentity, identity.id)
+        attempts = session.scalars(
+            select(EmailAttachmentImportAttempt).order_by(
+                EmailAttachmentImportAttempt.email_attachment_import_id
+            )
+        ).all()
+        assert stored_owner is not None
+        assert stored_waiter is not None
+        owner_can_retry = mailbox_import_service._can_retry(stored_owner)
+        waiter_can_retry = mailbox_import_service._can_retry(stored_waiter)
+
+    assert stored_owner is not None
+    assert stored_waiter is not None
+    assert stored_identity is not None
+    assert stored_owner.status == "failed"
+    assert stored_waiter.status == "failed"
+    assert stored_owner.error == "attachment_content_claim_expired"
+    assert stored_waiter.error == "attachment_content_claim_expired"
+    assert owner_can_retry
+    assert waiter_can_retry
+    assert stored_identity.status == "failed"
+    assert stored_identity.claim_token is None
+    assert all(attempt.status == "failed" and attempt.completed_at for attempt in attempts)

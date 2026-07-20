@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from ipaddress import ip_address, ip_network
 import logging
 import mimetypes
 from contextlib import asynccontextmanager
@@ -113,6 +114,7 @@ from app.services.identity_service import (
     issue_email_verification,
     legacy_principal,
     list_product_plans,
+    normalize_email,
     principal_from_session,
     registration_offer,
     record_email_verification_delivery,
@@ -126,6 +128,10 @@ from app.services.transactional_email import (
     VerificationDelivery,
     build_transactional_email_provider,
     email_verification_url,
+)
+from app.services.registration_rate_limit import (
+    RegistrationRateLimitError,
+    enforce_registration_rate_limit,
 )
 from app.tenant_scope import organization_context_id, set_organization_context
 from app.services.institution_service import (
@@ -377,6 +383,35 @@ def _deliver_email_verification(
     except HTTPException:
         logger.warning("email_verification_delivery_state_not_recorded")
     return True
+
+
+def _registration_client_identifier(request: Request, settings: AppSettings) -> str:
+    """Return a safe signup throttle key without trusting spoofable headers."""
+
+    direct_peer = request.client.host if request.client is not None else "unknown"
+    if not _is_trusted_proxy(direct_peer, settings.trusted_proxy_cidrs):
+        return f"peer:{direct_peer}"
+
+    # Caddy appends the remote address to X-Forwarded-For.  Reading the last
+    # valid value preserves the actual browser address even if an earlier,
+    # client-supplied value reached Caddy.  The header is ignored entirely
+    # unless the direct TCP peer is explicitly trusted above.
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        candidate = forwarded_for.rsplit(",", maxsplit=1)[-1].strip()
+        try:
+            return f"ip:{ip_address(candidate).compressed}"
+        except ValueError:
+            pass
+    return f"peer:{direct_peer}"
+
+
+def _is_trusted_proxy(host: str, cidrs: tuple[str, ...]) -> bool:
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    return any(address in ip_network(cidr, strict=False) for cidr in cidrs)
 
 
 def _raise_job_service_error(exc: JobServiceError) -> None:
@@ -716,6 +751,39 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 detail="email_delivery_not_configured",
             )
         try:
+            _, email_key = normalize_email(payload.email)
+            enforce_registration_rate_limit(
+                session,
+                secret=(
+                    settings.session_secret
+                    or settings.admin_token
+                    or "resume-v3-development-registration-rate-limit"
+                ),
+                client_identifier=_registration_client_identifier(request, settings),
+                email_key=email_key,
+                global_limit=settings.registration_rate_limit_global_limit,
+                global_window_seconds=settings.registration_rate_limit_global_window_seconds,
+                client_limit=settings.registration_rate_limit_client_limit,
+                client_window_seconds=settings.registration_rate_limit_client_window_seconds,
+                email_limit=settings.registration_rate_limit_email_limit,
+                email_window_seconds=settings.registration_rate_limit_email_window_seconds,
+            )
+            # Preserve the anti-abuse accounting even when account creation
+            # subsequently fails (for example, for a duplicate address).
+            _commit_or_raise(session)
+        except RegistrationRateLimitError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="registration_rate_limit_exceeded",
+            ) from exc
+        except IdentityServiceError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        try:
             principal = create_registration(session, payload)
             verification, raw_token = issue_email_verification(
                 session,
@@ -753,13 +821,28 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         request: Request,
         session: Session = Depends(get_session),
     ) -> AuthSession:
+        existing_principal = principal_from_session(session, request.session)
+        if (
+            existing_principal is None
+            and request.session.get("resume_v3_authenticated") is True
+        ):
+            existing_principal = legacy_principal(session)
         try:
-            principal = complete_email_verification(session, token=payload.token)
+            principal = complete_email_verification(
+                session,
+                token=payload.token,
+                expected_user_id=(existing_principal.user.id if existing_principal else None),
+            )
             _commit_or_raise(session)
         except IdentityServiceError as exc:
             session.rollback()
+            response_status = (
+                status.HTTP_409_CONFLICT
+                if str(exc) == "email_verification_account_mismatch"
+                else status.HTTP_422_UNPROCESSABLE_CONTENT
+            )
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=response_status,
                 detail=str(exc),
             ) from exc
         establish_session(request.session, principal)

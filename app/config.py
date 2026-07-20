@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from ipaddress import ip_network
 from pathlib import Path
 
 
@@ -55,6 +56,17 @@ class AppSettings:
     email_verification_ttl_seconds: int = 24 * 60 * 60
     email_verification_resend_cooldown_seconds: int = 60
     email_verification_daily_limit: int = 5
+    # Public self-registration has separate global, client, and email limits.
+    # The limits are persisted in the database so multiple API replicas share
+    # the same budget.  Forwarded client headers are accepted only when the
+    # direct peer is explicitly configured as a trusted proxy.
+    registration_rate_limit_global_limit: int = 20
+    registration_rate_limit_global_window_seconds: int = 60 * 60
+    registration_rate_limit_client_limit: int = 3
+    registration_rate_limit_client_window_seconds: int = 15 * 60
+    registration_rate_limit_email_limit: int = 3
+    registration_rate_limit_email_window_seconds: int = 24 * 60 * 60
+    trusted_proxy_cidrs: tuple[str, ...] = ()
     max_upload_bytes: int = 15 * 1024 * 1024
     min_text_chars_per_page: int = 80
     tencent_secret_id: str | None = None
@@ -137,6 +149,36 @@ class AppSettings:
             email_verification_daily_limit=int(
                 os.getenv("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT", "5")
             ),
+            registration_rate_limit_global_limit=int(
+                os.getenv("RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_LIMIT", "20")
+            ),
+            registration_rate_limit_global_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
+                    str(60 * 60),
+                )
+            ),
+            registration_rate_limit_client_limit=int(
+                os.getenv("RESUME_V3_REGISTRATION_RATE_LIMIT_CLIENT_LIMIT", "3")
+            ),
+            registration_rate_limit_client_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_REGISTRATION_RATE_LIMIT_CLIENT_WINDOW_SECONDS",
+                    str(15 * 60),
+                )
+            ),
+            registration_rate_limit_email_limit=int(
+                os.getenv("RESUME_V3_REGISTRATION_RATE_LIMIT_EMAIL_LIMIT", "3")
+            ),
+            registration_rate_limit_email_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_REGISTRATION_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
+                    str(24 * 60 * 60),
+                )
+            ),
+            trusted_proxy_cidrs=_comma_separated_values(
+                os.getenv("RESUME_V3_TRUSTED_PROXY_CIDRS", "")
+            ),
             tencent_secret_id=os.getenv("TENCENT_SECRET_ID") or None,
             tencent_secret_key=os.getenv("TENCENT_SECRET_KEY") or None,
             tencent_ocr_region=os.getenv("TENCENT_OCR_REGION", "ap-guangzhou"),
@@ -197,6 +239,34 @@ class AppSettings:
             )
         if self.email_verification_daily_limit < 1:
             raise ValueError("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT must be at least 1")
+        for name, value in (
+            ("RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_LIMIT", self.registration_rate_limit_global_limit),
+            ("RESUME_V3_REGISTRATION_RATE_LIMIT_CLIENT_LIMIT", self.registration_rate_limit_client_limit),
+            ("RESUME_V3_REGISTRATION_RATE_LIMIT_EMAIL_LIMIT", self.registration_rate_limit_email_limit),
+        ):
+            if value < 1:
+                raise ValueError(f"{name} must be at least 1")
+        for name, value in (
+            (
+                "RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
+                self.registration_rate_limit_global_window_seconds,
+            ),
+            (
+                "RESUME_V3_REGISTRATION_RATE_LIMIT_CLIENT_WINDOW_SECONDS",
+                self.registration_rate_limit_client_window_seconds,
+            ),
+            (
+                "RESUME_V3_REGISTRATION_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
+                self.registration_rate_limit_email_window_seconds,
+            ),
+        ):
+            if value < 60:
+                raise ValueError(f"{name} must be at least 60")
+        for cidr in self.trusted_proxy_cidrs:
+            try:
+                ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise ValueError("RESUME_V3_TRUSTED_PROXY_CIDRS contains an invalid network") from exc
         if self.transactional_email_provider == "tencent_ses":
             if not self.tencent_secret_id or not self.tencent_secret_key:
                 raise ValueError("Tencent SES requires TENCENT_SECRET_ID and TENCENT_SECRET_KEY")
@@ -231,3 +301,7 @@ def _optional_positive_int(name: str) -> int | None:
     if value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def _comma_separated_values(raw_value: str) -> tuple[str, ...]:
+    return tuple(value.strip() for value in raw_value.split(",") if value.strip())

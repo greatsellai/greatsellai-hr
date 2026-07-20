@@ -757,13 +757,23 @@ def issue_email_verification(
     """
 
     current_time = now or utcnow()
-    if user.email_verified_at is not None:
+    # All issuance and completion paths lock this user row.  PostgreSQL then
+    # serializes resend/verify races, while the partial unique index on the
+    # token table independently enforces one usable link per user.
+    locked_user = session.scalar(
+        select(UserAccount)
+        .where(UserAccount.id == user.id)
+        .with_for_update()
+    )
+    if locked_user is None:
+        raise IdentityServiceError("account_workspace_unavailable")
+    if locked_user.email_verified_at is not None:
         raise IdentityServiceError("email_already_verified")
 
     if enforce_resend_limit:
         most_recent = session.scalar(
             select(EmailVerificationToken)
-            .where(EmailVerificationToken.user_id == user.id)
+            .where(EmailVerificationToken.user_id == locked_user.id)
             .order_by(EmailVerificationToken.requested_at.desc(), EmailVerificationToken.id.desc())
             .limit(1)
         )
@@ -778,7 +788,7 @@ def issue_email_verification(
             select(func.count())
             .select_from(EmailVerificationToken)
             .where(
-                EmailVerificationToken.user_id == user.id,
+                EmailVerificationToken.user_id == locked_user.id,
                 EmailVerificationToken.requested_at >= earliest,
             )
         )
@@ -789,7 +799,7 @@ def issue_email_verification(
     # from `used_at` keeps security/audit semantics accurate.
     for pending in session.scalars(
         select(EmailVerificationToken).where(
-            EmailVerificationToken.user_id == user.id,
+            EmailVerificationToken.user_id == locked_user.id,
             EmailVerificationToken.used_at.is_(None),
             EmailVerificationToken.invalidated_at.is_(None),
         )
@@ -798,7 +808,7 @@ def issue_email_verification(
 
     token = secrets.token_urlsafe(32)
     verification = EmailVerificationToken(
-        user_id=user.id,
+        user_id=locked_user.id,
         token_digest=digest_token(token),
         expires_at=current_time + timedelta(seconds=ttl_seconds),
         requested_at=current_time,
@@ -829,25 +839,49 @@ def complete_email_verification(
     session: Session,
     *,
     token: str,
+    expected_user_id: str | None = None,
     now: datetime | None = None,
 ) -> AuthPrincipal:
     current_time = now or utcnow()
+    token_digest = digest_token(token)
+    # Resolve the owner first, then use the same user-row lock as resend.
+    # Re-reading the token after acquiring that lock closes the window where a
+    # concurrent resend could otherwise replace the link being completed.
+    token_user_id = session.scalar(
+        select(EmailVerificationToken.user_id).where(
+            EmailVerificationToken.token_digest == token_digest
+        )
+    )
+    if token_user_id is None:
+        raise IdentityServiceError("email_verification_invalid_or_expired")
+    locked_user = session.scalar(
+        select(UserAccount)
+        .where(UserAccount.id == token_user_id)
+        .with_for_update()
+    )
+    if locked_user is None:
+        raise IdentityServiceError("email_verification_invalid_or_expired")
     verification = session.scalar(
         select(EmailVerificationToken)
         .options(joinedload(EmailVerificationToken.user))
-        .where(EmailVerificationToken.token_digest == digest_token(token))
+        .where(EmailVerificationToken.token_digest == token_digest)
     )
     if (
         verification is None
+        or verification.user_id != locked_user.id
         or verification.used_at is not None
         or verification.invalidated_at is not None
         or (_aware(verification.expires_at) or current_time) <= current_time
-        or not verification.user.is_active
+        or not locked_user.is_active
     ):
         raise IdentityServiceError("email_verification_invalid_or_expired")
+    if expected_user_id is not None and expected_user_id != locked_user.id:
+        # A link is proof of the target mailbox, not authorization to replace
+        # an unrelated browser's active workspace session.
+        raise IdentityServiceError("email_verification_account_mismatch")
 
     verification.used_at = current_time
-    verification.user.email_verified_at = current_time
+    locked_user.email_verified_at = current_time
     for pending in session.scalars(
         select(EmailVerificationToken).where(
             EmailVerificationToken.user_id == verification.user_id,
@@ -871,7 +905,7 @@ def complete_email_verification(
         raise IdentityServiceError("account_workspace_unavailable")
     membership = memberships[0]
     return AuthPrincipal(
-        user=verification.user,
+        user=locked_user,
         membership=membership,
         organization=membership.organization,
         plan=membership.organization.plan,

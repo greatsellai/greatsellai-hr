@@ -11,6 +11,7 @@ from email.header import decode_header, make_header
 from email.message import Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Iterator
 from uuid import uuid4
 
@@ -40,6 +41,14 @@ from app.tenant_scope import (
 )
 from app.services.ai_extraction_job_service import enqueue_uploaded_resume_ai_extraction
 from app.services.document_text_extraction import SUPPORTED_DOCUMENT_EXTENSIONS
+from app.services.mailbox_retention_service import (
+    MailboxRetentionError,
+    discard_retained_failed_attachment,
+    read_retained_failed_attachment,
+    store_failed_attachment_copy,
+    store_mailbox_body_copy,
+    store_success_attachment_copy,
+)
 from app.services.resume_service import (
     UploadValidationError,
     create_candidate,
@@ -370,8 +379,18 @@ def _has_retryable_source(item: EmailAttachmentImport) -> bool:
     )
 
 
+def _has_retained_retry_copy(item: EmailAttachmentImport) -> bool:
+    now = _utcnow()
+    return any(
+        replica.kind == "failed_attachment"
+        and replica.cleaned_at is None
+        and (_as_utc(replica.expires_at) or now) > now
+        for replica in item.retention_replicas
+    )
+
+
 def _can_retry(item: EmailAttachmentImport) -> bool:
-    if not _has_retryable_source(item):
+    if not (_has_retryable_source(item) or _has_retained_retry_copy(item)):
         return False
     if item.status == "failed":
         return True
@@ -499,6 +518,40 @@ def _attachments(message: Message) -> list[tuple[str, bytes]]:
         if payload:
             found.append((_safe_filename(filename), payload))
     return found
+
+
+def _message_body_bytes(message: Message) -> bytes:
+    """Return bounded plain-text mail content without retaining MIME headers.
+
+    The body cache is for short retention/audit only.  It is deliberately
+    capped and does not include recipients, headers, or binary inline parts.
+    """
+
+    parts: list[bytes] = []
+    for part in message.walk():
+        if part.is_multipart() or part.get_filename():
+            continue
+        if part.get_content_type() != "text/plain":
+            continue
+        payload = part.get_payload(decode=True)
+        if payload:
+            parts.append(payload)
+    return b"\n\n".join(parts)[: 256 * 1024]
+
+
+def _store_replica_safely(session: Session, callback) -> None:
+    """A transient cache must never turn a resume import into a failure."""
+
+    try:
+        callback()
+        session.commit()
+    except (MailboxRetentionError, SQLAlchemyError):
+        # The source mailbox remains available for retry.  Do not persist a
+        # filesystem path, email content, or provider detail in the import UI.
+        # Callers invoke this helper only after their durable import record
+        # committed, so this rollback cannot undo a candidate/resume import.
+        session.rollback()
+        return
 
 
 class _AttachmentIngestionFailure(RuntimeError):
@@ -669,7 +722,7 @@ def _claim_retry(session: Session, *, import_id: str) -> EmailAttachmentImport:
             raise MailboxImportError("mailbox_import_not_retryable")
         claim_conditions = (EmailAttachmentImport.status == "failed",)
     elif record.status == "retrying":
-        if not _has_retryable_source(record):
+        if not (_has_retryable_source(record) or _has_retained_retry_copy(record)):
             raise MailboxImportError("mailbox_import_not_retryable")
         lease_expires_at = _as_utc(record.retry_lease_expires_at)
         if (
@@ -806,72 +859,82 @@ def retry_mailbox_attachment(
                 error="attachment_source_unavailable",
                 resume_id=None,
             )
-        if not config.enabled:
-            return complete(
-                status="failed",
-                error="mailbox_not_enabled",
-                resume_id=None,
-            )
-        if record.source_fingerprint != _mailbox_source_fingerprint(config):
-            return complete(
-                status="failed",
-                error="attachment_source_changed",
-                resume_id=None,
-            )
-        try:
-            password = _fernet(settings).decrypt(
-                config.encrypted_password.encode("ascii")
-            ).decode("utf-8")
-        except (MailboxImportError, InvalidToken, UnicodeDecodeError):
-            return complete(
-                status="failed",
-                error="mailbox_credentials_unavailable",
-                resume_id=None,
-            )
+        # A locally retained failure artifact is self-contained and can be
+        # retried even if the sender later deletes the source message.  Its
+        # hash is checked by the retention service before it is returned.
+        filename = record.attachment_filename
+        content = read_retained_failed_attachment(
+            session,
+            settings=settings,
+            attachment_import=record,
+        )
+        if content is None:
+            if not config.enabled:
+                return complete(
+                    status="failed",
+                    error="mailbox_not_enabled",
+                    resume_id=None,
+                )
+            if record.source_fingerprint != _mailbox_source_fingerprint(config):
+                return complete(
+                    status="failed",
+                    error="attachment_source_changed",
+                    resume_id=None,
+                )
+            try:
+                password = _fernet(settings).decrypt(
+                    config.encrypted_password.encode("ascii")
+                ).decode("utf-8")
+            except (MailboxImportError, InvalidToken, UnicodeDecodeError):
+                return complete(
+                    status="failed",
+                    error="mailbox_credentials_unavailable",
+                    resume_id=None,
+                )
 
-        client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
-        login_status, _ = client.login(config.email_address, password)
-        if login_status != "OK":
-            return complete(
-                status="failed",
-                error="mailbox_connection_failed",
-                resume_id=None,
+            client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
+            login_status, _ = client.login(config.email_address, password)
+            if login_status != "OK":
+                return complete(
+                    status="failed",
+                    error="mailbox_connection_failed",
+                    resume_id=None,
+                )
+            current_uidvalidity, _ = _read_mailbox_status(client, mailbox=config.mailbox)
+            if current_uidvalidity != record.source_uidvalidity:
+                return complete(
+                    status="failed",
+                    error="attachment_source_changed",
+                    resume_id=None,
+                )
+            select_status, _ = client.select(config.mailbox, readonly=True)
+            if select_status != "OK":
+                return complete(
+                    status="failed",
+                    error="mailbox_select_failed",
+                    resume_id=None,
+                )
+            fetch_status, fetched = client.uid(
+                "fetch", record.message_uid.encode("ascii"), "(RFC822)"
             )
-        current_uidvalidity, _ = _read_mailbox_status(client, mailbox=config.mailbox)
-        if current_uidvalidity != record.source_uidvalidity:
-            return complete(
-                status="failed",
-                error="attachment_source_changed",
-                resume_id=None,
+            if fetch_status != "OK" or not fetched or not isinstance(fetched[0], tuple):
+                return complete(
+                    status="failed",
+                    error="attachment_message_unavailable",
+                    resume_id=None,
+                )
+            message = BytesParser(policy=policy.default).parsebytes(fetched[0][1])
+            attachment = _attachment_with_digest(
+                message,
+                digest=record.attachment_sha256,
             )
-        select_status, _ = client.select(config.mailbox, readonly=True)
-        if select_status != "OK":
-            return complete(
-                status="failed",
-                error="mailbox_select_failed",
-                resume_id=None,
-            )
-        fetch_status, fetched = client.uid(
-            "fetch", record.message_uid.encode("ascii"), "(RFC822)"
-        )
-        if fetch_status != "OK" or not fetched or not isinstance(fetched[0], tuple):
-            return complete(
-                status="failed",
-                error="attachment_message_unavailable",
-                resume_id=None,
-            )
-        message = BytesParser(policy=policy.default).parsebytes(fetched[0][1])
-        attachment = _attachment_with_digest(
-            message,
-            digest=record.attachment_sha256,
-        )
-        if attachment is None:
-            return complete(
-                status="failed",
-                error="attachment_message_unavailable",
-                resume_id=None,
-            )
-        filename, content = attachment
+            if attachment is None:
+                return complete(
+                    status="failed",
+                    error="attachment_message_unavailable",
+                    resume_id=None,
+                )
+            filename, content = attachment
         try:
             resume = _ingest_attachment(
                 session,
@@ -887,16 +950,62 @@ def retry_mailbox_attachment(
                 organization_id=organization_id,
                 failure=exc,
             )
+            latest_config = session.scalar(
+                select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id)
+            )
+            latest_record = session.scalar(
+                select(EmailAttachmentImport).where(EmailAttachmentImport.id == record.id)
+            )
+            if (
+                latest_config is not None
+                and latest_record is not None
+                and exc.code not in _NON_RETRYABLE_ATTACHMENT_ERRORS
+            ):
+                _store_replica_safely(
+                    session,
+                    lambda: store_failed_attachment_copy(
+                        session,
+                        settings=settings,
+                        config=latest_config,
+                        attachment_import=latest_record,
+                        content=content,
+                        suffix=Path(filename).suffix,
+                    ),
+                )
             return complete(
                 status="failed",
                 error=exc.code,
                 resume_id=None,
             )
-        return complete(
+        result = complete(
             status="imported",
             error=None,
             resume_id=resume.id,
         )
+        latest_config = session.scalar(
+            select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id)
+        )
+        latest_record = session.scalar(
+            select(EmailAttachmentImport).where(EmailAttachmentImport.id == record.id)
+        )
+        if latest_config is not None and latest_record is not None:
+            _store_replica_safely(
+                session,
+                lambda: store_success_attachment_copy(
+                    session,
+                    settings=settings,
+                    config=latest_config,
+                    attachment_import=latest_record,
+                    content=content,
+                    suffix=Path(filename).suffix,
+                ),
+            )
+        discard_retained_failed_attachment(
+            session,
+            settings=settings,
+            attachment_import_id=record.id,
+        )
+        return result
     except _RetryClaimLost:
         session.rollback()
         discard_retry_resume()
@@ -1035,6 +1144,26 @@ def sync_mailbox(
             message_id = str(message.get("Message-ID") or "").strip() or None
             received_at = _received_at(message)
             attachments = _attachments(message)
+            # Keep only a bounded plain-text body cache, and only for mail
+            # carrying a supported resume.  The IMAP RFC822 payload itself is
+            # never persisted.
+            if attachments and any(
+                filename.lower().endswith(extension)
+                for filename, _ in attachments
+                for extension in SUPPORTED_DOCUMENT_EXTENSIONS
+            ):
+                body_content = _message_body_bytes(message)
+                if body_content:
+                    _store_replica_safely(
+                        session,
+                        lambda: store_mailbox_body_copy(
+                            session,
+                            settings=settings,
+                            config=config,
+                            message_uid=uid,
+                            content=body_content,
+                        ),
+                    )
             if not attachments:
                 digest = hashlib.sha256(b"").hexdigest()
                 _record(
@@ -1066,7 +1195,7 @@ def sync_mailbox(
                     duplicates += 1
                     continue
                 if not any(filename.lower().endswith(ext) for ext in SUPPORTED_DOCUMENT_EXTENSIONS):
-                    _record(
+                    record = _record(
                         session,
                         config=config,
                         uid=uid,
@@ -1104,6 +1233,17 @@ def sync_mailbox(
                         source_uidvalidity=imap_uidvalidity,
                     )
                     session.commit()
+                    _store_replica_safely(
+                        session,
+                        lambda: store_success_attachment_copy(
+                            session,
+                            settings=settings,
+                            config=config,
+                            attachment_import=record,
+                            content=content,
+                            suffix=Path(filename).suffix,
+                        ),
+                    )
                     imported += 1
                 except _AttachmentIngestionFailure as exc:
                     session.rollback()
@@ -1115,7 +1255,7 @@ def sync_mailbox(
                     config = session.get(MailboxConfig, mailbox_config_id)
                     if config is None or config.organization_id != organization_id:
                         raise MailboxImportError("mailbox_config_not_found")
-                    _record(
+                    record = _record(
                         session,
                         config=config,
                         uid=uid,
@@ -1129,6 +1269,18 @@ def sync_mailbox(
                         source_uidvalidity=imap_uidvalidity,
                     )
                     session.commit()
+                    if exc.code not in _NON_RETRYABLE_ATTACHMENT_ERRORS:
+                        _store_replica_safely(
+                            session,
+                            lambda: store_failed_attachment_copy(
+                                session,
+                                settings=settings,
+                                config=config,
+                                attachment_import=record,
+                                content=content,
+                                suffix=Path(filename).suffix,
+                            ),
+                        )
                     failed += 1
         config = session.get(MailboxConfig, mailbox_config_id)
         if config is None or config.organization_id != organization_id:

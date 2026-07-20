@@ -51,6 +51,11 @@ from app.schemas import (
     MailboxConfigUpdate,
     MailboxImportResponse,
     MailboxImportHistoryResponse,
+    MailboxRetentionCleanupRunHistoryResponse,
+    MailboxRetentionCleanupRunResponse,
+    MailboxRetentionPolicyUpdate,
+    MailboxRetentionPreviewResponse,
+    MailboxRetentionSummaryResponse,
     MailboxSyncResponse,
     CandidateCreate,
     CandidateCreated,
@@ -238,6 +243,14 @@ from app.services.mailbox_import_service import (
     retry_mailbox_attachment,
     save_mailbox_config,
     sync_mailbox,
+)
+from app.services.mailbox_retention_service import (
+    MailboxRetentionError,
+    cleanup_mailbox_retention,
+    get_mailbox_retention_summary,
+    list_mailbox_retention_cleanup_runs,
+    preview_mailbox_retention_cleanup,
+    update_mailbox_retention_policy,
 )
 
 
@@ -1066,6 +1079,92 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=str(exc),
             ) from exc
+
+    @app.get(
+        "/v1/mailbox/retention",
+        response_model=MailboxRetentionSummaryResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_mailbox_retention(
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionSummaryResponse:
+        return get_mailbox_retention_summary(session, settings=settings)
+
+    @app.put(
+        "/v1/mailbox/retention",
+        response_model=MailboxRetentionSummaryResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def put_mailbox_retention(
+        payload: MailboxRetentionPolicyUpdate,
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionSummaryResponse:
+        try:
+            return update_mailbox_retention_policy(
+                session,
+                settings=settings,
+                retention_policy=payload.retention_policy,
+            )
+        except MailboxRetentionError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=(
+                    status.HTTP_404_NOT_FOUND
+                    if str(exc) == "mailbox_not_configured"
+                    else status.HTTP_422_UNPROCESSABLE_CONTENT
+                ),
+                detail=str(exc),
+            ) from exc
+
+    @app.post(
+        "/v1/mailbox/retention/preview",
+        response_model=MailboxRetentionPreviewResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox_retention_preview(
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionPreviewResponse:
+        return preview_mailbox_retention_cleanup(session, settings=settings)
+
+    @app.post(
+        "/v1/mailbox/retention/cleanup",
+        response_model=MailboxRetentionCleanupRunResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox_retention_cleanup(
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionCleanupRunResponse:
+        try:
+            return cleanup_mailbox_retention(
+                session,
+                settings=settings,
+                trigger_type="manual",
+            )
+        except MailboxRetentionError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=(
+                    status.HTTP_404_NOT_FOUND
+                    if str(exc) == "mailbox_not_configured"
+                    else status.HTTP_409_CONFLICT
+                ),
+                detail=str(exc),
+            ) from exc
+
+    @app.get(
+        "/v1/mailbox/retention/runs",
+        response_model=MailboxRetentionCleanupRunHistoryResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_mailbox_retention_cleanup_runs(
+        limit: int = Query(default=20, ge=1, le=100),
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionCleanupRunHistoryResponse:
+        return list_mailbox_retention_cleanup_runs(
+            session,
+            settings=settings,
+            limit=limit,
+        )
 
     @app.post(
         "/v1/mailbox/sync",

@@ -281,6 +281,51 @@ class MailboxImportHistoryResponse(ApiModel):
     total: int
 
 
+class MailboxRetentionPolicyUpdate(ApiModel):
+    retention_policy: Literal["minimal", "standard", "audit"]
+
+
+class MailboxRetentionSummaryResponse(ApiModel):
+    configured: bool
+    retention_policy: Literal["minimal", "standard", "audit"] = "standard"
+    body_copy_count: int = 0
+    attachment_copy_count: int = 0
+    failure_artifact_count: int = 0
+    cache_bytes: int = 0
+    expired_body_count: int = 0
+    expired_attachment_copy_count: int = 0
+    expired_failure_artifact_count: int = 0
+    expired_bytes: int = 0
+    earliest_expires_at: datetime | None = None
+    last_cleanup_at: datetime | None = None
+    next_cleanup_at: datetime | None = None
+
+
+class MailboxRetentionPreviewResponse(MailboxRetentionSummaryResponse):
+    skipped_count: int = 0
+
+
+class MailboxRetentionCleanupRunResponse(ApiModel):
+    run_id: str
+    trigger_type: Literal["manual", "scheduled"]
+    status: str
+    retention_policy: Literal["minimal", "standard", "audit"]
+    started_at: datetime
+    finished_at: datetime | None = None
+    scanned_count: int = 0
+    deleted_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    reclaimed_bytes: int = 0
+    next_cleanup_at: datetime | None = None
+    error_code: str | None = None
+
+
+class MailboxRetentionCleanupRunHistoryResponse(ApiModel):
+    items: list[MailboxRetentionCleanupRunResponse]
+    total: int
+
+
 class RecruitingAgentRequest(ApiModel):
     """One bounded recruiting-assistant turn.
 

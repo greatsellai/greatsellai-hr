@@ -482,12 +482,24 @@ class MailboxConfig(OrganizationScoped, Base):
     import_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_sync_error: Mapped[str | None] = mapped_column(Text)
+    # Mail content is kept in a separate, short-lived cache.  Candidate
+    # originals and parsed resume facts never participate in this policy.
+    retention_policy: Mapped[str] = mapped_column(String(16), default="standard")
+    last_retention_cleanup_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
     imports: Mapped[list["EmailAttachmentImport"]] = relationship(
+        back_populates="mailbox_config", cascade="all, delete-orphan"
+    )
+    content_replicas: Mapped[list["MailboxContentReplica"]] = relationship(
+        back_populates="mailbox_config", cascade="all, delete-orphan"
+    )
+    retention_cleanup_runs: Mapped[list["MailboxRetentionCleanupRun"]] = relationship(
         back_populates="mailbox_config", cascade="all, delete-orphan"
     )
 
@@ -548,6 +560,9 @@ class EmailAttachmentImport(OrganizationScoped, Base):
         cascade="all, delete-orphan",
         order_by="EmailAttachmentImportAttempt.attempt_number",
     )
+    retention_replicas: Mapped[list["MailboxContentReplica"]] = relationship(
+        back_populates="attachment_import",
+    )
 
 
 class EmailAttachmentImportAttempt(OrganizationScoped, Base):
@@ -582,6 +597,106 @@ class EmailAttachmentImportAttempt(OrganizationScoped, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     attachment_import: Mapped[EmailAttachmentImport] = relationship(back_populates="attempts")
+
+
+class MailboxContentReplica(OrganizationScoped, Base):
+    """A short-lived mailbox body or attachment copy, never a resume original.
+
+    Files are stored under a dedicated workspace cache namespace.  Keeping the
+    cache index separate from ``Resume.storage_key`` makes retention cleanup
+    incapable of deleting a candidate's uploaded original by design.
+    """
+
+    __tablename__ = "mailbox_content_replicas"
+    __table_args__ = (
+        UniqueConstraint(
+            "mailbox_config_id",
+            "kind",
+            "source_reference",
+            name="uq_mailbox_content_replicas_source",
+        ),
+        UniqueConstraint("storage_key", name="uq_mailbox_content_replicas_storage_key"),
+        Index(
+            "ix_mailbox_content_replicas_cleanup",
+            "organization_id",
+            "cleaned_at",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    mailbox_config_id: Mapped[str] = mapped_column(
+        ForeignKey("mailbox_configs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    email_attachment_import_id: Mapped[str | None] = mapped_column(
+        ForeignKey("email_attachment_imports.id", ondelete="SET NULL"),
+        index=True,
+    )
+    # ``body`` and ``failed_attachment`` are used today.  The explicit kind
+    # also reserves a safe place for a future success-copy policy without
+    # ever conflating it with a candidate resume.
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    source_reference: Mapped[str] = mapped_column(String(128))
+    storage_key: Mapped[str] = mapped_column(String(512))
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    byte_size: Mapped[int] = mapped_column(BigInteger)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleanup_error: Mapped[str | None] = mapped_column(String(128))
+    cleanup_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    cleanup_claim_token: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    mailbox_config: Mapped[MailboxConfig] = relationship(back_populates="content_replicas")
+    attachment_import: Mapped[EmailAttachmentImport | None] = relationship(
+        back_populates="retention_replicas"
+    )
+
+
+class MailboxRetentionCleanupRun(OrganizationScoped, Base):
+    """A privacy-safe audit record for one cleanup execution."""
+
+    __tablename__ = "mailbox_retention_cleanup_runs"
+    __table_args__ = (
+        Index(
+            "ix_mailbox_retention_cleanup_runs_organization_started",
+            "organization_id",
+            "started_at",
+        ),
+        Index(
+            "ix_mailbox_retention_cleanup_runs_config_started",
+            "mailbox_config_id",
+            "started_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    mailbox_config_id: Mapped[str] = mapped_column(
+        ForeignKey("mailbox_configs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    trigger_type: Mapped[str] = mapped_column(String(32))
+    retention_policy: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    scanned_count: Mapped[int] = mapped_column(Integer, default=0)
+    deleted_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    reclaimed_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    mailbox_config: Mapped[MailboxConfig] = relationship(
+        back_populates="retention_cleanup_runs"
+    )
 
 
 class ResumeAiExtractionJob(OrganizationScoped, Base):

@@ -3258,6 +3258,166 @@ button {
   white-space: nowrap;
 }
 
+.panel.mailbox-retention-panel {
+  margin-top: var(--space-xl);
+}
+
+.mailbox-retention-policy {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.mailbox-retention-policy-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.mailbox-retention-option {
+  min-height: 5.75rem;
+  align-items: flex-start;
+  padding: 0.625rem;
+}
+
+.mailbox-retention-option > span {
+  display: grid;
+  min-width: 0;
+  gap: 0.1875rem;
+}
+
+.mailbox-retention-option strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.mailbox-retention-option small {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.mailbox-retention-notice {
+  padding: 0.625rem 0.75rem;
+  margin: var(--space-md) 0 0;
+  color: #7d410b;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  background: var(--amber-tint);
+  border: 1px solid #f1d7bb;
+  border-radius: var(--radius-xs);
+}
+
+.mailbox-retention-actions {
+  margin-top: var(--space-md);
+}
+
+.mailbox-retention-preview {
+  display: grid;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  margin-top: var(--space-lg);
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.mailbox-retention-preview-heading {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.mailbox-retention-preview-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.mailbox-retention-preview-heading p {
+  max-width: 62ch;
+  margin: 0.25rem 0 0;
+  color: var(--ink-muted);
+  font-size: 0.8125rem;
+}
+
+.mailbox-retention-preview-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.mailbox-retention-preview-stats > div {
+  display: grid;
+  gap: 0.1875rem;
+  min-width: 0;
+  padding: 0.625rem 0.75rem;
+}
+
+.mailbox-retention-preview-stats > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.mailbox-retention-preview-stats strong {
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.mailbox-retention-preview-stats span {
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.mailbox-retention-confirm-actions {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.mailbox-retention-empty {
+  display: grid;
+  gap: 0.25rem;
+  padding: var(--space-lg);
+  color: var(--ink-muted);
+  text-align: center;
+  background: var(--surface-muted);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+}
+
+.mailbox-retention-empty strong {
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+}
+
+.mailbox-retention-empty span {
+  font-size: 0.8125rem;
+}
+
+.mailbox-retention-history-table {
+  min-width: 58rem;
+}
+
+.mailbox-retention-history-table th:nth-child(1) { width: 6rem; }
+.mailbox-retention-history-table th:nth-child(2) { width: 7rem; }
+.mailbox-retention-history-table th:nth-child(3) { width: 14rem; }
+.mailbox-retention-history-table th:nth-child(4) { width: 12rem; }
+.mailbox-retention-history-table th:nth-child(5) { width: 8rem; }
+
+.mailbox-retention-count-cell {
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .match-batch-details {
   display: grid;
   gap: var(--space-md);
@@ -4306,6 +4466,26 @@ button {
 }
 
 @media (max-width: 47rem) {
+  .mailbox-retention-policy-options {
+    grid-template-columns: 1fr;
+  }
+
+  .mailbox-retention-preview-heading {
+    display: grid;
+  }
+
+  .mailbox-retention-preview-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mailbox-retention-preview-stats > div:nth-child(odd) {
+    border-left: 0;
+  }
+
+  .mailbox-retention-preview-stats > div:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(0, 1fr);

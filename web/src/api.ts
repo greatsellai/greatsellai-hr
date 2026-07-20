@@ -20,6 +20,11 @@ import type {
   MailboxConfigUpdate,
   MailboxImportHistory,
   MailboxImportHistoryItem,
+  MailboxRetentionOverview,
+  MailboxRetentionPreview,
+  MailboxRetentionRun,
+  MailboxRetentionRuns,
+  MailboxRetentionUpdate,
   MailboxSync,
   EmailVerificationResendResult,
   OriginalJobPublishInput,
@@ -270,6 +275,26 @@ export function createApiClient(options: ApiClientOptions = {}) {
         `/mailbox/imports/${encodeURIComponent(importId)}/retry`,
         { method: "POST" },
       );
+    },
+
+    getMailboxRetention(): Promise<MailboxRetentionOverview> {
+      return request<MailboxRetentionOverview>("/mailbox/retention");
+    },
+
+    saveMailboxRetention(input: MailboxRetentionUpdate): Promise<MailboxRetentionOverview> {
+      return request<MailboxRetentionOverview>("/mailbox/retention", { method: "PUT", body: input });
+    },
+
+    previewMailboxRetention(): Promise<MailboxRetentionPreview> {
+      return request<MailboxRetentionPreview>("/mailbox/retention/preview", { method: "POST" });
+    },
+
+    cleanupMailboxRetention(): Promise<MailboxRetentionRun> {
+      return request<MailboxRetentionRun>("/mailbox/retention/cleanup", { method: "POST" });
+    },
+
+    listMailboxRetentionRuns(): Promise<MailboxRetentionRuns> {
+      return request<MailboxRetentionRuns>("/mailbox/retention/runs");
     },
 
     runRecruitingAgentTurn(input: RecruitingAgentTurnInput): Promise<RecruitingAgentTurn> {

@@ -41,6 +41,10 @@ class AppSettings:
     ai_extraction_job_lease_seconds: int = 180
     ai_extraction_worker_poll_seconds: float = 2.0
     mailbox_sync_interval_seconds: float = 600.0
+    # The scheduler checks a workspace at this cadence for expired short-lived
+    # mail body/attachment cache entries. Candidate resume originals are not
+    # part of this cleanup path.
+    mailbox_retention_cleanup_interval_seconds: float = 3600.0
     # This is a per-run message batch, not an unbounded mailbox scan. Each
     # following run resumes older unseen message UIDs after newer ones are
     # recorded, so the worker remains responsive on large mailboxes.
@@ -135,6 +139,9 @@ class AppSettings:
             ),
             mailbox_sync_interval_seconds=float(
                 os.getenv("RESUME_V3_MAILBOX_SYNC_INTERVAL_SECONDS", "600")
+            ),
+            mailbox_retention_cleanup_interval_seconds=float(
+                os.getenv("RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS", "3600")
             ),
             mailbox_sync_attachment_limit=int(
                 os.getenv("RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT", "20")
@@ -232,6 +239,10 @@ class AppSettings:
         if self.ai_extraction_job_max_attempts < 1:
             raise ValueError(
                 "RESUME_V3_AI_EXTRACTION_JOB_MAX_ATTEMPTS must be at least 1"
+            )
+        if self.mailbox_retention_cleanup_interval_seconds < 60:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS must be at least 60"
             )
         if self.ai_extraction_job_lease_seconds < self.deepseek_timeout_seconds + 30:
             raise ValueError(

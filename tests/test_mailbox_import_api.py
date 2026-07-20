@@ -351,7 +351,7 @@ def test_mailbox_sync_records_database_attachment_failure_without_crashing_worke
     assert result.last_sync_error is None
 
 
-def test_failed_attachment_retries_exact_uid_and_updates_the_same_record(
+def test_failed_attachment_retries_retained_copy_and_updates_the_same_record(
     client,
     monkeypatch,
 ) -> None:
@@ -462,8 +462,9 @@ def test_failed_attachment_retries_exact_uid_and_updates_the_same_record(
     assert payload["resume_id"]
     assert payload["attempt_count"] == 2
     assert payload["can_retry"] is False
-    # A manual retry never runs the incremental mailbox search.
-    assert RetryImap.calls == [("fetch", b"42")]
+    # A fresh failed import has a short-lived, hash-checked retry copy, so
+    # recovery avoids both the incremental search and a second IMAP fetch.
+    assert RetryImap.calls == []
 
     repeated = client.post(f"/v1/mailbox/imports/{item['import_id']}/retry")
     assert repeated.status_code == 409, repeated.text

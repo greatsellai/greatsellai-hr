@@ -11,6 +11,7 @@ from app.database import Database
 from app.services.ai_extraction_job_service import run_ai_extraction_worker_once
 from app.services.job_match_batch_service import run_job_match_batch_worker_once
 from app.services.mailbox_import_service import sync_due_mailboxes
+from app.services.mailbox_retention_service import cleanup_due_mailbox_retention
 from app.services.resume_score_batch_service import run_resume_score_batch_worker_once
 from app.services.institution_service import (
     is_institution_registry_seeded,
@@ -62,11 +63,16 @@ def run_forever(settings: AppSettings) -> None:
                 worker_id=worker_id,
             )
             ran_mailbox_sync = sync_due_mailboxes(database=database, settings=settings)
+            ran_mailbox_retention_cleanup = cleanup_due_mailbox_retention(
+                database=database,
+                settings=settings,
+            )
             if (
                 not ran_extraction
                 and not ran_job_match
                 and not ran_score_batch
                 and not ran_mailbox_sync
+                and not ran_mailbox_retention_cleanup
             ):
                 time.sleep(settings.ai_extraction_worker_poll_seconds)
     finally:
@@ -108,6 +114,7 @@ def main() -> None:
                     worker_id=_worker_id(),
                 )
         sync_due_mailboxes(database=database, settings=settings)
+        cleanup_due_mailbox_retention(database=database, settings=settings)
     finally:
         database.dispose()
 

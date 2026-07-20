@@ -182,6 +182,66 @@ export interface MailboxImportHistory {
   total: number;
 }
 
+export type MailboxRetentionPolicy = "minimal" | "standard" | "audit";
+
+export interface MailboxRetentionOverview {
+  configured: boolean;
+  retention_policy: MailboxRetentionPolicy;
+  body_copy_count: number;
+  attachment_copy_count: number;
+  failure_artifact_count: number;
+  cache_bytes: number;
+  expired_body_count: number;
+  expired_attachment_copy_count: number;
+  expired_failure_artifact_count: number;
+  expired_bytes: number;
+  earliest_expires_at: string | null;
+  last_cleanup_at: string | null;
+  next_cleanup_at: string | null;
+}
+
+export interface MailboxRetentionUpdate {
+  retention_policy: MailboxRetentionPolicy;
+}
+
+export interface MailboxRetentionPreview {
+  retention_policy: MailboxRetentionPolicy;
+  expired_body_count: number;
+  expired_attachment_copy_count: number;
+  expired_failure_artifact_count: number;
+  expired_bytes: number;
+  skipped_count: number;
+}
+
+export type MailboxRetentionRunTrigger = "manual" | "scheduled";
+export type MailboxRetentionRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "completed_with_errors"
+  | "failed";
+
+export interface MailboxRetentionRun {
+  run_id: string;
+  trigger_type: MailboxRetentionRunTrigger;
+  status: MailboxRetentionRunStatus;
+  retention_policy: MailboxRetentionPolicy;
+  started_at: string | null;
+  finished_at: string | null;
+  scanned_count: number;
+  deleted_count: number;
+  skipped_count: number;
+  failed_count: number;
+  reclaimed_bytes: number;
+  next_cleanup_at: string | null;
+  error_code: string | null;
+}
+
+export interface MailboxRetentionRuns {
+  items: MailboxRetentionRun[];
+  total: number;
+}
+
 export type RecruitingAgentIntent =
   | "search_candidates"
   | "run_job_matching"

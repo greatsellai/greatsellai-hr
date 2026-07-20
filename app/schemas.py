@@ -231,7 +231,38 @@ class OrganizationPlanAssign(ApiModel):
     plan_status: Literal["trial", "active", "expired", "suspended"] | None = None
 
 
+class MailboxConfigCreate(ApiModel):
+    """Create one independently named IMAP ingestion source."""
+
+    display_name: str = Field(min_length=1, max_length=32)
+    imap_host: str = Field(min_length=1, max_length=255)
+    imap_port: int = Field(default=993, ge=1, le=65535)
+    email_address: str = Field(min_length=3, max_length=320)
+    mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=512)
+    enabled: bool = True
+
+
+class MailboxConfigPatch(ApiModel):
+    """Update a named IMAP source without ever returning its password."""
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=32)
+    imap_host: str | None = Field(default=None, min_length=1, max_length=255)
+    imap_port: int | None = Field(default=None, ge=1, le=65535)
+    email_address: str | None = Field(default=None, min_length=3, max_length=320)
+    mailbox: str | None = Field(default=None, min_length=1, max_length=255)
+    password: str | None = Field(default=None, min_length=1, max_length=512)
+    enabled: bool | None = None
+
+
 class MailboxConfigUpdate(ApiModel):
+    """Compatibility payload for the former single-mailbox endpoint.
+
+    The plural endpoints use ``MailboxConfigCreate`` and ``MailboxConfigPatch``.
+    Keeping this shape avoids silently changing one-channel clients during the
+    transition.
+    """
+
     imap_host: str = Field(min_length=1, max_length=255)
     imap_port: int = Field(default=993, ge=1, le=65535)
     email_address: str = Field(min_length=3, max_length=320)
@@ -242,11 +273,14 @@ class MailboxConfigUpdate(ApiModel):
 
 class MailboxConfigResponse(ApiModel):
     configured: bool
+    mailbox_id: str | None = None
+    display_name: str | None = None
     imap_host: str | None = None
     imap_port: int | None = None
     email_address: str | None = None
     mailbox: str | None = None
     enabled: bool = False
+    archived_at: datetime | None = None
     password_configured: bool = False
     # Deliberately expose the binding time, but not the IMAP UID internals.
     import_started_at: datetime | None = None
@@ -254,8 +288,15 @@ class MailboxConfigResponse(ApiModel):
     last_sync_error: str | None = None
 
 
+class MailboxConfigListResponse(ApiModel):
+    items: list[MailboxConfigResponse]
+    total: int
+
+
 class MailboxSyncResponse(ApiModel):
     configured: bool
+    mailbox_id: str | None = None
+    display_name: str | None = None
     imported_count: int = 0
     duplicate_count: int = 0
     skipped_count: int = 0
@@ -264,8 +305,18 @@ class MailboxSyncResponse(ApiModel):
     last_sync_error: str | None = None
 
 
+class MailboxSyncAllResponse(ApiModel):
+    items: list[MailboxSyncResponse]
+    imported_count: int = 0
+    duplicate_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+
+
 class MailboxImportResponse(ApiModel):
     import_id: str
+    mailbox_config_id: str
+    mailbox_display_name: str | None = None
     attachment_filename: str
     status: str
     error: str | None = None
@@ -920,6 +971,9 @@ class ResumeLibraryItem(ApiModel):
     ai_extraction_status: str
     ai_extraction_error: str | None = None
     is_active: bool
+    ingestion_source_type: str = "manual_upload"
+    source_mailbox_config_id: str | None = None
+    source_mailbox_label: str | None = None
     # Keep source-quality state on the list row.  A resume can be active from
     # an older extraction even when its stored source text has since been
     # identified as unreliable, so the client must not infer trust from

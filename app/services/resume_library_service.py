@@ -99,10 +99,16 @@ def list_resume_library(
     *,
     page: int,
     page_size: int,
+    mailbox_config_id: str | None = None,
 ) -> ResumeLibraryResponse:
     """List uploaded resume versions without exposing raw extracted facts."""
 
-    total = int(session.scalar(select(func.count(Resume.id))) or 0)
+    filters = []
+    if mailbox_config_id is not None:
+        filters.append(Resume.source_mailbox_config_id == mailbox_config_id)
+    total = int(
+        session.scalar(select(func.count(Resume.id)).where(*filters)) or 0
+    )
     statement = (
         select(Resume)
         .options(
@@ -111,6 +117,7 @@ def list_resume_library(
             selectinload(Resume.summaries),
             selectinload(Resume.scores).selectinload(ResumeScore.template),
         )
+        .where(*filters)
         .order_by(Resume.created_at.desc(), Resume.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -132,6 +139,9 @@ def list_resume_library(
                 ai_extraction_status=ai_status,
                 ai_extraction_error=ai_error,
                 is_active=resume.is_active,
+                ingestion_source_type=resume.ingestion_source_type,
+                source_mailbox_config_id=resume.source_mailbox_config_id,
+                source_mailbox_label=resume.source_mailbox_label_snapshot,
                 quality_flags=resume.quality_flags or [],
                 summary_preview=_summary_preview(summary.content) if summary else None,
                 summary_created_at=_isoformat(summary.created_at) if summary else None,

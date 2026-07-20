@@ -4,6 +4,7 @@ import base64
 import hashlib
 import imaplib
 import re
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email import policy
@@ -16,9 +17,9 @@ from typing import Iterator
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import desc, func, select, update
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, desc, func, or_, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import AppSettings
 from app.models import (
@@ -28,10 +29,14 @@ from app.models import (
     Resume,
 )
 from app.schemas import (
+    MailboxConfigCreate,
+    MailboxConfigListResponse,
+    MailboxConfigPatch,
     MailboxConfigResponse,
     MailboxConfigUpdate,
     MailboxImportHistoryResponse,
     MailboxImportResponse,
+    MailboxSyncAllResponse,
     MailboxSyncResponse,
 )
 from app.tenant_scope import (
@@ -66,6 +71,7 @@ class _RetryClaimLost(MailboxImportError):
 
 
 _RETRY_LEASE_SECONDS = 180
+_SYNC_LEASE_SECONDS = 600
 _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
     {
         "attachment_validation_failed",
@@ -265,11 +271,14 @@ def _config_response(config: MailboxConfig | None) -> MailboxConfigResponse:
         return MailboxConfigResponse(configured=False)
     return MailboxConfigResponse(
         configured=True,
+        mailbox_id=config.id,
+        display_name=config.display_name,
         imap_host=config.imap_host,
         imap_port=config.imap_port,
         email_address=config.email_address,
         mailbox=config.mailbox,
         enabled=config.enabled,
+        archived_at=config.archived_at,
         password_configured=bool(config.encrypted_password),
         import_started_at=config.import_started_at,
         last_synced_at=config.last_synced_at,
@@ -277,8 +286,290 @@ def _config_response(config: MailboxConfig | None) -> MailboxConfigResponse:
     )
 
 
+def _normalized_display_name(value: str) -> tuple[str, str]:
+    display_name = " ".join(unicodedata.normalize("NFKC", value).strip().split())
+    if not display_name:
+        raise MailboxImportError("mailbox_display_name_required")
+    return display_name, display_name.casefold()
+
+
+def _mailbox_config_or_error(
+    session: Session,
+    *,
+    config_id: str,
+    include_archived: bool = False,
+) -> MailboxConfig:
+    statement = select(MailboxConfig).where(MailboxConfig.id == config_id)
+    if not include_archived:
+        statement = statement.where(MailboxConfig.archived_at.is_(None))
+    config = session.scalar(statement)
+    if config is None:
+        raise MailboxImportError("mailbox_config_not_found")
+    return config
+
+
+def _ensure_display_name_available(
+    session: Session,
+    *,
+    display_name_key: str,
+    excluding_config_id: str | None = None,
+) -> None:
+    statement = select(MailboxConfig.id).where(
+        MailboxConfig.display_name_key == display_name_key
+    )
+    if excluding_config_id:
+        statement = statement.where(MailboxConfig.id != excluding_config_id)
+    if session.scalar(statement) is not None:
+        raise MailboxImportError("mailbox_duplicate_display_name")
+
+
+def _config_has_imports(session: Session, *, config_id: str) -> bool:
+    return (
+        session.scalar(
+            select(EmailAttachmentImport.id)
+            .where(EmailAttachmentImport.mailbox_config_id == config_id)
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def list_mailbox_configs(
+    session: Session,
+    *,
+    include_archived: bool = False,
+) -> MailboxConfigListResponse:
+    statement = select(MailboxConfig)
+    if not include_archived:
+        statement = statement.where(MailboxConfig.archived_at.is_(None))
+    configs = session.scalars(
+        statement.order_by(desc(MailboxConfig.created_at), MailboxConfig.id)
+    ).all()
+    return MailboxConfigListResponse(
+        items=[_config_response(config) for config in configs],
+        total=len(configs),
+    )
+
+
+def get_mailbox_config_by_id(session: Session, *, config_id: str) -> MailboxConfigResponse:
+    return _config_response(
+        _mailbox_config_or_error(session, config_id=config_id, include_archived=True)
+    )
+
+
+def _legacy_single_config(session: Session) -> MailboxConfig | None:
+    """Return the one active config for compatibility-only endpoints.
+
+    The former API had no mailbox ID.  It is safe only while exactly one
+    active channel exists.  Choosing the newest channel after a workspace
+    adds another source would send commands to the wrong mailbox.
+    """
+
+    configs = session.scalars(
+        select(MailboxConfig)
+        .where(MailboxConfig.archived_at.is_(None))
+        .order_by(desc(MailboxConfig.created_at), MailboxConfig.id)
+        .limit(2)
+    ).all()
+    if len(configs) > 1:
+        raise MailboxImportError("mailbox_legacy_endpoint_ambiguous")
+    return configs[0] if configs else None
+
+
+def _next_legacy_mailbox_label(session: Session) -> str:
+    """Keep the compatibility create route usable after an archive.
+
+    Archived channels retain their labels for auditability, so a newly created
+    legacy channel must use the same deterministic suffixing as migration
+    backfill instead of colliding with a hidden archived default.
+    """
+
+    base_label = "默认收件邮箱"
+    index = 1
+    while True:
+        label = base_label if index == 1 else f"{base_label} {index}"
+        _, key = _normalized_display_name(label)
+        if session.scalar(
+            select(MailboxConfig.id).where(MailboxConfig.display_name_key == key)
+        ) is None:
+            return label
+        index += 1
+
+
 def get_mailbox_config(session: Session) -> MailboxConfigResponse:
-    config = session.scalar(select(MailboxConfig).order_by(desc(MailboxConfig.created_at)))
+    return _config_response(_legacy_single_config(session))
+
+
+def _encrypt_password(settings: AppSettings, password: str) -> str:
+    return _fernet(settings).encrypt(password.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_password(settings: AppSettings, encrypted_password: str) -> str:
+    try:
+        return _fernet(settings).decrypt(encrypted_password.encode("ascii")).decode("utf-8")
+    except (MailboxImportError, InvalidToken, UnicodeDecodeError) as exc:
+        raise MailboxImportError("mailbox_credentials_unavailable") from exc
+
+
+def _update_config_values(
+    session: Session,
+    *,
+    settings: AppSettings,
+    config: MailboxConfig | None,
+    display_name: str,
+    imap_host: str,
+    imap_port: int,
+    email_address: str,
+    mailbox: str,
+    password: str | None,
+    enabled: bool,
+) -> MailboxConfig:
+    """Persist one source after validating its source identity and watermark."""
+
+    normalized_name, display_name_key = _normalized_display_name(display_name)
+    _ensure_display_name_available(
+        session,
+        display_name_key=display_name_key,
+        excluding_config_id=config.id if config is not None else None,
+    )
+    normalized_host = imap_host.strip()
+    normalized_email = email_address.strip()
+    normalized_mailbox = mailbox.strip()
+    source_changed = config is None or not _same_mailbox_source(
+        config,
+        imap_host=normalized_host,
+        imap_port=imap_port,
+        email_address=normalized_email,
+        mailbox=normalized_mailbox,
+    )
+    if config is not None and source_changed and _config_has_imports(session, config_id=config.id):
+        # A retry must always point to the exact historical source.  Reusing
+        # an existing channel for another inbox would break that guarantee.
+        raise MailboxImportError("mailbox_source_identity_locked")
+
+    needs_watermark = source_changed or (
+        config is not None
+        and (config.import_start_uid is None or config.imap_uidvalidity is None)
+    )
+    encrypted_password = config.encrypted_password if config is not None else ""
+    if password is not None:
+        encrypted_password = _encrypt_password(settings, password)
+    if not encrypted_password:
+        raise MailboxImportError("mailbox_password_required")
+    if needs_watermark:
+        binding_password = password or _decrypt_password(settings, encrypted_password)
+        imap_uidvalidity, import_start_uid = _read_initial_mailbox_watermark(
+            imap_host=normalized_host,
+            imap_port=imap_port,
+            email_address=normalized_email,
+            mailbox=normalized_mailbox,
+            password=binding_password,
+        )
+        import_started_at = _utcnow()
+
+    if config is None:
+        config = MailboxConfig(
+            display_name=normalized_name,
+            display_name_key=display_name_key,
+            imap_host=normalized_host,
+            imap_port=imap_port,
+            email_address=normalized_email,
+            mailbox=normalized_mailbox,
+            encrypted_password=encrypted_password,
+            enabled=enabled,
+            import_start_uid=import_start_uid,
+            imap_uidvalidity=imap_uidvalidity,
+            import_started_at=import_started_at,
+        )
+        session.add(config)
+        return config
+
+    config.display_name = normalized_name
+    config.display_name_key = display_name_key
+    config.imap_host = normalized_host
+    config.imap_port = imap_port
+    config.email_address = normalized_email
+    config.mailbox = normalized_mailbox
+    config.encrypted_password = encrypted_password
+    config.enabled = enabled
+    if needs_watermark:
+        config.import_start_uid = import_start_uid
+        config.imap_uidvalidity = imap_uidvalidity
+        config.import_started_at = import_started_at
+        # The worker should check a newly bound mailbox immediately.  The
+        # stored UIDNEXT keeps that check from importing its history.
+        config.last_synced_at = None
+    config.last_sync_error = None
+    return config
+
+
+def create_mailbox_config(
+    session: Session,
+    *,
+    settings: AppSettings,
+    payload: MailboxConfigCreate,
+) -> MailboxConfigResponse:
+    config = _update_config_values(
+        session,
+        settings=settings,
+        config=None,
+        display_name=payload.display_name,
+        imap_host=payload.imap_host,
+        imap_port=payload.imap_port,
+        email_address=payload.email_address,
+        mailbox=payload.mailbox,
+        password=payload.password,
+        enabled=payload.enabled,
+    )
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise MailboxImportError("mailbox_duplicate_display_name") from exc
+    return _config_response(config)
+
+
+def update_mailbox_config(
+    session: Session,
+    *,
+    settings: AppSettings,
+    config_id: str,
+    payload: MailboxConfigPatch,
+) -> MailboxConfigResponse:
+    config = _mailbox_config_or_error(session, config_id=config_id)
+    config = _update_config_values(
+        session,
+        settings=settings,
+        config=config,
+        display_name=payload.display_name if payload.display_name is not None else config.display_name,
+        imap_host=payload.imap_host if payload.imap_host is not None else config.imap_host,
+        imap_port=payload.imap_port if payload.imap_port is not None else config.imap_port,
+        email_address=(
+            payload.email_address if payload.email_address is not None else config.email_address
+        ),
+        mailbox=payload.mailbox if payload.mailbox is not None else config.mailbox,
+        password=payload.password,
+        enabled=payload.enabled if payload.enabled is not None else config.enabled,
+    )
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise MailboxImportError("mailbox_duplicate_display_name") from exc
+    return _config_response(config)
+
+
+def archive_mailbox_config(
+    session: Session,
+    *,
+    config_id: str,
+) -> MailboxConfigResponse:
+    config = _mailbox_config_or_error(session, config_id=config_id)
+    config.enabled = False
+    config.archived_at = _utcnow()
+    config.sync_lease_token = None
+    config.sync_lease_expires_at = None
+    session.commit()
     return _config_response(config)
 
 
@@ -288,83 +579,68 @@ def save_mailbox_config(
     settings: AppSettings,
     payload: MailboxConfigUpdate,
 ) -> MailboxConfigResponse:
-    config = session.scalar(select(MailboxConfig).order_by(desc(MailboxConfig.created_at)))
-    if config is None and not payload.password:
-        raise MailboxImportError("mailbox_password_required")
-    imap_host = payload.imap_host.strip()
-    email_address = payload.email_address.strip()
-    mailbox = payload.mailbox.strip()
-    source_changed = config is None or not _same_mailbox_source(
-        config,
-        imap_host=imap_host,
-        imap_port=payload.imap_port,
-        email_address=email_address,
-        mailbox=mailbox,
-    )
-    needs_watermark = source_changed or (
-        config is not None
-        and (config.import_start_uid is None or config.imap_uidvalidity is None)
-    )
-    encrypted_password = config.encrypted_password if config is not None else ""
-    password = payload.password
-    if payload.password:
-        encrypted_password = _fernet(settings).encrypt(payload.password.encode("utf-8")).decode("ascii")
-    if needs_watermark:
-        if password is None:
-            try:
-                password = _fernet(settings).decrypt(encrypted_password.encode("ascii")).decode("utf-8")
-            except (MailboxImportError, InvalidToken, UnicodeDecodeError) as exc:
-                raise MailboxImportError("mailbox_credentials_unavailable") from exc
-        imap_uidvalidity, import_start_uid = _read_initial_mailbox_watermark(
-            imap_host=imap_host,
-            imap_port=payload.imap_port,
-            email_address=email_address,
-            mailbox=mailbox,
-            password=password,
-        )
-        import_started_at = _utcnow()
+    config = _legacy_single_config(session)
     if config is None:
-        config = MailboxConfig(
-            imap_host=imap_host,
-            imap_port=payload.imap_port,
-            email_address=email_address,
-            mailbox=mailbox,
-            encrypted_password=encrypted_password,
-            enabled=payload.enabled,
-            import_start_uid=import_start_uid,
-            imap_uidvalidity=imap_uidvalidity,
-            import_started_at=import_started_at,
+        if not payload.password:
+            raise MailboxImportError("mailbox_password_required")
+        return create_mailbox_config(
+            session,
+            settings=settings,
+            payload=MailboxConfigCreate(
+                display_name=_next_legacy_mailbox_label(session),
+                imap_host=payload.imap_host,
+                imap_port=payload.imap_port,
+                email_address=payload.email_address,
+                mailbox=payload.mailbox,
+                password=payload.password,
+                enabled=payload.enabled,
+            ),
         )
-        session.add(config)
-    else:
-        config.imap_host = imap_host
-        config.imap_port = payload.imap_port
-        config.email_address = email_address
-        config.mailbox = mailbox
-        config.encrypted_password = encrypted_password
-        config.enabled = payload.enabled
-        if needs_watermark:
-            config.import_start_uid = import_start_uid
-            config.imap_uidvalidity = imap_uidvalidity
-            config.import_started_at = import_started_at
-            # The worker should check a newly bound mailbox immediately.  The
-            # stored UIDNEXT keeps that check from importing its history.
-            config.last_synced_at = None
-        config.last_sync_error = None
-    session.commit()
-    return _config_response(config)
+    return update_mailbox_config(
+        session,
+        settings=settings,
+        config_id=config.id,
+        payload=MailboxConfigPatch(
+            imap_host=payload.imap_host,
+            imap_port=payload.imap_port,
+            email_address=payload.email_address,
+            mailbox=payload.mailbox,
+            password=payload.password,
+            enabled=payload.enabled,
+        ),
+    )
 
 
-def list_mailbox_imports(session: Session, *, limit: int = 40) -> MailboxImportHistoryResponse:
+def list_mailbox_imports(
+    session: Session,
+    *,
+    limit: int = 40,
+    mailbox_config_id: str | None = None,
+) -> MailboxImportHistoryResponse:
+    if mailbox_config_id is not None:
+        _mailbox_config_or_error(
+            session,
+            config_id=mailbox_config_id,
+            include_archived=True,
+        )
+    statement = select(EmailAttachmentImport).options(
+        selectinload(EmailAttachmentImport.mailbox_config)
+    )
+    count_statement = select(func.count()).select_from(EmailAttachmentImport)
+    if mailbox_config_id is not None:
+        statement = statement.where(EmailAttachmentImport.mailbox_config_id == mailbox_config_id)
+        count_statement = count_statement.where(
+            EmailAttachmentImport.mailbox_config_id == mailbox_config_id
+        )
     records = session.scalars(
-        select(EmailAttachmentImport)
+        statement
         .order_by(
             desc(EmailAttachmentImport.last_attempted_at),
             desc(EmailAttachmentImport.created_at),
         )
         .limit(limit)
     ).all()
-    total = session.scalar(select(func.count()).select_from(EmailAttachmentImport))
+    total = session.scalar(count_statement)
     return MailboxImportHistoryResponse(
         items=[_import_response(item) for item in records],
         total=int(total or 0),
@@ -403,6 +679,10 @@ def _can_retry(item: EmailAttachmentImport) -> bool:
 def _import_response(item: EmailAttachmentImport) -> MailboxImportResponse:
     return MailboxImportResponse(
         import_id=item.id,
+        mailbox_config_id=item.mailbox_config_id,
+        mailbox_display_name=(
+            item.mailbox_config.display_name if item.mailbox_config is not None else None
+        ),
         attachment_filename=item.attachment_filename,
         status=item.status,
         error=item.error,
@@ -587,6 +867,13 @@ def _ingest_attachment(
         )
         if resume.organization_id != config.organization_id:
             raise MailboxImportError("mailbox_workspace_mismatch")
+        # Keep a stable, source-side provenance record on the resume so the
+        # library can filter by inbox without relying on mutable attachment
+        # history.  The label is a snapshot: later renaming a channel must not
+        # retroactively rewrite where a candidate entered the workspace.
+        resume.ingestion_source_type = "mailbox_attachment"
+        resume.source_mailbox_config_id = config.id
+        resume.source_mailbox_label_snapshot = config.display_name
         if resume.extraction_status == "failed":
             raise _AttachmentIngestionFailure(
                 "attachment_text_extraction_failed",
@@ -648,6 +935,7 @@ def _complete_retry(
     expected_organization_id = organization_context_id(session)
     completed = session.execute(
         update(EmailAttachmentImport)
+        .execution_options(synchronize_session=False)
         .where(
             EmailAttachmentImport.id == import_id,
             EmailAttachmentImport.organization_id == expected_organization_id,
@@ -741,6 +1029,7 @@ def _claim_retry(session: Session, *, import_id: str) -> EmailAttachmentImport:
 
     claimed = session.execute(
         update(EmailAttachmentImport)
+        .execution_options(synchronize_session=False)
         .where(
             EmailAttachmentImport.id == record.id,
             EmailAttachmentImport.organization_id == expected_organization_id,
@@ -859,6 +1148,12 @@ def retry_mailbox_attachment(
                 error="attachment_source_unavailable",
                 resume_id=None,
             )
+        if config.archived_at is not None:
+            return complete(
+                status="failed",
+                error="attachment_source_unavailable",
+                resume_id=None,
+            )
         # A locally retained failure artifact is self-contained and can be
         # retried even if the sender later deletes the source message.  Its
         # hash is checked by the retention service before it is returned.
@@ -891,7 +1186,6 @@ def retry_mailbox_attachment(
                     error="mailbox_credentials_unavailable",
                     resume_id=None,
                 )
-
             client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
             login_status, _ = client.login(config.email_address, password)
             if login_status != "OK":
@@ -1038,40 +1332,153 @@ def retry_mailbox_attachment(
                 pass
 
 
+def _sync_response(
+    config: MailboxConfig,
+    *,
+    imported_count: int = 0,
+    duplicate_count: int = 0,
+    skipped_count: int = 0,
+    failed_count: int = 0,
+) -> MailboxSyncResponse:
+    return MailboxSyncResponse(
+        configured=True,
+        mailbox_id=config.id,
+        display_name=config.display_name,
+        imported_count=imported_count,
+        duplicate_count=duplicate_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        last_synced_at=config.last_synced_at,
+        last_sync_error=config.last_sync_error,
+    )
+
+
+def _claim_mailbox_sync(session: Session, *, config: MailboxConfig) -> str:
+    """Claim one source without keeping a database transaction over IMAP."""
+
+    now = _utcnow()
+    claim_token = uuid4().hex
+    organization_id = organization_context_id(session)
+    claimed = session.execute(
+        update(MailboxConfig)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxConfig.id == config.id,
+            MailboxConfig.organization_id == organization_id,
+            MailboxConfig.enabled.is_(True),
+            MailboxConfig.archived_at.is_(None),
+            or_(
+                MailboxConfig.sync_lease_expires_at.is_(None),
+                MailboxConfig.sync_lease_expires_at <= now,
+            ),
+        )
+        .values(
+            sync_lease_token=claim_token,
+            sync_lease_expires_at=now + timedelta(seconds=_SYNC_LEASE_SECONDS),
+            last_sync_started_at=now,
+        )
+    )
+    if claimed.rowcount == 1:
+        session.commit()
+        return claim_token
+
+    session.rollback()
+    current = session.scalar(
+        select(MailboxConfig).where(MailboxConfig.id == config.id)
+    )
+    if current is None:
+        raise MailboxImportError("mailbox_config_not_found")
+    if current.archived_at is not None:
+        raise MailboxImportError("mailbox_config_archived")
+    lease_expires_at = _as_utc(current.sync_lease_expires_at)
+    if lease_expires_at is not None and lease_expires_at > now:
+        raise MailboxImportError("mailbox_sync_in_progress")
+    raise MailboxImportError("mailbox_sync_claim_failed")
+
+
+def _release_mailbox_sync(
+    session: Session,
+    *,
+    config_id: str,
+    claim_token: str,
+) -> None:
+    """Release only the lease owned by this run, never a newer worker's."""
+
+    organization_id = organization_context_id(session)
+    session.execute(
+        update(MailboxConfig)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxConfig.id == config_id,
+            MailboxConfig.organization_id == organization_id,
+            MailboxConfig.sync_lease_token == claim_token,
+        )
+        .values(sync_lease_token=None, sync_lease_expires_at=None)
+    )
+    session.commit()
+    session.expire_all()
+
+
+def _sync_config_for_run(
+    session: Session,
+    *,
+    config_id: str | None,
+) -> MailboxConfig | None:
+    if config_id is None:
+        return _legacy_single_config(session)
+    config = _mailbox_config_or_error(
+        session,
+        config_id=config_id,
+        include_archived=True,
+    )
+    if config.archived_at is not None:
+        raise MailboxImportError("mailbox_config_archived")
+    return config
+
+
 def sync_mailbox(
     session: Session,
     *,
     settings: AppSettings,
     config_id: str | None = None,
 ) -> MailboxSyncResponse:
-    config_query = select(MailboxConfig).order_by(desc(MailboxConfig.created_at))
-    if config_id:
-        config_query = select(MailboxConfig).where(MailboxConfig.id == config_id)
-    config = session.scalar(config_query)
+    config = _sync_config_for_run(session, config_id=config_id)
     if config is None:
         return MailboxSyncResponse(configured=False)
     organization_id = config.organization_id
     if not organization_id:
         # A configuration without a workspace is never allowed to read mail
-        # or create a candidate.  Keep the failure generic and non-sensitive.
+        # or create a candidate. Keep the failure generic and non-sensitive.
         raise MailboxImportError("mailbox_workspace_missing")
     if not config.enabled:
-        return MailboxSyncResponse(
-            configured=True,
-            last_synced_at=config.last_synced_at,
-            last_sync_error=config.last_sync_error,
-        )
+        return _sync_response(config)
+
     mailbox_config_id = config.id
-    try:
-        password = _fernet(settings).decrypt(config.encrypted_password.encode("ascii")).decode("utf-8")
-    except (MailboxImportError, InvalidToken, UnicodeDecodeError) as exc:
-        config.last_sync_error = "mailbox_credentials_unavailable"
-        session.commit()
-        raise MailboxImportError("mailbox_credentials_unavailable") from exc
+    claim_token = _claim_mailbox_sync(session, config=config)
+    config = _mailbox_config_or_error(
+        session,
+        config_id=mailbox_config_id,
+        include_archived=True,
+    )
+    if config.archived_at is not None:
+        _release_mailbox_sync(
+            session,
+            config_id=mailbox_config_id,
+            claim_token=claim_token,
+        )
+        raise MailboxImportError("mailbox_config_archived")
+    if not config.enabled:
+        _release_mailbox_sync(
+            session,
+            config_id=mailbox_config_id,
+            claim_token=claim_token,
+        )
+        return _sync_response(config)
 
     imported = duplicates = skipped = failed = 0
     client: imaplib.IMAP4_SSL | None = None
     try:
+        password = _decrypt_password(settings, config.encrypted_password)
         client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
         login_status, _ = client.login(config.email_address, password)
         if login_status != "OK":
@@ -1081,8 +1488,8 @@ def sync_mailbox(
             mailbox=config.mailbox,
         )
         # Older installations have no watermark until their first sync after
-        # this feature ships.  Establish it and deliberately leave all
-        # existing messages untouched.
+        # this feature ships. Establish it and deliberately leave all existing
+        # messages untouched.
         if config.import_start_uid is None or config.imap_uidvalidity is None:
             config.import_start_uid = current_uidnext
             config.imap_uidvalidity = imap_uidvalidity
@@ -1090,26 +1497,16 @@ def sync_mailbox(
             config.last_synced_at = _utcnow()
             config.last_sync_error = None
             session.commit()
-            return MailboxSyncResponse(
-                configured=True,
-                last_synced_at=config.last_synced_at,
-                last_sync_error=config.last_sync_error,
-            )
-        # A UID has meaning only inside one UIDVALIDITY epoch.  If the server
-        # reports a new epoch, take a fresh UIDNEXT watermark and skip this
-        # run rather than risking old mail or UID reuse being imported.
+            return _sync_response(config)
+        # A UID has meaning only inside one UIDVALIDITY epoch. A changed epoch
+        # is a different source identity, so do not silently reset the
+        # watermark and continue. The owner must archive this channel and bind
+        # a new one, which keeps historical retry provenance trustworthy.
         if config.imap_uidvalidity != imap_uidvalidity:
-            config.import_start_uid = current_uidnext
-            config.imap_uidvalidity = imap_uidvalidity
-            config.import_started_at = _utcnow()
-            config.last_synced_at = _utcnow()
-            config.last_sync_error = None
+            config.enabled = False
+            config.last_sync_error = "mailbox_source_epoch_changed"
             session.commit()
-            return MailboxSyncResponse(
-                configured=True,
-                last_synced_at=config.last_synced_at,
-                last_sync_error=config.last_sync_error,
-            )
+            raise MailboxImportError("mailbox_source_epoch_changed")
         status, _ = client.select(config.mailbox, readonly=True)
         if status != "OK":
             raise MailboxImportError("mailbox_select_failed")
@@ -1219,7 +1616,7 @@ def sync_mailbox(
                         content=content,
                         settings=settings,
                     )
-                    _record(
+                    record = _record(
                         session,
                         config=config,
                         uid=uid,
@@ -1252,9 +1649,13 @@ def sync_mailbox(
                         organization_id=organization_id,
                         failure=exc,
                     )
-                    config = session.get(MailboxConfig, mailbox_config_id)
-                    if config is None or config.organization_id != organization_id:
-                        raise MailboxImportError("mailbox_config_not_found")
+                    config = _mailbox_config_or_error(
+                        session,
+                        config_id=mailbox_config_id,
+                        include_archived=True,
+                    )
+                    if config.archived_at is not None:
+                        raise MailboxImportError("mailbox_config_archived")
                     record = _record(
                         session,
                         config=config,
@@ -1282,23 +1683,35 @@ def sync_mailbox(
                             ),
                         )
                     failed += 1
-        config = session.get(MailboxConfig, mailbox_config_id)
-        if config is None or config.organization_id != organization_id:
-            raise MailboxImportError("mailbox_config_not_found")
+        config = _mailbox_config_or_error(
+            session,
+            config_id=mailbox_config_id,
+            include_archived=True,
+        )
+        if config.archived_at is not None:
+            raise MailboxImportError("mailbox_config_archived")
         config.last_synced_at = _utcnow()
         config.last_sync_error = None
         session.commit()
+        return _sync_response(
+            config,
+            imported_count=imported,
+            duplicate_count=duplicates,
+            skipped_count=skipped,
+            failed_count=failed,
+        )
     except (imaplib.IMAP4.error, OSError, MailboxImportError, SQLAlchemyError) as exc:
         session.rollback()
-        config = session.get(MailboxConfig, mailbox_config_id)
+        error_code = (
+            str(exc)
+            if isinstance(exc, MailboxImportError)
+            else "mailbox_sync_failed"
+            if isinstance(exc, SQLAlchemyError)
+            else "mailbox_connection_failed"
+        )
+        config = session.scalar(select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id))
         if config is not None and config.organization_id == organization_id:
-            config.last_sync_error = (
-                str(exc)
-                if str(exc).startswith("mailbox_")
-                else "mailbox_sync_failed"
-                if isinstance(exc, SQLAlchemyError)
-                else "mailbox_connection_failed"
-            )
+            config.last_sync_error = error_code
             session.commit()
         if isinstance(exc, MailboxImportError):
             raise
@@ -1311,30 +1724,88 @@ def sync_mailbox(
                 client.logout()
             except (imaplib.IMAP4.error, OSError):
                 pass
-    return MailboxSyncResponse(
-        configured=True,
-        imported_count=imported,
-        duplicate_count=duplicates,
-        skipped_count=skipped,
-        failed_count=failed,
-        last_synced_at=config.last_synced_at,
-        last_sync_error=config.last_sync_error,
+        # A normal early return still reaches this block. The conditional
+        # release cannot erase a newer worker's lease after expiry.
+        try:
+            _release_mailbox_sync(
+                session,
+                config_id=mailbox_config_id,
+                claim_token=claim_token,
+            )
+        except SQLAlchemyError:
+            session.rollback()
+
+
+def sync_all_mailboxes(
+    session: Session,
+    *,
+    settings: AppSettings,
+) -> MailboxSyncAllResponse:
+    """Synchronize each active source independently and retain per-source errors."""
+
+    config_ids = list(
+        session.scalars(
+            select(MailboxConfig.id)
+            .where(MailboxConfig.archived_at.is_(None), MailboxConfig.enabled.is_(True))
+            .order_by(MailboxConfig.created_at, MailboxConfig.id)
+        ).all()
+    )
+    results: list[MailboxSyncResponse] = []
+    for config_id in config_ids:
+        try:
+            results.append(sync_mailbox(session, settings=settings, config_id=config_id))
+        except MailboxImportError as exc:
+            session.rollback()
+            config = session.scalar(
+                select(MailboxConfig).where(MailboxConfig.id == config_id)
+            )
+            if config is not None:
+                if config.last_sync_error != str(exc):
+                    config.last_sync_error = str(exc)
+                    session.commit()
+                results.append(_sync_response(config))
+    return MailboxSyncAllResponse(
+        items=results,
+        imported_count=sum(item.imported_count for item in results),
+        duplicate_count=sum(item.duplicate_count for item in results),
+        skipped_count=sum(item.skipped_count for item in results),
+        failed_count=sum(item.failed_count for item in results),
     )
 
 
 def sync_due_mailboxes(*, database, settings: AppSettings) -> bool:
-    cutoff = _utcnow() - timedelta(seconds=settings.mailbox_sync_interval_seconds)
+    now = _utcnow()
+    cutoff = now - timedelta(seconds=settings.mailbox_sync_interval_seconds)
     with database.session_factory() as session:
         claimed = session.execute(
             select(MailboxConfig.id, MailboxConfig.organization_id)
-            .where(MailboxConfig.enabled.is_(True))
+            .where(
+                MailboxConfig.enabled.is_(True),
+                MailboxConfig.archived_at.is_(None),
+                or_(
+                    MailboxConfig.sync_lease_expires_at.is_(None),
+                    MailboxConfig.sync_lease_expires_at <= now,
+                ),
+            )
             .where(
                 (MailboxConfig.import_start_uid.is_(None))
                 | (MailboxConfig.imap_uidvalidity.is_(None))
-                | (MailboxConfig.last_synced_at.is_(None))
-                | (MailboxConfig.last_synced_at <= cutoff)
+                | (MailboxConfig.last_sync_started_at <= cutoff)
+                | and_(
+                    MailboxConfig.last_sync_started_at.is_(None),
+                    or_(
+                        MailboxConfig.last_synced_at.is_(None),
+                        MailboxConfig.last_synced_at <= cutoff,
+                    ),
+                )
             )
-            .order_by(MailboxConfig.last_synced_at)
+            .order_by(
+                func.coalesce(
+                    MailboxConfig.last_sync_started_at,
+                    MailboxConfig.last_synced_at,
+                ),
+                MailboxConfig.id,
+            )
             # One scheduler serves all tenants, so discovery is global.  The
             # actual IMAP connection and every following write are scoped
             # immediately below before the config is re-read.
@@ -1347,7 +1818,12 @@ def sync_due_mailboxes(*, database, settings: AppSettings) -> bool:
             session.execute(
                 MailboxConfig.__table__.update()
                 .where(MailboxConfig.id == config_id)
-                .values(last_sync_error="mailbox_workspace_missing")
+                .values(
+                    enabled=False,
+                    last_sync_error="mailbox_workspace_missing",
+                    sync_lease_token=None,
+                    sync_lease_expires_at=None,
+                )
                 .execution_options(skip_organization_scope=True)
             )
             session.commit()

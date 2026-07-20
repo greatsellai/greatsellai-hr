@@ -340,6 +340,16 @@ class Resume(OrganizationScoped, Base):
         ),
         Index("ix_resumes_organization_created", "organization_id", "created_at"),
         Index("ix_resumes_organization_candidate", "organization_id", "candidate_id"),
+        Index(
+            "ix_resumes_organization_source_mailbox",
+            "organization_id",
+            "source_mailbox_config_id",
+        ),
+        Index(
+            "ix_resumes_organization_ingestion_source",
+            "organization_id",
+            "ingestion_source_type",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -359,6 +369,22 @@ class Resume(OrganizationScoped, Base):
     employment_or_internship_months: Mapped[int] = mapped_column(Integer, default=0, index=True)
     facts_version: Mapped[int] = mapped_column(Integer, default=0)
     raw_text: Mapped[str | None] = mapped_column(Text)
+    # Keep source provenance on the resume itself so the library can filter
+    # and display a stable channel label without depending on mutable mailbox
+    # configuration.  Existing/manual uploads retain the safe default.
+    ingestion_source_type: Mapped[str] = mapped_column(
+        String(32),
+        default="manual_upload",
+        server_default=text("'manual_upload'"),
+    )
+    source_mailbox_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("mailbox_configs.id"),
+        nullable=True,
+    )
+    source_mailbox_label_snapshot: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -422,6 +448,10 @@ class Resume(OrganizationScoped, Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    source_mailbox_config: Mapped["MailboxConfig | None"] = relationship(
+        back_populates="ingested_resumes",
+        foreign_keys=[source_mailbox_config_id],
+    )
 
 
 class ResumeUploadIdempotencyKey(OrganizationScoped, Base):
@@ -460,14 +490,39 @@ class ResumeUploadIdempotencyKey(OrganizationScoped, Base):
 
 
 class MailboxConfig(OrganizationScoped, Base):
-    """The single account's IMAP source. Its password is always encrypted."""
+    """An independently named IMAP source. Its password is always encrypted."""
 
     __tablename__ = "mailbox_configs"
     __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "display_name_key",
+            name="uq_mailbox_configs_organization_display_name_key",
+        ),
         Index("ix_mailbox_configs_organization_enabled", "organization_id", "enabled"),
+        Index(
+            "ix_mailbox_configs_organization_sync_claim",
+            "organization_id",
+            "enabled",
+            "archived_at",
+            "sync_lease_expires_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    # The service validates the visible label and writes its NFKC/casefolded
+    # comparison key.  Defaults preserve the legacy one-mailbox behaviour
+    # until callers are migrated to the explicit multi-channel API.
+    display_name: Mapped[str] = mapped_column(
+        String(32),
+        default="默认收件邮箱",
+        server_default=text("'默认收件邮箱'"),
+    )
+    display_name_key: Mapped[str] = mapped_column(
+        String(64),
+        default="默认收件邮箱",
+        server_default=text("'默认收件邮箱'"),
+    )
     imap_host: Mapped[str] = mapped_column(String(255))
     imap_port: Mapped[int] = mapped_column(Integer, default=993)
     email_address: Mapped[str] = mapped_column(String(320))
@@ -480,6 +535,9 @@ class MailboxConfig(OrganizationScoped, Base):
     import_start_uid: Mapped[int | None] = mapped_column(BigInteger)
     imap_uidvalidity: Mapped[int | None] = mapped_column(BigInteger)
     import_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Scheduler fairness uses the last attempted run, not only successful
+    # syncs, so one broken source cannot monopolize the worker loop.
+    last_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_sync_error: Mapped[str | None] = mapped_column(Text)
     # Mail content is kept in a separate, short-lived cache.  Candidate
@@ -488,6 +546,12 @@ class MailboxConfig(OrganizationScoped, Base):
     last_retention_cleanup_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A per-channel lease prevents manual and scheduled sync calls from
+    # processing the same IMAP source concurrently without blocking another
+    # channel in the same workspace.
+    sync_lease_token: Mapped[str | None] = mapped_column(String(64))
+    sync_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -501,6 +565,10 @@ class MailboxConfig(OrganizationScoped, Base):
     )
     retention_cleanup_runs: Mapped[list["MailboxRetentionCleanupRun"]] = relationship(
         back_populates="mailbox_config", cascade="all, delete-orphan"
+    )
+    ingested_resumes: Mapped[list[Resume]] = relationship(
+        back_populates="source_mailbox_config",
+        foreign_keys="Resume.source_mailbox_config_id",
     )
 
 

@@ -3,7 +3,7 @@
 **版本：** V1.0
 **日期：** 2026-07-20
 **所属版本：** 高级版 B · 收简历邮箱自动收集
-**状态：** 待评审，未实施
+**状态：** 已实现，待合并
 **关联文档：** [全版本 PRD](PRD_ALL_VERSIONS.md)、[邮箱附件失败与单附件重试 PRD](MAILBOX_ATTACHMENT_RETRY_PRD.md)
 
 ## 1. 背景与现状
@@ -44,6 +44,7 @@
 - IMAP 主机、端口、接收邮箱和文件夹；
 - 仅服务端可读的加密授权码；
 - 独立的收件起点、UIDVALIDITY、同步时间和错误状态；
+- 独立的邮件暂存留存策略、清理记录和失败附件重试副本；
 - 启用、暂停或归档状态。
 
 通道名称在同一工作区内唯一。创建时去除首尾空格，按大小写和连续空白归一化后校验；名称长度为 1 至 32 个可见字符。不同工作区可使用相同名称。
@@ -163,7 +164,7 @@ IMAP 主机、端口、接收邮箱和文件夹共同构成连接身份。连接
 
 为让简历库无需依赖临时邮件记录判断来源，新增或明确以下稳定来源字段：
 
-- 简历版本的 `ingestion_source_type`：`manual_upload` 或 `mailbox`；
+- 简历版本的 `ingestion_source_type`：`manual_upload` 或 `mailbox_attachment`；
 - 简历版本的 `source_mailbox_config_id`（手动上传为 `null`）；
 - 可选的 `source_mailbox_label_snapshot`，用于通道归档或改名后的历史审计。
 
@@ -195,6 +196,14 @@ IMAP 主机、端口、接收邮箱和文件夹共同构成连接身份。连接
   - 管理员触发全部已启用通道的逐通道同步，返回每个通道独立结果。
 - `POST /v1/mailboxes/{mailbox_id}/archive`
   - 归档通道，不删除历史数据。
+- `GET/PUT /v1/mailboxes/{mailbox_id}/retention`
+  - 查看或修改该通道的邮件暂存留存策略；绝不按“最新通道”推断目标。
+- `POST /v1/mailboxes/{mailbox_id}/retention/preview`
+  - 仅预览该通道当前可清理的暂存内容。
+- `POST /v1/mailboxes/{mailbox_id}/retention/cleanup`
+  - 仅清理该通道已到期的邮件暂存副本；不会触及候选人原始简历。
+- `GET /v1/mailboxes/{mailbox_id}/retention/runs`
+  - 查看该通道的清理运行记录。
 - `GET /v1/mailbox-imports?mailbox_id={id}`
   - 返回当前工作区附件记录；`mailbox_id` 为可选过滤条件。
 - `POST /v1/mailbox-imports/{import_id}/retry`
@@ -212,6 +221,7 @@ IMAP 主机、端口、接收邮箱和文件夹共同构成连接身份。连接
 6. 两个不同通道收到完全相同的附件时，分别保留两条收件审计，并标记为“可能重复来源”；不得仅凭哈希自动合并候选人或覆盖来源。
 7. 失败附件精确重试保留原通道的来源指纹、UIDVALIDITY、UID、哈希和领取令牌；通道改名不会影响重试，连接身份变更或归档不会误取其他通道邮件。
 8. AI 提取任务只在附件已经安全入库后创建；AI 任务失败沿用既有队列重试，不重新从邮箱创建候选人。
+9. 邮件正文、成功附件副本和失败附件重试副本按通道分别执行三档留存（最小、标准、审计）；归档通道不再收件，但其到期暂存内容仍由后台清理，候选人原文件和已入库事实不受此策略影响。
 
 ## 9. 权限、隐私与 Agent 边界
 

@@ -17,7 +17,9 @@ import type {
   JobVersion,
   JobVersionRequirementsUpdate,
   MailboxConfig,
-  MailboxConfigUpdate,
+  MailboxConfigCreate,
+  MailboxConfigList,
+  MailboxConfigPatch,
   MailboxImportHistory,
   MailboxImportHistoryItem,
   MailboxRetentionOverview,
@@ -26,6 +28,7 @@ import type {
   MailboxRetentionRuns,
   MailboxRetentionUpdate,
   MailboxSync,
+  MailboxSyncAll,
   EmailVerificationResendResult,
   OriginalJobPublishInput,
   PasswordResetRequestResult,
@@ -254,20 +257,41 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return request<void>("/auth/logout", { method: "POST" });
     },
 
-    getMailboxConfig(): Promise<MailboxConfig> {
-      return request<MailboxConfig>("/mailbox/config");
+    listMailboxConfigs(includeArchived = false): Promise<MailboxConfigList> {
+      const query = includeArchived ? "?include_archived=true" : "";
+      return request<MailboxConfigList>(`/mailboxes${query}`);
     },
 
-    saveMailboxConfig(input: MailboxConfigUpdate): Promise<MailboxConfig> {
-      return request<MailboxConfig>("/mailbox/config", { method: "PUT", body: input });
+    getMailboxConfig(mailboxId: string): Promise<MailboxConfig> {
+      return request<MailboxConfig>(`/mailboxes/${resourcePath(mailboxId)}`);
     },
 
-    syncMailbox(): Promise<MailboxSync> {
-      return request<MailboxSync>("/mailbox/sync", { method: "POST" });
+    createMailboxConfig(input: MailboxConfigCreate): Promise<MailboxConfig> {
+      return request<MailboxConfig>("/mailboxes", { method: "POST", body: input });
     },
 
-    listMailboxImports(): Promise<MailboxImportHistory> {
-      return request<MailboxImportHistory>("/mailbox/imports");
+    updateMailboxConfig(mailboxId: string, input: MailboxConfigPatch): Promise<MailboxConfig> {
+      return request<MailboxConfig>(`/mailboxes/${resourcePath(mailboxId)}`, {
+        method: "PATCH",
+        body: input,
+      });
+    },
+
+    syncMailbox(mailboxId: string): Promise<MailboxSync> {
+      return request<MailboxSync>(`/mailboxes/${resourcePath(mailboxId)}/sync`, { method: "POST" });
+    },
+
+    syncAllMailboxes(): Promise<MailboxSyncAll> {
+      return request<MailboxSyncAll>("/mailboxes/sync", { method: "POST" });
+    },
+
+    archiveMailbox(mailboxId: string): Promise<MailboxConfig> {
+      return request<MailboxConfig>(`/mailboxes/${resourcePath(mailboxId)}/archive`, { method: "POST" });
+    },
+
+    listMailboxImports(mailboxId?: string | null): Promise<MailboxImportHistory> {
+      const query = mailboxId ? `?${new URLSearchParams({ mailbox_id: mailboxId }).toString()}` : "";
+      return request<MailboxImportHistory>(`/mailbox-imports${query}`);
     },
 
     retryMailboxImport(importId: string): Promise<MailboxImportHistoryItem> {
@@ -277,24 +301,24 @@ export function createApiClient(options: ApiClientOptions = {}) {
       );
     },
 
-    getMailboxRetention(): Promise<MailboxRetentionOverview> {
-      return request<MailboxRetentionOverview>("/mailbox/retention");
+    getMailboxRetention(mailboxId: string): Promise<MailboxRetentionOverview> {
+      return request<MailboxRetentionOverview>(`/mailboxes/${resourcePath(mailboxId)}/retention`);
     },
 
-    saveMailboxRetention(input: MailboxRetentionUpdate): Promise<MailboxRetentionOverview> {
-      return request<MailboxRetentionOverview>("/mailbox/retention", { method: "PUT", body: input });
+    saveMailboxRetention(mailboxId: string, input: MailboxRetentionUpdate): Promise<MailboxRetentionOverview> {
+      return request<MailboxRetentionOverview>(`/mailboxes/${resourcePath(mailboxId)}/retention`, { method: "PUT", body: input });
     },
 
-    previewMailboxRetention(): Promise<MailboxRetentionPreview> {
-      return request<MailboxRetentionPreview>("/mailbox/retention/preview", { method: "POST" });
+    previewMailboxRetention(mailboxId: string): Promise<MailboxRetentionPreview> {
+      return request<MailboxRetentionPreview>(`/mailboxes/${resourcePath(mailboxId)}/retention/preview`, { method: "POST" });
     },
 
-    cleanupMailboxRetention(): Promise<MailboxRetentionRun> {
-      return request<MailboxRetentionRun>("/mailbox/retention/cleanup", { method: "POST" });
+    cleanupMailboxRetention(mailboxId: string): Promise<MailboxRetentionRun> {
+      return request<MailboxRetentionRun>(`/mailboxes/${resourcePath(mailboxId)}/retention/cleanup`, { method: "POST" });
     },
 
-    listMailboxRetentionRuns(): Promise<MailboxRetentionRuns> {
-      return request<MailboxRetentionRuns>("/mailbox/retention/runs");
+    listMailboxRetentionRuns(mailboxId: string): Promise<MailboxRetentionRuns> {
+      return request<MailboxRetentionRuns>(`/mailboxes/${resourcePath(mailboxId)}/retention/runs`);
     },
 
     runRecruitingAgentTurn(input: RecruitingAgentTurnInput): Promise<RecruitingAgentTurn> {
@@ -410,8 +434,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return request<ResumeDetail>(`/resumes/${resourcePath(resumeId)}/enrich-filter-facts`, { method: "POST" });
     },
 
-    listResumeLibrary(page = 1, pageSize = 50): Promise<ResumeLibraryResponse> {
+    listResumeLibrary(
+      page = 1,
+      pageSize = 50,
+      mailboxId?: string | null,
+    ): Promise<ResumeLibraryResponse> {
       const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+      if (mailboxId) query.set("mailbox_id", mailboxId);
       return request<ResumeLibraryResponse>(`/resume-library?${query.toString()}`);
     },
 

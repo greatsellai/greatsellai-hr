@@ -134,29 +134,54 @@ export interface CandidateCreated {
 }
 
 export interface MailboxConfig {
+  /** Stable ID of this named mailbox source. */
+  mailbox_id: string;
+  /** Human-readable source label, unique within the workspace. */
+  display_name: string;
   configured: boolean;
   imap_host: string | null;
   imap_port: number | null;
   email_address: string | null;
   mailbox: string | null;
   enabled: boolean;
+  /** Archived sources no longer receive new mail, but keep their import audit trail. */
+  archived_at: string | null;
   password_configured: boolean;
   import_started_at: string | null;
   last_synced_at: string | null;
   last_sync_error: string | null;
 }
 
-export interface MailboxConfigUpdate {
+export interface MailboxConfigCreate {
+  display_name: string;
   imap_host: string;
   imap_port: number;
   email_address: string;
   mailbox: string;
-  password?: string;
+  password: string;
   enabled: boolean;
+}
+
+/** PATCH payload. Leave the authorization code out to keep the saved value. */
+export interface MailboxConfigPatch {
+  display_name?: string;
+  imap_host?: string;
+  imap_port?: number;
+  email_address?: string;
+  mailbox?: string;
+  password?: string;
+  enabled?: boolean;
+}
+
+export interface MailboxConfigList {
+  items: MailboxConfig[];
+  total: number;
 }
 
 export interface MailboxSync {
   configured: boolean;
+  mailbox_id: string | null;
+  display_name: string | null;
   imported_count: number;
   duplicate_count: number;
   skipped_count: number;
@@ -165,8 +190,18 @@ export interface MailboxSync {
   last_sync_error: string | null;
 }
 
+export interface MailboxSyncAll {
+  items: MailboxSync[];
+  imported_count: number;
+  duplicate_count: number;
+  skipped_count: number;
+  failed_count: number;
+}
+
 export interface MailboxImportHistoryItem {
   import_id: string;
+  mailbox_config_id: string;
+  mailbox_display_name: string | null;
   attachment_filename: string;
   status: string;
   error: string | null;
@@ -604,6 +639,9 @@ export interface ResumeLibraryItem {
   ai_extraction_status: AiExtractionStatus;
   ai_extraction_error: string | null;
   is_active: boolean;
+  ingestion_source_type: string;
+  source_mailbox_config_id: string | null;
+  source_mailbox_label: string | null;
   /** Source extraction warnings. These take precedence over an old active state. */
   quality_flags: string[];
   summary_preview: string | null;

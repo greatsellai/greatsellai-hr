@@ -29,7 +29,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import AppSettings
 from app.database import Database, get_session
 from app.filter_options import filter_options_payload
-from app.models import Candidate, Resume
+from app.models import Candidate, MailboxConfig, Resume
 from app.schemas import (
     AuthLogin,
     AuthRegistration,
@@ -47,6 +47,9 @@ from app.schemas import (
     ProductPlanResponse,
     ProductPlanUpdate,
     RegistrationOfferResponse,
+    MailboxConfigCreate,
+    MailboxConfigListResponse,
+    MailboxConfigPatch,
     MailboxConfigResponse,
     MailboxConfigUpdate,
     MailboxImportResponse,
@@ -56,6 +59,7 @@ from app.schemas import (
     MailboxRetentionPolicyUpdate,
     MailboxRetentionPreviewResponse,
     MailboxRetentionSummaryResponse,
+    MailboxSyncAllResponse,
     MailboxSyncResponse,
     CandidateCreate,
     CandidateCreated,
@@ -238,11 +242,17 @@ from app.services.job_match_batch_service import (
 )
 from app.services.mailbox_import_service import (
     MailboxImportError,
+    archive_mailbox_config,
+    create_mailbox_config,
     get_mailbox_config,
+    get_mailbox_config_by_id,
+    list_mailbox_configs,
     list_mailbox_imports,
     retry_mailbox_attachment,
     save_mailbox_config,
+    sync_all_mailboxes,
     sync_mailbox,
+    update_mailbox_config,
 )
 from app.services.mailbox_retention_service import (
     MailboxRetentionError,
@@ -336,6 +346,44 @@ def _commit_or_raise(session: Session) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail="database_conflict",
         ) from exc
+
+
+def _mailbox_error_http_exception(exc: MailboxImportError) -> HTTPException:
+    """Map stable mailbox service errors without exposing IMAP details."""
+
+    code = str(exc)
+    if code in {"mailbox_config_not_found", "mailbox_import_not_found"}:
+        response_status = status.HTTP_404_NOT_FOUND
+    elif code in {
+        "mailbox_legacy_endpoint_ambiguous",
+        "mailbox_duplicate_display_name",
+        "mailbox_source_identity_locked",
+        "mailbox_sync_in_progress",
+        "mailbox_sync_claim_failed",
+        "mailbox_config_archived",
+        "mailbox_import_not_retryable",
+        "mailbox_import_retry_in_progress",
+        "mailbox_import_retry_superseded",
+    }:
+        response_status = status.HTTP_409_CONFLICT
+    else:
+        response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+    return HTTPException(status_code=response_status, detail=code)
+
+
+def _mailbox_retention_error_http_exception(exc: MailboxRetentionError) -> HTTPException:
+    """Map retention failures without selecting another mailbox channel."""
+
+    code = str(exc)
+    if code in {"mailbox_not_configured", "mailbox_config_not_found"}:
+        response_status = status.HTTP_404_NOT_FOUND
+    elif code == "mailbox_legacy_endpoint_ambiguous":
+        response_status = status.HTTP_409_CONFLICT
+    elif code == "mailbox_retention_policy_invalid":
+        response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+    else:
+        response_status = status.HTTP_409_CONFLICT
+    return HTTPException(status_code=response_status, detail=code)
 
 
 def _deliver_email_verification(
@@ -1053,6 +1101,214 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @app.get(
+        "/v1/mailboxes",
+        response_model=MailboxConfigListResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_mailboxes(
+        include_archived: bool = False,
+        session: Session = Depends(get_session),
+    ) -> MailboxConfigListResponse:
+        return list_mailbox_configs(session, include_archived=include_archived)
+
+    @app.post(
+        "/v1/mailboxes",
+        response_model=MailboxConfigResponse,
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox(
+        payload: MailboxConfigCreate,
+        session: Session = Depends(get_session),
+    ) -> MailboxConfigResponse:
+        try:
+            return create_mailbox_config(session, settings=settings, payload=payload)
+        except MailboxImportError as exc:
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
+
+    # Keep this static route before ``/{mailbox_id}`` so routing never treats
+    # the literal word "sync" as a mailbox identifier.
+    @app.post(
+        "/v1/mailboxes/sync",
+        response_model=MailboxSyncAllResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_all_mailbox_syncs(
+        session: Session = Depends(get_session),
+    ) -> MailboxSyncAllResponse:
+        try:
+            return sync_all_mailboxes(session, settings=settings)
+        except MailboxImportError as exc:
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/mailboxes/{mailbox_id}",
+        response_model=MailboxConfigResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_mailbox(
+        mailbox_id: str,
+        session: Session = Depends(get_session),
+    ) -> MailboxConfigResponse:
+        try:
+            return get_mailbox_config_by_id(session, config_id=mailbox_id)
+        except MailboxImportError as exc:
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.patch(
+        "/v1/mailboxes/{mailbox_id}",
+        response_model=MailboxConfigResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def patch_mailbox(
+        mailbox_id: str,
+        payload: MailboxConfigPatch,
+        session: Session = Depends(get_session),
+    ) -> MailboxConfigResponse:
+        try:
+            return update_mailbox_config(
+                session,
+                settings=settings,
+                config_id=mailbox_id,
+                payload=payload,
+            )
+        except MailboxImportError as exc:
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/mailboxes/{mailbox_id}/sync",
+        response_model=MailboxSyncResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox_sync_by_id(
+        mailbox_id: str,
+        session: Session = Depends(get_session),
+    ) -> MailboxSyncResponse:
+        try:
+            return sync_mailbox(session, settings=settings, config_id=mailbox_id)
+        except MailboxImportError as exc:
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/mailboxes/{mailbox_id}/archive",
+        response_model=MailboxConfigResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox_archive(
+        mailbox_id: str,
+        session: Session = Depends(get_session),
+    ) -> MailboxConfigResponse:
+        try:
+            return archive_mailbox_config(session, config_id=mailbox_id)
+        except MailboxImportError as exc:
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/mailboxes/{mailbox_id}/retention",
+        response_model=MailboxRetentionSummaryResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_named_mailbox_retention(
+        mailbox_id: str,
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionSummaryResponse:
+        try:
+            return get_mailbox_retention_summary(
+                session,
+                settings=settings,
+                config_id=mailbox_id,
+            )
+        except MailboxRetentionError as exc:
+            raise _mailbox_retention_error_http_exception(exc) from exc
+
+    @app.put(
+        "/v1/mailboxes/{mailbox_id}/retention",
+        response_model=MailboxRetentionSummaryResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def put_named_mailbox_retention(
+        mailbox_id: str,
+        payload: MailboxRetentionPolicyUpdate,
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionSummaryResponse:
+        try:
+            return update_mailbox_retention_policy(
+                session,
+                settings=settings,
+                retention_policy=payload.retention_policy,
+                config_id=mailbox_id,
+            )
+        except MailboxRetentionError as exc:
+            session.rollback()
+            raise _mailbox_retention_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/mailboxes/{mailbox_id}/retention/preview",
+        response_model=MailboxRetentionPreviewResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_named_mailbox_retention_preview(
+        mailbox_id: str,
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionPreviewResponse:
+        try:
+            return preview_mailbox_retention_cleanup(
+                session,
+                settings=settings,
+                config_id=mailbox_id,
+            )
+        except MailboxRetentionError as exc:
+            raise _mailbox_retention_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/mailboxes/{mailbox_id}/retention/cleanup",
+        response_model=MailboxRetentionCleanupRunResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_named_mailbox_retention_cleanup(
+        mailbox_id: str,
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionCleanupRunResponse:
+        try:
+            return cleanup_mailbox_retention(
+                session,
+                settings=settings,
+                trigger_type="manual",
+                config_id=mailbox_id,
+            )
+        except MailboxRetentionError as exc:
+            session.rollback()
+            raise _mailbox_retention_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/mailboxes/{mailbox_id}/retention/runs",
+        response_model=MailboxRetentionCleanupRunHistoryResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_named_mailbox_retention_cleanup_runs(
+        mailbox_id: str,
+        limit: int = Query(default=20, ge=1, le=100),
+        session: Session = Depends(get_session),
+    ) -> MailboxRetentionCleanupRunHistoryResponse:
+        try:
+            return list_mailbox_retention_cleanup_runs(
+                session,
+                settings=settings,
+                limit=limit,
+                config_id=mailbox_id,
+            )
+        except MailboxRetentionError as exc:
+            raise _mailbox_retention_error_http_exception(exc) from exc
+
+    # Compatibility routes remain safe only while one active source exists.
+    # They deliberately fail instead of guessing the latest mailbox once a
+    # workspace has more than one named channel.
+    @app.get(
         "/v1/mailbox/config",
         response_model=MailboxConfigResponse,
         dependencies=[Depends(require_mailbox_feature)],
@@ -1060,7 +1316,10 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     def get_mailbox_configuration(
         session: Session = Depends(get_session),
     ) -> MailboxConfigResponse:
-        return get_mailbox_config(session)
+        try:
+            return get_mailbox_config(session)
+        except MailboxImportError as exc:
+            raise _mailbox_error_http_exception(exc) from exc
 
     @app.put(
         "/v1/mailbox/config",
@@ -1075,10 +1334,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             return save_mailbox_config(session, settings=settings, payload=payload)
         except MailboxImportError as exc:
             session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(exc),
-            ) from exc
+            raise _mailbox_error_http_exception(exc) from exc
 
     @app.get(
         "/v1/mailbox/retention",
@@ -1088,7 +1344,10 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     def get_mailbox_retention(
         session: Session = Depends(get_session),
     ) -> MailboxRetentionSummaryResponse:
-        return get_mailbox_retention_summary(session, settings=settings)
+        try:
+            return get_mailbox_retention_summary(session, settings=settings)
+        except MailboxRetentionError as exc:
+            raise _mailbox_retention_error_http_exception(exc) from exc
 
     @app.put(
         "/v1/mailbox/retention",
@@ -1107,14 +1366,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             )
         except MailboxRetentionError as exc:
             session.rollback()
-            raise HTTPException(
-                status_code=(
-                    status.HTTP_404_NOT_FOUND
-                    if str(exc) == "mailbox_not_configured"
-                    else status.HTTP_422_UNPROCESSABLE_CONTENT
-                ),
-                detail=str(exc),
-            ) from exc
+            raise _mailbox_retention_error_http_exception(exc) from exc
 
     @app.post(
         "/v1/mailbox/retention/preview",
@@ -1124,7 +1376,10 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     def post_mailbox_retention_preview(
         session: Session = Depends(get_session),
     ) -> MailboxRetentionPreviewResponse:
-        return preview_mailbox_retention_cleanup(session, settings=settings)
+        try:
+            return preview_mailbox_retention_cleanup(session, settings=settings)
+        except MailboxRetentionError as exc:
+            raise _mailbox_retention_error_http_exception(exc) from exc
 
     @app.post(
         "/v1/mailbox/retention/cleanup",
@@ -1142,14 +1397,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             )
         except MailboxRetentionError as exc:
             session.rollback()
-            raise HTTPException(
-                status_code=(
-                    status.HTTP_404_NOT_FOUND
-                    if str(exc) == "mailbox_not_configured"
-                    else status.HTTP_409_CONFLICT
-                ),
-                detail=str(exc),
-            ) from exc
+            raise _mailbox_retention_error_http_exception(exc) from exc
 
     @app.get(
         "/v1/mailbox/retention/runs",
@@ -1160,11 +1408,14 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         limit: int = Query(default=20, ge=1, le=100),
         session: Session = Depends(get_session),
     ) -> MailboxRetentionCleanupRunHistoryResponse:
-        return list_mailbox_retention_cleanup_runs(
-            session,
-            settings=settings,
-            limit=limit,
-        )
+        try:
+            return list_mailbox_retention_cleanup_runs(
+                session,
+                settings=settings,
+                limit=limit,
+            )
+        except MailboxRetentionError as exc:
+            raise _mailbox_retention_error_http_exception(exc) from exc
 
     @app.post(
         "/v1/mailbox/sync",
@@ -1177,14 +1428,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         try:
             result = sync_mailbox(session, settings=settings)
         except MailboxImportError as exc:
-            raise HTTPException(
-                status_code=(
-                    status.HTTP_404_NOT_FOUND
-                    if str(exc) == "mailbox_config_not_found"
-                    else status.HTTP_409_CONFLICT
-                ),
-                detail=str(exc),
-            ) from exc
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
         if not result.configured:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1209,18 +1454,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             )
         except MailboxImportError as exc:
             session.rollback()
-            code = str(exc)
-            if code == "mailbox_import_not_found":
-                response_status = status.HTTP_404_NOT_FOUND
-            elif code in {
-                "mailbox_import_not_retryable",
-                "mailbox_import_retry_in_progress",
-                "mailbox_import_retry_superseded",
-            }:
-                response_status = status.HTTP_409_CONFLICT
-            else:
-                response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
-            raise HTTPException(status_code=response_status, detail=code) from exc
+            raise _mailbox_error_http_exception(exc) from exc
 
     @app.get(
         "/v1/mailbox/imports",
@@ -1232,6 +1466,25 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> MailboxImportHistoryResponse:
         return list_mailbox_imports(session, limit=limit)
+
+    @app.get(
+        "/v1/mailbox-imports",
+        response_model=MailboxImportHistoryResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_named_mailbox_import_history(
+        mailbox_id: str | None = Query(default=None, min_length=1, max_length=64),
+        limit: int = Query(default=40, ge=1, le=100),
+        session: Session = Depends(get_session),
+    ) -> MailboxImportHistoryResponse:
+        try:
+            return list_mailbox_imports(
+                session,
+                limit=limit,
+                mailbox_config_id=mailbox_id,
+            )
+        except MailboxImportError as exc:
+            raise _mailbox_error_http_exception(exc) from exc
 
     @app.post(
         "/v1/recruiting-agent/turns",
@@ -1826,9 +2079,22 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     def get_resume_library(
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+        mailbox_id: str | None = Query(default=None, min_length=1, max_length=64),
         session: Session = Depends(get_session),
     ) -> ResumeLibraryResponse:
-        return list_resume_library(session, page=page, page_size=page_size)
+        if mailbox_id is not None and session.scalar(
+            select(MailboxConfig.id).where(MailboxConfig.id == mailbox_id)
+        ) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="mailbox_config_not_found",
+            )
+        return list_resume_library(
+            session,
+            page=page,
+            page_size=page_size,
+            mailbox_config_id=mailbox_id,
+        )
 
     @app.post(
         "/v1/saved-filters",

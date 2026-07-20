@@ -484,6 +484,7 @@ const mailboxImportErrorMessages: Record<string, string> = {
   mailbox_connection_failed: "无法连接邮箱，请检查 IMAP 地址、端口和授权码。",
   mailbox_select_failed: "无法打开指定的邮箱文件夹。",
   mailbox_status_failed: "无法读取邮箱当前位置，请检查文件夹设置后重试。",
+  mailbox_source_epoch_changed: "邮箱来源标识已变化，通道已暂停，请归档后新建。",
   attachment_validation_failed: "附件未通过文件校验，请候选人重新发送。",
   attachment_text_extraction_failed: "附件文字提取失败，请候选人重新发送清晰原件。",
   attachment_import_failed: "附件暂时无法入库，请稍后重试。",
@@ -611,6 +612,17 @@ function humanizeError(error: unknown): string {
         "该简历的重试标识已被其他文件使用。请重新选择文件后上传。",
       resume_not_found: "这份简历已不存在或无法访问。",
       mailbox_not_configured: "请先保存邮箱配置。",
+      mailbox_config_not_found: "这个收件通道已不存在或无法访问。",
+      mailbox_display_name_required: "请为这个收件通道填写名称。",
+      mailbox_duplicate_display_name: "该收件通道名称已被使用，请换一个名称。",
+      mailbox_source_identity_locked:
+        "该通道已有附件记录，不能改为其他邮箱。请新建一个收件通道。",
+      mailbox_legacy_endpoint_ambiguous: "当前工作区已有多个收件通道，请刷新页面后重试。",
+      mailbox_sync_in_progress: "这个收件通道正在同步，请稍后刷新查看结果。",
+      mailbox_sync_claim_failed: "这个收件通道暂时无法开始同步，请稍后重试。",
+      mailbox_config_archived: "这个收件通道已归档，不能继续同步。",
+      mailbox_source_epoch_changed:
+        "邮箱来源标识已变化，系统已暂停该通道。请归档后新建收件通道。",
       mailbox_password_required: "首次配置需要填写邮箱授权码。",
       mailbox_credentials_unavailable: "邮箱授权码无法读取，请重新保存后再同步。",
       mailbox_connection_failed: "无法连接邮箱，请检查 IMAP 地址、端口和授权码。",
@@ -3711,6 +3723,8 @@ function ResumeLibraryPage({
   onUpload: () => void;
 }) {
   const [library, setLibrary] = useState<ResumeLibraryResponse | null>(null);
+  const [mailboxSources, setMailboxSources] = useState<MailboxConfig[]>([]);
+  const [sourceMailboxId, setSourceMailboxId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -3719,17 +3733,35 @@ function ResumeLibraryPage({
     setLoading(true);
     setError(null);
     try {
-      setLibrary(await api.listResumeLibrary(page, RESUME_LIBRARY_PAGE_SIZE));
+      setLibrary(
+        await api.listResumeLibrary(
+          page,
+          RESUME_LIBRARY_PAGE_SIZE,
+          sourceMailboxId,
+        ),
+      );
     } catch (loadError) {
       setError(humanizeError(loadError));
     } finally {
       setLoading(false);
     }
-  }, [page]);
+  }, [page, sourceMailboxId]);
 
   useEffect(() => {
     void loadLibrary();
   }, [loadLibrary, refreshToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.listMailboxConfigs(true)
+      .then((response) => {
+        if (!cancelled) setMailboxSources(response.items);
+      })
+      // The library remains usable when the current plan cannot use mailbox
+      // ingestion. In that case there is simply no source-specific filter.
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (
@@ -3760,6 +3792,35 @@ function ResumeLibraryPage({
           </p>
         </div>
         <div className="resume-library-actions">
+          {mailboxSources.length ? (
+            <div className="resume-library-source-filter">
+              <label className="sr-only" htmlFor="resume-library-source">
+                按收件通道筛选
+              </label>
+              <div className="select-wrap">
+                <select
+                  aria-label="按收件通道筛选"
+                  className="select-field"
+                  id="resume-library-source"
+                  onChange={(event) => {
+                    setPage(1);
+                    setSourceMailboxId(event.target.value || null);
+                  }}
+                  value={sourceMailboxId ?? ""}
+                >
+                  <option value="">全部来源</option>
+                  {mailboxSources.map((mailbox) => (
+                    <option key={mailbox.mailbox_id} value={mailbox.mailbox_id}>
+                      {mailbox.archived_at
+                        ? `${mailbox.display_name}（已归档）`
+                        : mailbox.display_name}
+                    </option>
+                  ))}
+                </select>
+                <Icon name="chevron-down" size={16} />
+              </div>
+            </div>
+          ) : null}
           <button
             className="button"
             disabled={loading}
@@ -3845,6 +3906,11 @@ function ResumeLibraryPage({
                             title={item.original_filename}
                           >
                             {item.original_filename}
+                          </span>
+                          <span className="candidate-meta library-source-label">
+                            {item.source_mailbox_label
+                              ? `邮箱 · ${item.source_mailbox_label}`
+                              : "手动上传"}
                           </span>
                         </div>
                       </td>
@@ -4805,6 +4871,50 @@ function EvidenceTab({
   );
 }
 
+interface MailboxDraft {
+  displayName: string;
+  imapHost: string;
+  imapPort: string;
+  emailAddress: string;
+  mailbox: string;
+  password: string;
+  enabled: boolean;
+}
+
+function newMailboxDraft(): MailboxDraft {
+  return {
+    displayName: "",
+    imapHost: "imap.feishu.cn",
+    imapPort: "993",
+    emailAddress: "",
+    mailbox: "INBOX",
+    password: "",
+    enabled: true,
+  };
+}
+
+function mailboxDraftFromConfig(config: MailboxConfig): MailboxDraft {
+  return {
+    displayName: config.display_name,
+    imapHost: config.imap_host || "imap.feishu.cn",
+    imapPort: String(config.imap_port || 993),
+    emailAddress: config.email_address || "",
+    mailbox: config.mailbox || "INBOX",
+    password: "",
+    enabled: config.enabled,
+  };
+}
+
+function mailboxChannelStatus(config: MailboxConfig): string {
+  if (config.archived_at) return "已归档";
+  return config.enabled ? "已启用" : "已暂停";
+}
+
+function mailboxChannelStatusClass(config: MailboxConfig): string {
+  if (config.archived_at) return "";
+  return config.enabled ? " is-success" : " is-warning";
+}
+
 function MailboxPage({
   notify,
   onImported,
@@ -4814,26 +4924,32 @@ function MailboxPage({
   onImported: () => void;
   role: "admin" | "recruiter" | null;
 }) {
-  const [config, setConfig] = useState<MailboxConfig | null>(null);
+  const [mailboxes, setMailboxes] = useState<MailboxConfig[]>([]);
+  const [selectedMailboxId, setSelectedMailboxId] = useState<string | null>(null);
+  const [historyFilterMailboxId, setHistoryFilterMailboxId] = useState<string | null>(null);
   const [history, setHistory] = useState<MailboxImportHistory | null>(null);
+  const [draft, setDraft] = useState<MailboxDraft>(() => newMailboxDraft());
+  const [isCreating, setIsCreating] = useState(true);
   const [retention, setRetention] = useState<MailboxRetentionOverview | null>(null);
   const [retentionRuns, setRetentionRuns] = useState<MailboxRetentionRuns | null>(null);
   const [loading, setLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [syncingMailboxId, setSyncingMailboxId] = useState<string | null>(null);
+  const [syncingAll, setSyncingAll] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [retryingImportId, setRetryingImportId] = useState<string | null>(null);
   const [retentionSaving, setRetentionSaving] = useState(false);
   const [previewingRetention, setPreviewingRetention] = useState(false);
   const [cleaningRetention, setCleaningRetention] = useState(false);
   const [retentionPreview, setRetentionPreview] = useState<MailboxRetentionPreview | null>(null);
   const [retentionPolicy, setRetentionPolicy] = useState<MailboxRetentionPolicy>("standard");
-  const [imapHost, setImapHost] = useState("imap.feishu.cn");
-  const [imapPort, setImapPort] = useState("993");
-  const [emailAddress, setEmailAddress] = useState("");
-  const [mailbox, setMailbox] = useState("INBOX");
-  const [password, setPassword] = useState("");
-  const [enabled, setEnabled] = useState(true);
+  const retentionRequestRef = useRef(0);
 
+  const selectedConfig = selectedMailboxId
+    ? mailboxes.find((item) => item.mailbox_id === selectedMailboxId) ?? null
+    : null;
+  const selectedMailboxArchived = Boolean(selectedConfig?.archived_at);
   const canManageRetention = role === "admin";
   const retentionHasActiveRun = Boolean(retentionRuns?.items.some(
     (run) => run.status === "queued" || run.status === "running",
@@ -4842,78 +4958,175 @@ function MailboxPage({
     retention && retention.retention_policy !== retentionPolicy,
   );
 
-  const loadRetentionActivity = useCallback(async () => {
+  const loadRetentionActivity = useCallback(async (mailboxId: string, reset = false) => {
+    const requestId = ++retentionRequestRef.current;
+    if (reset) {
+      setRetention(null);
+      setRetentionRuns(null);
+      setRetentionPreview(null);
+      setRetentionPolicy("standard");
+    }
+
     const [nextRetention, nextRuns] = await Promise.all([
-      api.getMailboxRetention(),
-      api.listMailboxRetentionRuns(),
+      api.getMailboxRetention(mailboxId),
+      api.listMailboxRetentionRuns(mailboxId),
     ]);
+    if (retentionRequestRef.current !== requestId) return;
     setRetention(nextRetention);
     setRetentionPolicy(nextRetention.retention_policy);
     setRetentionRuns(nextRuns);
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const clearRetentionActivity = useCallback(() => {
+    retentionRequestRef.current += 1;
+    setRetention(null);
+    setRetentionRuns(null);
+    setRetentionPreview(null);
+    setRetentionPolicy("standard");
+  }, []);
+
+  const selectMailbox = (config: MailboxConfig) => {
+    setSelectedMailboxId(config.mailbox_id);
+    setDraft(mailboxDraftFromConfig(config));
+    setIsCreating(false);
+  };
+
+  const startCreatingMailbox = () => {
+    setSelectedMailboxId(null);
+    setDraft(newMailboxDraft());
+    setIsCreating(true);
+  };
+
+  const updateDraft = <Key extends keyof MailboxDraft>(key: Key, value: MailboxDraft[Key]) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const applyMailboxList = (items: MailboxConfig[], preferredMailboxId?: string | null) => {
+    setMailboxes(items);
+    const desiredMailboxId = preferredMailboxId ?? selectedMailboxId;
+    const nextConfig = items.find((item) => item.mailbox_id === desiredMailboxId)
+      ?? items.find((item) => !item.archived_at)
+      ?? items[0]
+      ?? null;
+    if (nextConfig) {
+      selectMailbox(nextConfig);
+    } else {
+      startCreatingMailbox();
+    }
+  };
+
+  const loadHistory = useCallback(async (mailboxId: string | null = historyFilterMailboxId) => {
+    setHistoryLoading(true);
     try {
-      const [nextConfig, nextHistory] = await Promise.all([
-        api.getMailboxConfig(),
+      setHistory(await api.listMailboxImports(mailboxId));
+    } catch (error) {
+      notify("error", humanizeError(error));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [historyFilterMailboxId, notify]);
+
+  const loadInitialData = useCallback(async () => {
+    setLoading(true);
+    setHistoryLoading(true);
+    try {
+      const [configResponse, historyResponse] = await Promise.all([
+        api.listMailboxConfigs(true),
         api.listMailboxImports(),
       ]);
-      setConfig(nextConfig);
-      setHistory(nextHistory);
-      if (nextConfig.configured) {
-        setImapHost(nextConfig.imap_host || "imap.feishu.cn");
-        setImapPort(String(nextConfig.imap_port || 993));
-        setEmailAddress(nextConfig.email_address || "");
-        setMailbox(nextConfig.mailbox || "INBOX");
-        setEnabled(nextConfig.enabled);
-        await loadRetentionActivity();
-      } else {
-        setRetention(null);
-        setRetentionRuns(null);
-        setRetentionPreview(null);
-        setRetentionPolicy("standard");
-      }
+      applyMailboxList(configResponse.items);
+      setHistory(historyResponse);
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
       setLoading(false);
+      setHistoryLoading(false);
     }
-  }, [loadRetentionActivity, notify]);
+  // The initial fetch intentionally runs once. Actions refresh only the data they change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notify]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void loadInitialData(); }, [loadInitialData]);
 
   useEffect(() => {
-    if (!config?.configured || !retentionHasActiveRun) return undefined;
+    if (!selectedConfig?.configured) {
+      clearRetentionActivity();
+      return undefined;
+    }
+
+    let active = true;
+    void loadRetentionActivity(selectedConfig.mailbox_id, true).catch((error) => {
+      if (active) notify("error", humanizeError(error));
+    });
+    return () => {
+      active = false;
+    };
+  }, [
+    clearRetentionActivity,
+    loadRetentionActivity,
+    notify,
+    selectedConfig?.configured,
+    selectedConfig?.mailbox_id,
+  ]);
+
+  useEffect(() => {
+    if (!selectedConfig?.configured || !retentionHasActiveRun) return undefined;
+    const mailboxId = selectedConfig.mailbox_id;
     const timer = window.setInterval(() => {
-      void loadRetentionActivity().catch(() => undefined);
+      void loadRetentionActivity(mailboxId).catch(() => undefined);
     }, 5_000);
     return () => window.clearInterval(timer);
-  }, [config?.configured, loadRetentionActivity, retentionHasActiveRun]);
+  }, [
+    loadRetentionActivity,
+    retentionHasActiveRun,
+    selectedConfig?.configured,
+    selectedConfig?.mailbox_id,
+  ]);
 
-  const save = async () => {
-    if (!imapHost.trim() || !emailAddress.trim()) {
+  const saveMailbox = async () => {
+    if (!draft.displayName.trim()) {
+      notify("error", "请为这个收件通道填写名称。");
+      return;
+    }
+    if (!draft.imapHost.trim() || !draft.emailAddress.trim()) {
       notify("error", "请填写 IMAP 地址和接收简历的邮箱。");
       return;
     }
-    if (!config?.password_configured && !password) {
-      notify("error", "首次配置需要填写邮箱授权码。");
+    if (isCreating && !draft.password) {
+      notify("error", "新通道首次保存需要填写邮箱授权码。");
       return;
     }
+    if (!isCreating && !selectedConfig) {
+      notify("error", "请先选择一个收件通道。");
+      return;
+    }
+    if (!isCreating && selectedConfig?.archived_at) {
+      notify("error", "归档通道仅保留历史与内容清理记录，不能再修改连接配置。");
+      return;
+    }
+
     setSaving(true);
     try {
-      const saved = await api.saveMailboxConfig({
-        imap_host: imapHost.trim(),
-        imap_port: Number(imapPort) || 993,
-        email_address: emailAddress.trim(),
-        mailbox: mailbox.trim() || "INBOX",
-        ...(password ? { password } : {}),
-        enabled,
-      });
-      setConfig(saved);
-      setPassword("");
-      if (saved.configured) void loadRetentionActivity().catch(() => undefined);
-      notify("success", "邮箱已绑定。只会入库从现在起收到的附件。");
+      const connection = {
+        display_name: draft.displayName.trim(),
+        imap_host: draft.imapHost.trim(),
+        imap_port: Number(draft.imapPort) || 993,
+        email_address: draft.emailAddress.trim(),
+        mailbox: draft.mailbox.trim() || "INBOX",
+        enabled: draft.enabled,
+      };
+      const saved = isCreating
+        ? await api.createMailboxConfig({ ...connection, password: draft.password })
+        : await api.updateMailboxConfig(selectedConfig!.mailbox_id, {
+          ...connection,
+          ...(draft.password ? { password: draft.password } : {}),
+        });
+      setMailboxes((current) => [
+        saved,
+        ...current.filter((item) => item.mailbox_id !== saved.mailbox_id),
+      ]);
+      selectMailbox(saved);
+      notify("success", isCreating ? "收件通道已创建，只会入库从现在起收到的附件。" : "收件通道已保存。");
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
@@ -4921,26 +5134,86 @@ function MailboxPage({
     }
   };
 
-  const sync = async () => {
-    setSyncing(true);
+  const refreshHistoryForCurrentFilter = async () => {
+    await loadHistory(historyFilterMailboxId);
+  };
+
+  const syncMailbox = async (config: MailboxConfig) => {
+    if (!config.enabled || config.archived_at || syncingMailboxId || syncingAll) return;
+    setSyncingMailboxId(config.mailbox_id);
     try {
-      const result = await api.syncMailbox();
-      notify(
-        "success",
-        `本次入库 ${result.imported_count} 份，重复跳过 ${result.duplicate_count} 份。`,
-      );
+      const result = await api.syncMailbox(config.mailbox_id);
+      setMailboxes((current) => current.map((item) => (
+        item.mailbox_id === config.mailbox_id
+          ? { ...item, last_synced_at: result.last_synced_at, last_sync_error: result.last_sync_error }
+          : item
+      )));
+      const message = `“${result.display_name || config.display_name}”本次入库 ${result.imported_count} 份，重复 ${result.duplicate_count} 份，跳过 ${result.skipped_count} 份。`;
+      notify(result.failed_count ? "error" : "success", result.failed_count ? `${message} ${result.failed_count} 份处理失败。` : message);
       if (result.imported_count) onImported();
-      await load();
+      await refreshHistoryForCurrentFilter();
+      if (selectedMailboxId === config.mailbox_id) {
+        void loadRetentionActivity(config.mailbox_id).catch(() => undefined);
+      }
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
-      setSyncing(false);
+      setSyncingMailboxId(null);
+    }
+  };
+
+  const syncAllMailboxes = async () => {
+    if (syncingMailboxId || syncingAll || !mailboxes.some((item) => item.enabled && !item.archived_at)) return;
+    setSyncingAll(true);
+    try {
+      const result = await api.syncAllMailboxes();
+      const summaries = new Map(result.items.flatMap((item) => item.mailbox_id ? [[item.mailbox_id, item] as const] : []));
+      setMailboxes((current) => current.map((item) => {
+        const summary = summaries.get(item.mailbox_id);
+        return summary
+          ? { ...item, last_synced_at: summary.last_synced_at, last_sync_error: summary.last_sync_error }
+          : item;
+      }));
+      const message = `已同步 ${result.items.length} 个收件通道，入库 ${result.imported_count} 份，重复 ${result.duplicate_count} 份。`;
+      const failedChannels = result.items.filter((item) => item.last_sync_error).length;
+      notify(
+        result.failed_count || failedChannels ? "error" : "success",
+        result.failed_count || failedChannels
+          ? `${message}${result.failed_count ? ` ${result.failed_count} 份附件处理失败。` : ""}${failedChannels ? ` ${failedChannels} 个通道未完成同步。` : ""}`
+          : message,
+      );
+      if (result.imported_count) onImported();
+      await refreshHistoryForCurrentFilter();
+      if (selectedConfig?.configured) {
+        void loadRetentionActivity(selectedConfig.mailbox_id).catch(() => undefined);
+      }
+    } catch (error) {
+      notify("error", humanizeError(error));
+    } finally {
+      setSyncingAll(false);
+    }
+  };
+
+  const archiveMailbox = async () => {
+    if (!selectedConfig || archiving) return;
+    if (!window.confirm(`归档“${selectedConfig.display_name}”？它将停止接收新附件，已有入库记录会保留。`)) return;
+    setArchiving(true);
+    try {
+      const archived = await api.archiveMailbox(selectedConfig.mailbox_id);
+      setMailboxes((current) => current.map((item) => (
+        item.mailbox_id === archived.mailbox_id ? archived : item
+      )));
+      selectMailbox(archived);
+      notify("success", "收件通道已归档，历史入库、内容保留与清理记录仍可查看。");
+    } catch (error) {
+      notify("error", humanizeError(error));
+    } finally {
+      setArchiving(false);
     }
   };
 
   const retryImport = async (item: MailboxImportHistoryItem) => {
     if (!item.can_retry || retryingImportId) return;
-
     setRetryingImportId(item.import_id);
     try {
       const result = await api.retryMailboxImport(item.import_id);
@@ -4950,7 +5223,10 @@ function MailboxPage({
       } else {
         notify("error", mailboxImportErrorLabel(result.error));
       }
-      await load();
+      await refreshHistoryForCurrentFilter();
+      if (item.mailbox_config_id === selectedMailboxId) {
+        void loadRetentionActivity(item.mailbox_config_id).catch(() => undefined);
+      }
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
@@ -4959,15 +5235,17 @@ function MailboxPage({
   };
 
   const saveRetentionPolicy = async () => {
-    if (!config?.configured) {
-      notify("error", "请先绑定收件邮箱，再设置内容保留策略。");
+    if (!selectedConfig?.configured) {
+      notify("error", "请先保存这个收件通道，再设置内容保留策略。");
       return;
     }
     if (!canManageRetention) return;
 
     setRetentionSaving(true);
     try {
-      const saved = await api.saveMailboxRetention({ retention_policy: retentionPolicy });
+      const saved = await api.saveMailboxRetention(selectedConfig.mailbox_id, {
+        retention_policy: retentionPolicy,
+      });
       setRetention(saved);
       setRetentionPolicy(saved.retention_policy);
       setRetentionPreview(null);
@@ -4980,7 +5258,7 @@ function MailboxPage({
   };
 
   const previewRetentionCleanup = async () => {
-    if (!config?.configured || !canManageRetention) return;
+    if (!selectedConfig?.configured || !canManageRetention) return;
     if (retentionPolicyChanged) {
       notify("error", "请先保存新的保留策略，再预览清理范围。");
       return;
@@ -4988,7 +5266,7 @@ function MailboxPage({
 
     setPreviewingRetention(true);
     try {
-      const preview = await api.previewMailboxRetention();
+      const preview = await api.previewMailboxRetention(selectedConfig.mailbox_id);
       setRetentionPreview(preview);
     } catch (error) {
       notify("error", humanizeError(error));
@@ -4998,12 +5276,12 @@ function MailboxPage({
   };
 
   const startRetentionCleanup = async () => {
-    if (!config?.configured || !canManageRetention || !retentionPreview) return;
+    if (!selectedConfig?.configured || !canManageRetention || !retentionPreview) return;
     if (mailboxRetentionDueCount(retentionPreview) <= 0) return;
 
     setCleaningRetention(true);
     try {
-      const run = await api.cleanupMailboxRetention();
+      const run = await api.cleanupMailboxRetention(selectedConfig.mailbox_id);
       setRetentionPreview(null);
       setRetentionRuns((current) => ({
         items: [
@@ -5014,9 +5292,9 @@ function MailboxPage({
       }));
       notify(
         "success",
-        run.status === "completed" ? "已完成过期内容清理。" : "已创建清理任务，状态会在下方自动更新。",
+        run.status === "completed" ? "已完成该通道的过期内容清理。" : "已创建清理任务，状态会在下方自动更新。",
       );
-      void loadRetentionActivity().catch(() => undefined);
+      void loadRetentionActivity(selectedConfig.mailbox_id).catch(() => undefined);
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
@@ -5024,273 +5302,374 @@ function MailboxPage({
     }
   };
 
+  const historySourceOptions = [
+    ...mailboxes.map((item) => ({ mailboxId: item.mailbox_id, displayName: item.display_name })),
+    ...(history?.items ?? [])
+      .filter((item) => !mailboxes.some((mailbox) => mailbox.mailbox_id === item.mailbox_config_id))
+      .map((item) => ({
+        mailboxId: item.mailbox_config_id,
+        displayName: item.mailbox_display_name || "已归档收件通道",
+      })),
+  ].filter((item, index, entries) => entries.findIndex((candidate) => candidate.mailboxId === item.mailboxId) === index);
+
   return (
     <div className="page-frame mailbox-page">
       <header className="page-heading">
         <div>
           <h1>邮箱附件入库</h1>
-          <p>从指定邮箱接收新到附件，历史邮件不会扫描，后续附件沿用相同的入库流程。</p>
+          <p>每个收件通道独立保存绑定位置和同步状态，只接收绑定之后到达的附件。</p>
         </div>
-        <button className="button button-primary" disabled={!config?.configured || syncing} onClick={() => void sync()} type="button">
-          {syncing ? <><i className="spinner" />正在同步</> : <><Icon name="refresh" size={16} />立即同步</>}
-        </button>
+        <div className="mailbox-heading-actions">
+          <button className="button" disabled={loading || saving || syncingAll} onClick={startCreatingMailbox} type="button">
+            <Icon name="plus" size={16} />新建收件通道
+          </button>
+          <button
+            className="button button-primary"
+            disabled={loading || saving || syncingAll || Boolean(syncingMailboxId) || !mailboxes.some((item) => item.enabled && !item.archived_at)}
+            onClick={() => void syncAllMailboxes()}
+            type="button"
+          >
+            {syncingAll ? <><i className="spinner" />正在同步全部</> : <><Icon name="refresh" size={16} />同步全部</>}
+          </button>
+        </div>
       </header>
-      <div className="page-layout mailbox-layout">
-        <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <h2>收件邮箱</h2>
-              <p>保存时记录邮箱当前位置，只有绑定后收到的附件会入库。</p>
-            </div>
-            {config?.configured && (
-              <span className={`status-pill${enabled ? " is-success" : ""}`}>
-                {enabled ? "已启用" : "已暂停"}
-              </span>
-            )}
+
+      <div className="mailbox-workspace">
+        <aside className="panel mailbox-channel-panel" aria-label="收件通道">
+          <div className="panel-heading mailbox-channel-heading">
+            <div><h2>收件通道</h2><p>每个通道独立去重和同步。</p></div>
+            <span className="tiny-badge">{mailboxes.length}</span>
           </div>
-          {loading ? <TableSkeleton /> : (
-            <div className="form-grid">
-              <div className="field-stack">
-                <label className="field-label" htmlFor="imap-host">IMAP 地址</label>
-                <input className="field" id="imap-host" onChange={(event) => setImapHost(event.target.value)} value={imapHost} />
-              </div>
-              <div className="field-stack">
-                <label className="field-label" htmlFor="imap-port">端口</label>
-                <input className="field" id="imap-port" inputMode="numeric" onChange={(event) => setImapPort(event.target.value)} value={imapPort} />
-              </div>
-              <div className="field-stack span-full">
-                <label className="field-label" htmlFor="imap-address">接收简历的邮箱</label>
-                <input autoComplete="email" className="field" id="imap-address" onChange={(event) => setEmailAddress(event.target.value)} type="email" value={emailAddress} />
-              </div>
-              <div className="field-stack">
-                <label className="field-label" htmlFor="imap-folder">邮箱文件夹</label>
-                <input className="field" id="imap-folder" onChange={(event) => setMailbox(event.target.value)} value={mailbox} />
-              </div>
-              <div className="field-stack">
-                <label className="field-label" htmlFor="imap-password">邮箱授权码</label>
-                <input autoComplete="new-password" className="field" id="imap-password" onChange={(event) => setPassword(event.target.value)} placeholder={config?.password_configured ? "留空则保持原授权码" : "首次保存必填"} type="password" value={password} />
-              </div>
-              <label className="choice-row span-full">
-                <input checked={enabled} onChange={(event) => setEnabled(event.target.checked)} type="checkbox" />
-                启用后台定时同步
-              </label>
+          {loading ? <TableSkeleton /> : mailboxes.length ? (
+            <div className="mailbox-channel-list">
+              {mailboxes.map((config) => {
+                const selected = !isCreating && config.mailbox_id === selectedMailboxId;
+                return (
+                  <button
+                    aria-pressed={selected}
+                    className={`mailbox-channel-row${selected ? " is-selected" : ""}`}
+                    key={config.mailbox_id}
+                    onClick={() => selectMailbox(config)}
+                    type="button"
+                  >
+                    <span className="mailbox-channel-copy">
+                      <strong>{config.display_name}</strong>
+                      <span>{config.email_address || "尚未配置接收邮箱"}</span>
+                    </span>
+                    <span className={`status-pill${mailboxChannelStatusClass(config)}`}>{mailboxChannelStatus(config)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="mailbox-channel-empty">
+              <span className="empty-glyph"><Icon name="inbox" size={20} /></span>
+              <strong>还没有收件通道</strong>
+              <span>新建后，系统从当前邮箱位置开始接收附件。</span>
             </div>
           )}
-          <div className="review-actions">
-            <button className="button button-primary" disabled={loading || saving} onClick={() => void save()} type="button">
-              {saving ? <><i className="spinner" />正在绑定</> : <><Icon name="check" size={16} />保存并开始接收</>}
-            </button>
-          </div>
-        </section>
-        <aside className="panel mailbox-status-panel">
-          <div className="panel-heading"><div><h2>同步与保留状态</h2><p>重复邮件和重复附件不会再次入库。</p></div></div>
-          <div className="fact-list">
-            <div className="fact-row"><strong>开始接收</strong><span>{config?.import_started_at ? formatLibraryDate(config.import_started_at) : config?.configured ? "正在初始化" : "尚未绑定"}</span></div>
-            <div className="fact-row"><strong>最近同步</strong><span>{config?.last_synced_at ? formatLibraryDate(config.last_synced_at) : "尚未同步"}</span></div>
-            <div className="fact-row"><strong>累计记录</strong><span>{history?.total ?? 0} 条</span></div>
-            <div className="fact-row"><strong>支持格式</strong><span>PDF、Word、图片、Excel、HTML</span></div>
-            {retention && <>
-              <div className="fact-row"><strong>当前保留</strong><span>{mailboxRetentionPolicyLabel(retention.retention_policy)}</span></div>
-              <div className="fact-row"><strong>缓存内容</strong><span>{retention.body_copy_count} 正文 · {retention.attachment_copy_count + retention.failure_artifact_count} 附件副本</span></div>
-              <div className="fact-row"><strong>缓存占用</strong><span>{formatFileSize(retention.cache_bytes)}</span></div>
-              <div className="fact-row"><strong>最早到期</strong><span>{retention.earliest_expires_at ? formatLibraryDate(retention.earliest_expires_at) : "暂无待清理内容"}</span></div>
-              <div className="fact-row"><strong>最近清理</strong><span>{retention.last_cleanup_at ? formatLibraryDate(retention.last_cleanup_at) : "尚未执行"}</span></div>
-              <div className="fact-row"><strong>下次清理</strong><span>{retention.next_cleanup_at ? formatLibraryDate(retention.next_cleanup_at) : "由系统定时安排"}</span></div>
-            </>}
-            {config?.last_sync_error && <div className="fact-row"><strong>最近异常</strong><span>{config.last_sync_error}</span></div>}
-          </div>
+          <button className="button button-ghost mailbox-add-channel" onClick={startCreatingMailbox} type="button">
+            <Icon name="plus" size={16} />新建收件通道
+          </button>
         </aside>
-      </div>
-      <section className="panel mailbox-retention-panel">
-        <div className="panel-heading">
-          <div>
-            <h2>内容保留</h2>
-            <p>只清理系统内的邮件正文与附件副本，不会删除邮箱源邮件或候选人原始简历。</p>
-          </div>
-          {retention && <span className="status-pill">{mailboxRetentionPolicyLabel(retention.retention_policy)}</span>}
-        </div>
-        {loading ? <TableSkeleton /> : !config?.configured ? (
-          <div className="mailbox-retention-empty">
-            <strong>先绑定收件邮箱</strong>
-            <span>保存邮箱配置后，可为该工作区设置正文和附件副本的保留周期。</span>
-          </div>
-        ) : (
-          <>
-            <fieldset className="mailbox-retention-policy" disabled={!canManageRetention || retentionSaving}>
-              <legend className="field-label">内容保留档位</legend>
-              <div className="mailbox-retention-policy-options">
-                {mailboxRetentionPolicies.map((option) => (
-                  <label className="choice-row mailbox-retention-option" key={option.value}>
-                    <input
-                      checked={retentionPolicy === option.value}
-                      name="mailbox-retention-policy"
-                      onChange={() => {
-                        setRetentionPolicy(option.value);
-                        setRetentionPreview(null);
-                      }}
-                      type="radio"
-                    />
-                    <span>
-                      <strong>{option.label}</strong>
-                      <small>{option.description}</small>
-                    </span>
-                  </label>
-                ))}
+
+        <div className="mailbox-detail">
+          <div className="mailbox-detail-grid">
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>{isCreating ? "新建收件通道" : selectedConfig?.display_name || "收件通道"}</h2>
+                  <p>{isCreating ? "保存时会记录当前邮箱位置，历史邮件不会入库。" : "授权码始终保持隐藏，留空则继续使用已保存的值。"}</p>
+                </div>
+                {selectedConfig && <span className={`status-pill${mailboxChannelStatusClass(selectedConfig)}`}>{mailboxChannelStatus(selectedConfig)}</span>}
               </div>
-            </fieldset>
-            {!canManageRetention && <p className="field-help">仅工作区管理员可以修改保留策略或执行清理。当前策略与清理统计仍可查看。</p>}
-            <p className="mailbox-retention-notice">已删除的系统副本不可恢复。简历库中的候选人原始简历、AI 结论与邮箱服务商中的源邮件不受影响。</p>
-            {canManageRetention && (
-              <div className="review-actions mailbox-retention-actions">
-                <button className="button button-primary" disabled={retentionSaving || !retention || !retentionPolicyChanged} onClick={() => void saveRetentionPolicy()} type="button">
-                  {retentionSaving ? <><i className="spinner" />正在保存</> : <><Icon name="check" size={16} />保存保留策略</>}
-                </button>
-                <button className="button" disabled={!retention || previewingRetention || retentionSaving || retentionPolicyChanged || retentionHasActiveRun} onClick={() => void previewRetentionCleanup()} type="button">
-                  {previewingRetention ? <><i className="spinner" />正在预览</> : <><Icon name="history" size={16} />预览已到期内容</>}
-                </button>
-              </div>
-            )}
-            {retentionPreview && (
-              <section aria-live="polite" className="mailbox-retention-preview">
-                <div className="mailbox-retention-preview-heading">
-                  <div>
-                    <h3>已到期内容预览</h3>
-                    <p>以下系统副本将不可恢复地删除，不包含邮箱源邮件或候选人原始简历。</p>
+              {loading ? <TableSkeleton /> : (
+                <div className="form-grid">
+                  <div className="field-stack span-full">
+                    <label className="field-label" htmlFor="mailbox-display-name">通道名称</label>
+                    <input className="field" disabled={selectedMailboxArchived} id="mailbox-display-name" maxLength={32} onChange={(event) => updateDraft("displayName", event.target.value)} placeholder="例如：招聘邮箱" value={draft.displayName} />
                   </div>
-                  <span className={`status-pill${mailboxRetentionDueCount(retentionPreview) ? " is-warning" : " is-success"}`}>
-                    {mailboxRetentionDueCount(retentionPreview) ? `${mailboxRetentionDueCount(retentionPreview)} 项待清理` : "暂无待清理内容"}
-                  </span>
+                  <div className="field-stack">
+                    <label className="field-label" htmlFor="imap-host">IMAP 地址</label>
+                    <input className="field" disabled={selectedMailboxArchived} id="imap-host" onChange={(event) => updateDraft("imapHost", event.target.value)} value={draft.imapHost} />
+                  </div>
+                  <div className="field-stack">
+                    <label className="field-label" htmlFor="imap-port">端口</label>
+                    <input className="field" disabled={selectedMailboxArchived} id="imap-port" inputMode="numeric" onChange={(event) => updateDraft("imapPort", event.target.value)} value={draft.imapPort} />
+                  </div>
+                  <div className="field-stack span-full">
+                    <label className="field-label" htmlFor="imap-address">接收简历的邮箱</label>
+                    <input autoComplete="email" className="field" disabled={selectedMailboxArchived} id="imap-address" onChange={(event) => updateDraft("emailAddress", event.target.value)} type="email" value={draft.emailAddress} />
+                  </div>
+                  <div className="field-stack">
+                    <label className="field-label" htmlFor="imap-folder">邮箱文件夹</label>
+                    <input className="field" disabled={selectedMailboxArchived} id="imap-folder" onChange={(event) => updateDraft("mailbox", event.target.value)} value={draft.mailbox} />
+                  </div>
+                  <div className="field-stack">
+                    <label className="field-label" htmlFor="imap-password">邮箱授权码</label>
+                    <input
+                      aria-describedby="imap-password-hint"
+                      autoComplete="new-password"
+                      className="field"
+                      disabled={selectedMailboxArchived}
+                      id="imap-password"
+                      onChange={(event) => updateDraft("password", event.target.value)}
+                      placeholder={isCreating ? "首次保存必填" : "留空则保持原授权码"}
+                      type="password"
+                      value={draft.password}
+                    />
+                    <p className="field-help" id="imap-password-hint">授权码仅用于连接该收件通道，不会在页面中回显。</p>
+                  </div>
+                  <label className="choice-row span-full">
+                    <input checked={draft.enabled} disabled={selectedMailboxArchived} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
+                    启用后台定时同步
+                  </label>
                 </div>
-                <div className="mailbox-retention-preview-stats">
-                  <div><strong>正文副本</strong><span>{retentionPreview.expired_body_count} 项</span></div>
-                  <div><strong>成功与失败附件副本</strong><span>{retentionPreview.expired_attachment_copy_count + retentionPreview.expired_failure_artifact_count} 项</span></div>
-                  <div><strong>预计释放</strong><span>{formatFileSize(retentionPreview.expired_bytes)}</span></div>
-                  <div><strong>暂不清理</strong><span>{retentionPreview.skipped_count} 项</span></div>
+              )}
+              <div className="review-actions mailbox-form-actions">
+                {!isCreating && selectedConfig && (
+                  <button className="button button-ghost" disabled={archiving || saving || Boolean(syncingMailboxId) || syncingAll || !selectedConfig.enabled || Boolean(selectedConfig.archived_at)} onClick={() => void syncMailbox(selectedConfig)} type="button">
+                    {syncingMailboxId === selectedConfig.mailbox_id ? <><i className="spinner" />正在同步</> : <><Icon name="refresh" size={16} />同步此通道</>}
+                  </button>
+                )}
+                {!isCreating && selectedConfig && !selectedConfig.archived_at && (
+                  <button className="button button-danger-ghost" disabled={archiving || saving || Boolean(syncingMailboxId) || syncingAll} onClick={() => void archiveMailbox()} type="button">
+                    {archiving ? <><i className="spinner" />正在归档</> : "归档通道"}
+                  </button>
+                )}
+                <button className="button button-primary" disabled={loading || saving || archiving || (!isCreating && selectedMailboxArchived)} onClick={() => void saveMailbox()} type="button">
+                  {saving ? <><i className="spinner" />正在保存</> : <><Icon name="check" size={16} />{isCreating ? "创建并开始接收" : selectedMailboxArchived ? "已归档" : "保存通道"}</>}
+                </button>
+              </div>
+            </section>
+
+            <aside className="panel mailbox-status-panel">
+              <div className="panel-heading"><div><h2>同步与保留状态</h2><p>每个通道独立去重、同步与清理，失败不会影响其他通道。</p></div></div>
+              {selectedConfig ? (
+                <div className="fact-list">
+                  <div className="fact-row"><strong>开始接收</strong><span>{selectedConfig.import_started_at ? formatLibraryDate(selectedConfig.import_started_at) : "正在初始化"}</span></div>
+                  <div className="fact-row"><strong>最近同步</strong><span>{selectedConfig.last_synced_at ? formatLibraryDate(selectedConfig.last_synced_at) : "尚未同步"}</span></div>
+                  <div className="fact-row"><strong>已载入记录</strong><span>{historyFilterMailboxId === selectedConfig.mailbox_id ? `${history?.total ?? 0} 条` : "可在下方按来源筛选"}</span></div>
+                  <div className="fact-row"><strong>支持格式</strong><span>PDF、Word、图片、Excel、HTML</span></div>
+                  {retention && <>
+                    <div className="fact-row"><strong>当前保留</strong><span>{mailboxRetentionPolicyLabel(retention.retention_policy)}</span></div>
+                    <div className="fact-row"><strong>缓存内容</strong><span>{retention.body_copy_count} 正文 · {retention.attachment_copy_count + retention.failure_artifact_count} 附件副本</span></div>
+                    <div className="fact-row"><strong>缓存占用</strong><span>{formatFileSize(retention.cache_bytes)}</span></div>
+                    <div className="fact-row"><strong>最早到期</strong><span>{retention.earliest_expires_at ? formatLibraryDate(retention.earliest_expires_at) : "暂无待清理内容"}</span></div>
+                    <div className="fact-row"><strong>最近清理</strong><span>{retention.last_cleanup_at ? formatLibraryDate(retention.last_cleanup_at) : "尚未执行"}</span></div>
+                    <div className="fact-row"><strong>下次清理</strong><span>{retention.next_cleanup_at ? formatLibraryDate(retention.next_cleanup_at) : "由系统定时安排"}</span></div>
+                  </>}
+                  {selectedConfig.last_sync_error && <div className="fact-row"><strong>最近异常</strong><span>{mailboxImportErrorLabel(selectedConfig.last_sync_error)}</span></div>}
                 </div>
-                {canManageRetention && mailboxRetentionDueCount(retentionPreview) > 0 && (
-                  <div className="review-actions mailbox-retention-confirm-actions">
-                    <button className="button button-danger-ghost" disabled={cleaningRetention || retentionHasActiveRun} onClick={() => void startRetentionCleanup()} type="button">
-                      {cleaningRetention ? <><i className="spinner" />正在创建清理任务</> : "确认清理已到期内容"}
+              ) : (
+                <div className="mailbox-status-empty"><Icon name="history" size={19} /><span>保存后会显示这个通道的接收起点、最近同步时间和异常状态。</span></div>
+              )}
+            </aside>
+          </div>
+
+          <section className="panel mailbox-retention-panel">
+            <div className="panel-heading">
+              <div>
+                <h2>内容保留</h2>
+                <p>只清理当前通道的系统邮件正文与附件副本，不会删除源邮件或候选人原始简历。</p>
+              </div>
+              {retention && <span className="status-pill">{mailboxRetentionPolicyLabel(retention.retention_policy)}</span>}
+            </div>
+            {loading ? <TableSkeleton /> : !selectedConfig?.configured ? (
+              <div className="mailbox-retention-empty">
+                <strong>先保存收件通道</strong>
+                <span>保存连接配置后，可为这个通道设置正文和附件副本的保留周期。</span>
+              </div>
+            ) : (
+              <>
+                {selectedMailboxArchived && <p className="mailbox-retention-notice">该通道已归档，不会接收新附件；已有内容仍按以下策略清理。</p>}
+                <fieldset className="mailbox-retention-policy" disabled={!canManageRetention || retentionSaving}>
+                  <legend className="field-label">内容保留档位</legend>
+                  <div className="mailbox-retention-policy-options">
+                    {mailboxRetentionPolicies.map((option) => (
+                      <label className="choice-row mailbox-retention-option" key={option.value}>
+                        <input
+                          checked={retentionPolicy === option.value}
+                          name="mailbox-retention-policy"
+                          onChange={() => {
+                            setRetentionPolicy(option.value);
+                            setRetentionPreview(null);
+                          }}
+                          type="radio"
+                        />
+                        <span>
+                          <strong>{option.label}</strong>
+                          <small>{option.description}</small>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+                {!canManageRetention && <p className="field-help">仅工作区管理员可以修改保留策略或执行清理。当前策略与清理统计仍可查看。</p>}
+                <p className="mailbox-retention-notice">已删除的系统副本不可恢复。简历库中的候选人原始简历、AI 结论与邮箱服务商中的源邮件不受影响。</p>
+                {canManageRetention && (
+                  <div className="review-actions mailbox-retention-actions">
+                    <button className="button button-primary" disabled={retentionSaving || !retention || !retentionPolicyChanged} onClick={() => void saveRetentionPolicy()} type="button">
+                      {retentionSaving ? <><i className="spinner" />正在保存</> : <><Icon name="check" size={16} />保存保留策略</>}
+                    </button>
+                    <button className="button" disabled={!retention || previewingRetention || retentionSaving || retentionPolicyChanged || retentionHasActiveRun} onClick={() => void previewRetentionCleanup()} type="button">
+                      {previewingRetention ? <><i className="spinner" />正在预览</> : <><Icon name="history" size={16} />预览已到期内容</>}
                     </button>
                   </div>
                 )}
-              </section>
+                {retentionPreview && (
+                  <section aria-live="polite" className="mailbox-retention-preview">
+                    <div className="mailbox-retention-preview-heading">
+                      <div>
+                        <h3>已到期内容预览</h3>
+                        <p>以下系统副本将不可恢复地删除，不包含邮箱源邮件或候选人原始简历。</p>
+                      </div>
+                      <span className={`status-pill${mailboxRetentionDueCount(retentionPreview) ? " is-warning" : " is-success"}`}>
+                        {mailboxRetentionDueCount(retentionPreview) ? `${mailboxRetentionDueCount(retentionPreview)} 项待清理` : "暂无待清理内容"}
+                      </span>
+                    </div>
+                    <div className="mailbox-retention-preview-stats">
+                      <div><strong>正文副本</strong><span>{retentionPreview.expired_body_count} 项</span></div>
+                      <div><strong>成功与失败附件副本</strong><span>{retentionPreview.expired_attachment_copy_count + retentionPreview.expired_failure_artifact_count} 项</span></div>
+                      <div><strong>预计释放</strong><span>{formatFileSize(retentionPreview.expired_bytes)}</span></div>
+                      <div><strong>暂不清理</strong><span>{retentionPreview.skipped_count} 项</span></div>
+                    </div>
+                    {canManageRetention && mailboxRetentionDueCount(retentionPreview) > 0 && (
+                      <div className="review-actions mailbox-retention-confirm-actions">
+                        <button className="button button-danger-ghost" disabled={cleaningRetention || retentionHasActiveRun} onClick={() => void startRetentionCleanup()} type="button">
+                          {cleaningRetention ? <><i className="spinner" />正在创建清理任务</> : "确认清理已到期内容"}
+                        </button>
+                      </div>
+                    )}
+                  </section>
+                )}
+              </>
             )}
-          </>
-        )}
-      </section>
-      <section className="panel mailbox-history">
-        <div className="panel-heading"><div><h2>最近入库记录</h2><p>只记录附件处理结果，不在这里展示邮件正文。</p></div></div>
-        <span aria-live="polite" className="sr-only">{retryingImportId ? "正在重新入库一份附件。" : ""}</span>
-        {loading ? <TableSkeleton /> : history?.items.length ? (
-          <div className="table-scroll">
-            <table className="candidate-table mailbox-history-table">
-              <thead>
-                <tr>
-                  <th scope="col">附件</th>
-                  <th scope="col">结果与原因</th>
-                  <th scope="col">尝试</th>
-                  <th scope="col">最后处理</th>
-                  <th scope="col">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.items.map((item) => {
-                  const isRetrying = (
-                    item.status === "retrying"
-                    && !item.can_retry
-                  ) || retryingImportId === item.import_id;
-                  const statusClass = item.status === "imported"
-                    ? "is-success"
-                    : item.status === "failed"
-                      ? "is-error"
-                      : item.status === "retrying"
-                        ? item.can_retry ? "is-warning" : "is-progress"
-                        : "";
+          </section>
 
-                  return (
-                    <tr key={item.import_id}>
-                      <th scope="row"><strong>{item.attachment_filename}</strong></th>
-                      <td>
-                        <span className={`status-pill mailbox-import-status ${statusClass}`}>{mailboxImportStatusLabel(item.status, item.can_retry)}</span>
-                        {item.error && <small className="mailbox-import-error">{mailboxImportErrorLabel(item.error)}</small>}
-                      </td>
-                      <td className="mailbox-attempt-cell">{item.attempt_count} 次</td>
-                      <td>{formatLibraryDate(item.last_attempted_at ?? item.created_at)}</td>
-                      <td className="mailbox-action-cell">
-                        {isRetrying ? (
-                          <span className="mailbox-retry-pending"><i className="spinner" />正在重试</span>
-                        ) : item.can_retry ? (
-                          <button
-                            aria-label={`重新入库：${item.attachment_filename}`}
-                            className="button button-ghost upload-row-button mailbox-retry-button"
-                            disabled={Boolean(retryingImportId)}
-                            onClick={() => void retryImport(item)}
-                            type="button"
-                          >
-                            <Icon name="refresh" size={15} />重新入库
-                          </button>
-                        ) : <span className="candidate-meta">—</span>}
-                      </td>
+          <section className="panel mailbox-history">
+            <div className="panel-heading mailbox-history-heading">
+              <div><h2>附件入库记录</h2><p>只记录附件处理结果，不在这里展示邮件正文。</p></div>
+              <div className="mailbox-history-filter">
+                <label className="field-label" htmlFor="mailbox-history-filter">来源</label>
+                <div className="select-wrap">
+                  <select className="select-field" id="mailbox-history-filter" onChange={(event) => {
+                    const mailboxId = event.target.value || null;
+                    setHistoryFilterMailboxId(mailboxId);
+                    void loadHistory(mailboxId);
+                  }} value={historyFilterMailboxId ?? ""}>
+                    <option value="">全部收件通道</option>
+                    {historySourceOptions.map((item) => <option key={item.mailboxId} value={item.mailboxId}>{item.displayName}</option>)}
+                  </select>
+                  <Icon name="chevron-down" size={16} />
+                </div>
+              </div>
+            </div>
+            <span aria-live="polite" className="sr-only">{retryingImportId ? "正在重新入库一份附件。" : syncingAll ? "正在同步全部收件通道。" : syncingMailboxId ? "正在同步收件通道。" : ""}</span>
+            {historyLoading ? <TableSkeleton /> : history?.items.length ? (
+              <div className="table-scroll">
+                <table className="candidate-table mailbox-history-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">附件</th>
+                      <th scope="col">来源</th>
+                      <th scope="col">结果与原因</th>
+                      <th scope="col">尝试</th>
+                      <th scope="col">最后处理</th>
+                      <th scope="col">操作</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : <div className="empty-state"><div className="empty-state-inner"><span className="empty-glyph"><Icon name="inbox" size={23} /></span><h2>还没有附件入库记录</h2><p>绑定后收到的附件会在这里显示，历史邮件不会入库。</p></div></div>}
-      </section>
-      <section className="panel mailbox-retention-history">
-        <div className="panel-heading">
-          <div>
-            <h2>清理记录</h2>
-            <p>仅保留安全统计与任务状态，不展示邮件正文、邮箱地址或附件内容。</p>
-          </div>
-          {retentionHasActiveRun && <span className="status-pill is-progress"><i className="spinner" />正在更新</span>}
+                  </thead>
+                  <tbody>
+                    {history.items.map((item) => {
+                      const isRetrying = (item.status === "retrying" && !item.can_retry) || retryingImportId === item.import_id;
+                      const statusClass = item.status === "imported"
+                        ? "is-success"
+                        : item.status === "failed"
+                          ? "is-error"
+                          : item.status === "retrying"
+                            ? item.can_retry ? "is-warning" : "is-progress"
+                            : "";
+                      return (
+                        <tr key={item.import_id}>
+                          <th scope="row"><strong>{item.attachment_filename}</strong></th>
+                          <td className="mailbox-source-cell">{item.mailbox_display_name || "已归档收件通道"}</td>
+                          <td>
+                            <span className={`status-pill mailbox-import-status ${statusClass}`}>{mailboxImportStatusLabel(item.status, item.can_retry)}</span>
+                            {item.error && <small className="mailbox-import-error">{mailboxImportErrorLabel(item.error)}</small>}
+                          </td>
+                          <td className="mailbox-attempt-cell">{item.attempt_count} 次</td>
+                          <td>{formatLibraryDate(item.last_attempted_at ?? item.created_at)}</td>
+                          <td className="mailbox-action-cell">
+                            {isRetrying ? (
+                              <span className="mailbox-retry-pending"><i className="spinner" />正在重试</span>
+                            ) : item.can_retry ? (
+                              <button aria-label={`重新入库：${item.attachment_filename}`} className="button button-ghost upload-row-button mailbox-retry-button" disabled={Boolean(retryingImportId)} onClick={() => void retryImport(item)} type="button">
+                                <Icon name="refresh" size={15} />重新入库
+                              </button>
+                            ) : <span className="candidate-meta">—</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : <div className="empty-state"><div className="empty-state-inner"><span className="empty-glyph"><Icon name="inbox" size={23} /></span><h2>还没有附件入库记录</h2><p>绑定后收到的附件会在这里显示，历史邮件不会入库。</p></div></div>}
+          </section>
+
+          <section className="panel mailbox-retention-history">
+            <div className="panel-heading">
+              <div>
+                <h2>清理记录</h2>
+                <p>仅保留安全统计与任务状态，不展示邮件正文、邮箱地址或附件内容。</p>
+              </div>
+              {retentionHasActiveRun && <span className="status-pill is-progress"><i className="spinner" />正在更新</span>}
+            </div>
+            <span aria-live="polite" className="sr-only">{retentionHasActiveRun ? "正在更新当前收件通道的内容清理任务状态。" : ""}</span>
+            {loading ? <TableSkeleton /> : !selectedConfig?.configured ? (
+              <div className="mailbox-retention-empty">
+                <strong>尚未配置清理</strong>
+                <span>保存收件通道后，系统会按该通道的保留策略自动清理过期副本。</span>
+              </div>
+            ) : retentionRuns?.items.length ? (
+              <div className="table-scroll">
+                <table className="candidate-table mailbox-retention-history-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">触发方式</th>
+                      <th scope="col">保留策略</th>
+                      <th scope="col">状态</th>
+                      <th scope="col">扫描 / 清理</th>
+                      <th scope="col">释放空间</th>
+                      <th scope="col">处理时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {retentionRuns.items.map((run) => (
+                      <tr key={run.run_id}>
+                        <th scope="row">{run.trigger_type === "manual" ? "手动" : "定时"}</th>
+                        <td>{mailboxRetentionPolicyLabel(run.retention_policy)}</td>
+                        <td>
+                          <span className={`status-pill ${mailboxRetentionRunStatusClass(run.status)}`}>{mailboxRetentionRunStatusLabel(run.status)}</span>
+                          {run.error_code && <small className="mailbox-import-error">{mailboxRetentionRunErrorLabel(run.error_code)}</small>}
+                        </td>
+                        <td className="mailbox-retention-count-cell">{run.scanned_count} / {run.deleted_count}{run.skipped_count ? `，跳过 ${run.skipped_count}` : ""}{run.failed_count ? `，失败 ${run.failed_count}` : ""}</td>
+                        <td className="mailbox-retention-count-cell">{formatFileSize(run.reclaimed_bytes)}</td>
+                        <td>{formatLibraryDate(run.finished_at ?? run.started_at ?? "")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="mailbox-retention-empty">
+                <strong>还没有清理记录</strong>
+                <span>系统会每日检查当前通道的到期副本；管理员也可先预览后手动执行。</span>
+              </div>
+            )}
+          </section>
         </div>
-        <span aria-live="polite" className="sr-only">{retentionHasActiveRun ? "正在更新内容清理任务状态。" : ""}</span>
-        {loading ? <TableSkeleton /> : !config?.configured ? (
-          <div className="mailbox-retention-empty">
-            <strong>尚未配置清理</strong>
-            <span>绑定收件邮箱后，系统会按工作区的保留策略自动清理过期副本。</span>
-          </div>
-        ) : retentionRuns?.items.length ? (
-          <div className="table-scroll">
-            <table className="candidate-table mailbox-retention-history-table">
-              <thead>
-                <tr>
-                  <th scope="col">触发方式</th>
-                  <th scope="col">保留策略</th>
-                  <th scope="col">状态</th>
-                  <th scope="col">扫描 / 清理</th>
-                  <th scope="col">释放空间</th>
-                  <th scope="col">处理时间</th>
-                </tr>
-              </thead>
-              <tbody>
-                {retentionRuns.items.map((run) => (
-                  <tr key={run.run_id}>
-                    <th scope="row">{run.trigger_type === "manual" ? "手动" : "定时"}</th>
-                    <td>{mailboxRetentionPolicyLabel(run.retention_policy)}</td>
-                    <td>
-                      <span className={`status-pill ${mailboxRetentionRunStatusClass(run.status)}`}>{mailboxRetentionRunStatusLabel(run.status)}</span>
-                      {run.error_code && <small className="mailbox-import-error">{mailboxRetentionRunErrorLabel(run.error_code)}</small>}
-                    </td>
-                    <td className="mailbox-retention-count-cell">{run.scanned_count} / {run.deleted_count}{run.skipped_count ? `，跳过 ${run.skipped_count}` : ""}{run.failed_count ? `，失败 ${run.failed_count}` : ""}</td>
-                    <td className="mailbox-retention-count-cell">{formatFileSize(run.reclaimed_bytes)}</td>
-                    <td>{formatLibraryDate(run.finished_at ?? run.started_at ?? "")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="mailbox-retention-empty">
-            <strong>还没有清理记录</strong>
-            <span>系统会每日检查到期副本；管理员也可先预览后手动执行。</span>
-          </div>
-        )}
-      </section>
+      </div>
     </div>
   );
 }

@@ -267,6 +267,7 @@ def _seed_workspace_b_private_resources(
             "summary_id": summary.id,
             "job_id": job.id,
             "job_version_id": job_version.id,
+            "mailbox_config_id": mailbox_config.id,
             "mailbox_import_id": mailbox_import.id,
         }
 
@@ -458,3 +459,33 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
         f"/v1/mailbox/imports/{private['mailbox_import_id']}/retry"
     )
     assert foreign_mailbox_retry.status_code == 404, foreign_mailbox_retry.text
+
+    # New named-channel routes must use the current workspace scope just as
+    # strictly as the compatibility endpoints above. An opaque ID from B must
+    # never become a readable or mutable resource for A.
+    foreign_mailbox = client_a.get(f"/v1/mailboxes/{private['mailbox_config_id']}")
+    foreign_mailbox_patch = client_a.patch(
+        f"/v1/mailboxes/{private['mailbox_config_id']}",
+        json={"display_name": "not-allowed"},
+    )
+    foreign_mailbox_sync = client_a.post(
+        f"/v1/mailboxes/{private['mailbox_config_id']}/sync"
+    )
+    foreign_mailbox_archive = client_a.post(
+        f"/v1/mailboxes/{private['mailbox_config_id']}/archive"
+    )
+    foreign_mailbox_history = client_a.get(
+        f"/v1/mailbox-imports?mailbox_id={private['mailbox_config_id']}"
+    )
+    foreign_library_source = client_a.get(
+        f"/v1/resume-library?mailbox_id={private['mailbox_config_id']}"
+    )
+    for response in (
+        foreign_mailbox,
+        foreign_mailbox_patch,
+        foreign_mailbox_sync,
+        foreign_mailbox_archive,
+        foreign_mailbox_history,
+        foreign_library_source,
+    ):
+        assert response.status_code == 404, response.text

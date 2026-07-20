@@ -207,11 +207,39 @@ def _write_atomically(*, storage_path: Path, content: bytes) -> None:
         raise MailboxRetentionError("mailbox_retention_storage_write_failed") from exc
 
 
-def _active_config(session: Session, *, config_id: str | None = None) -> MailboxConfig | None:
-    query = select(MailboxConfig).order_by(desc(MailboxConfig.created_at))
+def _active_config(
+    session: Session,
+    *,
+    config_id: str | None = None,
+    require_config: bool = False,
+) -> MailboxConfig | None:
+    """Resolve one mailbox without ever guessing between named channels.
+
+    ``config_id`` is the normal path for public multi-channel endpoints and
+    remains tenant-scoped by the session guard.  The no-ID path exists only
+    for the legacy single-mailbox endpoints; once a workspace has multiple
+    channels it fails closed rather than selecting the newest row.
+    """
+
     if config_id:
-        query = select(MailboxConfig).where(MailboxConfig.id == config_id)
-    return session.scalar(query)
+        config = session.scalar(
+            select(MailboxConfig).where(MailboxConfig.id == config_id)
+        )
+        if config is None and require_config:
+            raise MailboxRetentionError("mailbox_config_not_found")
+        return config
+
+    configs = session.scalars(
+        select(MailboxConfig)
+        .where(MailboxConfig.archived_at.is_(None))
+        .order_by(desc(MailboxConfig.created_at))
+        .limit(2)
+    ).all()
+    if len(configs) > 1:
+        raise MailboxRetentionError("mailbox_legacy_endpoint_ambiguous")
+    if not configs and require_config:
+        raise MailboxRetentionError("mailbox_not_configured")
+    return configs[0] if configs else None
 
 
 def _replica_expiry(*, created_at: datetime, policy: RetentionPolicy, kind: str) -> datetime:
@@ -523,12 +551,17 @@ def get_mailbox_retention_summary(
     session: Session,
     *,
     settings: AppSettings,
+    config_id: str | None = None,
 ) -> MailboxRetentionSummaryResponse:
     return MailboxRetentionSummaryResponse(
         **_summary_values(
             session,
             settings=settings,
-            config=_active_config(session),
+            config=_active_config(
+                session,
+                config_id=config_id,
+                require_config=config_id is not None,
+            ),
         )
     )
 
@@ -538,10 +571,10 @@ def update_mailbox_retention_policy(
     *,
     settings: AppSettings,
     retention_policy: str,
+    config_id: str | None = None,
 ) -> MailboxRetentionSummaryResponse:
-    config = _active_config(session)
-    if config is None:
-        raise MailboxRetentionError("mailbox_not_configured")
+    config = _active_config(session, config_id=config_id, require_config=True)
+    assert config is not None
     policy = _normalized_policy(retention_policy)
     if retention_policy.strip().lower() not in _POLICY_DAYS:
         raise MailboxRetentionError("mailbox_retention_policy_invalid")
@@ -582,8 +615,13 @@ def preview_mailbox_retention_cleanup(
     session: Session,
     *,
     settings: AppSettings,
+    config_id: str | None = None,
 ) -> MailboxRetentionPreviewResponse:
-    config = _active_config(session)
+    config = _active_config(
+        session,
+        config_id=config_id,
+        require_config=config_id is not None,
+    )
     values = _summary_values(session, settings=settings, config=config)
     if config is None:
         return MailboxRetentionPreviewResponse(**values, skipped_count=0)
@@ -689,9 +727,8 @@ def cleanup_mailbox_retention(
     trigger_type: Literal["manual", "scheduled"],
     config_id: str | None = None,
 ) -> MailboxRetentionCleanupRunResponse:
-    config = _active_config(session, config_id=config_id)
-    if config is None:
-        raise MailboxRetentionError("mailbox_not_configured")
+    config = _active_config(session, config_id=config_id, require_config=True)
+    assert config is not None
     now = _utcnow()
     run = MailboxRetentionCleanupRun(
         organization_id=organization_context_id(session),
@@ -755,9 +792,8 @@ def cleanup_mailbox_retention(
         else:
             skipped += 1
 
-    config = _active_config(session, config_id=config.id)
-    if config is None:
-        raise MailboxRetentionError("mailbox_not_configured")
+    config = _active_config(session, config_id=config.id, require_config=True)
+    assert config is not None
     config.last_retention_cleanup_at = now
     run = session.get(MailboxRetentionCleanupRun, run.id)
     if run is None:
@@ -780,8 +816,13 @@ def list_mailbox_retention_cleanup_runs(
     *,
     settings: AppSettings,
     limit: int = 20,
+    config_id: str | None = None,
 ) -> MailboxRetentionCleanupRunHistoryResponse:
-    config = _active_config(session)
+    config = _active_config(
+        session,
+        config_id=config_id,
+        require_config=config_id is not None,
+    )
     if config is None:
         return MailboxRetentionCleanupRunHistoryResponse(items=[], total=0)
     runs = session.scalars(

@@ -19,54 +19,24 @@
 
 {$RESUME_V3_DOMAIN} {
     encode zstd gzip
+
+    # A future root-site edge may proxy the legacy compatibility paths to this
+    # host while retaining ownership of greatsellai.net itself.
+    @compat_api path /greatsellhr/v1 /greatsellhr/v1/*
+    handle @compat_api {
+        uri strip_prefix /greatsellhr
+        reverse_proxy api:8000
+    }
+
+    @compat_health path /greatsellhr/health
+    handle @compat_health {
+        uri strip_prefix /greatsellhr
+        reverse_proxy api:8000
+    }
+
     import common_api
 
     handle {
         import frontend
-    }
-}
-
-greatsellai.net {
-    encode zstd gzip
-
-    # Keep the future root site independent while exposing the HR SPA at the
-    # requested path. The SPA itself continues to use same-origin /v1 calls.
-    @root_api path /v1 /v1/*
-    handle @root_api {
-        reverse_proxy api:8000
-    }
-
-    @root_health path /health
-    handle @root_health {
-        reverse_proxy api:8000
-    }
-
-    @hr_api path /greatsellhr/v1 /greatsellhr/v1/*
-    handle @hr_api {
-        uri strip_prefix /greatsellhr
-        reverse_proxy api:8000
-    }
-
-    @hr_health path /greatsellhr/health
-    handle @hr_health {
-        uri strip_prefix /greatsellhr
-        reverse_proxy api:8000
-    }
-
-    @hr_path path /greatsellhr /greatsellhr/*
-    handle @hr_path {
-        uri strip_prefix /greatsellhr
-        import frontend
-    }
-
-    # Vite emits absolute /assets URLs; serve them for the path-mounted SPA.
-    @hr_assets path /assets /assets/*
-    handle @hr_assets {
-        root * /srv
-        file_server
-    }
-
-    handle {
-        respond "GreatSell AI homepage is not configured yet." 200
     }
 }

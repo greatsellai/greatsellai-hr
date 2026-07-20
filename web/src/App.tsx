@@ -18,8 +18,6 @@ import {
 import {
   LandingPage,
   ROOT_WORKSPACE_BASE_PATH,
-  ROOT_WORKSPACE_LOGIN_URL,
-  ROOT_WORKSPACE_ORIGIN,
 } from "./landing";
 import type {
   AiExtractionStatus,
@@ -74,7 +72,6 @@ type JobWorkspaceMode = "create" | "view";
 type AuthRoute = "login" | "register" | "forgot-password";
 type AppSurface =
   | { kind: "landing" }
-  | { kind: "redirect"; href: string }
   | { kind: "workspace"; authRoute: AuthRoute | null };
 
 interface FilterDraft {
@@ -840,10 +837,11 @@ function isLocalDevelopmentHost(hostname: string) {
 
 function workspaceHref(path = "") {
   const normalizedPath = path && !path.startsWith("/") ? `/${path}` : path;
-  const destination = `${ROOT_WORKSPACE_BASE_PATH}${normalizedPath}`;
-  return isLocalDevelopmentHost(window.location.hostname)
-    ? destination
-    : `${ROOT_WORKSPACE_ORIGIN}${destination}`;
+  const pathname = window.location.pathname;
+  const isCompatibilityWorkspace =
+    pathname === ROOT_WORKSPACE_BASE_PATH ||
+    pathname.startsWith(`${ROOT_WORKSPACE_BASE_PATH}/`);
+  return `${isCompatibilityWorkspace ? ROOT_WORKSPACE_BASE_PATH : ""}${normalizedPath}` || "/";
 }
 
 function authRouteFromPath(pathname: string): AuthRoute | null {
@@ -865,11 +863,11 @@ function resolveAppSurface(): AppSurface {
     return { kind: "workspace", authRoute: authRouteFromPath(nestedPath) };
   }
 
-  if (hostname === "hr.greatsellai.net") {
-    const authRoute = authRouteFromPath(pathname);
-    if (authRoute) {
-      return { kind: "redirect", href: workspaceHref(`/${authRoute}`) };
-    }
+  // The primary HR host is self-contained: its root is the authenticated
+  // workspace and its direct auth routes use the same-origin API. This keeps
+  // login working when the root site lives on a different server.
+  if (hostname === "hr.greatsellai.net" || isLocalDevelopmentHost(hostname)) {
+    return { kind: "workspace", authRoute: authRouteFromPath(pathname) };
   }
 
   return { kind: "landing" };
@@ -899,10 +897,8 @@ function App() {
   }, []);
 
   if (surface.kind === "landing") {
-    return <LandingPage loginHref={ROOT_WORKSPACE_LOGIN_URL} />;
+    return <LandingPage loginHref={workspaceHref("/login")} />;
   }
-
-  if (surface.kind === "redirect") return <ExternalRedirect href={surface.href} />;
 
   return <WorkspaceApp authRoute={surface.authRoute} />;
 }

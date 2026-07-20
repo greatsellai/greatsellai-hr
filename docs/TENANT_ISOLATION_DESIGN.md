@@ -117,10 +117,9 @@ UserAccount
 
 ### 3.3 兼容入口
 
-- 主入口 `https://hr.greatsellai.net` 使用 `/v1` 与 `/health`。
-- 兼容入口 `https://greatsellai.net/greatsellhr/` 使用 `/greatsellhr/v1` 与 `/greatsellhr/health`。
-- 前端根据当前入口选择 API 前缀；不会把 `/greatsellai.net/` 根目录映射到 HR 工作台。
-- 登录页固定支持 `https://greatsellai.net/greatsellhr/login`，并增加 `/register`、`/forgot-password` 与邀请接受路由。
+- 主入口 `https://hr.greatsellai.net` 直接承载工作台、`/v1`、`/health`、`/login`、`/register` 与 `/forgot-password`。
+- `https://greatsellai.net/greatsellhr/` 是可选兼容入口，使用 `/greatsellhr/v1` 与 `/greatsellhr/health`；它只能由官网自身的边缘代理转发到 HR 主站，不能要求或导致 `greatsellai.net/` 根域映射到 HR 服务器。
+- 前端根据当前入口选择 API 前缀，主入口始终使用同源 `/v1`。
 
 ## 4. 数据与文件隔离
 
@@ -197,9 +196,10 @@ Alembic 迁移不读取环境变量、不读取文件卷、不读取候选人内
 
 ## 7. 前端体验
 
-- `/greatsellhr/login`：邮箱密码登录，保留旧管理口令兼容说明但不暴露系统细节。
-- `/greatsellhr/register`：企业名称、姓名、邮箱、密码、试用期限说明，注册成功直接进入工作台。
-- `/greatsellhr/forgot-password`：通用请求确认，不枚举邮箱；邮件适配器未启用时提供明确支持路径。
+- `/login`：邮箱密码登录，保留旧管理口令兼容说明但不暴露系统细节。
+- `/register`：企业名称、姓名、邮箱、密码、试用期限说明，注册成功直接进入工作台。
+- `/forgot-password`：通用请求确认，不枚举邮箱；邮件适配器未启用时提供明确支持路径。
+- 兼容入口存在时，以上路由可在 `/greatsellhr/` 前缀下继续使用。
 - 顶栏展示当前工作区名称、角色和剩余试用天数；到期时显示阻断式续费提示。
 - 注册/登录页面沿用现有深墨、灰、品牌红和高信息密度产品语言，不把占位官网改造成 HR 工作台。
 - 工作区管理员能看到当前套餐、试用剩余时间与升级说明；不能自己变更档位。

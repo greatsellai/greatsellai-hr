@@ -1,42 +1,86 @@
 (common_api) {
-    @api path /v1 /v1/*
-    handle @api {
-        reverse_proxy api:8000
-    }
+	@api path /v1 /v1/*
+	handle @api {
+		reverse_proxy api:8000
+	}
 
-    @health path /health
-    handle @health {
-        reverse_proxy api:8000
-    }
+	@health path /health
+	handle @health {
+		reverse_proxy api:8000
+	}
 }
 
 (frontend) {
-    root * /srv
-    try_files {path} /index.html
-    header Cache-Control "no-cache"
-    file_server
+	root * /srv
+	try_files {path} /index.html
+	header Cache-Control "no-cache"
+	file_server
 }
 
 {$RESUME_V3_DOMAIN} {
-    encode zstd gzip
+	encode zstd gzip
 
-    # A future root-site edge may proxy the legacy compatibility paths to this
-    # host while retaining ownership of greatsellai.net itself.
-    @compat_api path /greatsellhr/v1 /greatsellhr/v1/*
-    handle @compat_api {
-        uri strip_prefix /greatsellhr
-        reverse_proxy api:8000
-    }
+	# Retain the compatibility surface on the primary host while older links
+	# migrate to the dedicated HR origin.
+	@compat_api path /greatsellhr/v1 /greatsellhr/v1/*
+	handle @compat_api {
+		uri strip_prefix /greatsellhr
+		reverse_proxy api:8000
+	}
 
-    @compat_health path /greatsellhr/health
-    handle @compat_health {
-        uri strip_prefix /greatsellhr
-        reverse_proxy api:8000
-    }
+	@compat_health path /greatsellhr/health
+	handle @compat_health {
+		uri strip_prefix /greatsellhr
+		reverse_proxy api:8000
+	}
 
-    import common_api
+	import common_api
 
-    handle {
-        import frontend
-    }
+	handle {
+		import frontend
+	}
+}
+
+# The apex domain is the public product site. It deliberately has no direct
+# /v1 or /health proxy, so an unauthenticated root-domain request can never
+# reach the HR application's API. The legacy nested entry remains available
+# only for existing greatsellai.net/greatsellhr links.
+greatsellai.net {
+	encode zstd gzip
+
+	route {
+		@compat_api path /greatsellhr/v1 /greatsellhr/v1/*
+		handle @compat_api {
+			uri strip_prefix /greatsellhr
+			reverse_proxy api:8000
+		}
+
+		@compat_health path /greatsellhr/health /greatsellhr/health/*
+		handle @compat_health {
+			uri strip_prefix /greatsellhr
+			reverse_proxy api:8000
+		}
+
+		@root_api_or_health path /v1 /v1/* /health /health/*
+		handle @root_api_or_health {
+			respond "Not found" 404
+		}
+
+		# A manually entered legacy root-domain auth URL still reaches the
+		# dedicated HR application instead of rendering the public landing.
+		@root_auth path /login /register /forgot-password
+		handle @root_auth {
+			redir https://hr.greatsellai.net{uri} 308
+		}
+
+		@compat_workspace path /greatsellhr /greatsellhr/*
+		handle @compat_workspace {
+			uri strip_prefix /greatsellhr
+			import frontend
+		}
+
+		handle {
+			import frontend
+		}
+	}
 }

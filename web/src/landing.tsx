@@ -110,6 +110,11 @@ function setDescription(content: string) {
   description?.setAttribute("content", content);
 }
 
+function setCanonical(url: string) {
+  const canonical = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+  canonical?.setAttribute("href", url);
+}
+
 function BrandLogo() {
   return (
     <span className="landing-brand" aria-label="大卖数智 GreatSell AI">
@@ -132,6 +137,7 @@ export function LandingPage({ loginHref }: { loginHref: string }) {
   useEffect(() => {
     document.title = "大卖数智 GreatSell AI 招聘工作台";
     setDescription("让每一次招聘决策，都拥有AI驱动的判断能力。GreatSell AI 将简历、岗位与面试信息沉淀为可解释的招聘依据。");
+    setCanonical("https://greatsellai.net/");
   }, []);
 
   return (

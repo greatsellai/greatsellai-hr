@@ -835,13 +835,29 @@ function isLocalDevelopmentHost(hostname: string) {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
+function isRootMarketingHost(hostname: string) {
+  return hostname === "greatsellai.net";
+}
+
 function workspaceHref(path = "") {
   const normalizedPath = path && !path.startsWith("/") ? `/${path}` : path;
-  const pathname = window.location.pathname;
+  const { hostname, pathname } = window.location;
   const isCompatibilityWorkspace =
     pathname === ROOT_WORKSPACE_BASE_PATH ||
     pathname.startsWith(`${ROOT_WORKSPACE_BASE_PATH}/`);
-  return `${isCompatibilityWorkspace ? ROOT_WORKSPACE_BASE_PATH : ""}${normalizedPath}` || "/";
+
+  if (isCompatibilityWorkspace) {
+    return `${ROOT_WORKSPACE_BASE_PATH}${normalizedPath}` || ROOT_WORKSPACE_BASE_PATH;
+  }
+
+  // The public root site is intentionally a separate marketing surface. Its
+  // calls to action always cross to the dedicated HR application origin, so
+  // the root domain never needs to expose the authenticated HR API.
+  if (isRootMarketingHost(hostname)) {
+    return `https://hr.greatsellai.net${normalizedPath || "/"}`;
+  }
+
+  return normalizedPath || "/";
 }
 
 function authRouteFromPath(pathname: string): AuthRoute | null {

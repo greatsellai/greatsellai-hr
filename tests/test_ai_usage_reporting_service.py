@@ -78,6 +78,12 @@ def _seed_usage_ledger(session: Session) -> None:
             reporting_cost_micros=120,
             reporting_currency="CNY",
             cost_source="price_snapshot",
+            usage_source="provider",
+            input_tokens=100,
+            cached_read_input_tokens=10,
+            cached_write_input_tokens=5,
+            output_tokens=20,
+            reasoning_tokens=3,
         )
     )
 
@@ -110,6 +116,12 @@ def _seed_usage_ledger(session: Session) -> None:
                 reporting_cost_micros=30,
                 reporting_currency="CNY",
                 cost_source="price_snapshot",
+                usage_source="provider",
+                input_tokens=30,
+                cached_read_input_tokens=2,
+                cached_write_input_tokens=0,
+                output_tokens=15,
+                reasoning_tokens=5,
             ),
             ApiInvocation(
                 ai_run_id=partial_run.id,
@@ -157,6 +169,15 @@ def _seed_usage_ledger(session: Session) -> None:
             reporting_cost_micros=700,
             reporting_currency="CNY",
             cost_source="price_snapshot",
+            # A provider may legitimately return a zero-token usage payload.
+            # This must remain distinct from a provider that returned no
+            # metering payload at all.
+            usage_source="provider",
+            input_tokens=0,
+            cached_read_input_tokens=0,
+            cached_write_input_tokens=0,
+            output_tokens=0,
+            reasoning_tokens=0,
         )
     )
     session.commit()
@@ -183,6 +204,17 @@ def test_platform_reporting_is_explicitly_global_but_can_filter_one_workspace(ai
         assert all("business_ref" not in row.__dataclass_fields__ for row in summaries_for_a)
         assert all("prompt" not in row.__dataclass_fields__ for row in summaries_for_a)
         assert all("output" not in row.__dataclass_fields__ for row in summaries_for_a)
+
+        summaries_by_feature = {row.feature: row for row in summaries_for_a}
+        score_summary = summaries_by_feature["resume_score"]
+        assert score_summary.invocation_count == 1
+        assert score_summary.token_usage_invocation_count == 1
+        assert score_summary.total_tokens == 138
+
+        match_summary = summaries_by_feature["jd_match"]
+        assert match_summary.invocation_count == 2
+        assert match_summary.token_usage_invocation_count == 1
+        assert match_summary.total_tokens == 52
 
         all_summaries = list_platform_ai_run_summaries(session, query=AiUsageQuery())
         assert {row.organization_id for row in all_summaries} == {ORG_A_ID, ORG_B_ID}
@@ -219,6 +251,13 @@ def test_platform_reporting_aggregates_cost_status_and_uncertain_billing(ai_clie
         assert score.partial_run_count == 0
         assert score.unavailable_run_count == 0
         assert score.potentially_billed_invocation_count == 0
+        assert score.token_usage_invocation_count == 1
+        assert score.input_tokens == 100
+        assert score.cached_read_input_tokens == 10
+        assert score.cached_write_input_tokens == 5
+        assert score.output_tokens == 20
+        assert score.reasoning_tokens == 3
+        assert score.total_tokens == 138
 
         match = by_feature["jd_match"]
         assert match.organization_id == ORG_A_ID
@@ -231,6 +270,13 @@ def test_platform_reporting_aggregates_cost_status_and_uncertain_billing(ai_clie
         assert match.partial_run_count == 1
         assert match.unavailable_run_count == 0
         assert match.potentially_billed_invocation_count == 1
+        assert match.token_usage_invocation_count == 1
+        assert match.input_tokens == 30
+        assert match.cached_read_input_tokens == 2
+        assert match.cached_write_input_tokens == 0
+        assert match.output_tokens == 15
+        assert match.reasoning_tokens == 5
+        assert match.total_tokens == 52
 
         all_aggregates = summarize_platform_ai_usage(session, query=AiUsageQuery())
         assert {(row.organization_id, row.reported_cost_cny_micros) for row in all_aggregates} == {
@@ -238,6 +284,44 @@ def test_platform_reporting_aggregates_cost_status_and_uncertain_billing(ai_clie
             (ORG_A_ID, 30),
             (ORG_B_ID, 700),
         }
+        other_workspace_score = next(
+            row
+            for row in all_aggregates
+            if row.organization_id == ORG_B_ID and row.feature == "resume_score"
+        )
+        assert other_workspace_score.token_usage_invocation_count == 1
+        assert other_workspace_score.total_tokens == 0
+
+
+def test_platform_usage_api_returns_token_totals_without_business_content(ai_client) -> None:
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        _seed_usage_ledger(session)
+
+    runs_response = ai_client.get(
+        "/v1/platform/ai/usage/runs",
+        params={"organization_id": ORG_A_ID},
+    )
+    assert runs_response.status_code == 200, runs_response.text
+    runs_by_feature = {item["feature"]: item for item in runs_response.json()}
+    assert runs_by_feature["resume_score"]["token_usage_invocation_count"] == 1
+    assert runs_by_feature["resume_score"]["total_tokens"] == 138
+    assert "business_ref_id" not in runs_by_feature["resume_score"]
+    assert "prompt" not in runs_by_feature["resume_score"]
+
+    usage_response = ai_client.get(
+        "/v1/platform/ai/usage/summary",
+        params={"organization_id": ORG_A_ID},
+    )
+    assert usage_response.status_code == 200, usage_response.text
+    usage_by_feature = {item["feature"]: item for item in usage_response.json()}
+    score = usage_by_feature["resume_score"]
+    assert score["input_tokens"] == 100
+    assert score["cached_read_input_tokens"] == 10
+    assert score["cached_write_input_tokens"] == 5
+    assert score["output_tokens"] == 20
+    assert score["reasoning_tokens"] == 3
+    assert score["total_tokens"] == 138
 
 
 def test_platform_reporting_rejects_invalid_filters() -> None:

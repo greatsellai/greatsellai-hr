@@ -335,6 +335,8 @@ export interface AiRunUsage {
   cost_status: string;
   invocation_count: number;
   potentially_billed_invocation_count: number;
+  token_usage_invocation_count: number;
+  total_tokens: number;
 }
 
 export interface AiUsageAggregate {
@@ -346,6 +348,13 @@ export interface AiUsageAggregate {
   unavailable_cost_invocation_count: number;
   potentially_billed_invocation_count: number;
   reported_cost_cny_micros: number;
+  token_usage_invocation_count: number;
+  input_tokens: number;
+  cached_read_input_tokens: number;
+  cached_write_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
   known_run_count: number;
   partial_run_count: number;
   unavailable_run_count: number;

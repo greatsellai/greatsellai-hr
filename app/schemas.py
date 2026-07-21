@@ -749,6 +749,8 @@ class AiRunUsageSummaryResponse(ApiModel):
     cost_status: str
     invocation_count: int
     potentially_billed_invocation_count: int
+    token_usage_invocation_count: int
+    total_tokens: int
 
 
 class AiUsageAggregateResponse(ApiModel):
@@ -762,6 +764,13 @@ class AiUsageAggregateResponse(ApiModel):
     unavailable_cost_invocation_count: int
     potentially_billed_invocation_count: int
     reported_cost_cny_micros: int
+    token_usage_invocation_count: int
+    input_tokens: int
+    cached_read_input_tokens: int
+    cached_write_input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    total_tokens: int
     known_run_count: int
     partial_run_count: int
     unavailable_run_count: int

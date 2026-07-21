@@ -356,6 +356,48 @@ function DataTableEmpty({ description }: { description: string }) {
   return <AdminEmpty description={description} title="当前没有记录" />;
 }
 
+function TokenUsageCell({
+  invocationCount,
+  tokenUsageInvocationCount,
+  totalTokens,
+  inputTokens,
+  cachedReadInputTokens,
+  cachedWriteInputTokens,
+  outputTokens,
+  reasoningTokens,
+}: {
+  invocationCount: number;
+  tokenUsageInvocationCount: number;
+  totalTokens: number;
+  inputTokens?: number;
+  cachedReadInputTokens?: number;
+  cachedWriteInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+}) {
+  const hasProviderUsage = tokenUsageInvocationCount > 0;
+  const isPartial = hasProviderUsage && tokenUsageInvocationCount < invocationCount;
+  const hasBreakdown = inputTokens !== undefined && outputTokens !== undefined;
+  const title = hasProviderUsage && hasBreakdown
+    ? [
+      `总计 ${numberFormat(totalTokens)} Token`,
+      `输入 ${numberFormat(inputTokens)} Token`,
+      `输出 ${numberFormat(outputTokens)} Token`,
+      cachedReadInputTokens ? `缓存读取 ${numberFormat(cachedReadInputTokens)} Token` : "",
+      cachedWriteInputTokens ? `缓存写入 ${numberFormat(cachedWriteInputTokens)} Token` : "",
+      reasoningTokens ? `推理 ${numberFormat(reasoningTokens)} Token` : "",
+    ].filter(Boolean).join("\n")
+    : undefined;
+
+  return (
+    <span title={title}>
+      <strong>{hasProviderUsage ? numberFormat(totalTokens) : "未返回"}</strong>
+      <small>{hasProviderUsage ? `已返回 ${numberFormat(tokenUsageInvocationCount)}/${numberFormat(invocationCount)} 次${isPartial ? "，部分统计" : ""}` : "模型未提供用量"}</small>
+      {hasProviderUsage && hasBreakdown && <small>输入 {numberFormat(inputTokens)} · 输出 {numberFormat(outputTokens)}</small>}
+    </span>
+  );
+}
+
 export function AdminAiPage() {
   const [state, setState] = useState<RequestState>("loading");
   const [error, setError] = useState("");
@@ -397,8 +439,8 @@ export function AdminAiPage() {
       {(tab === "runs" || tab === "usage") && <form className="admin-filter-bar" onSubmit={apply}><label className="admin-search-field"><span className="sr-only">工作区 ID</span><Icon name="briefcase" size={16} /><input onChange={(event) => setOrganizationDraft(event.target.value)} placeholder="工作区 ID" value={organizationDraft} /></label><label className="admin-search-field"><span className="sr-only">AI 功能</span><Icon name="spark" size={16} /><input onChange={(event) => setFeatureDraft(event.target.value)} placeholder="功能，例如 resume_score" value={featureDraft} /></label><button className="button button-primary" type="submit">筛选记录</button>{(organizationId || feature) && <button className="button button-ghost" onClick={() => { setOrganizationDraft(""); setFeatureDraft(""); setOrganizationId(""); setFeature(""); }} type="button">清除条件</button>}</form>}
       {state === "loading" && <div className="admin-panel"><AdminLoading label="正在汇总 AI 运行数据…" /></div>}
       {state === "error" && <div className="admin-panel"><AdminError message={error} onRetry={() => void load()} /></div>}
-      {state === "ready" && tab === "runs" && <div className="admin-table-panel"><div className="admin-table-note"><span>最近 {runs.length} 条运行</span><small>不含 Prompt、简历或模型输出</small></div>{runs.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>开始时间</th><th>工作区</th><th>功能</th><th>服务</th><th>状态</th><th>调用</th><th>成本</th></tr></thead><tbody>{runs.map((run) => <tr key={run.run_id}><td>{formatDate(run.started_at,true)}</td><td title={run.organization_id}>{shortId(run.organization_id)}</td><td>{featureName(run.feature)}</td><td>{run.service_kind}</td><td><AdminStatus status={run.status} /></td><td>{numberFormat(run.invocation_count)}</td><td>{currencyFromMicros(run.total_cost_cny_micros)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有 AI 运行记录。" />}</div>}
-      {state === "ready" && tab === "usage" && <div className="admin-table-panel"><div className="admin-table-note"><span>按工作区、功能与模型汇总</span><small>费用来自已发布的模型价格版本</small></div>{usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>工作区</th><th>功能</th><th>模型</th><th>调用</th><th>已核算</th><th>待核算</th><th>报告成本</th></tr></thead><tbody>{usage.map((item,index) => <tr key={`${item.organization_id}-${item.feature}-${item.model_slug}-${index}`}><td title={item.organization_id}>{shortId(item.organization_id)}</td><td>{featureName(item.feature)}</td><td>{item.model_slug}</td><td>{numberFormat(item.invocation_count)}</td><td>{numberFormat(item.costed_invocation_count)}</td><td>{numberFormat(item.unavailable_cost_invocation_count)}</td><td>{currencyFromMicros(item.reported_cost_cny_micros)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有可汇总的用量。" />}</div>}
+      {state === "ready" && tab === "runs" && <div className="admin-table-panel"><div className="admin-table-note"><span>最近 {runs.length} 条运行</span><small>不含 Prompt、简历或模型输出；未返回用量不会记为 0 Token</small></div>{runs.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>开始时间</th><th>工作区</th><th>功能</th><th>服务</th><th>状态</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th><th>成本</th></tr></thead><tbody>{runs.map((run) => <tr key={run.run_id}><td>{formatDate(run.started_at,true)}</td><td title={run.organization_id}>{shortId(run.organization_id)}</td><td>{featureName(run.feature)}</td><td>{run.service_kind}</td><td><AdminStatus status={run.status} /></td><td>{numberFormat(run.invocation_count)}</td><td><TokenUsageCell invocationCount={run.invocation_count} tokenUsageInvocationCount={run.token_usage_invocation_count} totalTokens={run.total_tokens} /></td><td>{currencyFromMicros(run.total_cost_cny_micros)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有 AI 运行记录。" />}</div>}
+      {state === "ready" && tab === "usage" && <div className="admin-table-panel"><div className="admin-table-note"><span>按工作区、功能与模型汇总</span><small>费用来自已发布的模型价格版本；Token 仅统计模型返回的用量</small></div>{usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>工作区</th><th>功能</th><th>模型</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th><th>已核算</th><th>待核算</th><th>报告成本</th></tr></thead><tbody>{usage.map((item,index) => <tr key={`${item.organization_id}-${item.feature}-${item.model_slug}-${index}`}><td title={item.organization_id}>{shortId(item.organization_id)}</td><td>{featureName(item.feature)}</td><td>{item.model_slug}</td><td>{numberFormat(item.invocation_count)}</td><td><TokenUsageCell cachedReadInputTokens={item.cached_read_input_tokens} cachedWriteInputTokens={item.cached_write_input_tokens} inputTokens={item.input_tokens} invocationCount={item.invocation_count} outputTokens={item.output_tokens} reasoningTokens={item.reasoning_tokens} tokenUsageInvocationCount={item.token_usage_invocation_count} totalTokens={item.total_tokens} /></td><td>{numberFormat(item.costed_invocation_count)}</td><td>{numberFormat(item.unavailable_cost_invocation_count)}</td><td>{currencyFromMicros(item.reported_cost_cny_micros)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有可汇总的用量。" />}</div>}
       {state === "ready" && tab === "resources" && <div className="admin-resource-stack">
         <section className="admin-table-panel"><div className="admin-table-note"><span>Provider</span><small>凭据名称与密钥均不在管理界面显示</small></div>{providers.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>名称</th><th>驱动</th><th>端点</th><th>凭据</th><th>状态</th></tr></thead><tbody>{providers.map((item) => <tr key={item.provider_id}><td><strong>{item.display_name}</strong><small>{item.slug}</small></td><td>{item.driver}</td><td className="admin-cell-truncate" title={item.endpoint_url}>{item.endpoint_url}</td><td>服务端托管</td><td><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="尚未配置 AI Provider。" />}</section>
         <section className="admin-table-panel"><div className="admin-table-note"><span>模型</span><small>{models.length} 个模型配置</small></div>{models.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>模型</th><th>Provider</th><th>能力</th><th>上下文</th><th>最大输出</th><th>状态</th></tr></thead><tbody>{models.map((item) => <tr key={item.model_id}><td><strong>{item.display_name}</strong><small>{item.slug}</small></td><td>{item.provider_slug}</td><td>{item.capabilities.join("、") || "—"}</td><td>{item.context_window_tokens ? numberFormat(item.context_window_tokens) : "—"}</td><td>{item.max_output_tokens ? numberFormat(item.max_output_tokens) : "—"}</td><td><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="尚未配置模型。" />}</section>

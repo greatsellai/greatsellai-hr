@@ -1700,6 +1700,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 potentially_billed_invocation_count=(
                     row.potentially_billed_invocation_count
                 ),
+                token_usage_invocation_count=row.token_usage_invocation_count,
+                total_tokens=row.total_tokens,
             )
             for row in rows
         ]
@@ -1748,6 +1750,13 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     row.potentially_billed_invocation_count
                 ),
                 reported_cost_cny_micros=row.reported_cost_cny_micros,
+                token_usage_invocation_count=row.token_usage_invocation_count,
+                input_tokens=row.input_tokens,
+                cached_read_input_tokens=row.cached_read_input_tokens,
+                cached_write_input_tokens=row.cached_write_input_tokens,
+                output_tokens=row.output_tokens,
+                reasoning_tokens=row.reasoning_tokens,
+                total_tokens=row.total_tokens,
                 known_run_count=row.known_run_count,
                 partial_run_count=row.partial_run_count,
                 unavailable_run_count=row.unavailable_run_count,

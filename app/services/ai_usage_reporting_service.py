@@ -77,6 +77,8 @@ class AiRunUsageSummary:
     cost_status: str
     invocation_count: int
     potentially_billed_invocation_count: int
+    token_usage_invocation_count: int
+    total_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +100,79 @@ class AiUsageAggregate:
     unavailable_cost_invocation_count: int
     potentially_billed_invocation_count: int
     reported_cost_cny_micros: int
+    token_usage_invocation_count: int
+    input_tokens: int
+    cached_read_input_tokens: int
+    cached_write_input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    total_tokens: int
     known_run_count: int
     partial_run_count: int
     unavailable_run_count: int
+
+
+def _has_provider_usage() -> object:
+    """Return the durable condition for provider-reported metering.
+
+    Token columns are nullable because historical or failed calls may not have
+    returned a usage object.  The gateway writes ``usage_source='provider'``
+    only after a provider returned a recognized usage payload, so this is more
+    precise than treating a numeric zero as missing data.
+    """
+
+    return ApiInvocation.usage_source == "provider"
+
+
+def _provider_usage_invocation_count() -> object:
+    return func.coalesce(
+        func.sum(case((_has_provider_usage(), 1), else_=0)),
+        0,
+    ).label("token_usage_invocation_count")
+
+
+def _sum_provider_token_bucket(column: object, *, label: str) -> object:
+    """Sum a disjoint token bucket only when the provider reported usage."""
+
+    return func.coalesce(
+        func.sum(
+            case(
+                (_has_provider_usage(), func.coalesce(column, 0)),
+                else_=0,
+            )
+        ),
+        0,
+    ).label(label)
+
+
+def _metered_token_total_expression() -> object:
+    """Return the ledger's non-overlapping total-token expression.
+
+    Cached and reasoning quantities are stored in dedicated buckets and
+    removed from input/output at gateway normalization time.  Summing these
+    buckets therefore matches the quantity used by the cost ledger without
+    charging the same token twice.
+    """
+
+    return (
+        func.coalesce(ApiInvocation.input_tokens, 0)
+        + func.coalesce(ApiInvocation.cached_read_input_tokens, 0)
+        + func.coalesce(ApiInvocation.cached_write_input_tokens, 0)
+        + func.coalesce(ApiInvocation.output_tokens, 0)
+        + func.coalesce(ApiInvocation.reasoning_tokens, 0)
+    )
+
+
+def _sum_provider_total_tokens() -> object:
+    return func.coalesce(
+        func.sum(
+            case(
+                (_has_provider_usage(), _metered_token_total_expression()),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("total_tokens")
 
 
 def list_platform_ai_run_summaries(
@@ -124,6 +196,8 @@ def list_platform_ai_run_summaries(
         ),
         0,
     ).label("potentially_billed_invocation_count")
+    token_usage_invocation_count = _provider_usage_invocation_count()
+    total_tokens = _sum_provider_total_tokens()
 
     statement = (
         select(
@@ -138,6 +212,8 @@ def list_platform_ai_run_summaries(
             AiRun.cost_status,
             func.count(ApiInvocation.id).label("invocation_count"),
             potentially_billed_count,
+            token_usage_invocation_count,
+            total_tokens,
         )
         .select_from(AiRun)
         .outerjoin(
@@ -181,6 +257,10 @@ def list_platform_ai_run_summaries(
             potentially_billed_invocation_count=int(
                 row["potentially_billed_invocation_count"] or 0
             ),
+            token_usage_invocation_count=int(
+                row["token_usage_invocation_count"] or 0
+            ),
+            total_tokens=int(row["total_tokens"] or 0),
         )
         for row in rows
     ]
@@ -218,6 +298,28 @@ def summarize_platform_ai_usage(
             )
         )
     ).label("unavailable_run_count")
+    token_usage_invocation_count = _provider_usage_invocation_count()
+    input_tokens = _sum_provider_token_bucket(
+        ApiInvocation.input_tokens,
+        label="input_tokens",
+    )
+    cached_read_input_tokens = _sum_provider_token_bucket(
+        ApiInvocation.cached_read_input_tokens,
+        label="cached_read_input_tokens",
+    )
+    cached_write_input_tokens = _sum_provider_token_bucket(
+        ApiInvocation.cached_write_input_tokens,
+        label="cached_write_input_tokens",
+    )
+    output_tokens = _sum_provider_token_bucket(
+        ApiInvocation.output_tokens,
+        label="output_tokens",
+    )
+    reasoning_tokens = _sum_provider_token_bucket(
+        ApiInvocation.reasoning_tokens,
+        label="reasoning_tokens",
+    )
+    total_tokens = _sum_provider_total_tokens()
 
     statement = (
         select(
@@ -249,6 +351,13 @@ def summarize_platform_ai_usage(
                 ),
                 0,
             ).label("reported_cost_cny_micros"),
+            token_usage_invocation_count,
+            input_tokens,
+            cached_read_input_tokens,
+            cached_write_input_tokens,
+            output_tokens,
+            reasoning_tokens,
+            total_tokens,
             known_run_count,
             partial_run_count,
             unavailable_run_count,
@@ -283,6 +392,17 @@ def summarize_platform_ai_usage(
                 row["potentially_billed_invocation_count"] or 0
             ),
             reported_cost_cny_micros=int(row["reported_cost_cny_micros"] or 0),
+            token_usage_invocation_count=int(
+                row["token_usage_invocation_count"] or 0
+            ),
+            input_tokens=int(row["input_tokens"] or 0),
+            cached_read_input_tokens=int(row["cached_read_input_tokens"] or 0),
+            cached_write_input_tokens=int(
+                row["cached_write_input_tokens"] or 0
+            ),
+            output_tokens=int(row["output_tokens"] or 0),
+            reasoning_tokens=int(row["reasoning_tokens"] or 0),
+            total_tokens=int(row["total_tokens"] or 0),
             known_run_count=int(row["known_run_count"] or 0),
             partial_run_count=int(row["partial_run_count"] or 0),
             unavailable_run_count=int(row["unavailable_run_count"] or 0),

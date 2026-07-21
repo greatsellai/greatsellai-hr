@@ -108,6 +108,28 @@ def test_upload_backup_validation_rejects_traversal_members(tmp_path: Path) -> N
         runner._validate_upload_archive(archive_path)
 
 
+def test_named_upload_volume_is_initialized_for_the_unprivileged_app_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _load_runner()
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_docker(*arguments: str, **kwargs: object) -> str:
+        calls.append((arguments, kwargs))
+        return ""
+
+    monkeypatch.setattr(runner, "_docker", fake_docker)
+
+    runner._create_volume(volume_name="synthetic-uploads", run_label="synthetic-run")
+
+    assert calls[0][0][:2] == ("volume", "create")
+    initialize_arguments, initialize_kwargs = calls[1]
+    assert initialize_arguments[:4] == ("run", "--rm", "--network", "none")
+    assert "type=volume,src=synthetic-uploads,dst=/uploads" in initialize_arguments
+    assert "mkdir -p /uploads && chown -R 10001:10001 /uploads" in initialize_arguments
+    assert initialize_kwargs["label"] == "temporary_upload_volume_initialize"
+
+
 def test_release_scripts_require_paired_recovery_and_explicit_targeting() -> None:
     helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
         encoding="utf-8"

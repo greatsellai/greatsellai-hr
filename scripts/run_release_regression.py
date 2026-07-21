@@ -360,6 +360,24 @@ def _create_volume(*, volume_name: str, run_label: str) -> None:
         volume_name,
         label="temporary_upload_volume_create",
     )
+    # Docker creates an empty named volume as root. The production image runs
+    # as appuser (UID/GID 10001), so initialize the harness volume explicitly
+    # instead of letting a root-owned mount hide a permission regression.
+    _docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        *_resource_label_arguments(run_label),
+        "--mount",
+        _volume_mount(volume_name=volume_name, destination="/uploads"),
+        "postgres:16-alpine",
+        "sh",
+        "-ceu",
+        "mkdir -p /uploads && chown -R 10001:10001 /uploads",
+        label="temporary_upload_volume_initialize",
+        capture=False,
+    )
 
 
 def _sha256(path: Path) -> str:

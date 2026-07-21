@@ -1,7 +1,9 @@
 # 发布运行时回归执行手册
 
 这套 harness 只使用运行时生成的合成数据。它不会读取 `.env.production`、不会启动
-`compose.yml`、不会映射宿主机端口、不会使用既有 Docker 卷，也不会连接服务器。
+`compose.yml`、不会映射宿主机端口、不会使用既有 Docker 卷，也不会连接服务器。文档提取
+容器显式使用 Docker `--network none`；恢复演练的应用与 PostgreSQL 只加入 Docker
+`--internal` 临时网络，不能访问外网。
 
 ## 前置条件
 
@@ -10,7 +12,32 @@
 - 首次执行允许 Docker 拉取 `postgres:16-alpine`，并构建项目 `Dockerfile`。
 
 运行时会生成随机数据库口令，但该值只存在于子进程环境中，不会写入仓库、日志、备份或
-输出。所有容器、网络、临时 PostgreSQL 数据和临时上传文件都会在结束时删除。
+输出。正常退出或可捕获的异常时，所有容器、网络、临时 PostgreSQL 数据、临时上传文件和
+脚本构建的临时镜像都会自动删除。
+
+每次运行还会给其 Docker 资源打上以下标签，便于主机被强制关机、Docker daemon 崩溃等无法
+执行 `finally` 的情况后进行精确清理：
+
+- `com.greatsell.release-regression=true`
+- `com.greatsell.release-regression.run=<本次随机运行 ID>`
+
+PowerShell 清理异常遗留资源：
+
+```powershell
+$filter = 'label=com.greatsell.release-regression=true'
+docker ps -aq --filter $filter | ForEach-Object { docker rm -f $_ }
+docker network ls -q --filter $filter | ForEach-Object { docker network rm $_ }
+docker image ls -q --filter $filter | Sort-Object -Unique | ForEach-Object { docker image rm $_ }
+```
+
+Linux / CI 可使用：
+
+```bash
+filter='label=com.greatsell.release-regression=true'
+docker ps -aq --filter "$filter" | xargs -r docker rm -f
+docker network ls -q --filter "$filter" | xargs -r docker network rm
+docker image ls -q --filter "$filter" | sort -u | xargs -r docker image rm
+```
 
 ## 本地 PowerShell
 
@@ -69,7 +96,7 @@ LibreOffice、Tesseract 或项目的统一 `extract_document_text` 链路。
 2. 写入两个合成工作区、一个简历元数据记录、一个原始文件和两个隔离的邮箱 worker 任务；
 3. 用真实 `pg_dump -Fc` 备份数据库，并用 tar.gz 备份 uploads；
 4. 恢复到新的临时 PostgreSQL 和新的 uploads 目录，校验 Alembic head、工作区归属、原文件 SHA-256 与业务记录；
-5. 让主工作区的 `running + expired lease` 邮箱任务通过真实 worker recovery/claim 函数回到队列并被重新领取，同时断言第二工作区任务没有被触碰。
+5. 让主工作区各一条 `running + expired lease` 邮箱后台任务与 AI 提取任务分别通过其真实 worker recovery/claim 函数回到队列并被重新领取，同时断言第二工作区对应两条任务都没有被触碰。
 
 这不是生产备份替代品：生产备份、保留期限、异地副本和恢复授权仍由部署负责人按
 `docs/DEPLOYMENT.md` 执行。本演练只是将应用迁移、逻辑数据库备份、原文件备份和后台队列

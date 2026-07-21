@@ -229,6 +229,10 @@ def _settings(database_url: str, uploads_dir: Path) -> object:
         database_url=database_url,
         auto_create_schema=False,
         seed_registry_on_startup=False,
+        # This makes the extraction queue claimable without creating a
+        # runnable legacy route or sending a provider request. The recovery
+        # exercise stops after a lease-protected claim.
+        ai_provider_credentials={"release-regression": "synthetic-not-a-secret"},
     )
 
 
@@ -238,7 +242,15 @@ def run_database_seed() -> None:
     from datetime import datetime, timezone
 
     from app.database import Database
-    from app.models import Candidate, MailboxBackgroundJob, MailboxConfig, Organization, Resume
+    from app.models import (
+        Candidate,
+        MailboxBackgroundJob,
+        MailboxConfig,
+        Organization,
+        Resume,
+        ResumeAiExtractionJob,
+        ResumeSourceBlock,
+    )
     from app.tenant_scope import clear_organization_context, set_organization_context
 
     database_url = _database_url()
@@ -300,19 +312,38 @@ def run_database_seed() -> None:
                 )
                 session.add_all((resume, mailbox))
                 session.flush()
-                expired_job = MailboxBackgroundJob(
+                source_block = ResumeSourceBlock(
+                    resume_id=resume.id,
+                    block_id="page-001",
+                    page_no=1,
+                    block_type="text",
+                    text="SYNTHETIC AI RECOVERY MARKER",
+                )
+                expired_mailbox_job = MailboxBackgroundJob(
                     mailbox_config_id=mailbox.id,
                     job_kind="sync",
                     trigger_type="manual",
                     status="running",
                     attempt_count=1,
                     max_attempts=3,
-                    lease_owner="crashed-worker",
+                    lease_owner="crashed-mailbox-worker",
                     lease_expires_at=now - timedelta(minutes=5),
                     requested_at=now - timedelta(minutes=10),
                     started_at=now - timedelta(minutes=6),
                 )
-                session.add(expired_job)
+                expired_ai_job = ResumeAiExtractionJob(
+                    resume_id=resume.id,
+                    job_kind="initial",
+                    status="running",
+                    attempt_count=1,
+                    max_attempts=3,
+                    input_facts_version=0,
+                    lease_owner="crashed-ai-worker",
+                    lease_expires_at=now - timedelta(minutes=5),
+                    requested_at=now - timedelta(minutes=10),
+                    started_at=now - timedelta(minutes=6),
+                )
+                session.add_all((source_block, expired_mailbox_job, expired_ai_job))
                 # Flush before changing workspace context.  The ORM tenant
                 # guard intentionally rejects a pending row from workspace A
                 # if it is accidentally flushed while workspace B is active.
@@ -322,6 +353,23 @@ def run_database_seed() -> None:
 
             set_organization_context(session, secondary_organization.id)
             try:
+                secondary_candidate = Candidate(display_name="Synthetic isolated candidate")
+                session.add(secondary_candidate)
+                session.flush()
+                secondary_resume = Resume(
+                    candidate_id=secondary_candidate.id,
+                    original_filename="synthetic-isolated-resume.pdf",
+                    storage_key=f"{secondary_organization.id}/synthetic-isolated-resume.pdf",
+                    sha256=hashlib.sha256(b"Synthetic isolated resume.").hexdigest(),
+                    source_page_count=1,
+                    parsed_page_count=1,
+                    extraction_status="text_ready",
+                    quality_flags=[],
+                    parser_version="release-regression",
+                    is_active=False,
+                    facts_version=0,
+                    raw_text="SYNTHETIC ISOLATED MARKER",
+                )
                 secondary_mailbox = MailboxConfig(
                     display_name="Synthetic isolated mailbox",
                     display_name_key="synthetic isolated mailbox",
@@ -332,9 +380,9 @@ def run_database_seed() -> None:
                     encrypted_password="synthetic-not-a-secret",
                     enabled=True,
                 )
-                session.add(secondary_mailbox)
+                session.add_all((secondary_resume, secondary_mailbox))
                 session.flush()
-                untouched_job = MailboxBackgroundJob(
+                untouched_mailbox_job = MailboxBackgroundJob(
                     mailbox_config_id=secondary_mailbox.id,
                     job_kind="sync",
                     trigger_type="manual",
@@ -344,7 +392,17 @@ def run_database_seed() -> None:
                     next_attempt_at=now + timedelta(days=1),
                     requested_at=now,
                 )
-                session.add(untouched_job)
+                untouched_ai_job = ResumeAiExtractionJob(
+                    resume_id=secondary_resume.id,
+                    job_kind="initial",
+                    status="queued",
+                    attempt_count=0,
+                    max_attempts=3,
+                    input_facts_version=0,
+                    next_attempt_at=now + timedelta(days=1),
+                    requested_at=now,
+                )
+                session.add_all((untouched_mailbox_job, untouched_ai_job))
                 session.flush()
             finally:
                 clear_organization_context(session)
@@ -363,8 +421,8 @@ def run_database_verify() -> None:
     from sqlalchemy import select
 
     from app.database import Database
-    from app.models import MailboxBackgroundJob, Organization, Resume
-    from app.services import mailbox_background_job_service
+    from app.models import MailboxBackgroundJob, Organization, Resume, ResumeAiExtractionJob
+    from app.services import ai_extraction_job_service, mailbox_background_job_service
     from app.tenant_scope import clear_organization_context, set_organization_context
 
     database_url = _database_url()
@@ -391,17 +449,25 @@ def run_database_verify() -> None:
                         Resume.original_filename == "synthetic-recovery-resume.pdf"
                     )
                 )
-                expired_job = session.scalar(
+                expired_mailbox_job = session.scalar(
                     select(MailboxBackgroundJob).where(
                         MailboxBackgroundJob.status == "running",
-                        MailboxBackgroundJob.lease_owner == "crashed-worker",
+                        MailboxBackgroundJob.lease_owner == "crashed-mailbox-worker",
+                    )
+                )
+                expired_ai_job = session.scalar(
+                    select(ResumeAiExtractionJob).where(
+                        ResumeAiExtractionJob.status == "running",
+                        ResumeAiExtractionJob.lease_owner == "crashed-ai-worker",
                     )
                 )
             finally:
                 clear_organization_context(session)
             _assert(resume is not None, "restored_resume_missing")
-            _assert(expired_job is not None, "restored_expired_job_missing")
-            _assert(expired_job.organization_id == primary.id, "restored_job_workspace_mismatch")
+            _assert(expired_mailbox_job is not None, "restored_expired_mailbox_job_missing")
+            _assert(expired_ai_job is not None, "restored_expired_ai_job_missing")
+            _assert(expired_mailbox_job.organization_id == primary.id, "restored_mailbox_job_workspace_mismatch")
+            _assert(expired_ai_job.organization_id == primary.id, "restored_ai_job_workspace_mismatch")
             original_path = uploads_dir / resume.storage_key
             _assert(original_path.is_file(), "restored_original_missing")
             _assert(
@@ -409,8 +475,8 @@ def run_database_verify() -> None:
                 "restored_original_sha256_mismatch",
             )
 
-        # Invoke the exact worker recovery function, then invoke its normal
-        # claim function after the deliberate one-second retry backoff.  No
+        # Invoke the exact mailbox worker recovery function, then its normal
+        # claim function after the deliberate one-second retry backoff. No
         # IMAP connection is opened: this proves a restart can reclaim a
         # durable queue record before slow external work begins.
         with database.session_factory() as session:
@@ -423,20 +489,30 @@ def run_database_verify() -> None:
         with database.session_factory() as session:
             set_organization_context(session, primary.id)
             try:
-                recovered = session.get(MailboxBackgroundJob, expired_job.id)
+                recovered_mailbox_job = session.get(MailboxBackgroundJob, expired_mailbox_job.id)
             finally:
                 clear_organization_context(session)
-            _assert(recovered is not None, "recovered_job_missing")
-            _assert(recovered.status == "queued", "expired_lease_not_requeued")
+            _assert(recovered_mailbox_job is not None, "recovered_mailbox_job_missing")
+            _assert(recovered_mailbox_job.status == "queued", "expired_mailbox_lease_not_requeued")
             _assert(
-                recovered.last_error == "mailbox_background_job_lease_expired",
-                "expired_lease_error_missing",
+                recovered_mailbox_job.last_error == "mailbox_background_job_lease_expired",
+                "expired_mailbox_lease_error_missing",
             )
-            _assert(recovered.lease_owner is None and recovered.lease_expires_at is None, "expired_lease_not_cleared")
-            _assert(recovered.next_attempt_at is not None, "expired_lease_retry_not_scheduled")
+            _assert(
+                recovered_mailbox_job.lease_owner is None
+                and recovered_mailbox_job.lease_expires_at is None,
+                "expired_mailbox_lease_not_cleared",
+            )
+            _assert(
+                recovered_mailbox_job.next_attempt_at is not None,
+                "expired_mailbox_lease_retry_not_scheduled",
+            )
             wait_seconds = max(
                 0.0,
-                (recovered.next_attempt_at - datetime.now(timezone.utc)).total_seconds(),
+                (
+                    recovered_mailbox_job.next_attempt_at
+                    - datetime.now(timezone.utc)
+                ).total_seconds(),
             )
 
         if wait_seconds:
@@ -446,30 +522,84 @@ def run_database_verify() -> None:
             settings=settings,
             worker_id="recovery-regression-worker",
         )
-        _assert(claimed is not None, "recovered_job_not_claimable")
-        _assert(claimed.organization_id == primary.id, "recovered_job_claimed_cross_workspace")
+        _assert(claimed is not None, "recovered_mailbox_job_not_claimable")
+        _assert(claimed.organization_id == primary.id, "recovered_mailbox_job_claimed_cross_workspace")
+
+        # AI extraction has a different lease/retry implementation from the
+        # mailbox queue. Exercise its own recovery and global claim code with
+        # an inert in-memory credential map; no provider execution follows.
+        with database.session_factory() as session:
+            ai_extraction_job_service._recover_expired_leases(
+                session,
+                now=datetime.now(timezone.utc),
+            )
+            session.commit()
 
         with database.session_factory() as session:
             set_organization_context(session, primary.id)
             try:
-                reclaimed = session.get(MailboxBackgroundJob, expired_job.id)
+                recovered_ai_job = session.get(ResumeAiExtractionJob, expired_ai_job.id)
+            finally:
+                clear_organization_context(session)
+            _assert(recovered_ai_job is not None, "recovered_ai_job_missing")
+            _assert(recovered_ai_job.status == "queued", "expired_ai_lease_not_requeued")
+            _assert(
+                recovered_ai_job.last_error == "ai_extraction_worker_lease_expired",
+                "expired_ai_lease_error_missing",
+            )
+            _assert(
+                recovered_ai_job.lease_owner is None
+                and recovered_ai_job.lease_expires_at is None,
+                "expired_ai_lease_not_cleared",
+            )
+
+        ai_claimed = ai_extraction_job_service._claim_next_job(
+            database,
+            settings=settings,
+            worker_id="recovery-regression-ai-worker",
+        )
+        _assert(ai_claimed is not None, "recovered_ai_job_not_claimable")
+        _assert(ai_claimed.organization_id == primary.id, "recovered_ai_job_claimed_cross_workspace")
+
+        with database.session_factory() as session:
+            set_organization_context(session, primary.id)
+            try:
+                reclaimed_mailbox_job = session.get(MailboxBackgroundJob, expired_mailbox_job.id)
+                reclaimed_ai_job = session.get(ResumeAiExtractionJob, expired_ai_job.id)
             finally:
                 clear_organization_context(session)
             set_organization_context(session, secondary.id)
             try:
-                untouched = session.scalar(
+                untouched_mailbox_job = session.scalar(
                     select(MailboxBackgroundJob).where(
                         MailboxBackgroundJob.status == "queued"
                     )
                 )
+                untouched_ai_job = session.scalar(
+                    select(ResumeAiExtractionJob).where(
+                        ResumeAiExtractionJob.status == "queued"
+                    )
+                )
             finally:
                 clear_organization_context(session)
-            _assert(reclaimed is not None, "reclaimed_job_missing")
-            _assert(reclaimed.status == "running", "recovered_job_not_running_after_claim")
-            _assert(reclaimed.lease_owner == "recovery-regression-worker", "recovered_job_owner_mismatch")
-            _assert(untouched is not None, "secondary_workspace_job_missing")
-            _assert(untouched.organization_id == secondary.id, "secondary_workspace_job_changed")
-            _assert(untouched.attempt_count == 0, "secondary_workspace_job_claimed")
+            _assert(reclaimed_mailbox_job is not None, "reclaimed_mailbox_job_missing")
+            _assert(reclaimed_mailbox_job.status == "running", "recovered_mailbox_job_not_running_after_claim")
+            _assert(
+                reclaimed_mailbox_job.lease_owner == "recovery-regression-worker",
+                "recovered_mailbox_job_owner_mismatch",
+            )
+            _assert(reclaimed_ai_job is not None, "reclaimed_ai_job_missing")
+            _assert(reclaimed_ai_job.status == "running", "recovered_ai_job_not_running_after_claim")
+            _assert(
+                reclaimed_ai_job.lease_owner == "recovery-regression-ai-worker",
+                "recovered_ai_job_owner_mismatch",
+            )
+            _assert(untouched_mailbox_job is not None, "secondary_workspace_mailbox_job_missing")
+            _assert(untouched_mailbox_job.organization_id == secondary.id, "secondary_workspace_mailbox_job_changed")
+            _assert(untouched_mailbox_job.attempt_count == 0, "secondary_workspace_mailbox_job_claimed")
+            _assert(untouched_ai_job is not None, "secondary_workspace_ai_job_missing")
+            _assert(untouched_ai_job.organization_id == secondary.id, "secondary_workspace_ai_job_changed")
+            _assert(untouched_ai_job.attempt_count == 0, "secondary_workspace_ai_job_claimed")
     finally:
         database.dispose()
 

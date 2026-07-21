@@ -14,9 +14,7 @@ host data directories.
 from __future__ import annotations
 
 import argparse
-import os
 import secrets
-import shutil
 import subprocess
 import sys
 import tarfile
@@ -29,6 +27,8 @@ from uuid import uuid4
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_RUNNER = REPOSITORY_ROOT / "scripts" / "runtime_release_regression.py"
+REGRESSION_LABEL = "com.greatsell.release-regression"
+REGRESSION_RUN_LABEL = "com.greatsell.release-regression.run"
 
 
 class RegressionFailure(RuntimeError):
@@ -37,6 +37,7 @@ class RegressionFailure(RuntimeError):
 
 @dataclass(frozen=True)
 class RuntimeResources:
+    run_label: str
     network: str
     source_postgres: str
     restored_postgres: str
@@ -97,9 +98,21 @@ def _assert_docker_available() -> None:
     _docker("version", "--format", "{{.Server.Version}}", label="docker_unavailable")
 
 
-def _build_image(tag: str) -> None:
+def _resource_label_arguments(run_label: str) -> tuple[str, ...]:
+    """Tag every harness-owned Docker resource for safe post-crash cleanup."""
+
+    return (
+        "--label",
+        f"{REGRESSION_LABEL}=true",
+        "--label",
+        f"{REGRESSION_RUN_LABEL}={run_label}",
+    )
+
+
+def _build_image(tag: str, *, run_label: str) -> None:
     _docker(
         "build",
+        *_resource_label_arguments(run_label),
         "--build-arg",
         "DEBIAN_MIRROR=deb.debian.org",
         "--build-arg",
@@ -123,6 +136,12 @@ def _run_document_regression(image: str, prefix: str) -> None:
         "--rm",
         "--name",
         f"{prefix}-documents",
+        *_resource_label_arguments(prefix),
+        # Document extraction does not need a database or external network.
+        # Make the no-server boundary an enforced Docker property instead of
+        # relying only on the harness code never opening a socket.
+        "--network",
+        "none",
         "--mount",
         _runtime_mount(),
         image,
@@ -135,17 +154,40 @@ def _run_document_regression(image: str, prefix: str) -> None:
 
 
 def _wait_for_postgres(container_name: str, *, database_password: str) -> None:
+    """Require two successful SQL probes before using a new database.
+
+    ``pg_isready`` alone can briefly report ready while an init/restart edge is
+    still closing the server. A real query twice in succession prevents the
+    backup/restore exercise from accepting that transient state as healthy.
+    """
+
     deadline = time.monotonic() + 60
+    consecutive_successes = 0
     while time.monotonic() < deadline:
         result = subprocess.run(
-            ["docker", "exec", container_name, "pg_isready", "-U", "regression", "-d", "regression"],
+            [
+                "docker",
+                "exec",
+                container_name,
+                "psql",
+                "-U",
+                "regression",
+                "-d",
+                "regression",
+                "-Atqc",
+                "SELECT 1",
+            ],
             cwd=REPOSITORY_ROOT,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
         )
-        if result.returncode == 0:
-            return
+        if result.returncode == 0 and result.stdout.strip() == b"1":
+            consecutive_successes += 1
+            if consecutive_successes >= 2:
+                return
+        else:
+            consecutive_successes = 0
         time.sleep(1)
     raise RegressionFailure("temporary_postgres_not_ready")
 
@@ -155,6 +197,7 @@ def _start_postgres(
     container_name: str,
     network: str,
     database_password: str,
+    run_label: str,
 ) -> None:
     _docker(
         "run",
@@ -165,6 +208,7 @@ def _start_postgres(
         network,
         "--network-alias",
         container_name,
+        *_resource_label_arguments(run_label),
         "--env",
         "POSTGRES_DB=regression",
         "--env",
@@ -197,6 +241,7 @@ def _run_seed(
         resources.seed_container,
         "--network",
         resources.network,
+        *_resource_label_arguments(resources.run_label),
         "--mount",
         _runtime_mount(),
         "--env",
@@ -253,34 +298,45 @@ def _restore_database(
     source: Path,
     password: str,
 ) -> None:
-    with source.open("rb") as backup:
-        completed = subprocess.run(
-            [
-                "docker",
-                "exec",
-                "--interactive",
-                postgres_container,
-                "pg_restore",
-                "-U",
-                "regression",
-                "-d",
-                "regression",
-                "--clean",
-                "--if-exists",
-                "--no-owner",
-            ],
-            cwd=REPOSITORY_ROOT,
-            stdin=backup,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-    if completed.returncode != 0:
-        details = _redact(
+    command = [
+        "docker",
+        "exec",
+        "--interactive",
+        postgres_container,
+        "pg_restore",
+        "-U",
+        "regression",
+        "-d",
+        "regression",
+        "--clean",
+        "--if-exists",
+        "--no-owner",
+    ]
+    transient_errors = ("database system is shutting down", "database system is starting up")
+    last_details = ""
+    for attempt in range(3):
+        with source.open("rb") as backup:
+            completed = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                stdin=backup,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        if completed.returncode == 0:
+            return
+        last_details = _redact(
             completed.stderr.decode("utf-8", errors="replace")[-500:],
             secrets_to_redact=(password,),
         )
-        raise RegressionFailure(f"temporary_database_restore_failed_exit_{completed.returncode}: {details}")
+        if attempt < 2 and any(error in last_details.lower() for error in transient_errors):
+            _wait_for_postgres(postgres_container, database_password=password)
+            continue
+        break
+    raise RegressionFailure(
+        f"temporary_database_restore_failed_exit_{completed.returncode}: {last_details}"
+    )
 
 
 def _archive_uploads(source: Path, archive_path: Path) -> None:
@@ -331,6 +387,7 @@ def _run_restore_verify(
         f"{resources.seed_container}-verify",
         "--network",
         resources.network,
+        *_resource_label_arguments(resources.run_label),
         "--mount",
         _runtime_mount(),
         "--mount",
@@ -364,17 +421,26 @@ def _run_postgres_recovery(image: str, prefix: str) -> None:
 
     password = secrets.token_urlsafe(24)
     resources = RuntimeResources(
+        run_label=prefix,
         network=f"{prefix}-network",
         source_postgres=f"{prefix}-postgres-source",
         restored_postgres=f"{prefix}-postgres-restored",
         seed_container=f"{prefix}-seed",
     )
-    _docker("network", "create", resources.network, label="temporary_network_create")
+    _docker(
+        "network",
+        "create",
+        "--internal",
+        *_resource_label_arguments(resources.run_label),
+        resources.network,
+        label="temporary_network_create",
+    )
     try:
         _start_postgres(
             container_name=resources.source_postgres,
             network=resources.network,
             database_password=password,
+            run_label=resources.run_label,
         )
         source_url = _database_url(resources.source_postgres, password)
         _run_seed(
@@ -410,6 +476,7 @@ def _run_postgres_recovery(image: str, prefix: str) -> None:
                 container_name=resources.restored_postgres,
                 network=resources.network,
                 database_password=password,
+                run_label=resources.run_label,
             )
             _restore_database(
                 postgres_container=resources.restored_postgres,
@@ -449,7 +516,7 @@ def main() -> None:
     built_image = arguments.image is None
     try:
         if built_image:
-            _build_image(image)
+            _build_image(image, run_label=prefix)
         if arguments.documents or arguments.all or not arguments.postgres:
             _run_document_regression(image, prefix)
         if arguments.postgres or arguments.all or not arguments.documents:

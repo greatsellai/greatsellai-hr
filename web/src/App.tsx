@@ -492,10 +492,22 @@ const mailboxImportErrorMessages: Record<string, string> = {
   mailbox_config_archived: "该收件通道已归档，不能再同步新邮件。",
   mailbox_not_enabled: "该收件邮箱已暂停，请启用后重试。",
   mailbox_credentials_unavailable: "邮箱授权码无法读取，请重新保存后再同步。",
+  mailbox_imap_host_not_allowed: "该 IMAP 地址不在当前部署允许的服务商范围内。",
+  mailbox_imap_port_not_allowed: "只支持加密 IMAPS 的 993 端口。",
+  mailbox_imap_address_not_allowed: "该 IMAP 地址解析到不安全网络，系统已拒绝连接。",
+  mailbox_imap_dns_failed: "无法安全解析该 IMAP 地址，请检查服务商配置。",
+  mailbox_imap_response_line_too_large: "邮箱返回的数据行超过安全上限，系统已停止本次同步。",
   mailbox_connection_failed: "无法连接邮箱，请检查 IMAP 地址、端口和授权码。",
   mailbox_select_failed: "无法打开指定的邮箱文件夹。",
   mailbox_status_failed: "无法读取邮箱当前位置，请检查文件夹设置后重试。",
   mailbox_source_epoch_changed: "邮箱来源标识已变化，通道已暂停，请归档后新建。",
+  mailbox_message_too_large: "邮件超过系统可处理大小，已跳过且不会重复下载。",
+  mailbox_message_headers_too_large: "邮件头超过系统可处理范围，已安全跳过。",
+  mailbox_mime_structure_too_complex: "邮件 MIME 结构过于复杂，已安全跳过。",
+  mailbox_attachment_count_exceeded: "邮件附件数量超过单封处理上限，已安全跳过。",
+  mailbox_attachment_too_large: "邮件中的简历附件超过单个文件上限，已安全跳过。",
+  mailbox_attachment_total_too_large: "邮件中的简历附件总量超过单封处理上限，已安全跳过。",
+  mailbox_search_response_too_large: "邮箱待处理邮件范围过大，系统暂未展开扫描。",
   attachment_validation_failed: "附件未通过文件校验，请候选人重新发送。",
   attachment_text_extraction_failed: "附件文字提取失败，请候选人重新发送清晰原件。",
   attachment_import_failed: "附件暂时无法入库，请稍后重试。",
@@ -5016,13 +5028,21 @@ function mailboxDraftFromConfig(config: MailboxConfig): MailboxDraft {
 }
 
 function mailboxChannelStatus(config: MailboxConfig): string {
+  if (config.active_sync_alert) return "需处理";
   if (config.archived_at) return "已归档";
   return config.enabled ? "已启用" : "已暂停";
 }
 
 function mailboxChannelStatusClass(config: MailboxConfig): string {
+  if (config.active_sync_alert) return " is-error";
   if (config.archived_at) return "";
   return config.enabled ? " is-success" : " is-warning";
+}
+
+function mailboxSyncAlertTitle(config: MailboxConfig): string {
+  const alert = config.active_sync_alert;
+  if (!alert) return "";
+  return alert.severity === "critical" ? "同步配置需要处理" : "同步持续失败";
 }
 
 function MailboxPage({
@@ -5077,6 +5097,7 @@ function MailboxPage({
       .filter((job) => job.job_kind === "attachment_retry" && job.import_id)
       .flatMap((job) => job.import_id ? [job.import_id] : []),
   );
+  const activeSyncAlerts = mailboxes.filter((item) => item.active_sync_alert);
   const selectedSyncJob = selectedMailboxId
     ? activeMailboxJobs.find(
       (job) => job.mailbox_id === selectedMailboxId && job.job_kind === "sync",
@@ -5243,6 +5264,18 @@ function MailboxPage({
   }, [notify]);
 
   useEffect(() => { void loadInitialData(); }, [loadInitialData]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      // Do not replace the current form draft while the recruiter is editing.
+      // This refresh only brings scheduled-worker alert and health changes
+      // into the channel list when no browser task is active.
+      void api.listMailboxConfigs(true)
+        .then((response) => setMailboxes(response.items))
+        .catch(() => undefined);
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!selectedConfig?.configured) {
@@ -5516,6 +5549,48 @@ function MailboxPage({
         </div>
       </header>
 
+      {activeSyncAlerts.length > 0 && (
+        <section aria-label="需要处理的邮箱同步异常" className="mailbox-sync-alert-list" role="alert">
+          <div className="mailbox-sync-alert-list-heading">
+            <div>
+              <h2>需要处理的同步异常</h2>
+              <p>这些通道的后台同步已连续失败。请检查连接配置后重新同步，成功后提示会自动恢复。</p>
+            </div>
+            <span className="status-pill is-error">{activeSyncAlerts.length} 个通道需处理</span>
+          </div>
+          <div className="mailbox-sync-alert-items">
+            {activeSyncAlerts.map((config) => {
+              const alert = config.active_sync_alert!;
+              const canSync = config.enabled
+                && !config.archived_at
+                && enqueuingMailboxId !== config.mailbox_id
+                && !activeSyncMailboxIds.has(config.mailbox_id);
+              return (
+                <div className="mailbox-sync-alert-item" key={config.mailbox_id}>
+                  <div>
+                    <strong>{config.display_name}</strong>
+                    <span>{mailboxSyncAlertTitle(config)}，连续失败的后台同步任务 {alert.consecutive_failures} 次，最近一次 {formatLibraryDate(alert.last_failed_at)}。</span>
+                    <small>{mailboxImportErrorLabel(alert.last_error_code)}</small>
+                  </div>
+                  <button
+                    className="button button-danger-ghost"
+                    disabled={!canSync}
+                    onClick={() => void syncMailbox(config)}
+                    type="button"
+                  >
+                    {enqueuingMailboxId === config.mailbox_id
+                      ? <><i className="spinner" />正在加入队列</>
+                      : activeSyncMailboxIds.has(config.mailbox_id)
+                        ? <><i className="spinner" />后台同步中</>
+                        : <><Icon name="refresh" size={16} />同步此通道</>}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       <div className="mailbox-workspace">
         <aside className="panel mailbox-channel-panel" aria-label="收件通道">
           <div className="panel-heading mailbox-channel-heading">
@@ -5574,10 +5649,12 @@ function MailboxPage({
                   <div className="field-stack">
                     <label className="field-label" htmlFor="imap-host">IMAP 地址</label>
                     <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-host" onChange={(event) => updateDraft("imapHost", event.target.value)} value={draft.imapHost} />
+                    <p className="field-help">仅可连接服务端已批准的 IMAPS 服务商地址。</p>
                   </div>
                   <div className="field-stack">
                     <label className="field-label" htmlFor="imap-port">端口</label>
                     <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-port" inputMode="numeric" onChange={(event) => updateDraft("imapPort", event.target.value)} value={draft.imapPort} />
+                    <p className="field-help">系统仅接受加密 IMAPS 的 993 端口。</p>
                   </div>
                   <div className="field-stack span-full">
                     <label className="field-label" htmlFor="imap-address">接收简历的邮箱</label>
@@ -5628,6 +5705,24 @@ function MailboxPage({
             <aside className="panel mailbox-status-panel">
               <div className="panel-heading"><div><h2>同步与保留状态</h2><p>各通道独立同步与清理；同一工作区内已处理邮件或相同内容附件不会重复创建候选人，每封邮件仍保留一条处理记录。</p></div></div>
               {selectedConfig ? (
+                <>
+                  {selectedConfig.active_sync_alert && (
+                    <section className="mailbox-sync-alert-detail" role="alert">
+                      <div>
+                        <strong>{mailboxSyncAlertTitle(selectedConfig)}</strong>
+                        <span>连续失败的后台同步任务 {selectedConfig.active_sync_alert.consecutive_failures} 次，最近一次 {formatLibraryDate(selectedConfig.active_sync_alert.last_failed_at)}。</span>
+                        <small>{mailboxImportErrorLabel(selectedConfig.active_sync_alert.last_error_code)}</small>
+                      </div>
+                      <button
+                        className="button button-danger-ghost"
+                        disabled={!selectedConfig.enabled || Boolean(selectedConfig.archived_at) || selectedSyncInProgress}
+                        onClick={() => void syncMailbox(selectedConfig)}
+                        type="button"
+                      >
+                        {selectedSyncInProgress ? <><i className="spinner" />后台同步中</> : <><Icon name="refresh" size={16} />立即同步</>}
+                      </button>
+                    </section>
+                  )}
                 <div className="fact-list">
                   <div className="fact-row"><strong>开始接收</strong><span>{selectedConfig.import_started_at ? formatLibraryDate(selectedConfig.import_started_at) : "正在初始化"}</span></div>
                   <div className="fact-row"><strong>最近同步</strong><span>{selectedConfig.last_synced_at ? formatLibraryDate(selectedConfig.last_synced_at) : "尚未同步"}</span></div>
@@ -5644,6 +5739,7 @@ function MailboxPage({
                   </>}
                   {selectedConfig.last_sync_error && <div className="fact-row"><strong>最近异常</strong><span>{mailboxImportErrorLabel(selectedConfig.last_sync_error)}</span></div>}
                 </div>
+                </>
               ) : (
                 <div className="mailbox-status-empty"><Icon name="history" size={19} /><span>保存后会显示这个通道的接收起点、最近同步时间和异常状态。</span></div>
               )}

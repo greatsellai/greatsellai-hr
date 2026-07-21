@@ -423,11 +423,17 @@ def read_retained_failed_attachment(
     if replica is None:
         return None
     try:
-        content = resolve_mailbox_replica_path(
+        if replica.byte_size < 0 or replica.byte_size > settings.max_upload_bytes:
+            return None
+        path = resolve_mailbox_replica_path(
             settings,
             storage_key=replica.storage_key,
             organization_id=attachment_import.organization_id,
-        ).read_bytes()
+        )
+        file_size = path.stat().st_size
+        if file_size != replica.byte_size or file_size > settings.max_upload_bytes:
+            return None
+        content = path.read_bytes()
     except (OSError, MailboxRetentionError):
         return None
     if hashlib.sha256(content).hexdigest() != replica.content_sha256:

@@ -622,6 +622,63 @@ class MailboxConfig(OrganizationScoped, Base):
     background_jobs: Mapped[list["MailboxBackgroundJob"]] = relationship(
         back_populates="mailbox_config", cascade="all, delete-orphan"
     )
+    sync_failure_alert: Mapped["MailboxSyncFailureAlert | None"] = relationship(
+        back_populates="mailbox_config",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class MailboxSyncFailureAlert(OrganizationScoped, Base):
+    """One durable sync-health incident for a named mailbox source.
+
+    The row contains only stable internal error codes and timestamps. It never
+    stores IMAP credentials, email content, provider diagnostics, or candidate
+    information, so it can safely surface a workspace-local operational alert.
+    """
+
+    __tablename__ = "mailbox_sync_failure_alerts"
+    __table_args__ = (
+        UniqueConstraint(
+            "mailbox_config_id",
+            name="uq_mailbox_sync_failure_alerts_mailbox_config_id",
+        ),
+        Index(
+            "ix_mailbox_sync_failure_alerts_organization_state",
+            "organization_id",
+            "state",
+            "last_failed_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    mailbox_config_id: Mapped[str] = mapped_column(
+        ForeignKey("mailbox_configs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    # ``monitoring`` retains a short failure streak below the alert threshold;
+    # ``open`` is visible in the workspace; ``resolved`` preserves the last
+    # recovery without leaving an active alert behind.
+    state: Mapped[str] = mapped_column(String(16), default="monitoring", index=True)
+    severity: Mapped[str] = mapped_column(String(16), default="warning")
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    first_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(128))
+    # Job history is pruned independently, so this deliberately remains a
+    # plain identifier rather than a foreign key that would block retention.
+    last_job_id: Mapped[str | None] = mapped_column(String(36))
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    mailbox_config: Mapped[MailboxConfig] = relationship(
+        back_populates="sync_failure_alert"
+    )
 
 
 class EmailAttachmentImport(OrganizationScoped, Base):

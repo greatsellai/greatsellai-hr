@@ -807,6 +807,16 @@ class MailboxConfigUpdate(ApiModel):
     enabled: bool = True
 
 
+class MailboxSyncAlertSummary(ApiModel):
+    """A safe, workspace-local summary of an open mailbox sync incident."""
+
+    severity: Literal["warning", "critical"]
+    consecutive_failures: int
+    opened_at: datetime
+    last_failed_at: datetime
+    last_error_code: str
+
+
 class MailboxConfigResponse(ApiModel):
     configured: bool
     mailbox_id: str | None = None
@@ -822,6 +832,7 @@ class MailboxConfigResponse(ApiModel):
     import_started_at: datetime | None = None
     last_synced_at: datetime | None = None
     last_sync_error: str | None = None
+    active_sync_alert: MailboxSyncAlertSummary | None = None
 
 
 class MailboxConfigListResponse(ApiModel):

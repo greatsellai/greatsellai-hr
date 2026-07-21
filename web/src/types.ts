@@ -151,6 +151,16 @@ export interface MailboxConfig {
   import_started_at: string | null;
   last_synced_at: string | null;
   last_sync_error: string | null;
+  /** Present only when this channel has an unresolved terminal sync incident. */
+  active_sync_alert: MailboxSyncAlertSummary | null;
+}
+
+export interface MailboxSyncAlertSummary {
+  severity: "warning" | "critical";
+  consecutive_failures: number;
+  opened_at: string;
+  last_failed_at: string;
+  last_error_code: string;
 }
 
 export interface MailboxConfigCreate {

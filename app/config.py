@@ -59,6 +59,26 @@ class AppSettings:
     # following run resumes older unseen message UIDs after newer ones are
     # recorded, so the worker remains responsive on large mailboxes.
     mailbox_sync_attachment_limit: int = 20
+    # IMAP endpoints are deployment-owned infrastructure, never arbitrary
+    # destinations supplied by a workspace. The transport resolves these
+    # exact names again for every connection and pins the verified address.
+    mailbox_imap_allowed_hosts: tuple[str, ...] = ("imap.feishu.cn",)
+    mailbox_imap_connect_timeout_seconds: int = 10
+    mailbox_imap_max_resolved_addresses: int = 8
+    # Every value below bounds one RFC822 message before MIME parsing or
+    # document extraction can allocate unbounded process memory.
+    mailbox_max_raw_message_bytes: int = 24 * 1024 * 1024
+    mailbox_max_header_bytes: int = 128 * 1024
+    mailbox_max_mime_parts: int = 64
+    mailbox_max_mime_depth: int = 16
+    mailbox_max_attachments_per_message: int = 5
+    mailbox_max_search_response_bytes: int = 1024 * 1024
+    mailbox_max_body_cache_bytes: int = 256 * 1024
+    # A mailbox incident opens only after this many terminal sync failures in
+    # the configured window. Configuration/security failures are escalated
+    # immediately by the worker-owned alert service.
+    mailbox_consecutive_failure_alert_threshold: int = 3
+    mailbox_consecutive_failure_window_seconds: int = 60 * 60
     email_credentials_key: str | None = field(default=None, repr=False)
     # Account verification and password recovery use a transactional sender.
     # This is deliberately separate from the IMAP credentials used to ingest
@@ -162,6 +182,42 @@ class AppSettings:
             ),
             mailbox_sync_attachment_limit=int(
                 os.getenv("RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT", "20")
+            ),
+            mailbox_imap_allowed_hosts=_comma_separated_values(
+                os.getenv("RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS", "imap.feishu.cn")
+            ),
+            mailbox_imap_connect_timeout_seconds=int(
+                os.getenv("RESUME_V3_MAILBOX_IMAP_CONNECT_TIMEOUT_SECONDS", "10")
+            ),
+            mailbox_imap_max_resolved_addresses=int(
+                os.getenv("RESUME_V3_MAILBOX_IMAP_MAX_RESOLVED_ADDRESSES", "8")
+            ),
+            mailbox_max_raw_message_bytes=int(
+                os.getenv("RESUME_V3_MAILBOX_MAX_RAW_MESSAGE_BYTES", str(24 * 1024 * 1024))
+            ),
+            mailbox_max_header_bytes=int(
+                os.getenv("RESUME_V3_MAILBOX_MAX_HEADER_BYTES", str(128 * 1024))
+            ),
+            mailbox_max_mime_parts=int(
+                os.getenv("RESUME_V3_MAILBOX_MAX_MIME_PARTS", "64")
+            ),
+            mailbox_max_mime_depth=int(
+                os.getenv("RESUME_V3_MAILBOX_MAX_MIME_DEPTH", "16")
+            ),
+            mailbox_max_attachments_per_message=int(
+                os.getenv("RESUME_V3_MAILBOX_MAX_ATTACHMENTS_PER_MESSAGE", "5")
+            ),
+            mailbox_max_search_response_bytes=int(
+                os.getenv("RESUME_V3_MAILBOX_MAX_SEARCH_RESPONSE_BYTES", str(1024 * 1024))
+            ),
+            mailbox_max_body_cache_bytes=int(
+                os.getenv("RESUME_V3_MAILBOX_MAX_BODY_CACHE_BYTES", str(256 * 1024))
+            ),
+            mailbox_consecutive_failure_alert_threshold=int(
+                os.getenv("RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_ALERT_THRESHOLD", "3")
+            ),
+            mailbox_consecutive_failure_window_seconds=int(
+                os.getenv("RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_WINDOW_SECONDS", str(60 * 60))
             ),
             email_credentials_key=os.getenv("RESUME_V3_EMAIL_CREDENTIALS_KEY") or None,
             transactional_email_provider=os.getenv(
@@ -280,6 +336,76 @@ class AppSettings:
             raise ValueError("RESUME_V3_MAILBOX_SYNC_INTERVAL_SECONDS must be positive")
         if self.mailbox_sync_attachment_limit < 1:
             raise ValueError("RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT must be at least 1")
+        if self.mailbox_sync_attachment_limit > 100:
+            raise ValueError("RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT must not exceed 100")
+        if not self.mailbox_imap_allowed_hosts:
+            raise ValueError("RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS must not be empty")
+        if any(
+            not host
+            or "*" in host
+            or "://" in host
+            or "/" in host
+            or "@" in host
+            for host in self.mailbox_imap_allowed_hosts
+        ):
+            raise ValueError(
+                "RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS must contain exact host names"
+            )
+        # Reuse the transport's canonical hostname checks at startup. A bad
+        # deployment allowlist must fail closed before a recruiter ever saves
+        # a mailbox configuration; DNS is intentionally not queried here.
+        from app.services.mailbox_imap_transport import (
+            MailboxImapTransportError,
+            validate_imap_endpoint,
+        )
+
+        try:
+            for host in self.mailbox_imap_allowed_hosts:
+                validate_imap_endpoint(self, host=host, port=993)
+        except MailboxImapTransportError as exc:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS must contain valid exact IMAPS host names"
+            ) from exc
+        if not 1 <= self.mailbox_imap_connect_timeout_seconds <= 60:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_IMAP_CONNECT_TIMEOUT_SECONDS must be between 1 and 60"
+            )
+        if not 1 <= self.mailbox_imap_max_resolved_addresses <= 32:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_IMAP_MAX_RESOLVED_ADDRESSES must be between 1 and 32"
+            )
+        if self.mailbox_max_raw_message_bytes < self.max_upload_bytes:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_MAX_RAW_MESSAGE_BYTES must cover one uploaded attachment"
+            )
+        if not 1 <= self.mailbox_max_header_bytes <= self.mailbox_max_raw_message_bytes:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_MAX_HEADER_BYTES must be positive and no larger than the raw message limit"
+            )
+        if not 1 <= self.mailbox_max_mime_parts <= 1024:
+            raise ValueError("RESUME_V3_MAILBOX_MAX_MIME_PARTS must be between 1 and 1024")
+        if not 1 <= self.mailbox_max_mime_depth <= 64:
+            raise ValueError("RESUME_V3_MAILBOX_MAX_MIME_DEPTH must be between 1 and 64")
+        if not 1 <= self.mailbox_max_attachments_per_message <= 100:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_MAX_ATTACHMENTS_PER_MESSAGE must be between 1 and 100"
+            )
+        if not 1 <= self.mailbox_max_search_response_bytes <= self.mailbox_max_raw_message_bytes:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_MAX_SEARCH_RESPONSE_BYTES must be positive and bounded"
+            )
+        if not 1 <= self.mailbox_max_body_cache_bytes <= self.mailbox_max_raw_message_bytes:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_MAX_BODY_CACHE_BYTES must be positive and bounded"
+            )
+        if not 1 <= self.mailbox_consecutive_failure_alert_threshold <= 20:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_ALERT_THRESHOLD must be between 1 and 20"
+            )
+        if self.mailbox_consecutive_failure_window_seconds < 60:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_WINDOW_SECONDS must be at least 60"
+            )
         if self.transactional_email_provider not in {
             "disabled",
             "tencent_ses",

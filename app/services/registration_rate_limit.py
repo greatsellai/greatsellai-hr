@@ -48,7 +48,10 @@ class LoginRateLimitError(PublicRateLimitError):
 class PublicRateLimitRule:
     scope: str
     value: str
-    limit: int
+    # ``None`` records a bounded-window counter without turning it into a
+    # public hard refusal. Login account backpressure deliberately uses this
+    # mode so a correct password can always proceed after a capped delay.
+    limit: int | None
     window_seconds: int
 
 
@@ -102,20 +105,22 @@ def enforce_password_reset_rate_limit(
     secret: str,
     client_identifier: str,
     email_key: str,
-    global_limit: int,
-    global_window_seconds: int,
     client_limit: int,
     client_window_seconds: int,
     email_limit: int,
     email_window_seconds: int,
     now: datetime | None = None,
-) -> None:
-    """Consume one password-reset request allowance before issuing a token.
+) -> bool:
+    """Apply reset abuse controls and return whether delivery may be issued.
 
     The email key is an opaque normalized-or-invalid-input namespace that is
-    HMACed before persistence.  This function is deliberately called before
-    ``issue_password_reset``: a rejected request must not invalidate an
-    already-delivered, still-valid recovery link.
+    HMACed before persistence. Client exhaustion raises a stable public 429;
+    email exhaustion is intentionally a silent delivery-suppression decision.
+    Returning ``False`` means the caller must not invoke
+    ``issue_password_reset`` (which would invalidate an older recovery link),
+    but must retain the same accepted public response. This prevents a
+    distributed attacker from turning an account-targeted email limit into a
+    direct public denial-of-service signal.
     """
 
     _enforce_public_rate_limit(
@@ -123,26 +128,163 @@ def enforce_password_reset_rate_limit(
         secret=secret,
         rules=(
             PublicRateLimitRule(
-                scope="password_reset_global",
-                value="global",
-                limit=global_limit,
-                window_seconds=global_window_seconds,
-            ),
-            PublicRateLimitRule(
                 scope="password_reset_client",
                 value=client_identifier,
                 limit=client_limit,
                 window_seconds=client_window_seconds,
             ),
-            PublicRateLimitRule(
-                scope="password_reset_email",
-                value=email_key,
-                limit=email_limit,
-                window_seconds=email_window_seconds,
-            ),
         ),
         error_type=PasswordResetRateLimitError,
         now=now,
+    )
+    return _try_consume_public_rate_limit(
+        session,
+        secret=secret,
+        rule=_password_reset_email_rule(
+            email_key=email_key,
+            email_limit=email_limit,
+            email_window_seconds=email_window_seconds,
+        ),
+        now=now,
+    )
+
+
+def _try_consume_public_rate_limit(
+    session: Session,
+    *,
+    secret: str,
+    rule: PublicRateLimitRule,
+    now: datetime | None,
+) -> bool:
+    """Consume a bounded bucket without converting exhaustion into a 429."""
+
+    current_time = _aware(now) or datetime.now(timezone.utc)
+    retention_cutoff = current_time - timedelta(seconds=rule.window_seconds)
+    session.execute(
+        delete(RegistrationRateLimitBucket).where(
+            RegistrationRateLimitBucket.scope == rule.scope,
+            RegistrationRateLimitBucket.window_started_at < retention_cutoff,
+        )
+    )
+    try:
+        _consume_bucket(
+            session,
+            secret=secret,
+            rule=rule,
+            now=current_time,
+            error_type=PasswordResetRateLimitError,
+        )
+    except PasswordResetRateLimitError:
+        return False
+    return True
+
+
+def _password_reset_email_rule(
+    *,
+    email_key: str,
+    email_limit: int,
+    email_window_seconds: int,
+) -> PublicRateLimitRule:
+    """Keep the delivery-suppression namespace explicit for audits/tests."""
+
+    return PublicRateLimitRule(
+        scope="password_reset_email",
+        value=email_key,
+        limit=email_limit,
+        window_seconds=email_window_seconds,
+    )
+
+
+def login_account_backpressure_delay_seconds(
+    session: Session,
+    *,
+    secret: str,
+    email_key: str,
+    window_seconds: int,
+    free_failures: int,
+    base_delay_seconds: float,
+    max_delay_seconds: float,
+    now: datetime | None = None,
+) -> float:
+    """Return a capped pre-verification delay for one account namespace.
+
+    This is deliberately not a hard account lock. An attacker that rotates
+    source IPs still increases this durable, HMAC-keyed failure counter, but
+    a legitimate user is only delayed (and a successful sign-in clears the
+    current counter). The caller applies the returned delay asynchronously
+    before expensive password verification.
+    """
+
+    current_time = _aware(now) or datetime.now(timezone.utc)
+    rule = PublicRateLimitRule(
+        scope="login_account_backpressure",
+        value=email_key,
+        limit=None,
+        window_seconds=window_seconds,
+    )
+    request_count = _bucket_request_count(
+        session,
+        secret=secret,
+        rule=rule,
+        now=current_time,
+    )
+    if request_count <= free_failures:
+        return 0.0
+    # Clamp the exponent independently of the configured maximum so a
+    # corrupted/very old counter cannot produce a giant intermediate float.
+    exponent = min(request_count - free_failures - 1, 30)
+    return min(base_delay_seconds * (2**exponent), max_delay_seconds)
+
+
+def record_login_account_backpressure_failure(
+    session: Session,
+    *,
+    secret: str,
+    email_key: str,
+    window_seconds: int,
+    now: datetime | None = None,
+) -> None:
+    """Record a failed verification without creating an account hard block."""
+
+    _enforce_public_rate_limit(
+        session,
+        secret=secret,
+        rules=(
+            PublicRateLimitRule(
+                scope="login_account_backpressure",
+                value=email_key,
+                limit=None,
+                window_seconds=window_seconds,
+            ),
+        ),
+        error_type=LoginRateLimitError,
+        now=now,
+    )
+
+
+def clear_login_account_backpressure(
+    session: Session,
+    *,
+    secret: str,
+    email_key: str,
+) -> None:
+    """Remove stale failure pressure after a valid sign-in.
+
+    Deleting every window for this HMAC key is intentional: a correct
+    password demonstrates control of the account and should not inherit a
+    previous window's delay. No raw account identifier is used in storage.
+    """
+
+    key_digest = _rate_limit_digest(
+        secret,
+        scope="login_account_backpressure",
+        value=email_key,
+    )
+    session.execute(
+        delete(RegistrationRateLimitBucket).where(
+            RegistrationRateLimitBucket.scope == "login_account_backpressure",
+            RegistrationRateLimitBucket.key_digest == key_digest,
+        )
     )
 
 
@@ -258,17 +400,17 @@ def _enforce_public_rate_limit(
     """
 
     current_time = _aware(now) or datetime.now(timezone.utc)
-    # Buckets are security counters, not an event log.  Retain only the
-    # longest active window so unbounded unique-email traffic cannot grow the
-    # table forever.
-    retention_cutoff = current_time - timedelta(
-        seconds=max(rule.window_seconds for rule in rules)
-    )
-    session.execute(
-        delete(RegistrationRateLimitBucket).where(
-            RegistrationRateLimitBucket.window_started_at < retention_cutoff
+    # Buckets are security counters, not an event log. Clean only the scopes
+    # that this caller owns: deleting every scope at the shortest current
+    # window would silently shorten a different endpoint's longer budget.
+    for rule in rules:
+        retention_cutoff = current_time - timedelta(seconds=rule.window_seconds)
+        session.execute(
+            delete(RegistrationRateLimitBucket).where(
+                RegistrationRateLimitBucket.scope == rule.scope,
+                RegistrationRateLimitBucket.window_started_at < retention_cutoff,
+            )
         )
-    )
     # Fixed lock order avoids a deadlock when concurrent public-account
     # requests share only some of their buckets.
     for rule in rules:
@@ -302,7 +444,11 @@ def _assert_public_rate_limit_available(
                 RegistrationRateLimitBucket.window_started_at == window_started_at,
             )
         )
-        if request_count is not None and request_count >= rule.limit:
+        if (
+            rule.limit is not None
+            and request_count is not None
+            and request_count >= rule.limit
+        ):
             raise error_type(error_type.code)
 
 
@@ -345,9 +491,32 @@ def _consume_bucket(
             if bucket is None:
                 raise
 
-    if bucket.request_count >= rule.limit:
+    if rule.limit is not None and bucket.request_count >= rule.limit:
         raise error_type(error_type.code)
     bucket.request_count += 1
+
+
+def _bucket_request_count(
+    session: Session,
+    *,
+    secret: str,
+    rule: PublicRateLimitRule,
+    now: datetime,
+) -> int:
+    """Return the current-window count without consuming a login attempt."""
+
+    window_started_at = _window_started_at(now, rule.window_seconds)
+    key_digest = _rate_limit_digest(secret, scope=rule.scope, value=rule.value)
+    return int(
+        session.scalar(
+            select(RegistrationRateLimitBucket.request_count).where(
+                RegistrationRateLimitBucket.scope == rule.scope,
+                RegistrationRateLimitBucket.key_digest == key_digest,
+                RegistrationRateLimitBucket.window_started_at == window_started_at,
+            )
+        )
+        or 0
+    )
 
 
 def _rate_limit_digest(secret: str, *, scope: str, value: str) -> str:

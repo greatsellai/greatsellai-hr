@@ -1,17 +1,21 @@
-"""Timing equalization for public account-recovery responses.
+"""Timing-noise controls for public account-recovery responses.
 
 Password-reset requests must not reveal whether an account exists merely
 because issuing a real token and outbox row does more work than an unknown
-address.  The endpoint therefore finishes every response on a configurable
-minimum clock budget.  This module deliberately performs only transient,
-keyed dummy work: it never writes an email address, token, or response timing
-record anywhere.
+address. Every valid request outcome therefore reaches the same lower-bound
+clock budget plus bounded random jitter. This is deliberately *not* described
+as mathematical constant-time behavior: database contention, scheduling and
+network delivery can still make a request exceed the target. The bounded
+budget, transient keyed work, and per-client/account throttles make repeated
+remote timing comparisons materially less useful without blocking the event
+loop or storing timing telemetry.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import hmac
+import secrets
 from time import monotonic
 
 
@@ -39,24 +43,38 @@ def _perform_password_reset_dummy_crypto(*, secret: str, email_key: str) -> None
     hmac.compare_digest(digest, digest)
 
 
+def _sample_password_reset_jitter_seconds(maximum_seconds: float) -> float:
+    """Return bounded entropy used by every valid public reset outcome."""
+
+    if maximum_seconds <= 0:
+        return 0.0
+    # 10k evenly-spaced values are enough to defeat a fixed timing floor while
+    # keeping tests deterministic by monkeypatching this private sampler.
+    return maximum_seconds * (secrets.randbelow(10_000) / 10_000)
+
+
 async def enforce_password_reset_minimum_response_time(
     *,
     started_at: float,
     minimum_seconds: float,
+    jitter_seconds: float,
     secret: str,
     email_key: str,
 ) -> None:
-    """Finish a recovery response no sooner than its configured time budget.
+    """Finish a recovery response no sooner than a bounded target budget.
 
-    ``minimum_seconds`` is validated by :class:`AppSettings` before serving
-    requests.  The sleep is async and capped to that same bounded budget, so
-    it does not block the event loop or turn a malformed clock value into an
-    unbounded wait.
+    The endpoint invokes this from ``finally`` for known, unknown,
+    enqueue-failure, and rate-limited outcomes. ``minimum_seconds`` and
+    ``jitter_seconds`` are validated by :class:`AppSettings`; the resulting
+    intentional delay is bounded at configuration time. If preceding work
+    already exceeds the target, no extra sleep is added rather than claiming
+    a false fixed response duration.
     """
 
     _perform_password_reset_dummy_crypto(secret=secret, email_key=email_key)
+    target_seconds = minimum_seconds + _sample_password_reset_jitter_seconds(jitter_seconds)
     elapsed = max(0.0, monotonic() - started_at)
-    remaining = min(max(0.0, minimum_seconds - elapsed), minimum_seconds)
+    remaining = min(max(0.0, target_seconds - elapsed), target_seconds)
     if remaining > 0:
         await asyncio.sleep(remaining)
 

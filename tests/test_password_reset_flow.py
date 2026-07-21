@@ -30,6 +30,10 @@ def password_reset_client(tmp_path: Path) -> TestClient:
         transactional_email_provider="test",
         public_app_url="http://testserver",
         allow_unauthenticated=False,
+        # Keep functional tests fast and deterministic; production defaults
+        # retain the larger randomized timing envelope.
+        password_reset_min_response_seconds=0.25,
+        password_reset_response_jitter_seconds=0,
     )
     with TestClient(create_app(settings)) as client:
         yield client
@@ -162,7 +166,7 @@ def test_password_reset_request_is_enumeration_safe_and_replaces_older_link(
     assert invalidated.json()["detail"] == "password_reset_invalid_or_expired"
 
 
-def test_password_reset_timing_guard_covers_known_unknown_and_failed_enqueue(
+def test_password_reset_timing_guard_covers_known_unknown_failed_enqueue_and_client_429(
     password_reset_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -203,15 +207,35 @@ def test_password_reset_timing_guard_covers_known_unknown_and_failed_enqueue(
         json={"email": email},
     )
 
+    # The fixture permits five requests per client. The failed-enqueue branch
+    # above has consumed the third client allowance; exhaust the remaining
+    # two and verify the next client 429 travels through the same timing
+    # guard rather than returning early.
+    for suffix in ("one", "two"):
+        accepted = password_reset_client.post(
+            "/v1/auth/password-reset/request",
+            json={"email": f"timing-extra-{suffix}@example.test"},
+        )
+        assert accepted.status_code == 200, accepted.text
+    client_throttled = password_reset_client.post(
+        "/v1/auth/password-reset/request",
+        json={"email": "timing-client-throttled@example.test"},
+    )
+
     assert known.status_code == unknown.status_code == failed_enqueue.status_code == 200
     assert known.json() == unknown.json() == failed_enqueue.json() == {
         "accepted": True,
         "delivery_available": True,
     }
-    assert len(timing_calls) == 3
+    assert client_throttled.status_code == 429, client_throttled.text
+    assert client_throttled.json()["detail"] == "password_reset_rate_limit_exceeded"
+    assert len(timing_calls) == 6
     assert {
         call["minimum_seconds"] for call in timing_calls
     } == {password_reset_client.app.state.settings.password_reset_min_response_seconds}
+    assert {
+        call["jitter_seconds"] for call in timing_calls
+    } == {password_reset_client.app.state.settings.password_reset_response_jitter_seconds}
 
 
 def test_password_reset_rejects_expired_link(password_reset_client: TestClient) -> None:

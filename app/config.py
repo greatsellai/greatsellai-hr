@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from email.utils import parseaddr
@@ -8,6 +9,9 @@ from ipaddress import ip_network
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+
+
+logger = logging.getLogger(__name__)
 
 
 def _environment_flag(name: str, *, default: bool) -> bool:
@@ -125,13 +129,19 @@ class AppSettings:
     email_verification_resend_cooldown_seconds: int = 60
     email_verification_daily_limit: int = 5
     password_reset_ttl_seconds: int = 60 * 60
-    # Every public recovery response waits to this minimum monotonic budget.
-    # It intentionally masks the extra database/outbox work for registered
-    # accounts without blocking the async server event loop.
-    password_reset_min_response_seconds: float = 0.2
+    # Every public recovery response waits to a randomized target budget. It
+    # masks the extra database/outbox work for registered accounts without
+    # blocking the async server event loop. This is a timing-noise control,
+    # not a claim of mathematical constant-time behavior under load.
+    password_reset_min_response_seconds: float = 0.75
+    password_reset_response_jitter_seconds: float = 0.25
     # Public password recovery is intentionally throttled independently from
-    # registration.  The persisted buckets use global, client and opaque
-    # email dimensions; no raw address or IP is stored.
+    # registration. The effective buckets use only client and opaque-email
+    # dimensions; no raw address or IP is stored.
+    #
+    # These two values remain only as source-compatible deprecated settings.
+    # A global recovery hard limit is not enforced because a distributed
+    # attacker could otherwise deny recovery to every unrelated user.
     password_reset_rate_limit_global_limit: int = 60
     password_reset_rate_limit_global_window_seconds: int = 60 * 60
     password_reset_rate_limit_client_limit: int = 5
@@ -150,6 +160,13 @@ class AppSettings:
     # avoid cross-network account lockouts.
     login_rate_limit_email_limit: int = 8
     login_rate_limit_email_window_seconds: int = 15 * 60
+    # Account-keyed progressive backpressure supplements the per-client hard
+    # limiter. It is a bounded async delay before scrypt verification, never
+    # a permanent account lockout or a global shared bucket.
+    login_account_backpressure_window_seconds: int = 60 * 60
+    login_account_backpressure_free_failures: int = 3
+    login_account_backpressure_base_delay_seconds: float = 0.25
+    login_account_backpressure_max_delay_seconds: float = 2.0
     # A password-reset request writes a durable, encrypted email outbox row.
     # The shared worker performs all SMTP/SES I/O after the HTTP response.
     transactional_email_outbox_max_attempts: int = 5
@@ -176,6 +193,22 @@ class AppSettings:
 
     @classmethod
     def from_env(cls) -> "AppSettings":
+        # These global public-auth knobs were removed in favor of scoped
+        # throttles and account-keyed, capped progressive backpressure. Emit
+        # a startup-visible warning rather than silently accepting stale
+        # operator configuration.
+        for deprecated_name in (
+            "RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_LIMIT",
+            "RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
+            "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_LIMIT",
+            "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
+        ):
+            if os.getenv(deprecated_name) is not None:
+                logger.warning(
+                    "%s is deprecated and ignored; global public-auth hard "
+                    "blocks are intentionally disabled to avoid cross-user denial of service",
+                    deprecated_name,
+                )
         project_dir = Path(__file__).resolve().parents[1]
         data_dir = Path(os.getenv("RESUME_V3_DATA_DIR", project_dir / "data"))
         database_url = os.getenv(
@@ -338,17 +371,16 @@ class AppSettings:
                 os.getenv("RESUME_V3_PASSWORD_RESET_TTL_SECONDS", str(60 * 60))
             ),
             password_reset_min_response_seconds=float(
-                os.getenv("RESUME_V3_PASSWORD_RESET_MIN_RESPONSE_SECONDS", "0.2")
+                os.getenv("RESUME_V3_PASSWORD_RESET_MIN_RESPONSE_SECONDS", "0.75")
             ),
-            password_reset_rate_limit_global_limit=int(
-                os.getenv("RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_LIMIT", "60")
+            password_reset_response_jitter_seconds=float(
+                os.getenv("RESUME_V3_PASSWORD_RESET_RESPONSE_JITTER_SECONDS", "0.25")
             ),
-            password_reset_rate_limit_global_window_seconds=int(
-                os.getenv(
-                    "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
-                    str(60 * 60),
-                )
-            ),
+            # Deprecated globals are deliberately ignored even when malformed;
+            # from_env() emits a startup warning above when either variable is
+            # present. Keep the fields only for source-compatible callers.
+            password_reset_rate_limit_global_limit=60,
+            password_reset_rate_limit_global_window_seconds=60 * 60,
             password_reset_rate_limit_client_limit=int(
                 os.getenv("RESUME_V3_PASSWORD_RESET_RATE_LIMIT_CLIENT_LIMIT", "5")
             ),
@@ -384,6 +416,23 @@ class AppSettings:
                     "RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
                     str(15 * 60),
                 )
+            ),
+            login_account_backpressure_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_LOGIN_ACCOUNT_BACKPRESSURE_WINDOW_SECONDS",
+                    str(60 * 60),
+                )
+            ),
+            login_account_backpressure_free_failures=int(
+                os.getenv("RESUME_V3_LOGIN_ACCOUNT_BACKPRESSURE_FREE_FAILURES", "3")
+            ),
+            login_account_backpressure_base_delay_seconds=float(
+                os.getenv(
+                    "RESUME_V3_LOGIN_ACCOUNT_BACKPRESSURE_BASE_DELAY_SECONDS", "0.25")
+            ),
+            login_account_backpressure_max_delay_seconds=float(
+                os.getenv(
+                    "RESUME_V3_LOGIN_ACCOUNT_BACKPRESSURE_MAX_DELAY_SECONDS", "2.0")
             ),
             transactional_email_outbox_max_attempts=int(
                 os.getenv("RESUME_V3_TRANSACTIONAL_EMAIL_OUTBOX_MAX_ATTEMPTS", "5")
@@ -601,15 +650,20 @@ class AppSettings:
             raise ValueError("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT must be at least 1")
         if self.password_reset_ttl_seconds < 5 * 60:
             raise ValueError("RESUME_V3_PASSWORD_RESET_TTL_SECONDS must be at least 300")
-        if not 0.05 <= self.password_reset_min_response_seconds <= 5:
+        if not 0.25 <= self.password_reset_min_response_seconds <= 2:
             raise ValueError(
-                "RESUME_V3_PASSWORD_RESET_MIN_RESPONSE_SECONDS must be between 0.05 and 5"
+                "RESUME_V3_PASSWORD_RESET_MIN_RESPONSE_SECONDS must be between 0.25 and 2"
+            )
+        if not 0 <= self.password_reset_response_jitter_seconds <= 1:
+            raise ValueError(
+                "RESUME_V3_PASSWORD_RESET_RESPONSE_JITTER_SECONDS must be between 0 and 1"
+            )
+        if self.password_reset_min_response_seconds + self.password_reset_response_jitter_seconds > 2:
+            raise ValueError(
+                "RESUME_V3_PASSWORD_RESET_MIN_RESPONSE_SECONDS plus "
+                "RESUME_V3_PASSWORD_RESET_RESPONSE_JITTER_SECONDS must be at most 2"
             )
         for name, value in (
-            (
-                "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_LIMIT",
-                self.password_reset_rate_limit_global_limit,
-            ),
             (
                 "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_CLIENT_LIMIT",
                 self.password_reset_rate_limit_client_limit,
@@ -623,10 +677,6 @@ class AppSettings:
                 raise ValueError(f"{name} must be at least 1")
         for name, value in (
             (
-                "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
-                self.password_reset_rate_limit_global_window_seconds,
-            ),
-            (
                 "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_CLIENT_WINDOW_SECONDS",
                 self.password_reset_rate_limit_client_window_seconds,
             ),
@@ -637,6 +687,27 @@ class AppSettings:
         ):
             if value < 60:
                 raise ValueError(f"{name} must be at least 60")
+        if not 60 <= self.login_account_backpressure_window_seconds <= 24 * 60 * 60:
+            raise ValueError(
+                "RESUME_V3_LOGIN_ACCOUNT_BACKPRESSURE_WINDOW_SECONDS must be between 60 and 86400"
+            )
+        if not 0 <= self.login_account_backpressure_free_failures <= 20:
+            raise ValueError(
+                "RESUME_V3_LOGIN_ACCOUNT_BACKPRESSURE_FREE_FAILURES must be between 0 and 20"
+            )
+        if not 0.05 <= self.login_account_backpressure_base_delay_seconds <= 2:
+            raise ValueError(
+                "RESUME_V3_LOGIN_ACCOUNT_BACKPRESSURE_BASE_DELAY_SECONDS must be between 0.05 and 2"
+            )
+        if not (
+            self.login_account_backpressure_base_delay_seconds
+            <= self.login_account_backpressure_max_delay_seconds
+            <= 5
+        ):
+            raise ValueError(
+                "RESUME_V3_LOGIN_ACCOUNT_BACKPRESSURE_MAX_DELAY_SECONDS must be at least the "
+                "base delay and at most 5"
+            )
         for name, value in (
             ("RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_LIMIT", self.login_rate_limit_client_limit),
             ("RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_LIMIT", self.login_rate_limit_email_limit),

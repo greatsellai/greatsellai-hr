@@ -61,6 +61,14 @@ PASSWORD_R = 8
 PASSWORD_P = 1
 PASSWORD_DKLEN = 64
 PASSWORD_MIN_LENGTH = 8
+# Public, fixed scrypt material used only to equalize unknown/inactive login
+# work with a normal invalid-password check. It is deliberately not a secret,
+# cannot authenticate any account, and uses the same cost parameters as a
+# freshly created password hash. Keep it valid when changing PASSWORD_*.
+_LOGIN_DUMMY_PASSWORD_HASH = (
+    "scrypt$16384$8$1$iZ7two2EVlo-4Kl43l_Opw$"
+    "hVfkGHScvqF9wGt_799n6z1zSe99k1yIYswlD0axbjzXNF-qYl8-3NGyOECXv_GpcNz8Def00AgWmaRiEhWccA"
+)
 
 
 class IdentityServiceError(RuntimeError):
@@ -530,7 +538,14 @@ def authenticate_email_password(
 ) -> AuthPrincipal:
     _, email_key = normalize_email(email_value)
     user = session.scalar(select(UserAccount).where(UserAccount.email_key == email_key))
-    if user is None or not user.is_active or not verify_password(password, user.password_hash):
+    if user is None or not user.is_active:
+        # Do the same bounded scrypt work as a wrong password before returning
+        # the shared public error. Without this, unknown/inactive accounts
+        # would skip password verification and create an obvious remote timing
+        # enumeration signal.
+        verify_password(password, _LOGIN_DUMMY_PASSWORD_HASH)
+        raise IdentityServiceError("invalid_login_credentials")
+    if not verify_password(password, user.password_hash):
         raise IdentityServiceError("invalid_login_credentials")
 
     memberships = session.scalars(

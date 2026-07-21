@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import secrets
@@ -184,9 +185,12 @@ from app.services.registration_rate_limit import (
     LoginRateLimitError,
     PasswordResetRateLimitError,
     RegistrationRateLimitError,
+    clear_login_account_backpressure,
     ensure_login_rate_limit_available,
     enforce_password_reset_rate_limit,
     enforce_registration_rate_limit,
+    login_account_backpressure_delay_seconds,
+    record_login_account_backpressure_failure,
     record_login_failure,
 )
 from app.services.public_auth_timing import (
@@ -1101,6 +1105,21 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="login_rate_limit_exceeded",
                 ) from exc
+            # Rotating source IPs cannot bypass this account-keyed pressure:
+            # it is read before the expensive scrypt verification and grows
+            # only after failed credentials. It is never a hard lock; the
+            # configured delay is capped and a valid sign-in clears it.
+            backpressure_delay = login_account_backpressure_delay_seconds(
+                session,
+                secret=rate_limit_kwargs["secret"],
+                email_key=rate_limit_kwargs["email_key"],
+                window_seconds=settings.login_account_backpressure_window_seconds,
+                free_failures=settings.login_account_backpressure_free_failures,
+                base_delay_seconds=settings.login_account_backpressure_base_delay_seconds,
+                max_delay_seconds=settings.login_account_backpressure_max_delay_seconds,
+            )
+            if backpressure_delay > 0:
+                await asyncio.sleep(backpressure_delay)
         try:
             if payload.email:
                 principal = authenticate_email_password(
@@ -1124,6 +1143,18 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     # A failed static-token compatibility attempt and a
                     # failed email/password attempt share the same durable
                     # non-enumerating public limiter.
+                    #
+                    # Commit the account-only progressive counter first. If
+                    # the per-client hard limiter has already exhausted its
+                    # short window, a distributed attack still cannot evade
+                    # the cross-IP pre-verification delay by changing IP.
+                    record_login_account_backpressure_failure(
+                        session,
+                        secret=rate_limit_kwargs["secret"],
+                        email_key=rate_limit_kwargs["email_key"],
+                        window_seconds=settings.login_account_backpressure_window_seconds,
+                    )
+                    _commit_or_raise(session)
                     record_login_failure(session, **rate_limit_kwargs)
                     _commit_or_raise(session)
             except LoginRateLimitError as rate_limit_exc:
@@ -1140,6 +1171,12 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid_login_credentials",
             ) from exc
+        if not settings.allow_unauthenticated:
+            clear_login_account_backpressure(
+                session,
+                secret=rate_limit_kwargs["secret"],
+                email_key=rate_limit_kwargs["email_key"],
+            )
         _commit_or_raise(session)
         establish_session(request.session, principal)
         set_organization_context(session, principal.organization_id)
@@ -1333,13 +1370,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 # issuing a token. In particular, a rejected request must never
                 # reach issue_password_reset(), because that method intentionally
                 # invalidates an older active recovery link when it replaces it.
-                enforce_password_reset_rate_limit(
+                delivery_allowed = enforce_password_reset_rate_limit(
                     session,
                     secret=timing_secret,
                     client_identifier=_registration_client_identifier(request, settings),
                     email_key=email_key,
-                    global_limit=settings.password_reset_rate_limit_global_limit,
-                    global_window_seconds=settings.password_reset_rate_limit_global_window_seconds,
                     client_limit=settings.password_reset_rate_limit_client_limit,
                     client_window_seconds=settings.password_reset_rate_limit_client_window_seconds,
                     email_limit=settings.password_reset_rate_limit_email_limit,
@@ -1352,11 +1387,12 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="password_reset_rate_limit_exceeded",
                 ) from exc
-            # Both registered and unknown addresses return this exact response
-            # on the same minimum clock budget. A known account only receives
-            # a durable encrypted outbox row; all provider I/O happens in the
-            # worker after the HTTP response.
-            if provider.password_reset_configured:
+            # Registered, unknown, email-suppressed, and client-throttled
+            # requests retain the same public response/timing strategy. A
+            # known account receives a durable encrypted outbox row only when
+            # the opaque email budget permits it; all provider I/O happens in
+            # the worker after the HTTP response.
+            if provider.password_reset_configured and delivery_allowed:
                 try:
                     issued = issue_password_reset(
                         session,
@@ -1386,6 +1422,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             await enforce_password_reset_minimum_response_time(
                 started_at=response_started_at,
                 minimum_seconds=settings.password_reset_min_response_seconds,
+                jitter_seconds=settings.password_reset_response_jitter_seconds,
                 secret=timing_secret,
                 email_key=email_key,
             )

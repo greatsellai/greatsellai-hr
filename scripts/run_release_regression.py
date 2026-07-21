@@ -368,6 +368,8 @@ def _create_volume(*, volume_name: str, run_label: str) -> None:
         "--rm",
         "--network",
         "none",
+        "--user",
+        "0",
         *_resource_label_arguments(run_label),
         "--mount",
         _volume_mount(volume_name=volume_name, destination="/uploads"),

@@ -125,6 +125,8 @@ def test_named_upload_volume_is_initialized_for_the_unprivileged_app_user(
     assert calls[0][0][:2] == ("volume", "create")
     initialize_arguments, initialize_kwargs = calls[1]
     assert initialize_arguments[:4] == ("run", "--rm", "--network", "none")
+    assert "--user" in initialize_arguments
+    assert initialize_arguments[initialize_arguments.index("--user") + 1] == "0"
     assert "type=volume,src=synthetic-uploads,dst=/uploads" in initialize_arguments
     assert "mkdir -p /uploads && chown -R 10001:10001 /uploads" in initialize_arguments
     assert initialize_kwargs["label"] == "temporary_upload_volume_initialize"

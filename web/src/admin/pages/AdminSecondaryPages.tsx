@@ -26,6 +26,7 @@ import {
   numberFormat,
   shortId,
 } from "../AdminComponents";
+import { AdminAiConfigurationPanel } from "./AdminAiConfigurationPanel";
 
 const PAGE_SIZE = 30;
 
@@ -325,7 +326,7 @@ export function AdminPlansPage() {
   );
 }
 
-type AiTab = "runs" | "usage" | "resources";
+type AiTab = "runs" | "usage" | "resources" | "configure";
 
 function featureName(feature: string) {
   const names: Record<string, string> = {
@@ -370,25 +371,30 @@ export function AdminAiPage() {
   const [routes, setRoutes] = useState<AiRoutePolicy[]>([]);
   const [prices, setPrices] = useState<AiModelPriceVersion[]>([]);
 
+  const refreshData = useCallback(async () => {
+    const query = { organization_id: organizationId || undefined, feature: feature || undefined, limit: 100, offset: 0 };
+    const [nextRuns, nextUsage, nextProviders, nextModels, nextRoutes, nextPrices] = await Promise.all([
+      adminApi.listAiRuns(query), adminApi.listAiUsage(query), adminApi.listAiProviders(), adminApi.listAiModels(), adminApi.listAiRoutes(), adminApi.listAiPrices(),
+    ]);
+    setRuns(nextRuns); setUsage(nextUsage); setProviders(nextProviders); setModels(nextModels); setRoutes(nextRoutes); setPrices(nextPrices);
+  }, [feature, organizationId]);
+
   const load = useCallback(async () => {
     setState("loading"); setError("");
     try {
-      const query = { organization_id: organizationId || undefined, feature: feature || undefined, limit: 100, offset: 0 };
-      const [nextRuns, nextUsage, nextProviders, nextModels, nextRoutes, nextPrices] = await Promise.all([
-        adminApi.listAiRuns(query), adminApi.listAiUsage(query), adminApi.listAiProviders(), adminApi.listAiModels(), adminApi.listAiRoutes(), adminApi.listAiPrices(),
-      ]);
-      setRuns(nextRuns); setUsage(nextUsage); setProviders(nextProviders); setModels(nextModels); setRoutes(nextRoutes); setPrices(nextPrices); setState("ready");
+      await refreshData();
+      setState("ready");
     } catch (loadError) { setError(adminErrorMessage(loadError)); setState("error"); }
-  }, [feature, organizationId]);
+  }, [refreshData]);
 
   useEffect(() => { void load(); }, [load]);
   const apply = (event: FormEvent) => { event.preventDefault(); setOrganizationId(organizationDraft.trim()); setFeature(featureDraft.trim()); };
 
   return (
     <section className="admin-page-frame admin-page-frame-wide" aria-labelledby="admin-ai-title">
-      <AdminPageHeader actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新 AI 数据</button>} description="查看不含候选人内容的运行账本、成本汇总和当前模型资源。" title="AI 运营" />
-      <div className="admin-segmented" aria-label="AI 运营视图">{([['runs','运行记录'],['usage','用量与成本'],['resources','路由与资源']] as Array<[AiTab,string]>).map(([value,label]) => <button aria-pressed={tab === value} key={value} onClick={() => setTab(value)} type="button">{label}</button>)}</div>
-      {tab !== "resources" && <form className="admin-filter-bar" onSubmit={apply}><label className="admin-search-field"><span className="sr-only">工作区 ID</span><Icon name="briefcase" size={16} /><input onChange={(event) => setOrganizationDraft(event.target.value)} placeholder="工作区 ID" value={organizationDraft} /></label><label className="admin-search-field"><span className="sr-only">AI 功能</span><Icon name="spark" size={16} /><input onChange={(event) => setFeatureDraft(event.target.value)} placeholder="功能，例如 resume_score" value={featureDraft} /></label><button className="button button-primary" type="submit">筛选记录</button>{(organizationId || feature) && <button className="button button-ghost" onClick={() => { setOrganizationDraft(""); setFeatureDraft(""); setOrganizationId(""); setFeature(""); }} type="button">清除条件</button>}</form>}
+      <AdminPageHeader actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新 AI 数据</button>} description="查看不含候选人内容的运行账本、成本汇总、当前资源，以及平台级模型路由。" title="AI 运营" />
+      <div className="admin-segmented" aria-label="AI 运营视图">{([['runs','运行记录'],['usage','用量与成本'],['resources','路由与资源'],['configure','配置与发布']] as Array<[AiTab,string]>).map(([value,label]) => <button aria-pressed={tab === value} key={value} onClick={() => setTab(value)} type="button">{label}</button>)}</div>
+      {(tab === "runs" || tab === "usage") && <form className="admin-filter-bar" onSubmit={apply}><label className="admin-search-field"><span className="sr-only">工作区 ID</span><Icon name="briefcase" size={16} /><input onChange={(event) => setOrganizationDraft(event.target.value)} placeholder="工作区 ID" value={organizationDraft} /></label><label className="admin-search-field"><span className="sr-only">AI 功能</span><Icon name="spark" size={16} /><input onChange={(event) => setFeatureDraft(event.target.value)} placeholder="功能，例如 resume_score" value={featureDraft} /></label><button className="button button-primary" type="submit">筛选记录</button>{(organizationId || feature) && <button className="button button-ghost" onClick={() => { setOrganizationDraft(""); setFeatureDraft(""); setOrganizationId(""); setFeature(""); }} type="button">清除条件</button>}</form>}
       {state === "loading" && <div className="admin-panel"><AdminLoading label="正在汇总 AI 运行数据…" /></div>}
       {state === "error" && <div className="admin-panel"><AdminError message={error} onRetry={() => void load()} /></div>}
       {state === "ready" && tab === "runs" && <div className="admin-table-panel"><div className="admin-table-note"><span>最近 {runs.length} 条运行</span><small>不含 Prompt、简历或模型输出</small></div>{runs.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>开始时间</th><th>工作区</th><th>功能</th><th>服务</th><th>状态</th><th>调用</th><th>成本</th></tr></thead><tbody>{runs.map((run) => <tr key={run.run_id}><td>{formatDate(run.started_at,true)}</td><td title={run.organization_id}>{shortId(run.organization_id)}</td><td>{featureName(run.feature)}</td><td>{run.service_kind}</td><td><AdminStatus status={run.status} /></td><td>{numberFormat(run.invocation_count)}</td><td>{currencyFromMicros(run.total_cost_cny_micros)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有 AI 运行记录。" />}</div>}
@@ -398,6 +404,7 @@ export function AdminAiPage() {
         <section className="admin-table-panel"><div className="admin-table-note"><span>模型</span><small>{models.length} 个模型配置</small></div>{models.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>模型</th><th>Provider</th><th>能力</th><th>上下文</th><th>最大输出</th><th>状态</th></tr></thead><tbody>{models.map((item) => <tr key={item.model_id}><td><strong>{item.display_name}</strong><small>{item.slug}</small></td><td>{item.provider_slug}</td><td>{item.capabilities.join("、") || "—"}</td><td>{item.context_window_tokens ? numberFormat(item.context_window_tokens) : "—"}</td><td>{item.max_output_tokens ? numberFormat(item.max_output_tokens) : "—"}</td><td><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="尚未配置模型。" />}</section>
         <div className="admin-resource-grid"><section className="admin-table-panel"><div className="admin-table-note"><span>路由策略</span><small>{routes.length} 项功能路由</small></div>{routes.length ? <ul className="admin-resource-list">{routes.map((item) => <li key={item.policy_id}><span><strong>{item.display_name}</strong><small>{featureName(item.feature)} · 版本 {item.current_version ?? "—"}</small></span><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} /></li>)}</ul> : <DataTableEmpty description="尚未发布路由策略。" />}</section><section className="admin-table-panel"><div className="admin-table-note"><span>模型价格</span><small>{prices.length} 个价格版本</small></div>{prices.length ? <ul className="admin-resource-list">{prices.slice(0,20).map((item) => <li key={item.price_version_id}><span><strong>{item.model_slug}</strong><small>{item.currency} · {formatDate(item.effective_from)} · {item.source}</small></span><AdminStatus status={item.is_active ? "active" : "inactive"} /></li>)}</ul> : <DataTableEmpty description="尚未配置模型价格。" />}</section></div>
       </div>}
+      {state === "ready" && tab === "configure" && <AdminAiConfigurationPanel models={models} onChanged={refreshData} prices={prices} providers={providers} routes={routes} />}
     </section>
   );
 }

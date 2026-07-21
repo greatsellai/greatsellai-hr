@@ -105,3 +105,16 @@ HTML 简历可以被解析为文本，但原件本身仍是不可信内容。任
 | 恢复演练 | PostgreSQL 迁移/备份/恢复/租约脚本 | Docker、PostgreSQL 镜像 |
 
 提交顺序：先提交本设计；随后提交安全修复与 API 回归；最后提交浏览器、容器和恢复演练。每一提交均执行对应的最小测试、`git diff --check`、推送功能分支；最终 PR 只包含本设计和这组发布回归。
+
+## 9. 可重复执行方式
+
+具体命令、临时资源边界和 CI 调用方式见
+[发布运行时回归执行手册](RELEASE_REGRESSION_HARNESS.md)。执行入口为：
+
+```bash
+python scripts/run_release_regression.py --all
+```
+
+PowerShell 可使用 `scripts/run-release-regression.ps1`。harness 不读取任何生产环境文件，
+不修改 `compose.yml`，并会在结束时清理自身创建的容器、Docker 网络、临时数据库、上传文件
+和临时镜像。

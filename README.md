@@ -6,6 +6,7 @@
 - [全项目实施计划](docs/IMPLEMENTATION_PLAN.md)
 - [AI 提取后台任务](docs/AI_EXTRACTION_WORKER.md)
 - [条件筛选 V2 规则与接口](docs/FILTER_V2.md)
+- [发布运行时回归执行手册](docs/RELEASE_REGRESSION_HARNESS.md)
 - [团队共建工作流](docs/TEAM_WORKFLOW.md)
 - [GitHub Actions CI/CD](docs/CI_CD.md)
 

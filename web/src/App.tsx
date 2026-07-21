@@ -367,7 +367,10 @@ const legacyTierClassificationMap: Partial<
   Record<InstitutionTier, InstitutionClassification[]>
 > = {
   "985": ["985"],
-  "211": ["985", "211"],
+  // The product now defines 211 as 211-only. A legacy saved "211" condition
+  // therefore adopts the explicit new meaning instead of silently widening
+  // back to 985 candidates.
+  "211": ["211"],
   regular_undergraduate: ["undergraduate"],
   higher_vocational: ["associate"],
   overseas: ["overseas"],

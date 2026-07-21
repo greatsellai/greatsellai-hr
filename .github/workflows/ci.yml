@@ -68,27 +68,43 @@ jobs:
   web:
     name: Web build
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - uses: actions/setup-node@v4
         with:
           node-version: "22.12.0"
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Install backend dependencies for isolated browser tests
+        run: python -m pip install -e ".[dev]"
       - name: Install frontend dependencies
         working-directory: web
         run: npm ci
       - name: Build frontend
         working-directory: web
         run: npm run build
+      - name: Install Chromium for Playwright critical paths
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Run Playwright critical paths
+        working-directory: web
+        run: npm run e2e
 
   production-images:
     name: Production image builds
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Build application production image
         shell: bash
         run: |
@@ -131,3 +147,15 @@ jobs:
           done
       - name: Validate production Compose model
         run: docker compose --env-file .env.production.example config --quiet
+      - name: Run Docker release runtime regression
+        run: >-
+          python scripts/run_release_regression.py --all
+          --image "greatsellai-hr-ci:${{ github.sha }}"
+      - name: Remove temporary release regression resources
+        if: always()
+        run: |
+          filter='label=com.greatsell.release-regression=true'
+          docker ps -aq --filter "$filter" | xargs -r docker rm -f || true
+          docker network ls -q --filter "$filter" | xargs -r docker network rm || true
+          docker image ls -q --filter "$filter" | sort -u | xargs -r docker image rm || true
+          docker image rm -f "greatsellai-hr-ci:${{ github.sha }}" || true

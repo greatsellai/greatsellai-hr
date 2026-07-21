@@ -79,3 +79,21 @@ Docker 卷、Caddy 配置或 DNS。
 
 详细的服务器发布与恢复行为见 [DEPLOYMENT.md](DEPLOYMENT.md)，团队协作和标签规则见
 [TEAM_WORKFLOW.md](TEAM_WORKFLOW.md)。
+
+## Release regression gates
+
+The existing **Backend tests** check runs the complete pytest suite, including
+HTML-original delivery safety, trusted-proxy registration throttling, password
+recovery expiry/reuse/session invalidation, and tenant-isolation regressions.
+
+The existing **Web build** check additionally installs Chromium and runs the
+isolated Playwright critical paths: registration and verification, login,
+password recovery, upload, filtering, batch scoring, three-lane JD matching,
+mailbox queueing, and cross-workspace denial.
+
+The existing **Production image builds** check reuses the exact application
+image it just built to run `scripts/run_release_regression.py --all`. The
+runtime gate exercises real LibreOffice, Tesseract, and document extraction
+for all supported formats, then runs temporary PostgreSQL migration,
+backup/restore, and worker-lease recovery checks. It creates no production
+connection, volume, port, environment file, candidate file, or credential.

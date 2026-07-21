@@ -322,7 +322,7 @@ def test_mailbox_rebinding_resets_the_uid_watermark_but_settings_edits_do_not(
         assert config.imap_uidvalidity == 12
 
 
-def test_html_resume_upload_is_preserved_and_served_as_html(client) -> None:
+def test_html_resume_upload_is_preserved_but_never_served_as_inline_html(client) -> None:
     response = client.post(
         "/v1/resumes/upload",
         files={
@@ -338,7 +338,9 @@ def test_html_resume_upload_is_preserved_and_served_as_html(client) -> None:
 
     original = client.get(f"/v1/resumes/{resume_id}/original-file")
     assert original.status_code == 200, original.text
-    assert original.headers["content-type"].startswith("text/html")
+    assert original.headers["content-type"].startswith("application/octet-stream")
+    assert original.headers["content-disposition"].startswith("attachment;")
+    assert original.headers["x-content-type-options"] == "nosniff"
     assert b"Candidate" in original.content
 
 

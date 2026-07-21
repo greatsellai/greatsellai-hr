@@ -9,6 +9,80 @@ from app.config import AppSettings
 from app.main import create_app
 
 
+# The production default permits only deployment-owned provider names. Mailbox
+# tests use deterministic local IMAP doubles, so they receive their own exact
+# test allowlist instead of weakening the runtime policy with a wildcard.
+TEST_MAILBOX_IMAP_HOSTS = (
+    "imap.feishu.cn",
+    "imap.a.test",
+    "imap.b.test",
+    "imap.campus.test",
+    "imap.changed.example.test",
+    "imap.duplicate.test",
+    "imap.engineering.test",
+    "imap.epoch.test",
+    "imap.example.test",
+    "imap.explicit.test",
+    "imap.first.test",
+    "imap.fixture.invalid",
+    "imap.forwarded.test",
+    "imap.lease.test",
+    "imap.other-product.test",
+    "imap.owner.test",
+    "imap.product.test",
+    "imap.race.test",
+    "imap.retention.test",
+    "imap.sales.test",
+    "imap.scheduled.test",
+    "imap.second.test",
+    "imap.social.test",
+    "imap.sync-all-one.test",
+    "imap.sync-all-two.test",
+    "imap.task-one.test",
+    "imap.task-two.test",
+    "imap.tenant-retention.test",
+    "imap.workspace-retention.test",
+)
+
+
+@pytest.fixture(autouse=True)
+def mailbox_imap_test_double_adapter(monkeypatch):
+    """Keep legacy IMAP doubles at the service boundary for integration tests.
+
+    Focused transport tests exercise the pinned resolver and TLS connection
+    directly. Other mailbox tests only need deterministic protocol behavior,
+    never a real network socket.
+    """
+
+    from app.services import mailbox_import_service
+
+    class ImapDoubleAdapter:
+        def __init__(self, client) -> None:
+            self._client = client
+
+        def uid(self, command: str, *args):
+            if command.casefold() == "fetch" and args and args[-1] == "(RFC822.SIZE)":
+                # Existing protocol doubles model only a full RFC822 fetch.
+                # The real transport preflights size first; this tiny response
+                # lets those tests retain their focused behavior.
+                return "OK", [b"(RFC822.SIZE 1)"]
+            return self._client.uid(command, *args)
+
+        def __getattr__(self, name: str):
+            return getattr(self._client, name)
+
+    def create_test_client(settings: AppSettings, *, host: str, port: int):
+        return ImapDoubleAdapter(
+            mailbox_import_service.imaplib.IMAP4_SSL(
+                host,
+                port,
+                timeout=settings.mailbox_imap_connect_timeout_seconds,
+            )
+        )
+
+    monkeypatch.setattr(mailbox_import_service, "create_imap_client", create_test_client)
+
+
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     data_dir = tmp_path / "data"
@@ -19,6 +93,7 @@ def client(tmp_path: Path) -> TestClient:
         database_url="sqlite://",
         allow_unauthenticated=True,
         min_text_chars_per_page=20,
+        mailbox_imap_allowed_hosts=TEST_MAILBOX_IMAP_HOSTS,
     )
     app = create_app(settings)
     with TestClient(app) as test_client:
@@ -37,6 +112,7 @@ def ai_client(tmp_path: Path) -> TestClient:
         deepseek_api_key="unit-test-key",
         deepseek_model="unit-test-model",
         min_text_chars_per_page=20,
+        mailbox_imap_allowed_hosts=TEST_MAILBOX_IMAP_HOSTS,
     )
     app = create_app(settings)
     with TestClient(app) as test_client:
@@ -53,6 +129,7 @@ def protected_client(tmp_path: Path) -> TestClient:
         database_url="sqlite://",
         admin_token="test-admin-token",
         min_text_chars_per_page=20,
+        mailbox_imap_allowed_hosts=TEST_MAILBOX_IMAP_HOSTS,
     )
     app = create_app(settings)
     with TestClient(app) as test_client:

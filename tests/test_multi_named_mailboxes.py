@@ -15,6 +15,7 @@ class _MailboxImap:
 
     connected_hosts: list[str] = []
     fetches: list[tuple[str, bytes]] = []
+    status_calls_by_host: dict[str, int] = {}
 
     def __init__(self, host: str, *args, **kwargs) -> None:
         self.host = host
@@ -24,7 +25,10 @@ class _MailboxImap:
         return "OK", [b"logged in"]
 
     def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-        return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+        calls = self.__class__.status_calls_by_host.get(self.host, 0)
+        self.__class__.status_calls_by_host[self.host] = calls + 1
+        uidnext = 42 if calls == 0 else 43
+        return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
     def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
         return "OK", [b"1"]

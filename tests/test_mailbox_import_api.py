@@ -133,6 +133,7 @@ def test_mailbox_binding_searches_only_messages_at_or_after_uidnext(
     class BoundMailboxImap:
         search_args: list[tuple[object, ...]] = []
         fetched_uids: list[bytes] = []
+        status_calls = 0
 
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -141,7 +142,9 @@ def test_mailbox_binding_searches_only_messages_at_or_after_uidnext(
             return "OK", [b"logged in"]
 
         def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-            return "OK", [b'INBOX (UIDVALIDITY 9 UIDNEXT 42)']
+            self.__class__.status_calls += 1
+            uidnext = 42 if self.__class__.status_calls == 1 else 43
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
             return "OK", [b"1"]
@@ -180,7 +183,7 @@ def test_mailbox_binding_searches_only_messages_at_or_after_uidnext(
 
     assert result.imported_count == 0
     assert result.skipped_count == 1
-    assert BoundMailboxImap.search_args == [(None, "UID 42:*")]
+    assert BoundMailboxImap.search_args == [(None, "UID 42:42")]
     assert BoundMailboxImap.fetched_uids == [b"42"]
 
 
@@ -355,6 +358,8 @@ def test_mailbox_sync_records_database_attachment_failure_without_crashing_worke
     raw_message = message.as_bytes()
 
     class FakeImap:
+        status_calls = 0
+
         def __init__(self, *args, **kwargs) -> None:
             pass
 
@@ -365,7 +370,9 @@ def test_mailbox_sync_records_database_attachment_failure_without_crashing_worke
             return "OK", [b"1"]
 
         def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-            return "OK", [b'INBOX (UIDVALIDITY 9 UIDNEXT 42)']
+            self.__class__.status_calls += 1
+            uidnext = 42 if self.__class__.status_calls == 1 else 43
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def uid(self, command: str, *args):
             if command == "search":
@@ -426,6 +433,8 @@ def test_forwarded_identical_attachment_creates_one_resume_and_two_audit_records
     }
 
     class ForwardedImap:
+        status_calls = 0
+
         def __init__(self, *args, **kwargs) -> None:
             pass
 
@@ -433,7 +442,9 @@ def test_forwarded_identical_attachment_creates_one_resume_and_two_audit_records
             return "OK", [b"logged in"]
 
         def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+            self.__class__.status_calls += 1
+            uidnext = 42 if self.__class__.status_calls == 1 else 44
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
             return "OK", [b"2"]
@@ -515,6 +526,8 @@ def test_same_filename_with_different_attachment_bytes_imports_two_resumes(
     }
 
     class DistinctBytesImap:
+        status_calls = 0
+
         def __init__(self, *args, **kwargs) -> None:
             pass
 
@@ -522,7 +535,9 @@ def test_same_filename_with_different_attachment_bytes_imports_two_resumes(
             return "OK", [b"logged in"]
 
         def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+            self.__class__.status_calls += 1
+            uidnext = 42 if self.__class__.status_calls == 1 else 44
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
             return "OK", [b"2"]
@@ -679,6 +694,7 @@ def test_forwarded_attachment_can_retry_after_the_first_canonical_import_fails(
 
     class FailureThenForwardedImap:
         search_payload = b"42"
+        status_calls = 0
 
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -687,7 +703,13 @@ def test_forwarded_attachment_can_retry_after_the_first_canonical_import_fails(
             return "OK", [b"logged in"]
 
         def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+            self.__class__.status_calls += 1
+            uidnext = (
+                42
+                if self.__class__.status_calls == 1
+                else max(int(value) for value in self.__class__.search_payload.split()) + 1
+            )
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
             return "OK", [b"2"]
@@ -792,6 +814,7 @@ def test_failed_attachment_retries_retained_copy_and_updates_the_same_record(
 
     class RetryImap:
         calls: list[tuple[str, bytes | None]] = []
+        status_calls = 0
 
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -800,7 +823,9 @@ def test_failed_attachment_retries_retained_copy_and_updates_the_same_record(
             return "OK", [b"logged in"]
 
         def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+            self.__class__.status_calls += 1
+            uidnext = 42 if self.__class__.status_calls == 1 else 43
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
             return "OK", [b"1"]

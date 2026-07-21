@@ -21,6 +21,7 @@ from app.models import (
     JobVersion,
     MailboxConfig,
     MailboxAttachmentContentIdentity,
+    MailboxSyncFailureAlert,
     Resume,
     ResumeAiExtractionJob,
     ResumeScore,
@@ -77,6 +78,10 @@ def workspace_clients(tmp_path: Path) -> Iterator[tuple[TestClient, TestClient]]
         min_text_chars_per_page=20,
         transactional_email_provider="test",
         public_app_url="http://testserver",
+        # This two-session integration fixture uses a deterministic IMAP
+        # double for one provider name. Keep that test-only endpoint explicit
+        # instead of weakening the production exact-host allowlist.
+        mailbox_imap_allowed_hosts=("imap.example.test",),
     )
     app = create_app(settings)
 
@@ -238,6 +243,18 @@ def _seed_workspace_b_private_resources(
         )
         session.add_all((score, summary, extraction_job, job, mailbox_config))
         session.flush()
+
+        mailbox_alert = MailboxSyncFailureAlert(
+            mailbox_config_id=mailbox_config.id,
+            state="open",
+            severity="warning",
+            consecutive_failures=3,
+            first_failed_at=task_resume.created_at,
+            last_failed_at=task_resume.created_at,
+            last_error_code="mailbox_connection_failed",
+            opened_at=task_resume.created_at,
+        )
+        session.add(mailbox_alert)
 
         mailbox_import = EmailAttachmentImport(
             mailbox_config_id=mailbox_config.id,
@@ -407,6 +424,14 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert client_b.get(f"/v1/resume-scores/{private['score_id']}").status_code == 200
     assert client_b.get(f"/v1/resume-summaries/{private['summary_id']}").status_code == 200
     assert client_b.get("/v1/mailbox/config").json()["configured"] is True
+    b_mailboxes = client_b.get("/v1/mailboxes")
+    assert b_mailboxes.status_code == 200, b_mailboxes.text
+    b_mailbox = next(
+        item
+        for item in b_mailboxes.json()["items"]
+        if item["mailbox_id"] == private["mailbox_config_id"]
+    )
+    assert b_mailbox["active_sync_alert"] is not None
 
     foreign_job_versions = client_a.get(f"/v1/jobs/{private['job_id']}/versions")
     assert foreign_job_versions.status_code == 404, foreign_job_versions.text
@@ -458,6 +483,9 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert mailbox_for_a.json()["configured"] is False
     assert mailbox_history_for_a.status_code == 200, mailbox_history_for_a.text
     assert mailbox_history_for_a.json() == {"items": [], "total": 0}
+    a_mailboxes = client_a.get("/v1/mailboxes")
+    assert a_mailboxes.status_code == 200, a_mailboxes.text
+    assert a_mailboxes.json() == {"items": [], "total": 0}
 
     foreign_mailbox_retry = client_a.post(
         f"/v1/mailbox/imports/{private['mailbox_import_id']}/retry"
@@ -545,14 +573,20 @@ def test_identical_mailbox_attachment_is_not_deduplicated_across_workspaces(
     raw_message = message.as_bytes()
 
     class SharedAttachmentImap:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
+        status_calls_by_email: dict[str, int] = {}
 
-        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+        def __init__(self, *args, **kwargs) -> None:
+            self.email_address = ""
+
+        def login(self, email_address: str, *args, **kwargs) -> tuple[str, list[bytes]]:
+            self.email_address = email_address
             return "OK", [b"logged in"]
 
         def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+            calls = self.__class__.status_calls_by_email.get(self.email_address, 0)
+            self.__class__.status_calls_by_email[self.email_address] = calls + 1
+            uidnext = 42 if calls == 0 else 43
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
             return "OK", [b"1"]

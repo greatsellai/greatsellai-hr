@@ -37,6 +37,10 @@ from app.services.mailbox_import_service import (
 from app.services.mailbox_retention_service import (
     protect_retained_failed_attachment_for_retry,
 )
+from app.services.mailbox_sync_alert_service import (
+    record_terminal_sync_failure,
+    resolve_mailbox_sync_alert,
+)
 from app.tenant_scope import (
     clear_organization_context,
     organization_context_id,
@@ -74,8 +78,24 @@ _TERMINAL_ERROR_CODES = frozenset(
         "mailbox_not_enabled",
         "mailbox_credentials_unavailable",
         "mailbox_credentials_key_invalid",
+        "mailbox_imap_host_not_allowed",
+        "mailbox_imap_port_not_allowed",
+        "mailbox_imap_address_not_allowed",
+        "mailbox_imap_dns_failed",
+        "mailbox_imap_argument_invalid",
+        "mailbox_imap_response_line_too_large",
         "mailbox_task_source_changed",
         "mailbox_source_epoch_changed",
+        "mailbox_source_watermark_invalid",
+        "mailbox_sync_in_progress",
+        "mailbox_sync_claim_failed",
+        "mailbox_search_response_too_large",
+        "mailbox_message_too_large",
+        "mailbox_message_headers_too_large",
+        "mailbox_mime_structure_too_complex",
+        "mailbox_attachment_count_exceeded",
+        "mailbox_attachment_too_large",
+        "mailbox_attachment_total_too_large",
         "mailbox_import_not_found",
         "mailbox_import_not_retryable",
         "attachment_validation_failed",
@@ -601,14 +621,19 @@ def run_mailbox_background_job_worker_once(
 ) -> bool:
     """Claim and execute one mailbox job outside the HTTP request lifecycle."""
 
-    claimed = _claim_next_job(database, worker_id=worker_id)
+    claimed = _claim_next_job(database, settings=settings, worker_id=worker_id)
     if claimed is None:
         return False
     _process_claimed_job(database, settings=settings, worker_id=worker_id, claimed=claimed)
     return True
 
 
-def _recover_expired_jobs(session: Session, *, now: datetime) -> None:
+def _recover_expired_jobs(
+    session: Session,
+    *,
+    settings: AppSettings,
+    now: datetime,
+) -> None:
     expired = session.scalars(
         select(MailboxBackgroundJob)
         .where(
@@ -653,7 +678,7 @@ def _recover_expired_jobs(session: Session, *, now: datetime) -> None:
                     else None
                 ),
             }
-            session.execute(
+            recovered = session.execute(
                 update(MailboxBackgroundJob)
                 .where(
                     MailboxBackgroundJob.id == job.id,
@@ -663,6 +688,19 @@ def _recover_expired_jobs(session: Session, *, now: datetime) -> None:
                 .values(**values)
                 .execution_options(synchronize_session=False)
             )
+            if (
+                recovered.rowcount == 1
+                and not retry
+                and job.job_kind == MAILBOX_JOB_SYNC
+            ):
+                record_terminal_sync_failure(
+                    session,
+                    settings=settings,
+                    mailbox_config_id=job.mailbox_config_id,
+                    job_id=job.id,
+                    error_code="mailbox_background_job_lease_expired",
+                    now=now,
+                )
     if expired:
         session.commit()
 
@@ -670,11 +708,12 @@ def _recover_expired_jobs(session: Session, *, now: datetime) -> None:
 def _claim_next_job(
     database: Database,
     *,
+    settings: AppSettings,
     worker_id: str,
 ) -> ClaimedMailboxBackgroundJob | None:
     now = _utcnow()
     with database.session_factory() as session:
-        _recover_expired_jobs(session, now=now)
+        _recover_expired_jobs(session, settings=settings, now=now)
         candidate = session.scalar(
             select(MailboxBackgroundJob)
             .where(
@@ -850,8 +889,19 @@ def _complete_job(
         )
         .execution_options(synchronize_session=False)
     )
-    session.commit()
     was_completed = completed.rowcount == 1
+    if (
+        was_completed
+        and claimed.job_kind == MAILBOX_JOB_SYNC
+        and settings is not None
+    ):
+        resolve_mailbox_sync_alert(
+            session,
+            mailbox_config_id=claimed.mailbox_config_id,
+            resolution="sync_succeeded",
+            now=now,
+        )
+    session.commit()
     if was_completed:
         _prune_terminal_job_history_safely(session, now=now)
     return was_completed
@@ -895,8 +945,22 @@ def _fail_job(
         )
         .execution_options(synchronize_session=False)
     )
-    session.commit()
     was_updated = updated.rowcount == 1
+    if (
+        was_updated
+        and not should_retry
+        and claimed.job_kind == MAILBOX_JOB_SYNC
+        and settings is not None
+    ):
+        record_terminal_sync_failure(
+            session,
+            settings=settings,
+            mailbox_config_id=claimed.mailbox_config_id,
+            job_id=claimed.job_id,
+            error_code=error,
+            now=now,
+        )
+    session.commit()
     if was_updated and not should_retry:
         _prune_terminal_job_history_safely(session, now=now)
     return was_updated
@@ -935,6 +999,7 @@ def _process_claimed_job(
                         worker_id=worker_id,
                         error="mailbox_config_not_found",
                         retryable=False,
+                        settings=settings,
                     )
                     return
                 if config.organization_id != claimed.organization_id:
@@ -944,6 +1009,7 @@ def _process_claimed_job(
                         worker_id=worker_id,
                         error="mailbox_workspace_mismatch",
                         retryable=False,
+                        settings=settings,
                     )
                     return
                 if (
@@ -957,6 +1023,7 @@ def _process_claimed_job(
                         worker_id=worker_id,
                         error="mailbox_task_source_changed",
                         retryable=False,
+                        settings=settings,
                     )
                     return
                 if claimed.job_kind == MAILBOX_JOB_SYNC:
@@ -967,6 +1034,7 @@ def _process_claimed_job(
                             worker_id=worker_id,
                             error="mailbox_not_enabled",
                             retryable=False,
+                            settings=settings,
                         )
                         return
                     try:
@@ -1007,6 +1075,7 @@ def _process_claimed_job(
                             worker_id=worker_id,
                             error="mailbox_import_not_found",
                             retryable=False,
+                            settings=settings,
                         )
                         return
                     attachment_import = session.scalar(
@@ -1025,6 +1094,7 @@ def _process_claimed_job(
                             worker_id=worker_id,
                             error="mailbox_import_not_found",
                             retryable=False,
+                            settings=settings,
                         )
                         return
                     # A worker may have committed the attachment result just
@@ -1032,7 +1102,12 @@ def _process_claimed_job(
                     # running.  Make recovery idempotent instead of retrying a
                     # successfully imported attachment.
                     if attachment_import.status == "imported":
-                        _complete_job(session, claimed=claimed, worker_id=worker_id)
+                        _complete_job(
+                            session,
+                            claimed=claimed,
+                            worker_id=worker_id,
+                            settings=settings,
+                        )
                         return
                     try:
                         result = retry_mailbox_attachment(
@@ -1050,6 +1125,7 @@ def _process_claimed_job(
                             worker_id=worker_id,
                             error=error,
                             retryable=_retryable_error(error),
+                            settings=settings,
                         )
                         return
                     if result.status == "imported":
@@ -1057,6 +1133,7 @@ def _process_claimed_job(
                             session,
                             claimed=claimed,
                             worker_id=worker_id,
+                            settings=settings,
                             imported_count=1,
                         )
                         return
@@ -1067,6 +1144,7 @@ def _process_claimed_job(
                         worker_id=worker_id,
                         error=error,
                         retryable=_retryable_error(error),
+                        settings=settings,
                     )
                     return
                 _fail_job(
@@ -1075,6 +1153,7 @@ def _process_claimed_job(
                     worker_id=worker_id,
                     error="mailbox_background_job_invalid",
                     retryable=False,
+                    settings=settings,
                 )
     except Exception:
         # Never surface a raw exception or provider text through a task.  A

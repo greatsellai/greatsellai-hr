@@ -28,6 +28,7 @@ from app.models import (
     EmailAttachmentImportAttempt,
     MailboxAttachmentContentIdentity,
     MailboxConfig,
+    MailboxSyncFailureAlert,
     Resume,
 )
 from app.schemas import (
@@ -38,6 +39,7 @@ from app.schemas import (
     MailboxConfigUpdate,
     MailboxImportHistoryResponse,
     MailboxImportResponse,
+    MailboxSyncAlertSummary,
     MailboxSyncResponse,
 )
 from app.tenant_scope import (
@@ -54,6 +56,16 @@ from app.services.mailbox_retention_service import (
     store_failed_attachment_copy,
     store_mailbox_body_copy,
     store_success_attachment_copy,
+)
+from app.services.mailbox_imap_transport import (
+    MailboxImapResponseLimitError,
+    MailboxImapTransportError,
+    create_imap_client,
+    validate_imap_endpoint,
+)
+from app.services.mailbox_sync_alert_service import (
+    active_sync_alert,
+    resolve_mailbox_sync_alert,
 )
 from app.services.resume_service import (
     UploadValidationError,
@@ -78,12 +90,20 @@ class _ContentClaimLost(MailboxImportError):
 _RETRY_LEASE_SECONDS = 180
 _SYNC_LEASE_SECONDS = 600
 _CONTENT_CLAIM_LEASE_SECONDS = 180
+_IMAP_NZ_NUMBER_MAX = (1 << 32) - 1
+_IMAP_CANONICAL_NZ_NUMBER_PATTERN = re.compile(rb"[1-9][0-9]{0,9}\Z")
 _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
     {
         "attachment_validation_failed",
         "attachment_message_unavailable",
         "attachment_source_changed",
         "attachment_source_unavailable",
+        "mailbox_message_too_large",
+        "mailbox_message_headers_too_large",
+        "mailbox_mime_structure_too_complex",
+        "mailbox_attachment_count_exceeded",
+        "mailbox_attachment_too_large",
+        "mailbox_attachment_total_too_large",
     }
 )
 
@@ -100,6 +120,95 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _validated_imap_text(value: str) -> str:
+    """Return one printable ASCII IMAP value or fail with a stable code.
+
+    ``imaplib`` concatenates most command arguments without quoting or
+    rejecting CRLF.  Validate every stored and request-supplied value again at
+    the network boundary so legacy rows cannot inject a second IMAP command.
+    Printable non-ASCII strings are rejected too: this client has not enabled
+    IMAP UTF8 and would otherwise surface a raw ``UnicodeEncodeError``.
+    """
+
+    if not value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise MailboxImportError("mailbox_imap_argument_invalid")
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise MailboxImportError("mailbox_imap_argument_invalid") from exc
+    return value
+
+
+def _quoted_imap_string(value: str) -> str:
+    """Encode one validated value as an IMAP quoted string."""
+
+    safe_value = _validated_imap_text(value)
+    return '"' + safe_value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _validate_imap_connection_arguments(
+    *,
+    email_address: str,
+    mailbox: str,
+    password: str | None,
+) -> None:
+    _validated_imap_text(email_address)
+    _validated_imap_text(mailbox)
+    if password is not None:
+        _validated_imap_text(password)
+
+
+def _login_imap_client(
+    client: imaplib.IMAP4_SSL,
+    *,
+    email_address: str,
+    password: str,
+) -> tuple[str, list[bytes]]:
+    """Authenticate without allowing the username or password to add commands."""
+
+    return client.login(
+        _quoted_imap_string(email_address),
+        _validated_imap_text(password),
+    )
+
+
+def _select_mailbox_readonly(
+    client: imaplib.IMAP4_SSL,
+    *,
+    mailbox: str,
+) -> tuple[str, list[bytes]]:
+    return client.select(_quoted_imap_string(mailbox), readonly=True)
+
+
+def _parse_imap_nz_number(value: object) -> int | None:
+    """Parse an RFC IMAP ``nz-number`` without accepting alternate spellings."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 1 <= value <= _IMAP_NZ_NUMBER_MAX else None
+    if isinstance(value, bytes):
+        raw_value = value
+    elif isinstance(value, str):
+        try:
+            raw_value = value.encode("ascii")
+        except UnicodeEncodeError:
+            return None
+    else:
+        return None
+    if _IMAP_CANONICAL_NZ_NUMBER_PATTERN.fullmatch(raw_value) is None:
+        return None
+    parsed = int(raw_value)
+    return parsed if parsed <= _IMAP_NZ_NUMBER_MAX else None
+
+
+def _canonical_imap_uid(value: object) -> tuple[int, bytes] | None:
+    parsed = _parse_imap_nz_number(value)
+    if parsed is None:
+        return None
+    return parsed, str(parsed).encode("ascii")
 
 
 @contextmanager
@@ -158,7 +267,7 @@ def _received_at(message: Message) -> datetime | None:
 
 
 _MAILBOX_STATUS_VALUE_PATTERN = re.compile(
-    r"\b(UIDVALIDITY|UIDNEXT)\s+(\d+)\b",
+    r"\b(UIDVALIDITY|UIDNEXT)\s+([^\s()]+)",
     re.IGNORECASE,
 )
 
@@ -175,17 +284,20 @@ def _parse_mailbox_status(data: list[bytes] | list[str] | None) -> tuple[int, in
     values: dict[str, int] = {}
     for item in data or []:
         if isinstance(item, bytes):
-            text = item.decode("ascii", errors="ignore")
+            try:
+                text = item.decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise MailboxImportError("mailbox_status_failed") from exc
         else:
             text = str(item)
         for name, value in _MAILBOX_STATUS_VALUE_PATTERN.findall(text):
-            try:
-                values[name.upper()] = int(value)
-            except ValueError:
-                continue
+            parsed = _parse_imap_nz_number(value)
+            if parsed is None:
+                raise MailboxImportError("mailbox_status_failed")
+            values[name.upper()] = parsed
     uidvalidity = values.get("UIDVALIDITY")
     uidnext = values.get("UIDNEXT")
-    if uidvalidity is None or uidnext is None or uidvalidity <= 0 or uidnext <= 0:
+    if uidvalidity is None or uidnext is None:
         raise MailboxImportError("mailbox_status_failed")
     return uidvalidity, uidnext
 
@@ -198,7 +310,10 @@ def _read_mailbox_status(
     """Read the mailbox watermark without selecting or scanning messages."""
 
     try:
-        status, data = client.status(mailbox, "(UIDVALIDITY UIDNEXT)")
+        status, data = client.status(
+            _quoted_imap_string(mailbox),
+            "(UIDVALIDITY UIDNEXT)",
+        )
     except (imaplib.IMAP4.error, OSError) as exc:
         raise MailboxImportError("mailbox_status_failed") from exc
     if status != "OK":
@@ -208,6 +323,7 @@ def _read_mailbox_status(
 
 def _read_initial_mailbox_watermark(
     *,
+    settings: AppSettings,
     imap_host: str,
     imap_port: int,
     email_address: str,
@@ -223,14 +339,29 @@ def _read_initial_mailbox_watermark(
 
     client: imaplib.IMAP4_SSL | None = None
     try:
-        client = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=30)
-        login_status, _ = client.login(email_address, password)
+        _validate_imap_connection_arguments(
+            email_address=email_address,
+            mailbox=mailbox,
+            password=password,
+        )
+        client = create_imap_client(
+            settings,
+            host=imap_host,
+            port=imap_port,
+        )
+        login_status, _ = _login_imap_client(
+            client,
+            email_address=email_address,
+            password=password,
+        )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
         return _read_mailbox_status(client, mailbox=mailbox)
     except MailboxImportError:
         raise
-    except (imaplib.IMAP4.error, OSError) as exc:
+    except (imaplib.IMAP4.error, OSError, MailboxImapTransportError) as exc:
+        if isinstance(exc, MailboxImapTransportError):
+            raise MailboxImportError(str(exc)) from exc
         raise MailboxImportError("mailbox_connection_failed") from exc
     finally:
         if client is not None:
@@ -286,6 +417,7 @@ def mailbox_source_fingerprint(config: MailboxConfig) -> str:
 def _config_response(config: MailboxConfig | None) -> MailboxConfigResponse:
     if config is None:
         return MailboxConfigResponse(configured=False)
+    alert = active_sync_alert(config.sync_failure_alert)
     return MailboxConfigResponse(
         configured=True,
         mailbox_id=config.id,
@@ -300,6 +432,19 @@ def _config_response(config: MailboxConfig | None) -> MailboxConfigResponse:
         import_started_at=config.import_started_at,
         last_synced_at=config.last_synced_at,
         last_sync_error=config.last_sync_error,
+        active_sync_alert=(
+            MailboxSyncAlertSummary(
+                severity=alert.severity,  # type: ignore[arg-type]
+                consecutive_failures=alert.consecutive_failures,
+                opened_at=alert.opened_at or alert.last_failed_at,
+                last_failed_at=alert.last_failed_at,
+                last_error_code=alert.last_error_code or "mailbox_sync_failed",
+            )
+            if alert is not None
+            and alert.opened_at is not None
+            and alert.last_failed_at is not None
+            else None
+        ),
     )
 
 
@@ -449,9 +594,26 @@ def _update_config_values(
         display_name_key=display_name_key,
         excluding_config_id=config.id if config is not None else None,
     )
-    normalized_host = imap_host.strip()
+    try:
+        normalized_host = validate_imap_endpoint(
+            settings,
+            host=imap_host,
+            port=imap_port,
+        )
+    except MailboxImapTransportError as exc:
+        raise MailboxImportError(str(exc)) from exc
+    _validate_imap_connection_arguments(
+        email_address=email_address,
+        mailbox=mailbox,
+        password=password,
+    )
     normalized_email = email_address.strip()
     normalized_mailbox = mailbox.strip()
+    _validate_imap_connection_arguments(
+        email_address=normalized_email,
+        mailbox=normalized_mailbox,
+        password=None,
+    )
     source_changed = config is None or not _same_mailbox_source(
         config,
         imap_host=normalized_host,
@@ -476,6 +638,7 @@ def _update_config_values(
     if needs_watermark:
         binding_password = password or _decrypt_password(settings, encrypted_password)
         imap_uidvalidity, import_start_uid = _read_initial_mailbox_watermark(
+            settings=settings,
             imap_host=normalized_host,
             imap_port=imap_port,
             email_address=normalized_email,
@@ -517,6 +680,18 @@ def _update_config_values(
         # stored UIDNEXT keeps that check from importing its history.
         config.last_synced_at = None
     config.last_sync_error = None
+    if not enabled:
+        resolve_mailbox_sync_alert(
+            session,
+            mailbox_config_id=config.id,
+            resolution="disabled",
+        )
+    elif source_changed:
+        resolve_mailbox_sync_alert(
+            session,
+            mailbox_config_id=config.id,
+            resolution="reconfigured",
+        )
     return config
 
 
@@ -586,6 +761,11 @@ def archive_mailbox_config(
     config.archived_at = _utcnow()
     config.sync_lease_token = None
     config.sync_lease_expires_at = None
+    resolve_mailbox_sync_alert(
+        session,
+        mailbox_config_id=config.id,
+        resolution="archived",
+    )
     session.commit()
     return _config_response(config)
 
@@ -1530,49 +1710,378 @@ def _known_message_uids(
     *,
     config_id: str,
     organization_id: str,
+    message_uids: set[str],
 ) -> set[str]:
-    """Return message UIDs already handled by an earlier incremental run."""
+    """Return only selected UIDs that have already been handled.
 
+    The old implementation loaded every historical UID for the mailbox into
+    worker memory.  A bounded sync batch only needs to check the handful of
+    UIDs it is about to fetch.
+    """
+
+    if not message_uids:
+        return set()
     return set(
         session.scalars(
             select(EmailAttachmentImport.message_uid).where(
                 EmailAttachmentImport.mailbox_config_id == config_id,
                 EmailAttachmentImport.organization_id == organization_id,
+                EmailAttachmentImport.message_uid.in_(message_uids),
             )
         ).all()
     )
 
 
-def _attachments(message: Message) -> list[tuple[str, bytes]]:
-    found: list[tuple[str, bytes]] = []
-    for part in message.walk():
+@dataclass(frozen=True)
+class _MailboxAttachment:
+    filename: str
+    content: bytes | None
+    supported: bool
+    ordinal: int
+
+
+_MAILBOX_RESOURCE_LIMIT_ERRORS = frozenset(
+    {
+        "mailbox_message_too_large",
+        "mailbox_message_headers_too_large",
+        "mailbox_mime_structure_too_complex",
+        "mailbox_attachment_count_exceeded",
+        "mailbox_attachment_too_large",
+        "mailbox_attachment_total_too_large",
+    }
+)
+_RFC822_SIZE_PATTERN = re.compile(r"\bRFC822\.SIZE\s+(\d+)\b", re.IGNORECASE)
+
+
+def _is_supported_document_filename(filename: str) -> bool:
+    normalized = filename.casefold()
+    return any(normalized.endswith(extension) for extension in SUPPORTED_DOCUMENT_EXTENSIONS)
+
+
+def _iter_bounded_leaf_parts(
+    message: Message,
+    *,
+    settings: AppSettings,
+) -> Iterator[Message]:
+    """Walk MIME iteratively while enforcing total part and depth budgets."""
+
+    pending: list[tuple[Message, int]] = [(message, 0)]
+    part_count = 0
+    while pending:
+        part, depth = pending.pop()
+        part_count += 1
+        if part_count > settings.mailbox_max_mime_parts or depth > settings.mailbox_max_mime_depth:
+            raise MailboxImportError("mailbox_mime_structure_too_complex")
+        if not part.is_multipart():
+            yield part
+            continue
+        children = part.get_payload()
+        if not isinstance(children, list):
+            raise MailboxImportError("mailbox_mime_structure_too_complex")
+        for child in reversed(children):
+            if not isinstance(child, Message):
+                raise MailboxImportError("mailbox_mime_structure_too_complex")
+            pending.append((child, depth + 1))
+
+
+def _encoded_payload_size(part: Message) -> int:
+    """Estimate decoded payload size before allocating decoded attachment bytes."""
+
+    encoded = part.get_payload(decode=False)
+    transfer_encoding = part.get("Content-Transfer-Encoding", "").strip().casefold()
+    if isinstance(encoded, str):
+        if transfer_encoding != "base64":
+            # Four bytes is a safe UTF-8 upper bound without allocating a
+            # second copy of a potentially multi-megabyte MIME part.
+            return len(encoded) * 4
+        non_whitespace = 0
+        previous = last = ""
+        for character in encoded:
+            if character.isspace():
+                continue
+            non_whitespace += 1
+            previous, last = last, character
+        padding = 2 if previous == last == "=" else 1 if last == "=" else 0
+        return max(0, (non_whitespace // 4) * 3 - padding)
+    elif isinstance(encoded, bytes):
+        if transfer_encoding != "base64":
+            return len(encoded)
+        non_whitespace = 0
+        previous = last = -1
+        for byte in encoded:
+            if byte in b" \t\r\n":
+                continue
+            non_whitespace += 1
+            previous, last = last, byte
+        padding = 2 if previous == last == ord("=") else 1 if last == ord("=") else 0
+        return max(0, (non_whitespace // 4) * 3 - padding)
+    else:
+        return 0
+
+
+def _attachments(
+    message: Message,
+    *,
+    settings: AppSettings,
+) -> list[_MailboxAttachment]:
+    """Inspect all MIME parts before decoding any supported attachment.
+
+    A message that exceeds a structural or decoded-byte budget is rejected as
+    a whole.  That avoids importing the first few attachments and discovering
+    an exhaustion payload only after work has already escaped the transaction.
+    Unsupported files are audited without decoding their bytes.
+    """
+
+    candidates: list[tuple[str, Message, bool, int]] = []
+    for part in _iter_bounded_leaf_parts(message, settings=settings):
         filename = part.get_filename()
         disposition = part.get_content_disposition()
         if not filename or disposition not in {"attachment", "inline"}:
             continue
+        safe_filename = _safe_filename(filename)
+        candidates.append(
+            (
+                safe_filename,
+                part,
+                _is_supported_document_filename(safe_filename),
+                len(candidates),
+            )
+        )
+        if len(candidates) > settings.mailbox_max_attachments_per_message:
+            raise MailboxImportError("mailbox_attachment_count_exceeded")
+
+    estimated_total = 0
+    for _, part, supported, _ in candidates:
+        if not supported:
+            continue
+        estimate = _encoded_payload_size(part)
+        if estimate > settings.max_upload_bytes:
+            raise MailboxImportError("mailbox_attachment_too_large")
+        estimated_total += estimate
+        if estimated_total > settings.max_upload_bytes:
+            raise MailboxImportError("mailbox_attachment_total_too_large")
+
+    decoded_total = 0
+    found: list[_MailboxAttachment] = []
+    for filename, part, supported, ordinal in candidates:
+        if not supported:
+            found.append(
+                _MailboxAttachment(
+                    filename=filename,
+                    content=None,
+                    supported=False,
+                    ordinal=ordinal,
+                )
+            )
+            continue
         payload = part.get_payload(decode=True)
-        if payload:
-            found.append((_safe_filename(filename), payload))
+        if payload is None:
+            payload = b""
+        if not isinstance(payload, bytes):
+            raise MailboxImportError("mailbox_mime_structure_too_complex")
+        if len(payload) > settings.max_upload_bytes:
+            raise MailboxImportError("mailbox_attachment_too_large")
+        decoded_total += len(payload)
+        if decoded_total > settings.max_upload_bytes:
+            raise MailboxImportError("mailbox_attachment_total_too_large")
+        found.append(
+            _MailboxAttachment(
+                filename=filename,
+                content=payload,
+                supported=True,
+                ordinal=ordinal,
+            )
+        )
     return found
 
 
-def _message_body_bytes(message: Message) -> bytes:
-    """Return bounded plain-text mail content without retaining MIME headers.
+def _message_body_bytes(message: Message, *, settings: AppSettings) -> bytes:
+    """Return a bounded plain-text cache without decoding an oversized body."""
 
-    The body cache is for short retention/audit only.  It is deliberately
-    capped and does not include recipients, headers, or binary inline parts.
-    """
-
+    remaining = settings.mailbox_max_body_cache_bytes
     parts: list[bytes] = []
-    for part in message.walk():
-        if part.is_multipart() or part.get_filename():
+    for part in _iter_bounded_leaf_parts(message, settings=settings):
+        if remaining <= 0:
+            break
+        if part.get_filename() or part.get_content_type() != "text/plain":
             continue
-        if part.get_content_type() != "text/plain":
+        if _encoded_payload_size(part) > remaining:
+            # Retention is optional. Skip a large mail body rather than
+            # decoding it only to discard almost all of it.
             continue
         payload = part.get_payload(decode=True)
-        if payload:
-            parts.append(payload)
-    return b"\n\n".join(parts)[: 256 * 1024]
+        if not isinstance(payload, bytes) or not payload:
+            continue
+        clipped = payload[:remaining]
+        parts.append(clipped)
+        remaining -= len(clipped)
+    return b"\n\n".join(parts)[: settings.mailbox_max_body_cache_bytes]
+
+
+def _message_header_size(raw_message: bytes) -> int:
+    separators = [
+        position
+        for position in (
+            raw_message.find(b"\r\n\r\n"),
+            raw_message.find(b"\n\n"),
+        )
+        if position >= 0
+    ]
+    return min(separators) if separators else len(raw_message)
+
+
+def _bounded_message_factory(*, max_parts: int) -> Callable[..., Message]:
+    """Stop ``email`` from constructing an unbounded MIME object tree.
+
+    ``BytesParser`` normally creates every nested ``Message`` before callers
+    can inspect the finished tree. Its parser probes a supplied factory once
+    at construction time, so the first invocation below is deliberately not a
+    real part; every later invocation is a root or MIME child.
+    """
+
+    factory_probe_seen = False
+    part_count = 0
+
+    def create_message(*, policy: policy.Policy) -> Message:
+        nonlocal factory_probe_seen, part_count
+        if not factory_probe_seen:
+            factory_probe_seen = True
+            return Message(policy=policy)
+        part_count += 1
+        if part_count > max_parts:
+            raise MailboxImportError("mailbox_mime_structure_too_complex")
+        return Message(policy=policy)
+
+    return create_message
+
+
+def _parse_mailbox_message(
+    raw_message: bytes,
+    *,
+    settings: AppSettings,
+) -> Message:
+    if len(raw_message) > settings.mailbox_max_raw_message_bytes:
+        raise MailboxImportError("mailbox_message_too_large")
+    if _message_header_size(raw_message) > settings.mailbox_max_header_bytes:
+        raise MailboxImportError("mailbox_message_headers_too_large")
+    try:
+        return BytesParser(
+            _class=_bounded_message_factory(
+                max_parts=settings.mailbox_max_mime_parts,
+            ),
+            policy=policy.default,
+        ).parsebytes(raw_message)
+    except (RecursionError, UnicodeError, ValueError) as exc:
+        raise MailboxImportError("mailbox_mime_structure_too_complex") from exc
+
+
+def _parse_search_uids(
+    data: list[bytes] | list[str] | None,
+    *,
+    settings: AppSettings,
+    minimum_uid: int,
+    maximum_uid: int,
+) -> list[bytes]:
+    chunks: list[bytes] = []
+    size = 0
+    for item in data or []:
+        chunk = item if isinstance(item, bytes) else str(item).encode("utf-8")
+        size += len(chunk)
+        if size > settings.mailbox_max_search_response_bytes:
+            raise MailboxImportError("mailbox_search_response_too_large")
+        chunks.append(chunk)
+    validated: list[bytes] = []
+    for token in b" ".join(chunks).split():
+        canonical = _canonical_imap_uid(token)
+        if canonical is None:
+            continue
+        uid, raw_uid = canonical
+        if minimum_uid <= uid <= maximum_uid:
+            validated.append(raw_uid)
+    return validated
+
+
+def _extract_rfc822_size(data: list[object] | None) -> int | None:
+    for item in data or []:
+        values = item if isinstance(item, tuple) else (item,)
+        for value in values:
+            if isinstance(value, bytes):
+                text = value.decode("ascii", errors="ignore")
+            else:
+                text = str(value)
+            match = _RFC822_SIZE_PATTERN.search(text)
+            if match is not None:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    return None
+    return None
+
+
+def _fetch_message_size(
+    client: imaplib.IMAP4_SSL,
+    *,
+    raw_uid: bytes,
+) -> int | None:
+    status, data = client.uid("fetch", raw_uid, "(RFC822.SIZE)")
+    if status != "OK":
+        return None
+    return _extract_rfc822_size(data)
+
+
+def _fetch_message_bytes(
+    client: imaplib.IMAP4_SSL,
+    *,
+    raw_uid: bytes,
+    max_bytes: int,
+) -> bytes | None:
+    # Request one byte beyond the policy ceiling. A compliant IMAP server
+    # returns either the complete message or this bounded prefix, so we can
+    # reject an oversized message without ever asking it to materialize the
+    # full RFC822 payload. The pinned transport separately refuses a peer that
+    # ignores this partial range and declares a larger literal.
+    try:
+        status, data = client.uid(
+            "fetch",
+            raw_uid,
+            f"(BODY.PEEK[]<0.{max_bytes + 1}>)",
+        )
+    except MailboxImapResponseLimitError as exc:
+        raise MailboxImportError(str(exc)) from exc
+    if status != "OK" or not data:
+        return None
+    chunks: list[bytes] = []
+    total = 0
+    for item in data:
+        if not isinstance(item, tuple) or len(item) < 2 or not isinstance(item[1], bytes):
+            continue
+        chunk = item[1]
+        total += len(chunk)
+        if total > max_bytes:
+            raise MailboxImportError("mailbox_message_too_large")
+        chunks.append(chunk)
+    if not chunks:
+        return None
+    if len(chunks) == 1:
+        return chunks[0]
+    return b"".join(chunks)
+
+
+def _message_resource_digest(*, uid: str, error_code: str) -> str:
+    return hashlib.sha256(
+        f"mailbox-resource-v1\x1f{uid}\x1f{error_code}".encode("utf-8")
+    ).hexdigest()
+
+
+def _unsupported_attachment_digest(
+    *,
+    uid: str,
+    filename: str,
+    ordinal: int,
+) -> str:
+    return hashlib.sha256(
+        f"mailbox-unsupported-v1\x1f{uid}\x1f{ordinal}\x1f{filename}".encode("utf-8")
+    ).hexdigest()
 
 
 def _store_replica_safely(session: Session, callback) -> None:
@@ -1667,12 +2176,15 @@ def _attachment_with_digest(
     message: Message,
     *,
     digest: str,
+    settings: AppSettings,
 ) -> tuple[str, bytes] | None:
     """Return only the exact previously-recorded attachment content."""
 
-    for filename, content in _attachments(message):
-        if hashlib.sha256(content).hexdigest() == digest:
-            return filename, content
+    for attachment in _attachments(message, settings=settings):
+        if attachment.content is None:
+            continue
+        if hashlib.sha256(attachment.content).hexdigest() == digest:
+            return attachment.filename, attachment.content
     return None
 
 
@@ -2042,6 +2554,15 @@ def retry_mailbox_attachment(
                     error="attachment_source_changed",
                     resume_id=None,
                 )
+            canonical_uid = _canonical_imap_uid(record.message_uid)
+            source_uidvalidity = _parse_imap_nz_number(record.source_uidvalidity)
+            if canonical_uid is None or source_uidvalidity is None:
+                return complete(
+                    status="failed",
+                    error="attachment_source_changed",
+                    resume_id=None,
+                )
+            message_uid, raw_uid = canonical_uid
             try:
                 password = _fernet(settings).decrypt(
                     config.encrypted_password.encode("ascii")
@@ -2052,10 +2573,23 @@ def retry_mailbox_attachment(
                     error="mailbox_credentials_unavailable",
                     resume_id=None,
                 )
+            _validate_imap_connection_arguments(
+                email_address=config.email_address,
+                mailbox=config.mailbox,
+                password=password,
+            )
             pulse()
-            client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
+            client = create_imap_client(
+                settings,
+                host=config.imap_host,
+                port=config.imap_port,
+            )
             pulse()
-            login_status, _ = client.login(config.email_address, password)
+            login_status, _ = _login_imap_client(
+                client,
+                email_address=config.email_address,
+                password=password,
+            )
             if login_status != "OK":
                 return complete(
                     status="failed",
@@ -2063,15 +2597,24 @@ def retry_mailbox_attachment(
                     resume_id=None,
                 )
             pulse()
-            current_uidvalidity, _ = _read_mailbox_status(client, mailbox=config.mailbox)
-            if current_uidvalidity != record.source_uidvalidity:
+            current_uidvalidity, current_uidnext = _read_mailbox_status(
+                client,
+                mailbox=config.mailbox,
+            )
+            if (
+                current_uidvalidity != source_uidvalidity
+                or message_uid >= current_uidnext
+            ):
                 return complete(
                     status="failed",
                     error="attachment_source_changed",
                     resume_id=None,
                 )
             pulse()
-            select_status, _ = client.select(config.mailbox, readonly=True)
+            select_status, _ = _select_mailbox_readonly(
+                client,
+                mailbox=config.mailbox,
+            )
             if select_status != "OK":
                 return complete(
                     status="failed",
@@ -2079,19 +2622,54 @@ def retry_mailbox_attachment(
                     resume_id=None,
                 )
             pulse()
-            fetch_status, fetched = client.uid(
-                "fetch", record.message_uid.encode("ascii"), "(RFC822)"
+            selected_uidvalidity, selected_uidnext = _read_mailbox_status(
+                client,
+                mailbox=config.mailbox,
             )
-            if fetch_status != "OK" or not fetched or not isinstance(fetched[0], tuple):
+            if (
+                selected_uidvalidity != source_uidvalidity
+                or selected_uidnext < current_uidnext
+                or message_uid >= selected_uidnext
+            ):
+                return complete(
+                    status="failed",
+                    error="attachment_source_changed",
+                    resume_id=None,
+                )
+            pulse()
+            declared_size = _fetch_message_size(
+                client,
+                raw_uid=raw_uid,
+            )
+            if declared_size is None:
                 return complete(
                     status="failed",
                     error="attachment_message_unavailable",
                     resume_id=None,
                 )
-            message = BytesParser(policy=policy.default).parsebytes(fetched[0][1])
+            if declared_size > settings.mailbox_max_raw_message_bytes:
+                return complete(
+                    status="failed",
+                    error="mailbox_message_too_large",
+                    resume_id=None,
+                )
+            pulse()
+            raw_message = _fetch_message_bytes(
+                client,
+                raw_uid=raw_uid,
+                max_bytes=settings.mailbox_max_raw_message_bytes,
+            )
+            if raw_message is None:
+                return complete(
+                    status="failed",
+                    error="attachment_message_unavailable",
+                    resume_id=None,
+                )
+            message = _parse_mailbox_message(raw_message, settings=settings)
             attachment = _attachment_with_digest(
                 message,
                 digest=record.attachment_sha256,
+                settings=settings,
             )
             if attachment is None:
                 return complete(
@@ -2177,6 +2755,14 @@ def retry_mailbox_attachment(
         session.rollback()
         discard_retry_resume()
         raise MailboxImportError("mailbox_import_retry_superseded")
+    except MailboxImapTransportError as exc:
+        session.rollback()
+        discard_retry_resume()
+        return complete(
+            status="failed",
+            error=str(exc),
+            resume_id=None,
+        )
     except MailboxImportError as exc:
         session.rollback()
         discard_retry_resume()
@@ -2405,6 +2991,14 @@ def sync_mailbox(
             claim_token=claim_token,
         )
 
+    def stop_for_source_change(error_code: str) -> None:
+        """Disable a source whose immutable IMAP identity became unsafe."""
+
+        config.enabled = False
+        config.last_sync_error = error_code
+        session.commit()
+        raise MailboxImportError(error_code)
+
     imported = duplicates = skipped = failed = 0
     client: imaplib.IMAP4_SSL | None = None
     try:
@@ -2412,10 +3006,23 @@ def sync_mailbox(
         _recover_expired_content_claims(session, organization_id=organization_id)
         pulse()
         password = _decrypt_password(settings, config.encrypted_password)
+        _validate_imap_connection_arguments(
+            email_address=config.email_address,
+            mailbox=config.mailbox,
+            password=password,
+        )
         pulse()
-        client = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=30)
+        client = create_imap_client(
+            settings,
+            host=config.imap_host,
+            port=config.imap_port,
+        )
         pulse()
-        login_status, _ = client.login(config.email_address, password)
+        login_status, _ = _login_imap_client(
+            client,
+            email_address=config.email_address,
+            password=password,
+        )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
         pulse()
@@ -2438,57 +3045,167 @@ def sync_mailbox(
         # is a different source identity, so do not silently reset the
         # watermark and continue. The owner must archive this channel and bind
         # a new one, which keeps historical retry provenance trustworthy.
-        if config.imap_uidvalidity != imap_uidvalidity:
-            config.enabled = False
-            config.last_sync_error = "mailbox_source_epoch_changed"
-            session.commit()
-            raise MailboxImportError("mailbox_source_epoch_changed")
+        import_start_uid = _parse_imap_nz_number(config.import_start_uid)
+        configured_uidvalidity = _parse_imap_nz_number(config.imap_uidvalidity)
+        if import_start_uid is None or configured_uidvalidity is None:
+            stop_for_source_change("mailbox_source_watermark_invalid")
+        if configured_uidvalidity != imap_uidvalidity:
+            stop_for_source_change("mailbox_source_epoch_changed")
+        if current_uidnext < import_start_uid:
+            stop_for_source_change("mailbox_source_watermark_invalid")
         pulse()
-        status, _ = client.select(config.mailbox, readonly=True)
+        status, _ = _select_mailbox_readonly(
+            client,
+            mailbox=config.mailbox,
+        )
         if status != "OK":
             raise MailboxImportError("mailbox_select_failed")
         pulse()
-        status, data = client.uid("search", None, f"UID {config.import_start_uid}:*")
-        if status != "OK":
-            raise MailboxImportError("mailbox_search_failed")
-        known_uids = _known_message_uids(
-            session,
-            config_id=config.id,
-            organization_id=organization_id,
+        selected_uidvalidity, selected_uidnext = _read_mailbox_status(
+            client,
+            mailbox=config.mailbox,
         )
+        if selected_uidvalidity != configured_uidvalidity:
+            stop_for_source_change("mailbox_source_epoch_changed")
+        if selected_uidnext < current_uidnext or selected_uidnext < import_start_uid:
+            stop_for_source_change("mailbox_source_watermark_invalid")
+        pulse()
+        search_uids: list[bytes]
+        if selected_uidnext == import_start_uid:
+            # ``UID N:*`` includes the last existing message when N is larger
+            # than every assigned UID. Avoid that reversed-range behavior by
+            # issuing no SEARCH until the snapshot has a real post-bind UID.
+            search_uids = []
+        else:
+            maximum_uid = selected_uidnext - 1
+            status, data = client.uid(
+                "search",
+                None,
+                f"UID {import_start_uid}:{maximum_uid}",
+            )
+            if status != "OK":
+                raise MailboxImportError("mailbox_search_failed")
+            search_uids = _parse_search_uids(
+                data,
+                settings=settings,
+                minimum_uid=import_start_uid,
+                maximum_uid=maximum_uid,
+            )
         selected_uids: list[bytes] = []
+        seen_uids: set[str] = set()
+        candidate_batch: list[bytes] = []
+
+        def choose_unknown_uids() -> None:
+            if not candidate_batch:
+                return
+            candidate_values = {raw.decode("ascii") for raw in candidate_batch}
+            known_uids = _known_message_uids(
+                session,
+                config_id=config.id,
+                organization_id=organization_id,
+                message_uids=candidate_values,
+            )
+            for candidate in candidate_batch:
+                candidate_uid = candidate.decode("ascii")
+                if candidate_uid and candidate_uid not in known_uids:
+                    selected_uids.append(candidate)
+                    if len(selected_uids) >= settings.mailbox_sync_attachment_limit:
+                        break
+            candidate_batch.clear()
+
         # Work newest-first so freshly received resumes arrive immediately.
         # The server has already limited this search to UIDs at or after the
-        # binding watermark; known UIDs avoid re-fetching work from an earlier
-        # batch when a burst exceeds the per-run limit.
-        for raw_uid in reversed((data[0] or b"").split()):
-            uid = raw_uid.decode("ascii", errors="ignore")
-            if not uid or uid in known_uids:
+        # binding watermark. Querying historical handling state in small
+        # batches keeps a long-lived source from loading every prior UID.
+        for raw_uid in reversed(search_uids):
+            uid = raw_uid.decode("ascii")
+            if not uid or uid in seen_uids:
                 continue
-            selected_uids.append(raw_uid)
+            seen_uids.add(uid)
+            candidate_batch.append(raw_uid)
+            if len(candidate_batch) >= 100:
+                choose_unknown_uids()
             if len(selected_uids) >= settings.mailbox_sync_attachment_limit:
                 break
+        if len(selected_uids) < settings.mailbox_sync_attachment_limit:
+            choose_unknown_uids()
         uids = list(reversed(selected_uids))
         for raw_uid in uids:
-            uid = raw_uid.decode("ascii", errors="ignore")
+            uid = raw_uid.decode("ascii")
             pulse()
-            status, fetched = client.uid("fetch", raw_uid, "(RFC822)")
-            if status != "OK" or not fetched or not isinstance(fetched[0], tuple):
+            declared_size = _fetch_message_size(client, raw_uid=raw_uid)
+            if declared_size is None:
                 failed += 1
                 continue
-            message = BytesParser(policy=policy.default).parsebytes(fetched[0][1])
+            if declared_size > settings.mailbox_max_raw_message_bytes:
+                _record(
+                    session,
+                    config=config,
+                    uid=uid,
+                    message_id=None,
+                    filename="[邮件大小超限]",
+                    attachment_sha256=_message_resource_digest(
+                        uid=uid,
+                        error_code="mailbox_message_too_large",
+                    ),
+                    status="skipped",
+                    error="mailbox_message_too_large",
+                    resume_id=None,
+                    received_at=None,
+                    source_uidvalidity=imap_uidvalidity,
+                )
+                session.commit()
+                skipped += 1
+                continue
+            pulse()
+            try:
+                raw_message = _fetch_message_bytes(
+                    client,
+                    raw_uid=raw_uid,
+                    max_bytes=settings.mailbox_max_raw_message_bytes,
+                )
+                if raw_message is None:
+                    failed += 1
+                    continue
+                message = _parse_mailbox_message(raw_message, settings=settings)
+                attachments = _attachments(message, settings=settings)
+            except MailboxImportError as exc:
+                error_code = str(exc)
+                if error_code not in _MAILBOX_RESOURCE_LIMIT_ERRORS:
+                    raise
+                _record(
+                    session,
+                    config=config,
+                    uid=uid,
+                    message_id=None,
+                    filename="[邮件资源限制]",
+                    attachment_sha256=_message_resource_digest(
+                        uid=uid,
+                        error_code=error_code,
+                    ),
+                    status="skipped",
+                    error=error_code,
+                    resume_id=None,
+                    received_at=None,
+                    source_uidvalidity=imap_uidvalidity,
+                )
+                session.commit()
+                skipped += 1
+                if isinstance(exc.__cause__, MailboxImapResponseLimitError):
+                    # The pinned transport closes a peer that ignores our
+                    # bounded BODY.PEEK range. The UID is now durably marked
+                    # as skipped; finish this batch cleanly and reconnect on
+                    # the next scheduled task for any remaining messages.
+                    client = None
+                    break
+                continue
             message_id = str(message.get("Message-ID") or "").strip() or None
             received_at = _received_at(message)
-            attachments = _attachments(message)
             # Keep only a bounded plain-text body cache, and only for mail
             # carrying a supported resume.  The IMAP RFC822 payload itself is
             # never persisted.
-            if attachments and any(
-                filename.lower().endswith(extension)
-                for filename, _ in attachments
-                for extension in SUPPORTED_DOCUMENT_EXTENSIONS
-            ):
-                body_content = _message_body_bytes(message)
+            if any(attachment.supported for attachment in attachments):
+                body_content = _message_body_bytes(message, settings=settings)
                 if body_content:
                     _store_replica_safely(
                         session,
@@ -2517,21 +3234,25 @@ def sync_mailbox(
                 )
                 session.commit()
                 skipped += 1
-                known_uids.add(uid)
                 continue
-            for filename, content in attachments:
-                digest = hashlib.sha256(content).hexdigest()
-                if _already_imported(
-                    session,
-                    config_id=config.id,
-                    organization_id=organization_id,
-                    uid=uid,
-                    digest=digest,
-                ):
-                    duplicates += 1
-                    continue
-                if not any(filename.lower().endswith(ext) for ext in SUPPORTED_DOCUMENT_EXTENSIONS):
-                    record = _record(
+            for attachment in attachments:
+                filename = attachment.filename
+                if attachment.content is None:
+                    digest = _unsupported_attachment_digest(
+                        uid=uid,
+                        filename=filename,
+                        ordinal=attachment.ordinal,
+                    )
+                    if _already_imported(
+                        session,
+                        config_id=config.id,
+                        organization_id=organization_id,
+                        uid=uid,
+                        digest=digest,
+                    ):
+                        duplicates += 1
+                        continue
+                    _record(
                         session,
                         config=config,
                         uid=uid,
@@ -2546,6 +3267,17 @@ def sync_mailbox(
                     )
                     session.commit()
                     skipped += 1
+                    continue
+                content = attachment.content
+                digest = hashlib.sha256(content).hexdigest()
+                if _already_imported(
+                    session,
+                    config_id=config.id,
+                    organization_id=organization_id,
+                    uid=uid,
+                    digest=digest,
+                ):
+                    duplicates += 1
                     continue
                 record, content_claim, terminal = _begin_automatic_content_import(
                     session,
@@ -2690,11 +3422,17 @@ def sync_mailbox(
             skipped_count=skipped,
             failed_count=failed,
         )
-    except (imaplib.IMAP4.error, OSError, MailboxImportError, SQLAlchemyError) as exc:
+    except (
+        imaplib.IMAP4.error,
+        OSError,
+        MailboxImapTransportError,
+        MailboxImportError,
+        SQLAlchemyError,
+    ) as exc:
         session.rollback()
         error_code = (
             str(exc)
-            if isinstance(exc, MailboxImportError)
+            if isinstance(exc, (MailboxImportError, MailboxImapTransportError))
             else "mailbox_sync_failed"
             if isinstance(exc, SQLAlchemyError)
             else "mailbox_connection_failed"
@@ -2703,6 +3441,8 @@ def sync_mailbox(
         if config is not None and config.organization_id == organization_id:
             config.last_sync_error = error_code
             session.commit()
+        if isinstance(exc, MailboxImapTransportError):
+            raise MailboxImportError(error_code) from exc
         if isinstance(exc, MailboxImportError):
             raise
         if isinstance(exc, SQLAlchemyError):

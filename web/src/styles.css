@@ -3231,6 +3231,89 @@ button {
   justify-content: flex-end;
 }
 
+.mailbox-sync-alert-list,
+.mailbox-sync-alert-detail {
+  border: 1px solid #f1c6c2;
+  background: var(--red-tint);
+  border-radius: var(--radius-md);
+}
+
+.mailbox-sync-alert-list {
+  margin-bottom: var(--space-xl);
+  overflow: hidden;
+}
+
+.mailbox-sync-alert-list-heading,
+.mailbox-sync-alert-item,
+.mailbox-sync-alert-detail {
+  display: flex;
+  gap: var(--space-md);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mailbox-sync-alert-list-heading {
+  padding: var(--space-md) var(--space-lg);
+}
+
+.mailbox-sync-alert-list h2,
+.mailbox-sync-alert-detail strong {
+  color: #6e231f;
+}
+
+.mailbox-sync-alert-list h2 {
+  margin: 0;
+  font-size: 0.9375rem;
+}
+
+.mailbox-sync-alert-list p,
+.mailbox-sync-alert-item span,
+.mailbox-sync-alert-item small,
+.mailbox-sync-alert-detail span,
+.mailbox-sync-alert-detail small {
+  display: block;
+  margin: 0.1875rem 0 0;
+  color: #713b36;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.mailbox-sync-alert-items {
+  border-top: 1px solid #f1c6c2;
+}
+
+.mailbox-sync-alert-item {
+  padding: 0.75rem var(--space-lg);
+}
+
+.mailbox-sync-alert-item + .mailbox-sync-alert-item {
+  border-top: 1px solid rgb(156 39 33 / 0.17);
+}
+
+.mailbox-sync-alert-item > div,
+.mailbox-sync-alert-detail > div {
+  min-width: 0;
+}
+
+.mailbox-sync-alert-item strong {
+  color: #6e231f;
+  font-size: 0.875rem;
+}
+
+.mailbox-sync-alert-item small,
+.mailbox-sync-alert-detail small {
+  color: #7d410b;
+}
+
+.mailbox-sync-alert-detail {
+  margin-bottom: var(--space-md);
+  padding: 0.75rem;
+}
+
+.mailbox-sync-alert-detail strong {
+  font-size: 0.8125rem;
+}
+
 .mailbox-workspace {
   display: grid;
   grid-template-columns: minmax(14.5rem, 17rem) minmax(0, 1fr);
@@ -4736,6 +4819,13 @@ button {
 
   .mailbox-channel-list {
     grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  }
+
+  .mailbox-sync-alert-list-heading,
+  .mailbox-sync-alert-item,
+  .mailbox-sync-alert-detail {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .mailbox-add-channel {

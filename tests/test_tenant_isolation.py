@@ -573,14 +573,20 @@ def test_identical_mailbox_attachment_is_not_deduplicated_across_workspaces(
     raw_message = message.as_bytes()
 
     class SharedAttachmentImap:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
+        status_calls_by_email: dict[str, int] = {}
 
-        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+        def __init__(self, *args, **kwargs) -> None:
+            self.email_address = ""
+
+        def login(self, email_address: str, *args, **kwargs) -> tuple[str, list[bytes]]:
+            self.email_address = email_address
             return "OK", [b"logged in"]
 
         def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
-            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+            calls = self.__class__.status_calls_by_email.get(self.email_address, 0)
+            self.__class__.status_calls_by_email[self.email_address] = calls + 1
+            uidnext = 42 if calls == 0 else 43
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
             return "OK", [b"1"]

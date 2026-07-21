@@ -48,10 +48,12 @@ _IMMEDIATE_CRITICAL_FAILURES = frozenset(
         "mailbox_credentials_unavailable",
         "mailbox_credentials_key_invalid",
         "mailbox_source_epoch_changed",
+        "mailbox_source_watermark_invalid",
         "mailbox_imap_host_not_allowed",
         "mailbox_imap_port_not_allowed",
         "mailbox_imap_address_not_allowed",
         "mailbox_imap_dns_failed",
+        "mailbox_imap_argument_invalid",
     }
 )
 

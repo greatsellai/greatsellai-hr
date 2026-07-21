@@ -81,12 +81,15 @@ def test_sync_skips_declared_oversized_message_without_fetching_rfc822(client, m
     class OversizedImap:
         full_fetch_attempted = False
         size_fetches = 0
+        status_calls = 0
 
         def login(self, *args, **kwargs):
             return "OK", [b"logged in"]
 
         def status(self, *args, **kwargs):
-            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+            self.__class__.status_calls += 1
+            uidnext = 42 if self.__class__.status_calls == 1 else 43
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
 
         def select(self, *args, **kwargs):
             return "OK", [b"1"]

@@ -90,6 +90,8 @@ class _ContentClaimLost(MailboxImportError):
 _RETRY_LEASE_SECONDS = 180
 _SYNC_LEASE_SECONDS = 600
 _CONTENT_CLAIM_LEASE_SECONDS = 180
+_IMAP_NZ_NUMBER_MAX = (1 << 32) - 1
+_IMAP_CANONICAL_NZ_NUMBER_PATTERN = re.compile(rb"[1-9][0-9]{0,9}\Z")
 _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
     {
         "attachment_validation_failed",
@@ -118,6 +120,95 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _validated_imap_text(value: str) -> str:
+    """Return one printable ASCII IMAP value or fail with a stable code.
+
+    ``imaplib`` concatenates most command arguments without quoting or
+    rejecting CRLF.  Validate every stored and request-supplied value again at
+    the network boundary so legacy rows cannot inject a second IMAP command.
+    Printable non-ASCII strings are rejected too: this client has not enabled
+    IMAP UTF8 and would otherwise surface a raw ``UnicodeEncodeError``.
+    """
+
+    if not value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise MailboxImportError("mailbox_imap_argument_invalid")
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise MailboxImportError("mailbox_imap_argument_invalid") from exc
+    return value
+
+
+def _quoted_imap_string(value: str) -> str:
+    """Encode one validated value as an IMAP quoted string."""
+
+    safe_value = _validated_imap_text(value)
+    return '"' + safe_value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _validate_imap_connection_arguments(
+    *,
+    email_address: str,
+    mailbox: str,
+    password: str | None,
+) -> None:
+    _validated_imap_text(email_address)
+    _validated_imap_text(mailbox)
+    if password is not None:
+        _validated_imap_text(password)
+
+
+def _login_imap_client(
+    client: imaplib.IMAP4_SSL,
+    *,
+    email_address: str,
+    password: str,
+) -> tuple[str, list[bytes]]:
+    """Authenticate without allowing the username or password to add commands."""
+
+    return client.login(
+        _quoted_imap_string(email_address),
+        _validated_imap_text(password),
+    )
+
+
+def _select_mailbox_readonly(
+    client: imaplib.IMAP4_SSL,
+    *,
+    mailbox: str,
+) -> tuple[str, list[bytes]]:
+    return client.select(_quoted_imap_string(mailbox), readonly=True)
+
+
+def _parse_imap_nz_number(value: object) -> int | None:
+    """Parse an RFC IMAP ``nz-number`` without accepting alternate spellings."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 1 <= value <= _IMAP_NZ_NUMBER_MAX else None
+    if isinstance(value, bytes):
+        raw_value = value
+    elif isinstance(value, str):
+        try:
+            raw_value = value.encode("ascii")
+        except UnicodeEncodeError:
+            return None
+    else:
+        return None
+    if _IMAP_CANONICAL_NZ_NUMBER_PATTERN.fullmatch(raw_value) is None:
+        return None
+    parsed = int(raw_value)
+    return parsed if parsed <= _IMAP_NZ_NUMBER_MAX else None
+
+
+def _canonical_imap_uid(value: object) -> tuple[int, bytes] | None:
+    parsed = _parse_imap_nz_number(value)
+    if parsed is None:
+        return None
+    return parsed, str(parsed).encode("ascii")
 
 
 @contextmanager
@@ -176,7 +267,7 @@ def _received_at(message: Message) -> datetime | None:
 
 
 _MAILBOX_STATUS_VALUE_PATTERN = re.compile(
-    r"\b(UIDVALIDITY|UIDNEXT)\s+(\d+)\b",
+    r"\b(UIDVALIDITY|UIDNEXT)\s+([^\s()]+)",
     re.IGNORECASE,
 )
 
@@ -193,17 +284,20 @@ def _parse_mailbox_status(data: list[bytes] | list[str] | None) -> tuple[int, in
     values: dict[str, int] = {}
     for item in data or []:
         if isinstance(item, bytes):
-            text = item.decode("ascii", errors="ignore")
+            try:
+                text = item.decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise MailboxImportError("mailbox_status_failed") from exc
         else:
             text = str(item)
         for name, value in _MAILBOX_STATUS_VALUE_PATTERN.findall(text):
-            try:
-                values[name.upper()] = int(value)
-            except ValueError:
-                continue
+            parsed = _parse_imap_nz_number(value)
+            if parsed is None:
+                raise MailboxImportError("mailbox_status_failed")
+            values[name.upper()] = parsed
     uidvalidity = values.get("UIDVALIDITY")
     uidnext = values.get("UIDNEXT")
-    if uidvalidity is None or uidnext is None or uidvalidity <= 0 or uidnext <= 0:
+    if uidvalidity is None or uidnext is None:
         raise MailboxImportError("mailbox_status_failed")
     return uidvalidity, uidnext
 
@@ -216,7 +310,10 @@ def _read_mailbox_status(
     """Read the mailbox watermark without selecting or scanning messages."""
 
     try:
-        status, data = client.status(mailbox, "(UIDVALIDITY UIDNEXT)")
+        status, data = client.status(
+            _quoted_imap_string(mailbox),
+            "(UIDVALIDITY UIDNEXT)",
+        )
     except (imaplib.IMAP4.error, OSError) as exc:
         raise MailboxImportError("mailbox_status_failed") from exc
     if status != "OK":
@@ -242,12 +339,21 @@ def _read_initial_mailbox_watermark(
 
     client: imaplib.IMAP4_SSL | None = None
     try:
+        _validate_imap_connection_arguments(
+            email_address=email_address,
+            mailbox=mailbox,
+            password=password,
+        )
         client = create_imap_client(
             settings,
             host=imap_host,
             port=imap_port,
         )
-        login_status, _ = client.login(email_address, password)
+        login_status, _ = _login_imap_client(
+            client,
+            email_address=email_address,
+            password=password,
+        )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
         return _read_mailbox_status(client, mailbox=mailbox)
@@ -496,8 +602,18 @@ def _update_config_values(
         )
     except MailboxImapTransportError as exc:
         raise MailboxImportError(str(exc)) from exc
+    _validate_imap_connection_arguments(
+        email_address=email_address,
+        mailbox=mailbox,
+        password=password,
+    )
     normalized_email = email_address.strip()
     normalized_mailbox = mailbox.strip()
+    _validate_imap_connection_arguments(
+        email_address=normalized_email,
+        mailbox=normalized_mailbox,
+        password=None,
+    )
     source_changed = config is None or not _same_mailbox_source(
         config,
         imap_host=normalized_host,
@@ -1863,16 +1979,26 @@ def _parse_search_uids(
     data: list[bytes] | list[str] | None,
     *,
     settings: AppSettings,
+    minimum_uid: int,
+    maximum_uid: int,
 ) -> list[bytes]:
     chunks: list[bytes] = []
     size = 0
     for item in data or []:
-        chunk = item if isinstance(item, bytes) else str(item).encode("ascii", errors="ignore")
+        chunk = item if isinstance(item, bytes) else str(item).encode("utf-8")
         size += len(chunk)
         if size > settings.mailbox_max_search_response_bytes:
             raise MailboxImportError("mailbox_search_response_too_large")
         chunks.append(chunk)
-    return b" ".join(chunks).split()
+    validated: list[bytes] = []
+    for token in b" ".join(chunks).split():
+        canonical = _canonical_imap_uid(token)
+        if canonical is None:
+            continue
+        uid, raw_uid = canonical
+        if minimum_uid <= uid <= maximum_uid:
+            validated.append(raw_uid)
+    return validated
 
 
 def _extract_rfc822_size(data: list[object] | None) -> int | None:
@@ -2428,6 +2554,15 @@ def retry_mailbox_attachment(
                     error="attachment_source_changed",
                     resume_id=None,
                 )
+            canonical_uid = _canonical_imap_uid(record.message_uid)
+            source_uidvalidity = _parse_imap_nz_number(record.source_uidvalidity)
+            if canonical_uid is None or source_uidvalidity is None:
+                return complete(
+                    status="failed",
+                    error="attachment_source_changed",
+                    resume_id=None,
+                )
+            message_uid, raw_uid = canonical_uid
             try:
                 password = _fernet(settings).decrypt(
                     config.encrypted_password.encode("ascii")
@@ -2438,6 +2573,11 @@ def retry_mailbox_attachment(
                     error="mailbox_credentials_unavailable",
                     resume_id=None,
                 )
+            _validate_imap_connection_arguments(
+                email_address=config.email_address,
+                mailbox=config.mailbox,
+                password=password,
+            )
             pulse()
             client = create_imap_client(
                 settings,
@@ -2445,7 +2585,11 @@ def retry_mailbox_attachment(
                 port=config.imap_port,
             )
             pulse()
-            login_status, _ = client.login(config.email_address, password)
+            login_status, _ = _login_imap_client(
+                client,
+                email_address=config.email_address,
+                password=password,
+            )
             if login_status != "OK":
                 return complete(
                     status="failed",
@@ -2453,15 +2597,24 @@ def retry_mailbox_attachment(
                     resume_id=None,
                 )
             pulse()
-            current_uidvalidity, _ = _read_mailbox_status(client, mailbox=config.mailbox)
-            if current_uidvalidity != record.source_uidvalidity:
+            current_uidvalidity, current_uidnext = _read_mailbox_status(
+                client,
+                mailbox=config.mailbox,
+            )
+            if (
+                current_uidvalidity != source_uidvalidity
+                or message_uid >= current_uidnext
+            ):
                 return complete(
                     status="failed",
                     error="attachment_source_changed",
                     resume_id=None,
                 )
             pulse()
-            select_status, _ = client.select(config.mailbox, readonly=True)
+            select_status, _ = _select_mailbox_readonly(
+                client,
+                mailbox=config.mailbox,
+            )
             if select_status != "OK":
                 return complete(
                     status="failed",
@@ -2469,7 +2622,21 @@ def retry_mailbox_attachment(
                     resume_id=None,
                 )
             pulse()
-            raw_uid = record.message_uid.encode("ascii")
+            selected_uidvalidity, selected_uidnext = _read_mailbox_status(
+                client,
+                mailbox=config.mailbox,
+            )
+            if (
+                selected_uidvalidity != source_uidvalidity
+                or selected_uidnext < current_uidnext
+                or message_uid >= selected_uidnext
+            ):
+                return complete(
+                    status="failed",
+                    error="attachment_source_changed",
+                    resume_id=None,
+                )
+            pulse()
             declared_size = _fetch_message_size(
                 client,
                 raw_uid=raw_uid,
@@ -2824,6 +2991,14 @@ def sync_mailbox(
             claim_token=claim_token,
         )
 
+    def stop_for_source_change(error_code: str) -> None:
+        """Disable a source whose immutable IMAP identity became unsafe."""
+
+        config.enabled = False
+        config.last_sync_error = error_code
+        session.commit()
+        raise MailboxImportError(error_code)
+
     imported = duplicates = skipped = failed = 0
     client: imaplib.IMAP4_SSL | None = None
     try:
@@ -2831,6 +3006,11 @@ def sync_mailbox(
         _recover_expired_content_claims(session, organization_id=organization_id)
         pulse()
         password = _decrypt_password(settings, config.encrypted_password)
+        _validate_imap_connection_arguments(
+            email_address=config.email_address,
+            mailbox=config.mailbox,
+            password=password,
+        )
         pulse()
         client = create_imap_client(
             settings,
@@ -2838,7 +3018,11 @@ def sync_mailbox(
             port=config.imap_port,
         )
         pulse()
-        login_status, _ = client.login(config.email_address, password)
+        login_status, _ = _login_imap_client(
+            client,
+            email_address=config.email_address,
+            password=password,
+        )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
         pulse()
@@ -2861,31 +3045,60 @@ def sync_mailbox(
         # is a different source identity, so do not silently reset the
         # watermark and continue. The owner must archive this channel and bind
         # a new one, which keeps historical retry provenance trustworthy.
-        if config.imap_uidvalidity != imap_uidvalidity:
-            config.enabled = False
-            config.last_sync_error = "mailbox_source_epoch_changed"
-            session.commit()
-            raise MailboxImportError("mailbox_source_epoch_changed")
+        import_start_uid = _parse_imap_nz_number(config.import_start_uid)
+        configured_uidvalidity = _parse_imap_nz_number(config.imap_uidvalidity)
+        if import_start_uid is None or configured_uidvalidity is None:
+            stop_for_source_change("mailbox_source_watermark_invalid")
+        if configured_uidvalidity != imap_uidvalidity:
+            stop_for_source_change("mailbox_source_epoch_changed")
+        if current_uidnext < import_start_uid:
+            stop_for_source_change("mailbox_source_watermark_invalid")
         pulse()
-        status, _ = client.select(config.mailbox, readonly=True)
+        status, _ = _select_mailbox_readonly(
+            client,
+            mailbox=config.mailbox,
+        )
         if status != "OK":
             raise MailboxImportError("mailbox_select_failed")
         pulse()
-        status, data = client.uid("search", None, f"UID {config.import_start_uid}:*")
-        if status != "OK":
-            raise MailboxImportError("mailbox_search_failed")
+        selected_uidvalidity, selected_uidnext = _read_mailbox_status(
+            client,
+            mailbox=config.mailbox,
+        )
+        if selected_uidvalidity != configured_uidvalidity:
+            stop_for_source_change("mailbox_source_epoch_changed")
+        if selected_uidnext < current_uidnext or selected_uidnext < import_start_uid:
+            stop_for_source_change("mailbox_source_watermark_invalid")
+        pulse()
+        search_uids: list[bytes]
+        if selected_uidnext == import_start_uid:
+            # ``UID N:*`` includes the last existing message when N is larger
+            # than every assigned UID. Avoid that reversed-range behavior by
+            # issuing no SEARCH until the snapshot has a real post-bind UID.
+            search_uids = []
+        else:
+            maximum_uid = selected_uidnext - 1
+            status, data = client.uid(
+                "search",
+                None,
+                f"UID {import_start_uid}:{maximum_uid}",
+            )
+            if status != "OK":
+                raise MailboxImportError("mailbox_search_failed")
+            search_uids = _parse_search_uids(
+                data,
+                settings=settings,
+                minimum_uid=import_start_uid,
+                maximum_uid=maximum_uid,
+            )
         selected_uids: list[bytes] = []
-        search_uids = _parse_search_uids(data, settings=settings)
         seen_uids: set[str] = set()
         candidate_batch: list[bytes] = []
 
         def choose_unknown_uids() -> None:
             if not candidate_batch:
                 return
-            candidate_values = {
-                raw.decode("ascii", errors="ignore")
-                for raw in candidate_batch
-            }
+            candidate_values = {raw.decode("ascii") for raw in candidate_batch}
             known_uids = _known_message_uids(
                 session,
                 config_id=config.id,
@@ -2893,7 +3106,7 @@ def sync_mailbox(
                 message_uids=candidate_values,
             )
             for candidate in candidate_batch:
-                candidate_uid = candidate.decode("ascii", errors="ignore")
+                candidate_uid = candidate.decode("ascii")
                 if candidate_uid and candidate_uid not in known_uids:
                     selected_uids.append(candidate)
                     if len(selected_uids) >= settings.mailbox_sync_attachment_limit:
@@ -2905,7 +3118,7 @@ def sync_mailbox(
         # binding watermark. Querying historical handling state in small
         # batches keeps a long-lived source from loading every prior UID.
         for raw_uid in reversed(search_uids):
-            uid = raw_uid.decode("ascii", errors="ignore")
+            uid = raw_uid.decode("ascii")
             if not uid or uid in seen_uids:
                 continue
             seen_uids.add(uid)
@@ -2918,7 +3131,7 @@ def sync_mailbox(
             choose_unknown_uids()
         uids = list(reversed(selected_uids))
         for raw_uid in uids:
-            uid = raw_uid.decode("ascii", errors="ignore")
+            uid = raw_uid.decode("ascii")
             pulse()
             declared_size = _fetch_message_size(client, raw_uid=raw_uid)
             if declared_size is None:

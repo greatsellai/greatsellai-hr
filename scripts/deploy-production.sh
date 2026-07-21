@@ -6,18 +6,14 @@ set -Eeuo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-readonly default_host="ubuntu@58.87.96.20"
-readonly default_project_dir="/home/ubuntu/resume-screening-v3"
-readonly default_history_dir="/home/ubuntu/greatsellai-hr-deployments"
-
 usage() {
   cat <<'EOF'
 Usage: scripts/deploy-production.sh <prod-tag> [options]
 
 Options:
-  --host <ssh-host>         SSH target (default: ubuntu@58.87.96.20)
-  --project-dir <path>      Live project directory on the server
-  --history-dir <path>      Server-side release records and database backups
+  --host <ssh-host>         Required SSH target (or RESUME_V3_DEPLOY_HOST)
+  --project-dir <path>      Required live project directory (or RESUME_V3_REMOTE_DIR)
+  --history-dir <path>      Required release-record/backup directory (or RESUME_V3_DEPLOY_HISTORY_DIR)
   --ssh-key <path>          Optional SSH private-key path; never committed
   --rollback                Deploy a prior tag as an application rollback
   --allow-schema-ahead      Required for rollback across migration changes;
@@ -47,9 +43,9 @@ tag="${1:-}"
 [[ -n "$tag" && "$tag" != -* ]] || { usage >&2; exit 1; }
 shift
 
-remote_host="${RESUME_V3_DEPLOY_HOST:-$default_host}"
-project_dir="${RESUME_V3_REMOTE_DIR:-$default_project_dir}"
-history_dir="${RESUME_V3_DEPLOY_HISTORY_DIR:-$default_history_dir}"
+remote_host="${RESUME_V3_DEPLOY_HOST:-}"
+project_dir="${RESUME_V3_REMOTE_DIR:-}"
+history_dir="${RESUME_V3_DEPLOY_HISTORY_DIR:-}"
 ssh_key="${RESUME_V3_SSH_KEY:-}"
 mode="deploy"
 allow_schema_ahead=0
@@ -68,6 +64,9 @@ while (($#)); do
 done
 
 [[ "$tag" =~ ^prod-[0-9]{8}-[0-9a-f]{7,40}$ ]] || die "Invalid production tag: $tag"
+[[ -n "$remote_host" ]] || die "Missing deployment target; pass --host or set RESUME_V3_DEPLOY_HOST."
+[[ -n "$project_dir" ]] || die "Missing project directory; pass --project-dir or set RESUME_V3_REMOTE_DIR."
+[[ -n "$history_dir" ]] || die "Missing history directory; pass --history-dir or set RESUME_V3_DEPLOY_HISTORY_DIR."
 [[ "$project_dir" == /home/ubuntu/* && "$project_dir" != /home/ubuntu/ ]] || \
   die "Refusing unsafe project directory: $project_dir"
 [[ "$history_dir" == /home/ubuntu/* && "$history_dir" != /home/ubuntu/ ]] || \
@@ -130,17 +129,26 @@ if [[ "$mode" != "rollback" && "$allow_schema_ahead" -eq 1 ]]; then
   die "--allow-schema-ahead is only valid for an explicit rollback."
 fi
 
-backup_required=0
-if [[ "$mode" == "deploy" && "$migration_changed" -eq 1 ]]; then
-  backup_required=1
-fi
+# A release can change application behavior even without a migration. Capture
+# PostgreSQL and the shared originals volume as one verified bundle before
+# every deploy or rollback, rather than treating schema changes as the only
+# moment when recoverability matters.
+backup_required=1
 
 previous_tag_arg="${previous_tag:-__none__}"
 previous_commit_arg="${previous_commit:-__none__}"
 remote_helper="/tmp/greatsell-release-${tag}.sh"
+remote_compose="/tmp/greatsell-compose-${tag}.yml"
 
 git show "$tag:scripts/remote-release-helper.sh" | ssh "${ssh_options[@]}" "$remote_host" \
   "umask 077 && cat > $(shell_quote "$remote_helper") && chmod 700 $(shell_quote "$remote_helper")"
+
+# Render the tagged Compose file against the server's existing environment
+# before quiescing data services or transferring any source. This catches a
+# newly required non-secret deployment setting (for example the fixed Caddy
+# trusted-proxy CIDR) while the previous release remains fully available.
+git show "$tag:compose.yml" | ssh "${ssh_options[@]}" "$remote_host" \
+  "umask 077; temp=$(shell_quote "$remote_compose"); trap 'rm -f -- \"$remote_compose\"' EXIT; cat > \"$remote_compose\"; sudo -n env RESUME_V3_RELEASE_IMAGE_TAG=$(shell_quote "$release_commit") docker compose --project-directory $(shell_quote "$project_dir") -f \"$remote_compose\" --env-file $(shell_quote "$project_dir/.env.production") config --quiet"
 remote_release() {
   ssh_run "bash $(shell_quote "$remote_helper") $(shell_quote "$1") $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$2")"
 }

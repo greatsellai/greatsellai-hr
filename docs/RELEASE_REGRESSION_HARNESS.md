@@ -27,6 +27,7 @@ PowerShell 清理异常遗留资源：
 $filter = 'label=com.greatsell.release-regression=true'
 docker ps -aq --filter $filter | ForEach-Object { docker rm -f $_ }
 docker network ls -q --filter $filter | ForEach-Object { docker network rm $_ }
+docker volume ls -q --filter $filter | ForEach-Object { docker volume rm $_ }
 docker image ls -q --filter $filter | Sort-Object -Unique | ForEach-Object { docker image rm $_ }
 ```
 
@@ -36,6 +37,7 @@ Linux / CI 可使用：
 filter='label=com.greatsell.release-regression=true'
 docker ps -aq --filter "$filter" | xargs -r docker rm -f
 docker network ls -q --filter "$filter" | xargs -r docker network rm
+docker volume ls -q --filter "$filter" | xargs -r docker volume rm
 docker image ls -q --filter "$filter" | sort -u | xargs -r docker image rm
 ```
 
@@ -94,8 +96,8 @@ LibreOffice、Tesseract 或项目的统一 `extract_document_text` 链路。
 
 1. 在临时 PostgreSQL 中先升级至最早的 Alembic revision，再升级到当前唯一 head；
 2. 写入两个合成工作区、一个简历元数据记录、一个原始文件和两个隔离的邮箱 worker 任务；
-3. 用真实 `pg_dump -Fc` 备份数据库，并用 tar.gz 备份 uploads；
-4. 恢复到新的临时 PostgreSQL 和新的 uploads 目录，校验 Alembic head、工作区归属、原文件 SHA-256 与业务记录；
+3. 创建带运行标签的真实 Docker uploads 卷，用真实 `pg_dump -Fc` 与只读卷挂载生成同一 ID 的 `database.dump`、`uploads.tar.gz`、清单和 SHA-256；
+4. 删除原数据库容器和原 uploads 卷后，恢复到全新的 PostgreSQL 与全新的命名卷，并以只读卷挂载校验 Alembic head、工作区归属、原文件 SHA-256 与业务记录；
 5. 让主工作区各一条 `running + expired lease` 邮箱后台任务与 AI 提取任务分别通过其真实 worker recovery/claim 函数回到队列并被重新领取，同时断言第二工作区对应两条任务都没有被触碰。
 
 这不是生产备份替代品：生产备份、保留期限、异地副本和恢复授权仍由部署负责人按

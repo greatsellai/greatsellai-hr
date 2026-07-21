@@ -595,11 +595,25 @@ class AppSettings:
         ):
             if value < 60:
                 raise ValueError(f"{name} must be at least 60")
+        trusted_proxy_networks = []
         for cidr in self.trusted_proxy_cidrs:
             try:
-                ip_network(cidr, strict=False)
+                network = ip_network(cidr, strict=False)
             except ValueError as exc:
                 raise ValueError("RESUME_V3_TRUSTED_PROXY_CIDRS contains an invalid network") from exc
+            if network.prefixlen == 0:
+                raise ValueError(
+                    "RESUME_V3_TRUSTED_PROXY_CIDRS must not trust an all-address network"
+                )
+            # The forwarding peer is a deployment-owned local proxy, never a
+            # public client. Rejecting globally routable ranges prevents an
+            # accidental configuration from turning user-controlled
+            # X-Forwarded-For into an authentication-rate-limit bypass.
+            if not (network.is_private or network.is_loopback):
+                raise ValueError(
+                    "RESUME_V3_TRUSTED_PROXY_CIDRS must contain private or loopback networks"
+                )
+            trusted_proxy_networks.append(network)
         if self.transactional_email_provider != "disabled":
             if not self.public_app_url:
                 raise ValueError("RESUME_V3_PUBLIC_APP_URL is required for transactional email")
@@ -642,6 +656,8 @@ class AppSettings:
                 raise RuntimeError("production_must_use_alembic_not_auto_create_schema")
             if self.seed_registry_on_startup:
                 raise RuntimeError("production_must_seed_registry_explicitly")
+            if not trusted_proxy_networks:
+                raise RuntimeError("production_requires_trusted_proxy_cidrs")
             if self.transactional_email_provider == "test":
                 raise RuntimeError("production_must_not_use_test_transactional_email_provider")
             if self.public_app_url and not self.public_app_url.startswith("https://"):

@@ -16,14 +16,22 @@ RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.
         tesseract-ocr-chi-sim \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
+COPY pyproject.toml requirements-production.lock ./
+
+ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+RUN pip install --upgrade --no-cache-dir --index-url ${PIP_INDEX_URL} \
+        -r requirements-production.lock \
+    && pip check
+
 COPY app ./app
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 
-ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
-RUN pip install --upgrade pip --index-url ${PIP_INDEX_URL} \
-    && pip install . --index-url ${PIP_INDEX_URL}
+# Dependencies above are a reviewed, exact production lock. Installing the
+# application without dependency resolution makes a later image rebuild reuse
+# that exact set rather than silently selecting newer package releases.
+RUN pip install --no-deps --no-build-isolation . \
+    && pip check
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /var/lib/resume-v3 \

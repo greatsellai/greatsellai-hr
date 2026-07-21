@@ -17,6 +17,7 @@ def _settings(tmp_path: Path, **overrides: object) -> AppSettings:
         "environment": "production",
         "auto_create_schema": False,
         "seed_registry_on_startup": False,
+        "trusted_proxy_cidrs": ("172.30.0.2/32",),
     }
     values.update(overrides)
     return AppSettings(**values)
@@ -31,10 +32,28 @@ def test_production_refuses_sqlite_and_implicit_schema_bootstrap(tmp_path: Path)
         _settings(tmp_path, seed_registry_on_startup=True).validate_runtime()
     with pytest.raises(RuntimeError, match="production_must_not_allow_unauthenticated"):
         _settings(tmp_path, allow_unauthenticated=True).validate_runtime()
+    with pytest.raises(RuntimeError, match="production_requires_trusted_proxy_cidrs"):
+        _settings(tmp_path, trusted_proxy_cidrs=()).validate_runtime()
 
 
 def test_production_postgresql_with_explicit_migration_path_is_valid(tmp_path: Path) -> None:
     _settings(tmp_path).validate_runtime()
+
+
+@pytest.mark.parametrize(
+    ("trusted_proxy_cidrs", "error"),
+    [
+        (("0.0.0.0/0",), "must not trust an all-address network"),
+        (("8.8.8.8/32",), "must contain private or loopback networks"),
+    ],
+)
+def test_proxy_forwarding_configuration_never_trusts_all_public_clients(
+    tmp_path: Path,
+    trusted_proxy_cidrs: tuple[str, ...],
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        _settings(tmp_path, trusted_proxy_cidrs=trusted_proxy_cidrs).validate_runtime()
 
 
 def test_settings_load_generic_provider_credential_map_from_environment(
@@ -75,3 +94,26 @@ def test_compose_injects_generic_provider_credential_map_into_api_and_worker() -
         )
         assert match is not None
         assert "    environment: *app-environment" in match.group("body")
+
+
+def test_compose_pins_the_only_trusted_proxy_to_caddy_private_address() -> None:
+    """Rendered production config must not silently ignore Caddy forwarding.
+
+    The exact `172.30.0.2/32` value is safe because Compose reserves that
+    address for Caddy on a network joined only by Caddy and API. The runtime
+    setting then still verifies the direct TCP peer before reading XFF.
+    """
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "compose.yml").read_text(encoding="utf-8")
+    production_example = (root / ".env.production.example").read_text(encoding="utf-8")
+
+    assert (
+        "RESUME_V3_TRUSTED_PROXY_CIDRS: "
+        "${RESUME_V3_TRUSTED_PROXY_CIDRS:?set RESUME_V3_TRUSTED_PROXY_CIDRS in .env.production}"
+    ) in compose
+    assert "RESUME_V3_TRUSTED_PROXY_CIDRS=172.30.0.2/32" in production_example
+    assert "ipv4_address: 172.30.0.2" in compose
+    assert "subnet: 172.30.0.0/24" in compose
+    assert "  caddy:\n" in compose
+    assert "  api:\n" in compose

@@ -19,9 +19,10 @@
 - **Production rollback**：只能手动触发，且只接受已有 `prod-*` 标签。默认拒绝
   回滚到数据库 schema 落后的代码；只有已确认兼容时才可显式允许该情形。
 
-发布与回滚仍复用仓库已有的脚本。它们会执行迁移前备份、发布记录、健康检查、登录
-保护与原文件鉴权检查；不会传输、覆盖或删除 `.env.production`、数据库、候选人文件、
-Docker 卷、Caddy 配置或 DNS。
+发布与回滚仍复用仓库已有的脚本。它们会在每次变更前创建统一 backup ID 的 PostgreSQL
+逻辑备份与 `uploads_data` 原件卷备份，校验 checksum 后再执行发布，并保留发布记录、健康
+检查、登录保护与原文件鉴权检查；不会传输、覆盖或删除 `.env.production`、数据库、候选人
+文件、Docker 卷、Caddy 配置或 DNS。
 
 ## 一次性 GitHub 配置
 
@@ -64,7 +65,8 @@ Docker 卷、Caddy 配置或 DNS。
 4. 若部署因 GitHub runner 中断而未完成，可在 **Production deploy** 中输入同一个
    已创建的标签与确认词 `DEPLOY` 重试；不会创建第二个版本。
 5. 如需回滚，在 **Production rollback** 中指定一个已发布的 `prod-*` 标签，并输入
-   `ROLLBACK`。数据库恢复不属于自动回滚范围，必须基于发布前备份单独决策。
+   `ROLLBACK`。数据库与原文件恢复不属于自动回滚范围，必须基于同一 backup ID 的成对
+   备份、兼容性评审和显式 `restore-production-backup.sh --confirm-restore` 单独决策。
 
 ## 安全与边界
 

@@ -30,6 +30,12 @@
 
 生产 Web 进程不会运行 `create_all()`，也不会在启动时改写院校名单。这避免多副本启动时的 DDL/种子数据竞争。
 
+Compose 将 Caddy 固定在专用 `proxy` 网络的 `172.30.0.2`，API 同时连接该网络和内部
+业务网络。生产环境必须保留 `.env.production` 中的
+`RESUME_V3_TRUSTED_PROXY_CIDRS=172.30.0.2/32`：应用仅在 TCP 对端确为该 Caddy 地址时
+读取其追加的最后一个 `X-Forwarded-For` 值。不要写入 `0.0.0.0/0`、公网 CIDR 或任意
+客户端地址，否则会破坏注册/找回密码限流边界。
+
 浏览器使用同源的 `/v1/*` 请求 API，不需要在生产环境设置前端 API 域名或开放 CORS。HR 主站、登录和工作台均位于 `https://hr.greatsellai.net/`，首次签发 HTTPS 证书前，只需确认该主域的 A/AAAA 记录已指向 HR 服务器，并且云防火墙放行 `80` 与 `443`。
 
 `https://greatsellai.net/` 属于未来官网，HR 部署不得声明、接管或要求该根域指向 HR 服务器。如需保留 `https://greatsellai.net/greatsellhr/` 兼容入口，应由官网自身的边缘代理将该路径转发到 HR 主站，并继续由官网处理根路径和静态资源。
@@ -75,6 +81,9 @@ scripts/create-production-tag.sh
 
 ```bash
 scripts/deploy-production.sh prod-YYYYMMDD-<commit短码> \
+  --host ubuntu@<production-host> \
+  --project-dir /home/ubuntu/<project-dir> \
+  --history-dir /home/ubuntu/<release-history-dir> \
   --ssh-key /path/to/server-key
 ```
 
@@ -82,11 +91,11 @@ scripts/deploy-production.sh prod-YYYYMMDD-<commit短码> \
 `git archive` 传输 Git 受控源码，不使用删除式同步，因此不会覆盖或删除生产环境
 文件、数据库、上传 PDF 或 Docker 卷。
 
-部署前，脚本会读取服务器项目目录外的发布记录。首次部署或发现 `migrations/`
-变化时，会在 `/home/ubuntu/greatsellai-hr-deployments/backups/` 创建受限权限的
-PostgreSQL 逻辑备份。发布记录位于
-`/home/ubuntu/greatsellai-hr-deployments/releases/`，仅记录标签、提交号、时间和
-验证状态，不记录密钥或候选人信息。
+部署前，脚本会读取服务器项目目录外的发布记录，并在
+`/home/ubuntu/greatsellai-hr-deployments/backups/` 创建受限权限的成对备份：
+PostgreSQL 逻辑导出和共享 `uploads_data` 原文件卷在同一备份 ID、同一清单下保存。
+发布记录位于 `/home/ubuntu/greatsellai-hr-deployments/releases/`，仅记录标签、提交号、
+时间、备份 ID、镜像 ID 和验证状态，不记录密钥或候选人信息。
 
 脚本重建 `api`、`worker` 和 `caddy`，让 Compose 正常执行迁移依赖，并验证：
 
@@ -95,7 +104,9 @@ PostgreSQL 逻辑备份。发布记录位于
 - 未登录会话仍处于登录保护状态；
 - 不携带认证信息时，伪造 ID 的原 PDF 请求被拒绝。
 
-只有这些检查通过后，发布才会成为服务器的当前生产版本。
+只有这些检查通过后，发布才会成为服务器的当前生产版本。后端镜像使用
+`requirements-production.lock` 固定 Python 生产依赖；Compose 用发布提交号作为 API 和
+Caddy 的镜像标签，避免后续构建覆盖已记录的生产镜像。
 
 ### 应用回滚
 
@@ -103,6 +114,9 @@ PostgreSQL 逻辑备份。发布记录位于
 
 ```bash
 scripts/rollback-production.sh prod-YYYYMMDD-<commit短码> \
+  --host ubuntu@<production-host> \
+  --project-dir /home/ubuntu/<project-dir> \
+  --history-dir /home/ubuntu/<release-history-dir> \
   --ssh-key /path/to/server-key
 ```
 
@@ -112,11 +126,35 @@ scripts/rollback-production.sh prod-YYYYMMDD-<commit短码> \
 如果当前版本与目标版本间包含 Alembic 迁移，脚本默认拒绝回滚。负责人必须先判断
 旧应用代码是否可以读取当前数据库 schema；只有确认兼容后才能显式传入
 `--allow-schema-ahead`。该模式跳过迁移并保留当前数据库，**不会**自动执行
-`alembic downgrade`。如确实需要恢复数据库，必须基于部署前逻辑备份单独审批和
-执行，避免覆盖新产生的业务数据与候选人资料。
+`alembic downgrade`。
+
+### 数据恢复（显式、双确认）
+
+每次部署或应用回滚前，发布助手都会暂停 `api` 与 `worker`，在同一个备份 ID 下写入
+PostgreSQL `database.dump` 和 `uploads_data` 的 `uploads.tar.gz`。备份先写入 `.partial`
+目录，只有数据库导出、原文件归档与 SHA-256 校验均成功、且运行服务重新启动后，才会
+原子发布为可恢复备份。发布记录会保存备份 ID 和实际 API/Caddy 镜像 ID；初始空环境只会
+记录为 `initial_empty`，不能被误认为可恢复备份。
+
+恢复会覆盖数据库和候选人原文件，因此必须先完成兼容代码的部署/回滚评审，再由已授权
+的运维人员显式执行。恢复前脚本会校验清单、校验和与归档路径，并额外创建当前状态的
+成对安全备份；发生数据写入后的失败会让 `api` 与 `worker` 保持停止，避免把不一致状态
+继续暴露给用户。
+
+```bash
+scripts/restore-production-backup.sh prod-YYYYMMDD-<commit短码> <backup-id> \
+  --host ubuntu@<production-host> \
+  --project-dir /home/ubuntu/<project-dir> \
+  --history-dir /home/ubuntu/<release-history-dir> \
+  --ssh-key /path/to/server-key \
+  --confirm-restore
+```
+
+这不是“应用代码回滚”命令，也不会自行选择历史备份。先确认目标备份与当前代码/schema
+兼容，并在维护窗口执行；完成后检查健康检查、候选人原文件读取和恢复记录。
 
 ### 例行备份与安全
 
-- 定期执行 PostgreSQL 逻辑备份并演练恢复。上传的 PDF 位于 Docker volume `uploads_data`，备份时必须与数据库一起处理。
+- 定期执行成对的 PostgreSQL + `uploads_data` 备份并演练恢复。候选人原文件与数据库必须使用同一个备份 ID、清单和校验和处理；单独导出数据库不能作为完整恢复点。
 - 单账号登录口令只配置在服务端环境变量。浏览器通过同源 `/v1/auth/login` 提交口令，服务端签发 `HttpOnly`、`SameSite=Strict` 的会话 Cookie；口令绝不写入源码、`localStorage`、请求 URL 或上传内容。
 - 在上线真实简历前，务必使用 HTTPS 域名并限制服务器 SSH、数据库端口和 Docker 管理权限。

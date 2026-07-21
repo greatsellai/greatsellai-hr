@@ -29,7 +29,6 @@ def _save_v2_resume(client) -> str:
                         "major_raw": "计算机",
                         "start_month": "2022-09",
                         "end_month": "2026-06",
-                        "institution_tiers": ["211", "985"],
                         "average_score": 92,
                         "gpa_value": 3.8,
                         "gpa_scale": 4.0,
@@ -87,8 +86,8 @@ def test_filter_options_use_confirmed_order_and_bilingual_english_names(client) 
     assert [item["label"] for item in payload["degrees"]] == [
         "博士", "硕士", "本科", "大专", "高中", "中专/职高及以下"
     ]
-    assert [item["label"] for item in payload["institution_tiers"][:3]] == [
-        "211", "985", "双一流"
+    assert [item["label"] for item in payload["institution_classifications"]] == [
+        "985", "211", "本科", "大专", "中专", "海外院校"
     ]
     assert [item["label"] for item in payload["language_credentials"][:4]] == [
         "大学英语四级（CET-4）",
@@ -117,7 +116,7 @@ def test_v2_filters_match_same_grounded_facts_and_school_alias(client) -> None:
                 {
                     "school_name_contains": ["北大"],
                     "major_contains": ["计算机"],
-                    "institution_tiers_any_of": ["985"],
+                    "institution_classifications_any_of": ["985"],
                     "min_average_score": 90,
                     "min_gpa_percent": 90,
                     "max_rank_position": 10,
@@ -146,10 +145,66 @@ def test_v2_filters_match_same_grounded_facts_and_school_alias(client) -> None:
     )
     assert response.status_code == 200, response.text
     assert [item["resume_id"] for item in response.json()["items"]] == [resume_id]
+    assert response.json()["items"][0]["institution_classifications"] == ["985"]
     evidence_types = {
         match["fact_type"] for match in response.json()["items"][0]["matched_evidence"]
     }
     assert {"education", "skill", "language", "scholarship", "experience"} <= evidence_types
+
+    # A 985 education is no longer silently included by the exact 211 filter.
+    exact_211 = client.post(
+        "/v1/candidates/search",
+        json={
+            "education_any_of": [
+                {"institution_classifications_any_of": ["211"]}
+            ]
+        },
+    )
+    assert exact_211.status_code == 200, exact_211.text
+    assert exact_211.json()["items"] == []
+
+
+def test_exact_211_filter_matches_only_a_211_only_school(client) -> None:
+    _save_v2_resume(client)
+
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(
+        client,
+        resume_id,
+        "教育经历 北京工业大学 计算机 本科 2022-09 至 2026-06。",
+    )
+    saved = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "education": [
+                    {
+                        "school_name_raw": "北京工业大学",
+                        "degree": "bachelor",
+                        "major_raw": "计算机",
+                        "start_month": "2022-09",
+                        "end_month": "2026-06",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+            }
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={
+            "education_any_of": [
+                {"institution_classifications_any_of": ["211"]}
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert [item["resume_id"] for item in response.json()["items"]] == [resume_id]
+    assert response.json()["items"][0]["institution_classifications"] == ["211"]
 
 
 def test_english_aliases_are_or_for_broad_keywords_but_precise_stays_literal(client) -> None:
@@ -303,7 +358,6 @@ def test_filter_v2_enrichment_worker_preserves_active_facts_and_adds_new_evidenc
                     {
                         "school_name_raw": "北京大学",
                         "degree": "bachelor",
-                        "institution_tiers": ["211", "985"],
                         "evidence_block_ids": ["page-001"],
                     }
                 ],

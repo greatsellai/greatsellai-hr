@@ -5,7 +5,7 @@ from typing import Final
 from app.services.normalization import normalized_key
 
 
-FILTER_OPTIONS_VERSION: Final = "filter-options.v2.20260720.1"
+FILTER_OPTIONS_VERSION: Final = "filter-options.v4.20260721.1"
 
 DEGREE_OPTIONS: Final = [
     {"value": "doctor", "label": "博士"},
@@ -26,6 +26,18 @@ INSTITUTION_TIER_OPTIONS: Final = [
     {"value": "regular_undergraduate", "label": "普通本科"},
     {"value": "private_undergraduate", "label": "民办本科"},
     {"value": "higher_vocational", "label": "高职/高专"},
+    {"value": "overseas", "label": "海外院校"},
+]
+
+# The active recruiter workflow uses these six mutually exclusive categories
+# per education record. ``institution_tiers`` remains available only so old
+# saved filters and fact snapshots can still be read.
+INSTITUTION_CLASSIFICATION_OPTIONS: Final = [
+    {"value": "985", "label": "985"},
+    {"value": "211", "label": "211"},
+    {"value": "undergraduate", "label": "本科"},
+    {"value": "associate", "label": "大专"},
+    {"value": "secondary_vocational", "label": "中专"},
     {"value": "overseas", "label": "海外院校"},
 ]
 
@@ -130,6 +142,7 @@ def filter_options_payload() -> dict[str, object]:
     return {
         "schema_version": FILTER_OPTIONS_VERSION,
         "degrees": DEGREE_OPTIONS,
+        "institution_classifications": INSTITUTION_CLASSIFICATION_OPTIONS,
         "institution_tiers": INSTITUTION_TIER_OPTIONS,
         "experience_types": EXPERIENCE_TYPE_OPTIONS,
         "skill_categories": SKILL_CATEGORY_OPTIONS,

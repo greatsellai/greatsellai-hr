@@ -46,6 +46,17 @@ InstitutionTier = Literal[
     "private_undergraduate",
     "higher_vocational",
     "overseas",
+    "undergraduate",
+    "associate",
+    "secondary_vocational",
+]
+InstitutionClassification = Literal[
+    "985",
+    "211",
+    "undergraduate",
+    "associate",
+    "secondary_vocational",
+    "overseas",
 ]
 SkillCategory = Literal[
     "software",
@@ -1110,6 +1121,10 @@ class ResumeEducationResponse(ApiModel):
     start_month: Month | None
     end_month: Month | None
     institution_tiers: list[InstitutionTier]
+    institution_classification: InstitutionClassification | None = None
+    classification_basis: str | None = None
+    classification_registry_version: str | None = None
+    classification_evidence_block_ids: list[str] = Field(default_factory=list)
     average_score: float | None
     gpa_value: float | None
     gpa_scale: float | None
@@ -1412,6 +1427,10 @@ class EducationFilter(ApiModel):
     degree_in: list[DegreeLevel] = Field(default_factory=list, max_length=5)
     school_name_contains: list[str] = Field(default_factory=list, max_length=8)
     major_contains: list[str] = Field(default_factory=list, max_length=8)
+    institution_classifications_any_of: list[InstitutionClassification] = Field(
+        default_factory=list,
+        max_length=6,
+    )
     institution_tiers_any_of: list[InstitutionTier] = Field(default_factory=list, max_length=10)
     min_average_score: float | None = Field(default=None, ge=0, le=100)
     min_gpa_percent: float | None = Field(default=None, ge=0, le=100)
@@ -1548,6 +1567,9 @@ class CandidateSearchItem(ApiModel):
     resume_id: str
     original_filename: str
     is_985_211: bool
+    institution_classifications: list[InstitutionClassification] = Field(
+        default_factory=list
+    )
     highest_degree: DegreeLevel | None
     employment_months: int
     employment_or_internship_months: int

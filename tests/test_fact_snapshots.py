@@ -9,6 +9,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
 
 from app.models import Resume, ResumeFactSnapshot
+from app.services.deepseek_provider import FACT_SNAPSHOT_SCHEMA_VERSION
 
 
 def _make_pdf_with_text(text: str) -> bytes:
@@ -119,7 +120,7 @@ def test_saved_facts_create_append_only_canonical_snapshots(client) -> None:
     assert first_snapshot.created_by == "single_admin"
     assert first_snapshot.source_block_ids == ["page-001"]
     assert canonical_payload["source_block_ids"] == ["page-001"]
-    assert canonical_payload["schema_version"] == "resume_fact_snapshot.v4"
+    assert canonical_payload["schema_version"] == FACT_SNAPSHOT_SCHEMA_VERSION
     assert canonical_payload["facts_schema_version"] == "resume_facts.v2"
     assert canonical_payload["experiences"] == [
         {

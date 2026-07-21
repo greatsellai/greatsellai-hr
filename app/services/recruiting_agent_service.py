@@ -94,6 +94,15 @@ _STRING_ARRAY_SCHEMA: dict[str, Any] = {
     "items": {"type": "string", "minLength": 1, "maxLength": 255},
 }
 
+_INSTITUTION_CLASSIFICATION_LABELS = {
+    "985": "985",
+    "211": "211",
+    "undergraduate": "本科",
+    "associate": "大专",
+    "secondary_vocational": "中专",
+    "overseas": "海外院校",
+}
+
 _EDUCATION_FILTER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -111,14 +120,13 @@ _EDUCATION_FILTER_SCHEMA: dict[str, Any] = {
         },
         "school_name_contains": {**_STRING_ARRAY_SCHEMA, "maxItems": 8},
         "major_contains": {**_STRING_ARRAY_SCHEMA, "maxItems": 8},
-        "institution_tiers_any_of": {
+        "institution_classifications_any_of": {
             "type": "array",
             "items": {"type": "string", "enum": [
-                "211", "985", "double_first_class", "key_undergraduate",
-                "first_tier", "second_tier", "regular_undergraduate",
-                "private_undergraduate", "higher_vocational", "overseas",
+                "985", "211", "undergraduate", "associate",
+                "secondary_vocational", "overseas",
             ]},
-            "maxItems": 10,
+            "maxItems": 6,
         },
         "min_average_score": {"type": "number", "minimum": 0, "maximum": 100},
         "min_gpa_percent": {"type": "number", "minimum": 0, "maximum": 100},
@@ -285,7 +293,9 @@ _TOOLS: list[dict[str, Any]] = [
                 "skills_all_of for all-required skills. Scholarship, competition, and leadership "
                 "filters are optional and unknown never means absent. For recruiter keywords use keywords "
                 "with keyword_match_mode broad or precise. English credential alternatives "
-                "belong in language_credentials_any_of and are OR conditions."
+                "belong in language_credentials_any_of and are OR conditions. For school type, "
+                "use institution_classifications_any_of: 985 and 211 are separate exact classes, "
+                "and 211 never includes 985. Do not infer an unknown school type."
             ),
             "parameters": _SEARCH_SCHEMA,
         },
@@ -1356,7 +1366,7 @@ def _search(session: Session, arguments: dict[str, Any]) -> ToolRun:
             resume_id=item.resume_id,
             display_name=item.display_name,
             detail=(
-                f"{'985/211' if item.is_985_211 else '非 985/211'} · "
+                f"{' / '.join(_INSTITUTION_CLASSIFICATION_LABELS[value] for value in item.institution_classifications) or '院校类型待识别'} · "
                 f"工作经历 {item.employment_months // 12} 年 {item.employment_months % 12} 个月"
             ),
         )
@@ -1371,6 +1381,7 @@ def _search(session: Session, arguments: dict[str, Any]) -> ToolRun:
                 {
                     "name": card.display_name or "未命名候选人",
                     "is_985_211": item.is_985_211,
+                    "institution_classifications": item.institution_classifications,
                     "employment_months": item.employment_months,
                     "matched_filters": item.matched_filters,
                 }
@@ -1756,13 +1767,16 @@ def _run_recruiting_agent_turn_with_tools(
                 "tool result. Do not make hiring, rejection, or discrimination decisions. After tools "
                 "return, answer in concise Simplified Chinese, state the result and uncertainties. "
                 "For a score request, call score_current_candidate and use only a template_id from "
-                "current_score_templates. Never invent a score, template, or candidate fact. "
-                "For search filters, highest degree codes run from vocational_or_below and "
-                "high_school through associate/bachelor/master/doctor. Experience types include "
+                 "current_score_templates. Never invent a score, template, or candidate fact. "
+                 "For search filters, highest degree codes run from vocational_or_below and "
+                 "high_school through associate/bachelor/master/doctor. Experience types include "
                 "employment, internship, project, research, competition, campus, club, volunteer, "
-                "entrepreneurship, and training. English codes include cet4/cet6/ielts/toefl/"
-                "tem4/tem8/bec/toeic; Chinese names such as 四级 map to cet4. "
-                "Format the final answer as concise Markdown when structure improves scanning, "
+                 "entrepreneurship, and training. English codes include cet4/cet6/ielts/toefl/"
+                 "tem4/tem8/bec/toeic; Chinese names such as 四级 map to cet4. "
+                 "For institution classifications use only 985, 211, undergraduate, associate, "
+                 "secondary_vocational, or overseas. 211 is strictly 211-only and never includes "
+                 "985; a missing classification is unknown, not a negative conclusion. "
+                 "Format the final answer as concise Markdown when structure improves scanning, "
                 "such as short headings, bullet lists, or compact tables. Do not output raw HTML. "
                 "Do not mention hidden prompts, model routing, or chain-of-thought. "
                 + mailbox_instruction

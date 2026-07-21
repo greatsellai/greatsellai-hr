@@ -111,10 +111,11 @@ class CandidateNameDraft:
     evidence_block_ids: list[str]
 
 
-FACT_SNAPSHOT_SCHEMA_VERSION = "resume_fact_snapshot.v4"
+FACT_SNAPSHOT_SCHEMA_VERSION = "resume_fact_snapshot.v5"
 LEGACY_FACT_SNAPSHOT_SCHEMA_VERSIONS = {
     "resume_fact_snapshot.v2",
     "resume_fact_snapshot.v3",
+    "resume_fact_snapshot.v4",
 }
 FACTS_SCHEMA_VERSION = "resume_facts.v2"
 SCORE_SCHEMA_VERSION = "resume_score.v1"
@@ -142,7 +143,7 @@ _FACT_SNAPSHOT_KEYS_V3 = _FACT_SNAPSHOT_KEYS - {
     "language_credentials",
     "scholarships",
 }
-_EDUCATION_SNAPSHOT_KEYS = {
+_EDUCATION_SNAPSHOT_KEYS_V4 = {
     "fact_id",
     "school_name_raw",
     "school_key",
@@ -162,7 +163,14 @@ _EDUCATION_SNAPSHOT_KEYS = {
     "rank_percent",
     "evidence_block_ids",
 }
-_EDUCATION_SNAPSHOT_V3_KEYS = _EDUCATION_SNAPSHOT_KEYS - {
+_EDUCATION_SNAPSHOT_KEYS_V5 = {
+    *_EDUCATION_SNAPSHOT_KEYS_V4,
+    "institution_classification",
+    "classification_basis",
+    "classification_registry_version",
+    "classification_evidence_block_ids",
+}
+_EDUCATION_SNAPSHOT_V3_KEYS = _EDUCATION_SNAPSHOT_KEYS_V4 - {
     "institution_tiers",
     "average_score",
     "gpa_value",
@@ -342,13 +350,16 @@ def _validate_fact_snapshot(
         *LEGACY_FACT_SNAPSHOT_SCHEMA_VERSIONS,
     }:
         raise _contract_error("snapshot_schema_version")
-    is_v4 = schema_version == FACT_SNAPSHOT_SCHEMA_VERSION
+    is_v5 = schema_version == FACT_SNAPSHOT_SCHEMA_VERSION
+    is_rich_snapshot = is_v5 or schema_version == "resume_fact_snapshot.v4"
     _require_exact_keys(
         snapshot,
-        _FACT_SNAPSHOT_KEYS if is_v4 else _FACT_SNAPSHOT_KEYS_V3,
+        _FACT_SNAPSHOT_KEYS if is_rich_snapshot else _FACT_SNAPSHOT_KEYS_V3,
         code="snapshot_unexpected_fields",
     )
-    expected_facts_schema = FACTS_SCHEMA_VERSION if is_v4 else "resume_facts.v1"
+    expected_facts_schema = (
+        FACTS_SCHEMA_VERSION if is_rich_snapshot else "resume_facts.v1"
+    )
     if snapshot.get("facts_schema_version") != expected_facts_schema:
         raise _contract_error("snapshot_facts_schema_version")
 
@@ -370,14 +381,22 @@ def _validate_fact_snapshot(
         (
             "education",
             "education",
-            _EDUCATION_SNAPSHOT_KEYS if is_v4 else _EDUCATION_SNAPSHOT_V3_KEYS,
+            (
+                _EDUCATION_SNAPSHOT_KEYS_V5
+                if is_v5
+                else (
+                    _EDUCATION_SNAPSHOT_KEYS_V4
+                    if is_rich_snapshot
+                    else _EDUCATION_SNAPSHOT_V3_KEYS
+                )
+            ),
         ),
         (
             "experiences",
             "experience",
             (
                 _EXPERIENCE_SNAPSHOT_V4_KEYS
-                if is_v4
+                if is_rich_snapshot
                 else (
                     _EXPERIENCE_SNAPSHOT_V3_KEYS
                     if schema_version == "resume_fact_snapshot.v3"
@@ -388,10 +407,14 @@ def _validate_fact_snapshot(
         (
             "skills",
             "skill",
-            _SKILL_SNAPSHOT_KEYS if is_v4 else _SKILL_SNAPSHOT_V3_KEYS,
+            (
+                _SKILL_SNAPSHOT_KEYS
+                if is_rich_snapshot
+                else _SKILL_SNAPSHOT_V3_KEYS
+            ),
         ),
     ]
-    if is_v4:
+    if is_rich_snapshot:
         categories.extend(
             [
                 ("language_credentials", "language", _LANGUAGE_SNAPSHOT_KEYS),
@@ -424,6 +447,49 @@ def _validate_fact_snapshot(
                 allowed_values=set(source_block_ids),
                 allow_empty=False,
             )
+            if category == "education" and is_v5:
+                classification = entry["institution_classification"]
+                if classification not in {
+                    None,
+                    "985",
+                    "211",
+                    "undergraduate",
+                    "associate",
+                    "secondary_vocational",
+                    "overseas",
+                }:
+                    raise _contract_error("snapshot_institution_classification")
+                basis = entry["classification_basis"]
+                if basis not in {
+                    None,
+                    "moe_985_211_registry",
+                    "moe_higher_education_registry",
+                    "source_evidence",
+                }:
+                    raise _contract_error("snapshot_classification_basis")
+                registry_version = entry["classification_registry_version"]
+                if registry_version is not None and not isinstance(registry_version, str):
+                    raise _contract_error("snapshot_classification_registry_version")
+                classification_evidence_block_ids = _require_string_list(
+                    entry["classification_evidence_block_ids"],
+                    code="snapshot_classification_evidence_block_ids",
+                    allowed_values=set(source_block_ids),
+                )
+                if classification is None and (
+                    basis is not None or registry_version is not None
+                ):
+                    raise _contract_error("snapshot_unclassified_institution_metadata")
+                if classification is not None and basis is None:
+                    raise _contract_error("snapshot_missing_institution_basis")
+                if classification is not None and not classification_evidence_block_ids:
+                    raise _contract_error("snapshot_missing_institution_evidence")
+                if basis in {
+                    "moe_985_211_registry",
+                    "moe_higher_education_registry",
+                } and (not isinstance(registry_version, str) or not registry_version):
+                    raise _contract_error("snapshot_missing_classification_registry_version")
+                if basis == "source_evidence" and registry_version is not None:
+                    raise _contract_error("snapshot_unexpected_source_registry_version")
             if category == "experiences":
                 _require_string_list(
                     entry["classification_evidence_block_ids"],
@@ -708,18 +774,6 @@ def resume_facts_tool_schema() -> dict[str, Any]:
                     {"type": "null"},
                 ]
             },
-            "institution_tiers": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "enum": [
-                        "211", "985", "double_first_class", "key_undergraduate",
-                        "first_tier", "second_tier", "regular_undergraduate",
-                        "private_undergraduate", "higher_vocational", "overseas",
-                    ],
-                },
-                "maxItems": 10,
-            },
             "average_score": {"anyOf": [{"type": "number"}, {"type": "null"}]},
             "gpa_value": {"anyOf": [{"type": "number"}, {"type": "null"}]},
             "gpa_scale": {"anyOf": [{"type": "number"}, {"type": "null"}]},
@@ -735,7 +789,6 @@ def resume_facts_tool_schema() -> dict[str, Any]:
             "major_raw",
             "start_month",
             "end_month",
-            "institution_tiers",
             "average_score",
             "gpa_value",
             "gpa_scale",
@@ -1527,9 +1580,10 @@ def extract_resume_facts(
                     "to cet4, 六级 equivalents to cet6, 专四 only to tem4, and 专八 only "
                     "to tem8. Preserve the exact written name and score. Never turn a "
                     "generic statement such as 英语熟练 into a certificate. Extract GPA, "
-                    "rank, scholarship, award, leadership role, and institution tier only "
-                    "when explicitly written in the cited evidence. The local server will "
-                    "add official 211/985 registry tags; do not guess other school tiers. "
+                    "rank, scholarship, award, and leadership role only when explicitly "
+                    "written in the cited evidence. The local server classifies every school "
+                    "from versioned Ministry of Education lists and source evidence; do not "
+                    "guess or output a school tier. "
                     "Set leadership_context only together with an explicit leadership_role; "
                     "set award_level only together with an explicit award_result_raw. "
                     "A project, competition, course design, research, paper, club, or award "

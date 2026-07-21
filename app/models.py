@@ -1120,6 +1120,21 @@ class ResumeEducation(Base):
     start_month: Mapped[str | None] = mapped_column(String(7))
     end_month: Mapped[str | None] = mapped_column(String(7))
     institution_tiers: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Canonical, education-record-level classification used by the recruiter
+    # UI. A candidate may have several education records and therefore several
+    # classifications, but a single record never receives overlapping labels
+    # such as both 985 and 211.
+    institution_classification: Mapped[str | None] = mapped_column(
+        String(32),
+    )
+    classification_basis: Mapped[str | None] = mapped_column(String(32))
+    classification_registry_version: Mapped[str | None] = mapped_column(
+        String(64)
+    )
+    classification_evidence_block_ids: Mapped[list[str]] = mapped_column(
+        JSON,
+        default=list,
+    )
     average_score: Mapped[float | None] = mapped_column(Float)
     gpa_value: Mapped[float | None] = mapped_column(Float)
     gpa_scale: Mapped[float | None] = mapped_column(Float)

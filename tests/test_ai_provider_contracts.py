@@ -83,6 +83,10 @@ def _v3_fact_snapshot() -> dict[str, object]:
     education.update(
         {
             "institution_tiers": [],
+            "institution_classification": None,
+            "classification_basis": None,
+            "classification_registry_version": None,
+            "classification_evidence_block_ids": [],
             "average_score": None,
             "gpa_value": None,
             "gpa_scale": None,
@@ -337,13 +341,26 @@ def test_score_helper_rejects_raw_pdf_like_input_before_any_provider_call() -> N
         )
 
 
-def test_fact_snapshot_validator_accepts_legacy_v2_and_rich_v4_facts() -> None:
+def test_fact_snapshot_validator_accepts_legacy_and_current_fact_snapshots() -> None:
     v2, v2_fact_ids = _validate_fact_snapshot(_fact_snapshot())
     v3, v3_fact_ids = _validate_fact_snapshot(_v3_fact_snapshot())
+    legacy_v4 = deepcopy(_v3_fact_snapshot())
+    legacy_v4["schema_version"] = "resume_fact_snapshot.v4"
+    education = legacy_v4["education"][0]
+    assert isinstance(education, dict)
+    for key in (
+        "institution_classification",
+        "classification_basis",
+        "classification_registry_version",
+        "classification_evidence_block_ids",
+    ):
+        education.pop(key)
+    validated_v4, v4_fact_ids = _validate_fact_snapshot(legacy_v4)
 
     assert v2["schema_version"] == "resume_fact_snapshot.v2"
     assert v3["schema_version"] == FACT_SNAPSHOT_SCHEMA_VERSION
-    assert v2_fact_ids == v3_fact_ids == _fact_ids()
+    assert validated_v4["schema_version"] == "resume_fact_snapshot.v4"
+    assert v2_fact_ids == v3_fact_ids == v4_fact_ids == _fact_ids()
     assert v3["experiences"][0]["detail_items"] == [
         {
             "detail_raw": "Built source-cited candidate ingestion",

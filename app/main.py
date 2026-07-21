@@ -623,6 +623,12 @@ def _resume_review_detail(resume: object) -> ResumeReviewDetail:
                 start_month=education.start_month,
                 end_month=education.end_month,
                 institution_tiers=education.institution_tiers or [],
+                institution_classification=education.institution_classification,
+                classification_basis=education.classification_basis,
+                classification_registry_version=education.classification_registry_version,
+                classification_evidence_block_ids=(
+                    education.classification_evidence_block_ids or []
+                ),
                 average_score=education.average_score,
                 gpa_value=education.gpa_value,
                 gpa_scale=education.gpa_scale,

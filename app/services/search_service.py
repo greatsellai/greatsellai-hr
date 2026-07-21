@@ -24,7 +24,10 @@ from app.schemas import (
     LeadershipFilter,
     LanguageCredentialFilter,
 )
-from app.services.institution_service import resolve_institution
+from app.services.institution_service import (
+    INSTITUTION_CLASSIFICATION_ORDER,
+    resolve_institution,
+)
 from app.services.normalization import DEGREE_RANK, normalized_contains, normalized_key
 from app.services.resume_eligibility import is_resume_screening_eligible
 
@@ -115,6 +118,11 @@ def _matches_education(
         and _matches_school_name(session, education, filter_item.school_name_contains)
         and _matches_any_text(education.major_raw, filter_item.major_contains)
         and (
+            not filter_item.institution_classifications_any_of
+            or education.institution_classification
+            in filter_item.institution_classifications_any_of
+        )
+        and (
             not filter_item.institution_tiers_any_of
             or bool(
                 set(education.institution_tiers or [])
@@ -150,6 +158,21 @@ def _matches_education(
             )
         )
     )
+
+
+def _resume_institution_classifications(resume: Resume) -> list[str]:
+    """Return distinct per-record categories in one stable UI/API order."""
+
+    known = {
+        education.institution_classification
+        for education in resume.educations
+        if education.institution_classification
+    }
+    return [
+        classification
+        for classification in INSTITUTION_CLASSIFICATION_ORDER
+        if classification in known
+    ]
 
 
 def _matches_experience(filter_item: ExperienceFilter, experience: object) -> bool:
@@ -503,13 +526,18 @@ def search_candidates(
                         value
                         for value in (
                             education.school_name_raw,
+                            education.institution_classification,
                             education.degree,
                             education.major_raw,
                         )
                         if value
                     ),
                     fact_type="education",
-                    evidence_block_ids=education.evidence_block_ids or [],
+                    evidence_block_ids=(
+                        education.classification_evidence_block_ids
+                        or education.evidence_block_ids
+                        or []
+                    ),
                 )
                 for education in matching_education
             )
@@ -777,6 +805,7 @@ def search_candidates(
                 resume_id=resume.id,
                 original_filename=resume.original_filename,
                 is_985_211=bool(resume.is_985_211),
+                institution_classifications=_resume_institution_classifications(resume),
                 highest_degree=resume.highest_degree,
                 employment_months=resume.employment_months,
                 employment_or_internship_months=resume.employment_or_internship_months,

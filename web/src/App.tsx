@@ -847,7 +847,11 @@ function resumeFileTypeLabel(filename: string): string {
 
 function canPreviewInline(filename: string): boolean {
   const extension = resumeFileExtension(filename);
-  return [".pdf", ".png", ".jpg", ".jpeg", ".html", ".htm"].includes(extension);
+  // HTML is accepted as an extraction source, never as browser-previewable
+  // content. The API also forces it to an opaque attachment; keeping it out
+  // of this branch prevents a future response-policy regression from turning
+  // a candidate-controlled document into a same-origin preview.
+  return [".pdf", ".png", ".jpg", ".jpeg"].includes(extension);
 }
 
 function fileFingerprint(file: File): string {

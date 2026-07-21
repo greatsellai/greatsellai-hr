@@ -25,8 +25,6 @@ def _settings(tmp_path: Path, **overrides: object) -> AppSettings:
         "public_app_url": "http://testserver",
         "allow_unauthenticated": False,
         "trusted_proxy_cidrs": ("127.0.0.1/32",),
-        "login_rate_limit_global_limit": 100,
-        "login_rate_limit_global_window_seconds": 60 * 60,
         "login_rate_limit_client_limit": 10,
         "login_rate_limit_client_window_seconds": 15 * 60,
         "login_rate_limit_email_limit": 8,
@@ -78,12 +76,16 @@ def test_legacy_static_token_is_disabled_without_explicit_compatibility_switch(
         assert header_attempt.json()["detail"] == "authentication_required"
 
 
-def test_failed_login_limit_is_durable_hmac_and_does_not_lock_another_network(
+def test_failed_login_limit_is_durable_and_does_not_lock_correct_login_on_another_network(
     tmp_path: Path,
 ) -> None:
     """A hostile source cannot spend a different trusted source's account budget."""
 
-    settings = _settings(tmp_path, login_rate_limit_email_limit=1)
+    settings = _settings(
+        tmp_path,
+        login_rate_limit_client_limit=1,
+        login_rate_limit_email_limit=1,
+    )
     app = create_app(settings)
     with TestClient(app, client=("127.0.0.1", 2015)) as client:
         email = "login-limit-account@example.test"
@@ -117,12 +119,11 @@ def test_failed_login_limit_is_durable_hmac_and_does_not_lock_another_network(
             buckets = session.scalars(
                 select(RegistrationRateLimitBucket).where(
                     RegistrationRateLimitBucket.scope.in_(
-                        {"login_global", "login_client", "login_client_account"}
+                        {"login_client", "login_client_account"}
                     )
                 )
             ).all()
         assert {bucket.scope for bucket in buckets} == {
-            "login_global",
             "login_client",
             "login_client_account",
         }
@@ -132,28 +133,29 @@ def test_failed_login_limit_is_durable_hmac_and_does_not_lock_another_network(
         assert all("198.51.100.10" not in bucket.key_digest for bucket in buckets)
 
 
-def test_login_limit_and_legacy_compatibility_settings_are_explicit_and_validated(
+def test_public_auth_limit_and_legacy_compatibility_settings_are_explicit_and_validated(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED", "true")
-    monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_LIMIT", "71")
-    monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_WINDOW_SECONDS", "3601")
     monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_LIMIT", "6")
     monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_WINDOW_SECONDS", "901")
     monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_LIMIT", "4")
     monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_WINDOW_SECONDS", "901")
+    monkeypatch.setenv("RESUME_V3_PASSWORD_RESET_MIN_RESPONSE_SECONDS", "0.4")
 
     loaded = AppSettings.from_env()
     assert loaded.legacy_admin_token_enabled is True
-    assert loaded.login_rate_limit_global_limit == 71
-    assert loaded.login_rate_limit_global_window_seconds == 3601
     assert loaded.login_rate_limit_client_limit == 6
     assert loaded.login_rate_limit_client_window_seconds == 901
     assert loaded.login_rate_limit_email_limit == 4
     assert loaded.login_rate_limit_email_window_seconds == 901
+    assert loaded.password_reset_min_response_seconds == 0.4
+    assert not hasattr(loaded, "login_rate_limit_global_limit")
 
     with pytest.raises(ValueError, match="LOGIN_RATE_LIMIT_EMAIL_LIMIT"):
         replace(_settings(tmp_path), login_rate_limit_email_limit=0).validate_runtime()
     with pytest.raises(ValueError, match="LOGIN_RATE_LIMIT_CLIENT_WINDOW_SECONDS"):
         replace(_settings(tmp_path), login_rate_limit_client_window_seconds=59).validate_runtime()
+    with pytest.raises(ValueError, match="PASSWORD_RESET_MIN_RESPONSE_SECONDS"):
+        replace(_settings(tmp_path), password_reset_min_response_seconds=0.04).validate_runtime()

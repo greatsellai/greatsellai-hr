@@ -152,8 +152,6 @@ def ensure_login_rate_limit_available(
     secret: str,
     client_identifier: str,
     email_key: str,
-    global_limit: int,
-    global_window_seconds: int,
     client_limit: int,
     client_window_seconds: int,
     email_limit: int,
@@ -175,8 +173,6 @@ def ensure_login_rate_limit_available(
         rules=_login_rate_limit_rules(
             client_identifier=client_identifier,
             email_key=email_key,
-            global_limit=global_limit,
-            global_window_seconds=global_window_seconds,
             client_limit=client_limit,
             client_window_seconds=client_window_seconds,
             email_limit=email_limit,
@@ -193,8 +189,6 @@ def record_login_failure(
     secret: str,
     client_identifier: str,
     email_key: str,
-    global_limit: int,
-    global_window_seconds: int,
     client_limit: int,
     client_window_seconds: int,
     email_limit: int,
@@ -209,8 +203,6 @@ def record_login_failure(
         rules=_login_rate_limit_rules(
             client_identifier=client_identifier,
             email_key=email_key,
-            global_limit=global_limit,
-            global_window_seconds=global_window_seconds,
             client_limit=client_limit,
             client_window_seconds=client_window_seconds,
             email_limit=email_limit,
@@ -225,20 +217,12 @@ def _login_rate_limit_rules(
     *,
     client_identifier: str,
     email_key: str,
-    global_limit: int,
-    global_window_seconds: int,
     client_limit: int,
     client_window_seconds: int,
     email_limit: int,
     email_window_seconds: int,
 ) -> tuple[PublicRateLimitRule, ...]:
     return (
-        PublicRateLimitRule(
-            scope="login_global",
-            value="global",
-            limit=global_limit,
-            window_seconds=global_window_seconds,
-        ),
         PublicRateLimitRule(
             scope="login_client",
             value=client_identifier,

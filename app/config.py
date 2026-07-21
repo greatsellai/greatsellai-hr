@@ -125,6 +125,10 @@ class AppSettings:
     email_verification_resend_cooldown_seconds: int = 60
     email_verification_daily_limit: int = 5
     password_reset_ttl_seconds: int = 60 * 60
+    # Every public recovery response waits to this minimum monotonic budget.
+    # It intentionally masks the extra database/outbox work for registered
+    # accounts without blocking the async server event loop.
+    password_reset_min_response_seconds: float = 0.2
     # Public password recovery is intentionally throttled independently from
     # registration.  The persisted buckets use global, client and opaque
     # email dimensions; no raw address or IP is stored.
@@ -134,11 +138,11 @@ class AppSettings:
     password_reset_rate_limit_client_window_seconds: int = 15 * 60
     password_reset_rate_limit_email_limit: int = 3
     password_reset_rate_limit_email_window_seconds: int = 24 * 60 * 60
-    # Login failures use a durable, privacy-preserving client/account throttle
-    # so replicas share the same anti-credential-stuffing budget. Successful
-    # sign-ins never consume this failure budget.
-    login_rate_limit_global_limit: int = 300
-    login_rate_limit_global_window_seconds: int = 60 * 60
+    # Login failures use only durable, privacy-preserving per-client and
+    # per-client-account throttles. There is deliberately no global login
+    # bucket: a public global hard block would let one hostile source deny
+    # sign-in service to every unrelated user. Successful sign-ins never
+    # consume this failure budget.
     login_rate_limit_client_limit: int = 10
     login_rate_limit_client_window_seconds: int = 15 * 60
     # Kept as EMAIL_* environment names for clear operator input, but the
@@ -333,6 +337,9 @@ class AppSettings:
             password_reset_ttl_seconds=int(
                 os.getenv("RESUME_V3_PASSWORD_RESET_TTL_SECONDS", str(60 * 60))
             ),
+            password_reset_min_response_seconds=float(
+                os.getenv("RESUME_V3_PASSWORD_RESET_MIN_RESPONSE_SECONDS", "0.2")
+            ),
             password_reset_rate_limit_global_limit=int(
                 os.getenv("RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_LIMIT", "60")
             ),
@@ -358,15 +365,6 @@ class AppSettings:
                 os.getenv(
                     "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
                     str(24 * 60 * 60),
-                )
-            ),
-            login_rate_limit_global_limit=int(
-                os.getenv("RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_LIMIT", "300")
-            ),
-            login_rate_limit_global_window_seconds=int(
-                os.getenv(
-                    "RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
-                    str(60 * 60),
                 )
             ),
             login_rate_limit_client_limit=int(
@@ -603,6 +601,10 @@ class AppSettings:
             raise ValueError("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT must be at least 1")
         if self.password_reset_ttl_seconds < 5 * 60:
             raise ValueError("RESUME_V3_PASSWORD_RESET_TTL_SECONDS must be at least 300")
+        if not 0.05 <= self.password_reset_min_response_seconds <= 5:
+            raise ValueError(
+                "RESUME_V3_PASSWORD_RESET_MIN_RESPONSE_SECONDS must be between 0.05 and 5"
+            )
         for name, value in (
             (
                 "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_LIMIT",
@@ -636,17 +638,12 @@ class AppSettings:
             if value < 60:
                 raise ValueError(f"{name} must be at least 60")
         for name, value in (
-            ("RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_LIMIT", self.login_rate_limit_global_limit),
             ("RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_LIMIT", self.login_rate_limit_client_limit),
             ("RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_LIMIT", self.login_rate_limit_email_limit),
         ):
             if value < 1:
                 raise ValueError(f"{name} must be at least 1")
         for name, value in (
-            (
-                "RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
-                self.login_rate_limit_global_window_seconds,
-            ),
             (
                 "RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_WINDOW_SECONDS",
                 self.login_rate_limit_client_window_seconds,

@@ -8,11 +8,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+import app.main as main_module
 from app.config import AppSettings
 from app.main import create_app
 from app.models import PasswordResetToken
 from app.services.identity_service import digest_token, utcnow
 from app.services.transactional_email_outbox_service import (
+    TransactionalEmailOutboxError,
     run_transactional_email_outbox_worker_once,
 )
 
@@ -158,6 +160,58 @@ def test_password_reset_request_is_enumeration_safe_and_replaces_older_link(
     )
     assert invalidated.status_code == 422
     assert invalidated.json()["detail"] == "password_reset_invalid_or_expired"
+
+
+def test_password_reset_timing_guard_covers_known_unknown_and_failed_enqueue(
+    password_reset_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every public outcome reaches the same configured timing guard."""
+
+    email = "password-reset-timing@example.test"
+    _register_and_verify(
+        password_reset_client,
+        email=email,
+        password="password-reset-timing-password",
+    )
+    timing_calls: list[dict[str, object]] = []
+
+    async def capture_timing(**kwargs: object) -> None:
+        timing_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "enforce_password_reset_minimum_response_time",
+        capture_timing,
+    )
+
+    known = password_reset_client.post(
+        "/v1/auth/password-reset/request",
+        json={"email": email},
+    )
+    unknown = password_reset_client.post(
+        "/v1/auth/password-reset/request",
+        json={"email": "unknown-password-reset-timing@example.test"},
+    )
+
+    def fail_enqueue(*_: object, **__: object) -> None:
+        raise TransactionalEmailOutboxError("synthetic_enqueue_failure")
+
+    monkeypatch.setattr(main_module, "enqueue_password_reset_delivery", fail_enqueue)
+    failed_enqueue = password_reset_client.post(
+        "/v1/auth/password-reset/request",
+        json={"email": email},
+    )
+
+    assert known.status_code == unknown.status_code == failed_enqueue.status_code == 200
+    assert known.json() == unknown.json() == failed_enqueue.json() == {
+        "accepted": True,
+        "delivery_available": True,
+    }
+    assert len(timing_calls) == 3
+    assert {
+        call["minimum_seconds"] for call in timing_calls
+    } == {password_reset_client.app.state.settings.password_reset_min_response_seconds}
 
 
 def test_password_reset_rejects_expired_link(password_reset_client: TestClient) -> None:

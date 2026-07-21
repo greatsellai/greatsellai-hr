@@ -34,6 +34,9 @@ from app.services.job_service import create_job
 from app.services import mailbox_import_service
 from app.services.resume_service import create_candidate, save_facts
 from app.services.transactional_email import TestTransactionalEmailProvider
+from app.services.transactional_email_outbox_service import (
+    run_transactional_email_outbox_worker_once,
+)
 from app.tenant_scope import set_organization_context
 
 
@@ -170,6 +173,16 @@ def list_e2e_password_reset_deliveries(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="e2e_delivery_capture_unavailable",
         )
+    # Password recovery now leaves HTTP before provider I/O.  The loopback-only
+    # control route advances one real outbox job against the same test provider
+    # so the browser can follow the generated one-time URL without starting a
+    # second process or adding a production test bypass.
+    run_transactional_email_outbox_worker_once(
+        request.app.state.database,
+        settings=request.app.state.settings,
+        worker_id="e2e-password-reset-outbox",
+        provider=provider,
+    )
     recipient_key = recipient.strip().casefold()
     return {
         "deliveries": [

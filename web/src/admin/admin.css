@@ -1555,6 +1555,464 @@
   font-size: 0.75rem;
 }
 
+.admin-ai-config-layout {
+  display: grid;
+  grid-template-columns: minmax(14.5rem, 0.42fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.admin-ai-config-guide {
+  position: sticky;
+  top: 1rem;
+  display: grid;
+  gap: 0.875rem;
+}
+
+.admin-ai-config-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--red-pressed);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.admin-ai-config-guide h2,
+.admin-ai-form-heading h3,
+.admin-ai-route-history h4 {
+  margin: 0;
+  color: var(--ink-strong);
+  letter-spacing: -0.02em;
+}
+
+.admin-ai-config-guide h2 {
+  font-size: 1rem;
+}
+
+.admin-ai-config-guide > p,
+.admin-ai-form-heading p,
+.admin-ai-route-targets > p,
+.admin-ai-route-history p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.admin-ai-config-guide ol {
+  display: grid;
+  gap: 0.5rem;
+  padding-left: 1.25rem;
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.admin-ai-config-guide dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  padding: 0;
+  margin: 0;
+}
+
+.admin-ai-config-guide dl > div {
+  padding: 0.625rem;
+  background: var(--surface-muted);
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-config-guide dt {
+  color: var(--ink-soft);
+  font-size: 0.6875rem;
+}
+
+.admin-ai-config-guide dd {
+  margin: 0.2rem 0 0;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.admin-ai-config-panel {
+  padding: 0;
+}
+
+.admin-ai-config-panel > .admin-section-heading {
+  padding: 1.125rem 1.125rem 0.875rem;
+}
+
+.admin-ai-config-tabs {
+  margin: 0 1.125rem 1rem;
+}
+
+.admin-ai-config-form {
+  border-top: 1px solid var(--line);
+}
+
+.admin-ai-form-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.admin-ai-form-heading h3 {
+  font-size: 0.9375rem;
+}
+
+.admin-ai-form-heading p {
+  margin-top: 0.2rem;
+}
+
+.admin-ai-step-count {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.5rem;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 650;
+  background: var(--surface-muted);
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-field-wide {
+  grid-column: 1 / -1;
+}
+
+.admin-management-form label small {
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.admin-ai-route-targets {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.admin-ai-route-targets > legend {
+  margin-bottom: -0.2rem;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.admin-ai-route-target {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.875rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.admin-ai-route-target-heading,
+.admin-ai-route-target-actions,
+.admin-ai-route-history > div,
+.admin-ai-route-history li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.admin-ai-route-target-heading strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+}
+
+.admin-ai-route-target-heading .button {
+  min-height: 2rem;
+  padding-inline: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.admin-ai-fallback-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.admin-ai-fallback-options legend {
+  width: 100%;
+  margin-bottom: 0.05rem;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.admin-management-form .admin-ai-fallback-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 2rem;
+  padding: 0.35rem 0.5rem;
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-weight: 650;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-fallback-options input {
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  accent-color: var(--red);
+}
+
+.admin-ai-route-target-actions {
+  justify-content: flex-start;
+}
+
+.admin-ai-route-target-actions small {
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+}
+
+.admin-ai-route-load-state,
+.admin-ai-route-load-error {
+  display: flex;
+  min-height: 2.75rem;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.625rem 0.75rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-route-load-state {
+  color: var(--ink-soft);
+  background: var(--surface-muted);
+}
+
+.admin-ai-route-load-error {
+  justify-content: space-between;
+  color: var(--red-pressed);
+  background: var(--red-tint);
+  border-color: rgb(215 22 24 / 0.2);
+}
+
+.admin-ai-route-load-error .button {
+  flex: 0 0 auto;
+  min-height: 2rem;
+  padding: 0.3rem 0.625rem;
+  font-size: 0.75rem;
+}
+
+.admin-ai-route-review {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+}
+
+.admin-ai-route-review > header {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.admin-ai-route-review > header div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.admin-ai-route-review > header span {
+  color: var(--red-pressed);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.admin-ai-route-review h4,
+.admin-ai-route-change-warning h5 {
+  margin: 0;
+  color: var(--ink-strong);
+}
+
+.admin-ai-route-review h4 {
+  font-size: 1rem;
+  letter-spacing: -0.02em;
+}
+
+.admin-ai-route-review > header p,
+.admin-ai-route-change-warning p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.admin-ai-route-review-table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-route-review-table {
+  width: 100%;
+  min-width: 42rem;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.admin-ai-route-review-table th,
+.admin-ai-route-review-table td {
+  padding: 0.625rem 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.admin-ai-route-review-table thead th {
+  color: var(--ink-soft);
+  font-weight: 650;
+  background: var(--surface-muted);
+}
+
+.admin-ai-route-review-table tbody th {
+  width: 7.5rem;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.admin-ai-route-review-table td {
+  width: calc((100% - 7.5rem) / 2);
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.admin-ai-route-review-table td strong {
+  color: var(--ink);
+}
+
+.admin-ai-route-review-table tbody tr:last-child th,
+.admin-ai-route-review-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.admin-ai-route-review-reason {
+  padding: 0;
+  margin: 0;
+}
+
+.admin-ai-route-review-reason div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.admin-ai-route-review-reason dt {
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.admin-ai-route-review-reason dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.admin-ai-route-change-warning {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  color: #7d410b;
+  background: var(--amber-tint);
+  border: 1px solid #f1d7bb;
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-route-change-warning h5 {
+  color: #6b3508;
+  font-size: 0.8125rem;
+}
+
+.admin-ai-route-change-warning ul {
+  display: grid;
+  gap: 0.25rem;
+  padding-left: 1.1rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.admin-ai-route-change-warning p {
+  color: #6b3508;
+}
+
+.admin-ai-route-history {
+  display: grid;
+  gap: 0.625rem;
+  padding-top: 1rem;
+  margin-top: 0.125rem;
+  border-top: 1px solid var(--line);
+}
+
+.admin-ai-route-history h4 {
+  font-size: 0.875rem;
+}
+
+.admin-ai-route-history ol {
+  display: grid;
+  gap: 0.375rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.admin-ai-route-history li {
+  min-height: 2.75rem;
+  padding: 0.5rem 0.625rem;
+  background: var(--surface-muted);
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-route-history li > span {
+  display: grid;
+  min-width: 0;
+}
+
+.admin-ai-route-history strong {
+  color: var(--ink);
+  font-size: 0.75rem;
+}
+
+.admin-ai-route-history small,
+.admin-ai-route-history time {
+  color: var(--ink-soft);
+  font-size: 0.6875rem;
+}
+
+.admin-ai-route-history small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-ai-route-history time {
+  flex: 0 0 auto;
+}
+
 .admin-audit-table {
   min-width: 76rem;
 }
@@ -1740,6 +2198,14 @@
 
   .admin-resource-grid {
     grid-template-columns: 1fr;
+  }
+
+  .admin-ai-config-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-ai-config-guide {
+    position: static;
   }
 }
 
@@ -1969,6 +2435,34 @@
   .admin-form-actions,
   .admin-form-actions .button {
     width: 100%;
+  }
+
+  .admin-ai-config-tabs {
+    width: auto;
+    max-width: calc(100vw - 3.5rem);
+    overflow-x: auto;
+  }
+
+  .admin-ai-config-tabs button {
+    flex: 0 0 auto;
+  }
+
+  .admin-ai-form-heading,
+  .admin-ai-route-load-error,
+  .admin-ai-route-history > div,
+  .admin-ai-route-target-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .admin-ai-route-load-error .button,
+  .admin-ai-route-target-actions .button {
+    width: 100%;
+  }
+
+  .admin-ai-route-history li {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .admin-detail-metrics > div:nth-child(3) {

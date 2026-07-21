@@ -203,6 +203,19 @@ export interface AiProviderProfile {
   updated_at: string;
 }
 
+/** Platform-only, non-secret provider connection settings. */
+export interface AiProviderProfileCreateInput {
+  slug: string;
+  display_name: string;
+  driver: "openai_compatible";
+  endpoint_url: string;
+  /** A server-side credential reference, never an API key. */
+  credential_ref: string;
+  request_defaults: Record<string, unknown>;
+  is_enabled: boolean;
+  reason?: string;
+}
+
 export interface AiModelProfile {
   model_id: string;
   slug: string;
@@ -218,10 +231,39 @@ export interface AiModelProfile {
   updated_at: string;
 }
 
+export type AiModelCapability = "chat" | "tools" | "json_schema";
+
+export interface AiModelProfileCreateInput {
+  slug: string;
+  provider_slug: string;
+  display_name: string;
+  provider_model_id: string;
+  capabilities: AiModelCapability[];
+  context_window_tokens?: number;
+  max_output_tokens?: number;
+  is_enabled: boolean;
+  reason?: string;
+}
+
 export interface AiRouteTarget {
   model_slug: string;
   max_attempts: number;
   allow_fallback_on: string[];
+}
+
+export type AiRouteFallbackCategory =
+  | "rate_limited"
+  | "quota_exhausted"
+  | "timeout"
+  | "network"
+  | "provider_5xx";
+
+export interface AiRoutePolicyPublishInput {
+  display_name: string;
+  description?: string;
+  targets: AiRouteTarget[];
+  prompt_revision?: string;
+  reason?: string;
 }
 
 export interface AiRoutePolicy {
@@ -232,6 +274,17 @@ export interface AiRoutePolicy {
   current_version: number | null;
   is_enabled: boolean;
   updated_at: string;
+}
+
+export interface AiRoutePolicyVersion {
+  route_policy_version_id: string;
+  policy_id: string;
+  feature: string;
+  version: number;
+  targets: AiRouteTarget[];
+  prompt_revision: string | null;
+  published_at: string;
+  published_by_user_id: string | null;
 }
 
 export interface AiModelPriceVersion {
@@ -251,6 +304,23 @@ export interface AiModelPriceVersion {
   source: string;
   is_active: boolean;
   created_at: string;
+}
+
+export interface AiModelPriceVersionCreateInput {
+  model_slug: string;
+  currency: string;
+  effective_from: string;
+  effective_to?: string;
+  input_per_million?: string;
+  cached_read_input_per_million?: string;
+  cached_write_input_per_million?: string;
+  output_per_million?: string;
+  reasoning_per_million?: string;
+  request_unit_price?: string;
+  page_unit_price?: string;
+  source: string;
+  is_active: boolean;
+  reason?: string;
 }
 
 export interface AiRunUsage {

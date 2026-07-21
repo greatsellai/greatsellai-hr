@@ -119,6 +119,36 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByText("E2E 不匹配候选人")).toBeVisible();
   });
 
+  test("窄屏仍可展开筛选条件并应用", async ({ page }) => {
+    await registerAndVerify(page, "mobile-filter");
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    const toggle = page.getByRole("button", { name: "展开筛选", exact: true });
+    await expect(toggle).toBeVisible();
+    await expect(page.locator("#school-name")).not.toBeVisible();
+
+    await toggle.click();
+    await expect(page.locator("#school-name")).toBeVisible();
+    await page.locator("#school-name").fill("清华");
+    await page.getByRole("button", { name: "应用筛选条件", exact: true }).click();
+    await expect(page.getByRole("button", { name: "展开筛选", exact: true })).toBeVisible();
+  });
+
+  test("招聘助手打开后聚焦关闭键，关闭后返回触发按钮", async ({ page }) => {
+    await registerAndVerify(page, "agent-focus");
+
+    const trigger = page.getByRole("button", { name: "招聘助手", exact: true });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    const closeButton = dialog.getByRole("button", { name: "关闭招聘助手" });
+    await expect(dialog).toBeVisible();
+    await expect(closeButton).toBeFocused();
+
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+  });
+
   test("邮箱通道保存后同步请求只进入后台队列", async ({ page }) => {
     await registerAndVerify(page, "mailbox");
     await page.getByRole("button", { name: "邮箱入库", exact: true }).click();

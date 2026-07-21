@@ -122,9 +122,10 @@ const pricing = [
   },
   {
     name: "专业版",
-    price: "299",
-    eyebrow: "适合希望把面试准备与 HRBP 参考串起来的团队",
-    items: ["包含进阶版全部能力", "线上面试题撰写", "线下面试题撰写", "HRBP AI 面试结果参考"],
+    price: null,
+    comingSoon: true,
+    eyebrow: "面试辅助与 HRBP 参考能力正在筹备，暂未开放订阅",
+    items: ["包含进阶版全部能力", "线上面试题撰写（筹备中）", "线下面试题撰写（筹备中）", "HRBP AI 面试结果参考（筹备中）"],
   },
 ];
 
@@ -151,7 +152,7 @@ const faq = [
   },
   {
     question: "三个版本有什么区别？",
-    answer: "基础版覆盖简历筛选、评分、总结、JD 匹配与招聘 Agent；进阶版增加邮箱自动收简历和 AI-JD；专业版进一步覆盖线上、线下面试题与 HRBP 面试参考。",
+    answer: "基础版覆盖简历筛选、评分、总结、JD 匹配与招聘 Agent；进阶版增加邮箱自动收简历和 AI-JD。专业版的线上、线下面试题与 HRBP 面试参考仍在筹备，当前不会作为已交付能力出售。",
   },
 ];
 
@@ -404,18 +405,26 @@ export function LandingPage({
           <div className="landing-shell">
             <p className="landing-section-kicker">按团队当前阶段开始</p>
             <div className="landing-section-heading landing-pricing-heading">
-              <h2 id="pricing-title">¥99 / 月起，<br />把时间留给更重要的招聘判断</h2>
-              <p>新账号可先免费试用 30 天进阶版，再选择适合团队当前招聘流程的版本。</p>
+              <h2 id="pricing-title">先免费体验，<br />把时间留给更重要的招聘判断</h2>
+              <p>新账号可先免费试用 30 天进阶版；付费订阅与专业版会在正式开放后提供。</p>
             </div>
             <div className="landing-pricing-grid">
               {pricing.map((plan) => (
-                <article className={plan.featured ? "is-featured" : ""} key={plan.name}>
+                <article className={`${plan.featured ? "is-featured" : ""}${plan.comingSoon ? " is-coming-soon" : ""}`} key={plan.name}>
                   {plan.featured && <span className="landing-plan-badge">推荐</span>}
+                  {plan.comingSoon && <span className="landing-plan-badge landing-plan-badge-muted">筹备中</span>}
                   <p className="landing-plan-name">{plan.name}</p>
                   <p className="landing-plan-eyebrow">{plan.eyebrow}</p>
-                  <p className="landing-plan-price"><b>¥{plan.price}</b><span>/ 月</span></p>
+                  <p className="landing-plan-price">
+                    <b>{plan.comingSoon ? "敬请期待" : `¥${plan.price}`}</b>
+                    {!plan.comingSoon && <span>/ 月</span>}
+                  </p>
                   <ul>{plan.items.map((item) => <li key={item}><Icon name="check" size={17} />{item}</li>)}</ul>
-                  <a className={plan.featured ? "landing-button landing-button-primary" : "landing-button landing-button-outline"} href={registerHref}>先免费试用 30 天 <Icon name="arrow-right" size={17} /></a>
+                  {plan.comingSoon ? (
+                    <span aria-disabled="true" className="landing-button landing-button-disabled">专业版筹备中</span>
+                  ) : (
+                    <a className={plan.featured ? "landing-button landing-button-primary" : "landing-button landing-button-outline"} href={registerHref}>先免费试用 30 天 <Icon name="arrow-right" size={17} /></a>
+                  )}
                 </article>
               ))}
             </div>

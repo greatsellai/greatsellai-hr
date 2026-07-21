@@ -1,9 +1,14 @@
 import type { AuthSession } from "../types";
 import type {
+  AiModelPriceVersionCreateInput,
   AiModelPriceVersion,
+  AiModelProfileCreateInput,
   AiModelProfile,
+  AiProviderProfileCreateInput,
   AiProviderProfile,
+  AiRoutePolicyPublishInput,
   AiRoutePolicy,
+  AiRoutePolicyVersion,
   AiRunUsage,
   AiUsageAggregate,
   AiUsageQuery,
@@ -77,6 +82,16 @@ function extractError(payload: unknown) {
     const candidate = payload as Record<string, unknown>;
     const detail = candidate.detail;
     if (typeof detail === "string") return { message: detail, code: detail };
+    if (Array.isArray(detail)) {
+      const first = detail[0];
+      if (first && typeof first === "object") {
+        const issue = first as Record<string, unknown>;
+        const rawMessage = typeof issue.msg === "string" ? issue.msg : "请求参数不符合要求。";
+        const valueErrorPrefix = "Value error, ";
+        const code = rawMessage.startsWith(valueErrorPrefix) ? rawMessage.slice(valueErrorPrefix.length) : null;
+        return { message: code || rawMessage, code };
+      }
+    }
     if (detail && typeof detail === "object") {
       const detailObject = detail as Record<string, unknown>;
       const message = typeof detailObject.message === "string" ? detailObject.message : "请求未完成";
@@ -149,9 +164,22 @@ export const adminApi = {
   listAiUsage: (query: AiUsageQuery = {}) =>
     request<AiUsageAggregate[]>(`/platform/ai/usage/summary${queryString(query)}`),
   listAiProviders: () => request<AiProviderProfile[]>("/platform/ai/providers"),
+  createAiProvider: (payload: AiProviderProfileCreateInput) =>
+    request<AiProviderProfile>("/platform/ai/providers", { method: "POST", body: body(payload) }),
   listAiModels: () => request<AiModelProfile[]>("/platform/ai/models"),
+  createAiModel: (payload: AiModelProfileCreateInput) =>
+    request<AiModelProfile>("/platform/ai/models", { method: "POST", body: body(payload) }),
   listAiRoutes: () => request<AiRoutePolicy[]>("/platform/ai/routes"),
+  listAiRouteVersions: (feature: string) =>
+    request<AiRoutePolicyVersion[]>(`/platform/ai/routes/${encodeURIComponent(feature)}/versions`),
+  publishAiRoute: (feature: string, payload: AiRoutePolicyPublishInput) =>
+    request<AiRoutePolicyVersion>(`/platform/ai/routes/${encodeURIComponent(feature)}`, {
+      method: "PUT",
+      body: body(payload),
+    }),
   listAiPrices: () => request<AiModelPriceVersion[]>("/platform/ai/model-prices"),
+  createAiModelPrice: (payload: AiModelPriceVersionCreateInput) =>
+    request<AiModelPriceVersion>("/platform/ai/model-prices", { method: "POST", body: body(payload) }),
 };
 
 export function adminErrorMessage(error: unknown) {
@@ -167,6 +195,27 @@ export function adminErrorMessage(error: unknown) {
       platform_organization_confirmation_required: "请输入当前工作区名称确认这项高风险变更。",
       platform_admin_self_deactivation_forbidden: "不能停用当前登录的平台管理员账号。",
       platform_admin_deactivation_forbidden: "平台管理员账号受到保护，请先移除平台权限。",
+      ai_provider_not_found: "没有找到这个 Provider，请刷新资源后重试。",
+      ai_provider_slug_exists: "这个 Provider 标识已经存在，请换一个标识。",
+      ai_model_slug_exists: "这个模型标识已经存在，请换一个标识。",
+      ai_model_not_found: "没有找到这个模型，请刷新资源后重试。",
+      ai_route_policy_not_found: "没有找到这个路由策略。",
+      ai_route_model_not_found: "路由中有模型不存在，请刷新后重试。",
+      ai_route_model_unavailable: "路由中的模型未启用或能力不满足当前功能。",
+      ai_route_provider_unavailable: "路由中的 Provider 未启用或尚未就绪。",
+      unsupported_ai_feature: "这个 AI 功能暂不支持发布路由。",
+      ai_gateway_configuration_conflict: "配置与当前数据冲突，请刷新后重新发布。",
+      invalid_ai_config_slug: "配置标识仅支持小写字母、数字、点、下划线和连字符，且长度至少为 2 位。",
+      ai_endpoint_url_must_be_https: "Provider 端点必须使用 HTTPS。",
+      ai_endpoint_url_must_not_include_userinfo: "Provider 端点不能在 URL 中包含账号或密码。",
+      ai_endpoint_url_host_not_allowed: "Provider 端点不能指向本机或内网地址。",
+      ai_endpoint_url_must_not_include_fragment: "Provider 端点不能包含 URL 片段。",
+      invalid_currency: "币种必须是三位大写字母，例如 CNY。",
+      price_effective_to_must_follow_effective_from: "价格结束时间必须晚于生效时间。",
+      duplicate_route_model_target: "同一个模型不能在同一路由中重复出现。",
+      duplicate_ai_fallback_category: "同一种回退原因不能重复选择。",
+      value_must_not_be_blank: "请填写必填信息，不能只输入空格。",
+      platform_audit_reason_required: "请填写本次变更原因，便于平台审计。",
     };
     const message = (error.code && messages[error.code]) || error.message;
     return error.requestId ? `${message} 请求编号：${error.requestId}` : message;

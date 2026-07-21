@@ -80,6 +80,9 @@ fi
 
 git fetch origin main --tags --prune
 release_commit="$(git rev-parse -q --verify "refs/tags/$tag^{commit}")" || die "Unknown local tag: $tag"
+tag_short_commit="${tag##*-}"
+[[ "$release_commit" == "$tag_short_commit"* ]] || \
+  die "Tag '$tag' suffix does not match its target commit."
 git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 || \
   die "Tag '$tag' has not been pushed to GitHub."
 git merge-base --is-ancestor "$release_commit" origin/main || \

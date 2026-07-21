@@ -1,0 +1,106 @@
+name: Production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type RELEASE to create an immutable production tag and deploy it.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: greatsellai-hr-production
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and deploy production release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment:
+      name: production
+    steps:
+      - name: Validate release request
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Production releases must be run from main." >&2; exit 1; }
+          [[ "$CONFIRM" == "RELEASE" ]] || { echo "Confirmation must be RELEASE." >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: main
+      - name: Align local branch with reviewed main
+        run: |
+          set -Eeuo pipefail
+          git fetch origin main --tags --prune
+          git switch --force-create main origin/main
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || {
+            echo "main advanced after this release was requested. Re-run the release from current main." >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || {
+            echo "Checked-out main is not origin/main." >&2
+            exit 1
+          }
+      - name: Validate and configure production SSH
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+          PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
+          : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
+          : "${PROD_SSH_PRIVATE_KEY:?Missing production secret PROD_SSH_PRIVATE_KEY}"
+          : "${PROD_SSH_KNOWN_HOSTS:?Missing production secret PROD_SSH_KNOWN_HOSTS}"
+          [[ "$PROD_PROJECT_DIR" == /home/ubuntu/* && "$PROD_PROJECT_DIR" != /home/ubuntu/ ]] || {
+            echo "PROD_PROJECT_DIR must be a non-root /home/ubuntu path." >&2
+            exit 1
+          }
+          [[ "$PROD_HISTORY_DIR" == /home/ubuntu/* && "$PROD_HISTORY_DIR" != /home/ubuntu/ ]] || {
+            echo "PROD_HISTORY_DIR must be a non-root /home/ubuntu path." >&2
+            exit 1
+          }
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-production-deploy"
+          chmod 600 "$RUNNER_TEMP/greatsell-production-deploy"
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "${PROD_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null || {
+            echo "Production known_hosts does not contain the configured host." >&2
+            exit 1
+          }
+      - name: Create immutable production tag
+        id: release
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          tag="prod-$(date -u +%Y%m%d)-$(git rev-parse --short=7 HEAD)"
+          scripts/create-production-tag.sh "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Deploy tagged release
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
+          : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
+          scripts/deploy-production.sh "$RELEASE_TAG" \
+            --host "$PROD_DEPLOY_HOST" \
+            --project-dir "$PROD_PROJECT_DIR" \
+            --history-dir "$PROD_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"

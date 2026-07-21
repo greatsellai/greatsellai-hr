@@ -7,6 +7,7 @@
 - [AI 提取后台任务](docs/AI_EXTRACTION_WORKER.md)
 - [条件筛选 V2 规则与接口](docs/FILTER_V2.md)
 - [团队共建工作流](docs/TEAM_WORKFLOW.md)
+- [GitHub Actions CI/CD](docs/CI_CD.md)
 
 当前版本已覆盖：重新上传 PDF → 解析质量校验 → AI 从原文识别候选人姓名（不可靠则留空）并提取教育/经历/技能 → 字段级原文证据校验并自动启用 → 简历库汇总（AI 总结预览、最新 AI 评分、原 PDF）→ 条件筛选 → AI 评分、总结与 JD 匹配；React/Vite 工作台通过同域名 Caddy 静态部署，浏览器只请求同源的 `/v1/*` API。
 
@@ -56,21 +57,11 @@ GitHub 的 `main` 是唯一的团队代码基线；本地开发通过功能分�
 日常开发源，也不能把服务器文件反向覆盖 GitHub。
 
 每一个可验证的步骤都应先提交并推送到 GitHub 分支。完成需求后，先运行后端
-测试与前端构建，再创建 PR。PR 合并后，切换到最新 `main`，用以下脚本创建不可
-变的生产标签：
-
-```bash
-scripts/create-production-tag.sh
-```
-
-标签会形如 `prod-YYYYMMDD-<commit短码>`，脚本拒绝重用已有标签。部署只能使用该
-标签，并且仅将 Git 受控源码打包到服务器；它不会传输或删除 `.env.production`、
-数据库、候选人 PDF、Docker 卷或其他生产数据：
-
-```bash
-scripts/deploy-production.sh prod-YYYYMMDD-<commit短码> \
-  --ssh-key /path/to/server-key
-```
+测试与前端构建，再创建 PR。PR 合并到 `main` 后，GitHub Actions 会在该提交的 CI
+全部通过后自动创建不可变的 `prod-YYYYMMDD-<commit短码>` 标签并部署；详情见
+[GitHub Actions CI/CD](docs/CI_CD.md)。本地标签和部署脚本仅用于受控的应急重试。
+部署始终只打包 Git 受控源码，不会传输或删除 `.env.production`、数据库、候选人 PDF、
+Docker 卷或其他生产数据。
 
 部署脚本会在首次发布或存在 Alembic 迁移时先在服务器项目目录外创建受保护的
 PostgreSQL 逻辑备份，随后验证 HTTPS 健康检查、匿名登录保护和受保护 PDF 的拒绝
@@ -94,7 +85,7 @@ git pull --ff-only origin main
 ```
 
 不得直接推送 `main` 或直接修改服务器业务代码。紧急修复也必须回到本地分支、
-推送 GitHub、经 PR 合并，并重新打生产标签。
+推送 GitHub、经 PR 合并，并由成功 CI 自动创建新的生产标签。
 
 ## 已实现的 API 闭环
 

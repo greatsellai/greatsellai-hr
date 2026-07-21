@@ -22,6 +22,7 @@ def identity_client(tmp_path: Path) -> Iterator[TestClient]:
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
         admin_token="legacy-platform-test-token",
+        legacy_admin_token_enabled=True,
         session_secret="identity-plan-test-session-secret",
         allow_unauthenticated=False,
         ai_provider_credentials={

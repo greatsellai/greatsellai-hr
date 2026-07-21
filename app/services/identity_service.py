@@ -96,6 +96,21 @@ class AuthPrincipal:
         return self.legacy_compatibility or self.user.email_verified_at is not None
 
 
+@dataclass(frozen=True)
+class IssuedPasswordReset:
+    """One in-memory recovery secret paired with its durable token row.
+
+    The raw token is intentionally short-lived: callers must encrypt it into
+    the transactional outbox in the same database transaction and must never
+    serialize or log it. The outbox references the token by ID only.
+    """
+
+    token: str
+    password_reset_token_id: str
+    user_id: str
+    recipient: str
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -796,7 +811,7 @@ def issue_password_reset(
     *,
     email_value: str,
     ttl_seconds: int = 60 * 60,
-) -> str | None:
+) -> IssuedPasswordReset | None:
     """Issue exactly one usable reset token for an active account.
 
     The raw value is returned only to the delivery adapter and must never be
@@ -839,14 +854,19 @@ def issue_password_reset(
         session.flush()
 
     token = secrets.token_urlsafe(32)
-    session.add(
-        PasswordResetToken(
-            user_id=user.id,
-            token_digest=digest_token(token),
-            expires_at=now + timedelta(seconds=ttl_seconds),
-        )
+    reset = PasswordResetToken(
+        user_id=user.id,
+        token_digest=digest_token(token),
+        expires_at=now + timedelta(seconds=ttl_seconds),
     )
-    return token
+    session.add(reset)
+    session.flush()
+    return IssuedPasswordReset(
+        token=token,
+        password_reset_token_id=reset.id,
+        user_id=user.id,
+        recipient=user.email,
+    )
 
 
 def complete_password_reset(session: Session, *, token: str, password: str) -> None:

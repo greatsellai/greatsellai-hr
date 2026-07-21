@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.config import AppSettings
+from app.services.mailbox_import_service import MailboxImportError, _fernet
 
 
 def _settings(tmp_path: Path, **overrides: object) -> AppSettings:
@@ -17,6 +18,9 @@ def _settings(tmp_path: Path, **overrides: object) -> AppSettings:
         "environment": "production",
         "auto_create_schema": False,
         "seed_registry_on_startup": False,
+        "session_secret": "production-test-session-secret-that-is-independent",
+        # Base64url encoding of 32 synthetic bytes; valid only for tests.
+        "email_credentials_key": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
     }
     values.update(overrides)
     return AppSettings(**values)
@@ -35,6 +39,40 @@ def test_production_refuses_sqlite_and_implicit_schema_bootstrap(tmp_path: Path)
 
 def test_production_postgresql_with_explicit_migration_path_is_valid(tmp_path: Path) -> None:
     _settings(tmp_path).validate_runtime()
+
+
+def test_production_requires_independent_session_and_email_encryption_keys(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="production_session_secret_required"):
+        _settings(tmp_path, session_secret=None).validate_runtime()
+    with pytest.raises(RuntimeError, match="production_email_credentials_key_required"):
+        _settings(
+            tmp_path,
+            transactional_email_provider="test",
+            public_app_url="https://hr.example.test",
+            email_credentials_key=None,
+        ).validate_runtime()
+    with pytest.raises(RuntimeError, match="production_session_and_email_credentials_keys_must_differ"):
+        _settings(
+            tmp_path,
+            session_secret="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+            email_credentials_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+        ).validate_runtime()
+    with pytest.raises(RuntimeError, match="production_session_secret_must_differ_from_legacy_admin_token"):
+        _settings(
+            tmp_path,
+            admin_token="production-test-session-secret-that-is-independent",
+        ).validate_runtime()
+    with pytest.raises(RuntimeError, match="legacy_admin_token_enabled_requires_admin_token"):
+        _settings(tmp_path, legacy_admin_token_enabled=True, admin_token=None).validate_runtime()
+
+
+def test_production_without_email_flows_can_start_without_an_unused_email_key(tmp_path: Path) -> None:
+    """Mailbox and sender operations still fail closed when the key is absent."""
+
+    settings = _settings(tmp_path, email_credentials_key=None)
+    settings.validate_runtime()
+    with pytest.raises(MailboxImportError, match="mailbox_credentials_key_not_configured"):
+        _fernet(settings)
 
 
 def test_settings_load_generic_provider_credential_map_from_environment(

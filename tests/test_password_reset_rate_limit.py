@@ -12,6 +12,9 @@ from app.config import AppSettings
 from app.main import create_app
 from app.models import PasswordResetToken, RegistrationRateLimitBucket
 from app.services.identity_service import digest_token
+from app.services.transactional_email_outbox_service import (
+    run_transactional_email_outbox_worker_once,
+)
 
 
 def _settings(tmp_path: Path, **overrides: object) -> AppSettings:
@@ -93,6 +96,12 @@ def test_password_reset_rate_limit_uses_caddy_client_ip_and_keeps_active_link_on
         )
         assert known.status_code == 200, known.text
         assert known.json() == {"accepted": True, "delivery_available": True}
+        assert run_transactional_email_outbox_worker_once(
+            client.app.state.database,
+            settings=client.app.state.settings,
+            worker_id="password-reset-rate-limit-test-worker",
+            provider=client.app.state.transactional_email_provider,
+        )
         delivery = client.app.state.transactional_email_provider.password_reset_deliveries[-1]
         reset_token = parse_qs(urlsplit(delivery.reset_url).query)["token"][0]
 

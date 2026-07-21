@@ -151,6 +151,7 @@ def protected_client(tmp_path: Path) -> TestClient:
         upload_dir=data_dir / "uploads",
         database_url="sqlite://",
         admin_token="test-admin-token",
+        legacy_admin_token_enabled=True,
         min_text_chars_per_page=20,
         mailbox_imap_allowed_hosts=TEST_MAILBOX_IMAP_HOSTS,
     )

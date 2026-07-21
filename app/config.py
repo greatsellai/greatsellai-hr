@@ -7,6 +7,8 @@ from email.utils import parseaddr
 from ipaddress import ip_network
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+
 
 def _environment_flag(name: str, *, default: bool) -> bool:
     raw_value = os.getenv(name)
@@ -32,6 +34,10 @@ class AppSettings:
     database_pool_size: int = 5
     database_max_overflow: int = 10
     admin_token: str | None = field(default=None, repr=False)
+    # Pre-tenant installations authenticated a shared legacy workspace with
+    # one static token.  New deployments must keep this bridge disabled: it
+    # has no human identity and cannot provide account-level attribution.
+    legacy_admin_token_enabled: bool = False
     session_secret: str | None = field(default=None, repr=False)
     session_cookie_secure: bool = False
     allow_unauthenticated: bool = False
@@ -128,6 +134,23 @@ class AppSettings:
     password_reset_rate_limit_client_window_seconds: int = 15 * 60
     password_reset_rate_limit_email_limit: int = 3
     password_reset_rate_limit_email_window_seconds: int = 24 * 60 * 60
+    # Login failures use a durable, privacy-preserving client/account throttle
+    # so replicas share the same anti-credential-stuffing budget. Successful
+    # sign-ins never consume this failure budget.
+    login_rate_limit_global_limit: int = 300
+    login_rate_limit_global_window_seconds: int = 60 * 60
+    login_rate_limit_client_limit: int = 10
+    login_rate_limit_client_window_seconds: int = 15 * 60
+    # Kept as EMAIL_* environment names for clear operator input, but the
+    # persisted bucket is a trusted-client + normalized-account composite to
+    # avoid cross-network account lockouts.
+    login_rate_limit_email_limit: int = 8
+    login_rate_limit_email_window_seconds: int = 15 * 60
+    # A password-reset request writes a durable, encrypted email outbox row.
+    # The shared worker performs all SMTP/SES I/O after the HTTP response.
+    transactional_email_outbox_max_attempts: int = 5
+    transactional_email_outbox_lease_seconds: int = 90
+    transactional_email_outbox_retry_base_seconds: int = 60
     # Public self-registration has separate global, client, and email limits.
     # The limits are persisted in the database so multiple API replicas share
     # the same budget.  Forwarded client headers are accepted only when the
@@ -176,6 +199,10 @@ class AppSettings:
                 os.getenv("RESUME_V3_DATABASE_MAX_OVERFLOW", "10")
             ),
             admin_token=os.getenv("RESUME_V3_ADMIN_TOKEN") or None,
+            legacy_admin_token_enabled=_environment_flag(
+                "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED",
+                default=False,
+            ),
             session_secret=os.getenv("RESUME_V3_SESSION_SECRET") or None,
             session_cookie_secure=_environment_flag(
                 "RESUME_V3_SESSION_COOKIE_SECURE",
@@ -332,6 +359,42 @@ class AppSettings:
                     "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
                     str(24 * 60 * 60),
                 )
+            ),
+            login_rate_limit_global_limit=int(
+                os.getenv("RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_LIMIT", "300")
+            ),
+            login_rate_limit_global_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
+                    str(60 * 60),
+                )
+            ),
+            login_rate_limit_client_limit=int(
+                os.getenv("RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_LIMIT", "10")
+            ),
+            login_rate_limit_client_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_WINDOW_SECONDS",
+                    str(15 * 60),
+                )
+            ),
+            login_rate_limit_email_limit=int(
+                os.getenv("RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_LIMIT", "8")
+            ),
+            login_rate_limit_email_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
+                    str(15 * 60),
+                )
+            ),
+            transactional_email_outbox_max_attempts=int(
+                os.getenv("RESUME_V3_TRANSACTIONAL_EMAIL_OUTBOX_MAX_ATTEMPTS", "5")
+            ),
+            transactional_email_outbox_lease_seconds=int(
+                os.getenv("RESUME_V3_TRANSACTIONAL_EMAIL_OUTBOX_LEASE_SECONDS", "90")
+            ),
+            transactional_email_outbox_retry_base_seconds=int(
+                os.getenv("RESUME_V3_TRANSACTIONAL_EMAIL_OUTBOX_RETRY_BASE_SECONDS", "60")
             ),
             registration_rate_limit_global_limit=int(
                 os.getenv("RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_LIMIT", "20")
@@ -573,6 +636,39 @@ class AppSettings:
             if value < 60:
                 raise ValueError(f"{name} must be at least 60")
         for name, value in (
+            ("RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_LIMIT", self.login_rate_limit_global_limit),
+            ("RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_LIMIT", self.login_rate_limit_client_limit),
+            ("RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_LIMIT", self.login_rate_limit_email_limit),
+        ):
+            if value < 1:
+                raise ValueError(f"{name} must be at least 1")
+        for name, value in (
+            (
+                "RESUME_V3_LOGIN_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
+                self.login_rate_limit_global_window_seconds,
+            ),
+            (
+                "RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_WINDOW_SECONDS",
+                self.login_rate_limit_client_window_seconds,
+            ),
+            (
+                "RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
+                self.login_rate_limit_email_window_seconds,
+            ),
+        ):
+            if value < 60:
+                raise ValueError(f"{name} must be at least 60")
+        if self.transactional_email_outbox_max_attempts < 1:
+            raise ValueError("RESUME_V3_TRANSACTIONAL_EMAIL_OUTBOX_MAX_ATTEMPTS must be at least 1")
+        if not 30 <= self.transactional_email_outbox_lease_seconds <= 3600:
+            raise ValueError(
+                "RESUME_V3_TRANSACTIONAL_EMAIL_OUTBOX_LEASE_SECONDS must be between 30 and 3600"
+            )
+        if not 10 <= self.transactional_email_outbox_retry_base_seconds <= 24 * 60 * 60:
+            raise ValueError(
+                "RESUME_V3_TRANSACTIONAL_EMAIL_OUTBOX_RETRY_BASE_SECONDS must be between 10 and 86400"
+            )
+        for name, value in (
             ("RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_LIMIT", self.registration_rate_limit_global_limit),
             ("RESUME_V3_REGISTRATION_RATE_LIMIT_CLIENT_LIMIT", self.registration_rate_limit_client_limit),
             ("RESUME_V3_REGISTRATION_RATE_LIMIT_EMAIL_LIMIT", self.registration_rate_limit_email_limit),
@@ -642,10 +738,49 @@ class AppSettings:
                 raise RuntimeError("production_must_use_alembic_not_auto_create_schema")
             if self.seed_registry_on_startup:
                 raise RuntimeError("production_must_seed_registry_explicitly")
+            if not self.session_secret:
+                raise RuntimeError("production_session_secret_required")
+            # A mailbox connection or transactional sender makes the
+            # dedicated at-rest key mandatory.  An installation that has not
+            # enabled either flow may start without it, but mailbox/email
+            # actions still fail closed until an independent key is supplied.
+            if (
+                self.transactional_email_provider != "disabled"
+                and not self.email_credentials_key
+            ):
+                raise RuntimeError("production_email_credentials_key_required")
+            if self.email_credentials_key:
+                try:
+                    Fernet(self.email_credentials_key.encode("utf-8"))
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("production_email_credentials_key_invalid") from exc
+                if self.session_secret == self.email_credentials_key:
+                    raise RuntimeError(
+                        "production_session_and_email_credentials_keys_must_differ"
+                    )
+            if self.legacy_admin_token_enabled and not self.admin_token:
+                raise RuntimeError("legacy_admin_token_enabled_requires_admin_token")
+            if self.admin_token and self.admin_token == self.session_secret:
+                raise RuntimeError("production_session_secret_must_differ_from_legacy_admin_token")
             if self.transactional_email_provider == "test":
                 raise RuntimeError("production_must_not_use_test_transactional_email_provider")
             if self.public_app_url and not self.public_app_url.startswith("https://"):
                 raise RuntimeError("production_public_app_url_must_use_https")
+
+    def session_signing_secret(self) -> str:
+        """Return the only key that may sign browser/public-auth state.
+
+        Production never falls back to a legacy admin token or a source-code
+        literal. Local unauthenticated/test workspaces retain a deterministic
+        development fallback so existing developer ergonomics do not become a
+        deployment dependency.
+        """
+
+        if self.session_secret:
+            return self.session_secret
+        if self.environment in {"production", "prod"}:
+            raise RuntimeError("production_session_secret_required")
+        return "resume-v3-development-session"
 
 
 def _optional_positive_int(name: str) -> int | None:

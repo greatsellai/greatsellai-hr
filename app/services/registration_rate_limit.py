@@ -38,6 +38,12 @@ class PasswordResetRateLimitError(PublicRateLimitError):
     code = "password_reset_rate_limit_exceeded"
 
 
+class LoginRateLimitError(PublicRateLimitError):
+    """Stable public login throttle response without account disclosure."""
+
+    code = "login_rate_limit_exceeded"
+
+
 @dataclass(frozen=True)
 class PublicRateLimitRule:
     scope: str
@@ -140,6 +146,118 @@ def enforce_password_reset_rate_limit(
     )
 
 
+def ensure_login_rate_limit_available(
+    session: Session,
+    *,
+    secret: str,
+    client_identifier: str,
+    email_key: str,
+    global_limit: int,
+    global_window_seconds: int,
+    client_limit: int,
+    client_window_seconds: int,
+    email_limit: int,
+    email_window_seconds: int,
+    now: datetime | None = None,
+) -> None:
+    """Reject a credential attempt only when its failure budget is exhausted.
+
+    A correct password does not spend the budget.  The account-oriented
+    bucket is deliberately keyed by the trusted client and normalized account
+    together, so a hostile network cannot exhaust another network's account
+    budget.  Keys are HMACed in exactly the same durable bucket table as
+    registration and reset limits.
+    """
+
+    _assert_public_rate_limit_available(
+        session,
+        secret=secret,
+        rules=_login_rate_limit_rules(
+            client_identifier=client_identifier,
+            email_key=email_key,
+            global_limit=global_limit,
+            global_window_seconds=global_window_seconds,
+            client_limit=client_limit,
+            client_window_seconds=client_window_seconds,
+            email_limit=email_limit,
+            email_window_seconds=email_window_seconds,
+        ),
+        error_type=LoginRateLimitError,
+        now=now,
+    )
+
+
+def record_login_failure(
+    session: Session,
+    *,
+    secret: str,
+    client_identifier: str,
+    email_key: str,
+    global_limit: int,
+    global_window_seconds: int,
+    client_limit: int,
+    client_window_seconds: int,
+    email_limit: int,
+    email_window_seconds: int,
+    now: datetime | None = None,
+) -> None:
+    """Persist one failed login attempt across API replicas."""
+
+    _enforce_public_rate_limit(
+        session,
+        secret=secret,
+        rules=_login_rate_limit_rules(
+            client_identifier=client_identifier,
+            email_key=email_key,
+            global_limit=global_limit,
+            global_window_seconds=global_window_seconds,
+            client_limit=client_limit,
+            client_window_seconds=client_window_seconds,
+            email_limit=email_limit,
+            email_window_seconds=email_window_seconds,
+        ),
+        error_type=LoginRateLimitError,
+        now=now,
+    )
+
+
+def _login_rate_limit_rules(
+    *,
+    client_identifier: str,
+    email_key: str,
+    global_limit: int,
+    global_window_seconds: int,
+    client_limit: int,
+    client_window_seconds: int,
+    email_limit: int,
+    email_window_seconds: int,
+) -> tuple[PublicRateLimitRule, ...]:
+    return (
+        PublicRateLimitRule(
+            scope="login_global",
+            value="global",
+            limit=global_limit,
+            window_seconds=global_window_seconds,
+        ),
+        PublicRateLimitRule(
+            scope="login_client",
+            value=client_identifier,
+            limit=client_limit,
+            window_seconds=client_window_seconds,
+        ),
+        PublicRateLimitRule(
+            # Do not make this account-only: an attacker could otherwise
+            # deny service to a known account from any network.  This durable
+            # composite still slows repeated credential stuffing for the
+            # same trusted client/account pair without storing either value.
+            scope="login_client_account",
+            value=f"{client_identifier}\x00{email_key}",
+            limit=email_limit,
+            window_seconds=email_window_seconds,
+        ),
+    )
+
+
 def _enforce_public_rate_limit(
     session: Session,
     *,
@@ -177,6 +295,31 @@ def _enforce_public_rate_limit(
             now=current_time,
             error_type=error_type,
         )
+
+
+def _assert_public_rate_limit_available(
+    session: Session,
+    *,
+    secret: str,
+    rules: tuple[PublicRateLimitRule, ...],
+    error_type: type[PublicRateLimitError],
+    now: datetime | None,
+) -> None:
+    """Read the existing buckets without consuming a successful-login slot."""
+
+    current_time = _aware(now) or datetime.now(timezone.utc)
+    for rule in rules:
+        window_started_at = _window_started_at(current_time, rule.window_seconds)
+        key_digest = _rate_limit_digest(secret, scope=rule.scope, value=rule.value)
+        request_count = session.scalar(
+            select(RegistrationRateLimitBucket.request_count).where(
+                RegistrationRateLimitBucket.scope == rule.scope,
+                RegistrationRateLimitBucket.key_digest == key_digest,
+                RegistrationRateLimitBucket.window_started_at == window_started_at,
+            )
+        )
+        if request_count is not None and request_count >= rule.limit:
+            raise error_type(error_type.code)
 
 
 def _consume_bucket(

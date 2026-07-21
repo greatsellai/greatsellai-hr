@@ -25,6 +25,7 @@ def platform_client(tmp_path: Path) -> Iterator[TestClient]:
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
         admin_token="platform-console-test-token",
+        legacy_admin_token_enabled=True,
         session_secret="platform-console-session-secret",
         allow_unauthenticated=False,
         transactional_email_provider="test",

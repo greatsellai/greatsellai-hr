@@ -12,6 +12,9 @@ from app.config import AppSettings
 from app.main import create_app
 from app.models import PasswordResetToken
 from app.services.identity_service import digest_token, utcnow
+from app.services.transactional_email_outbox_service import (
+    run_transactional_email_outbox_worker_once,
+)
 
 
 @pytest.fixture
@@ -54,6 +57,14 @@ def _register_and_verify(client: TestClient, *, email: str, password: str) -> No
 def _request_reset(client: TestClient, email: str) -> tuple[dict[str, object], str]:
     response = client.post("/v1/auth/password-reset/request", json={"email": email})
     assert response.status_code == 200, response.text
+    # The HTTP endpoint never contacts a provider. A worker delivers the
+    # encrypted outbox payload after the accepted response is committed.
+    assert run_transactional_email_outbox_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="password-reset-flow-test-worker",
+        provider=client.app.state.transactional_email_provider,
+    )
     delivery = client.app.state.transactional_email_provider.password_reset_deliveries[-1]
     assert delivery.recipient == email
     parsed = urlsplit(delivery.reset_url)

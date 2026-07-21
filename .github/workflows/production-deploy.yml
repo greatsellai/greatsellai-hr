@@ -1,0 +1,91 @@
+name: Production deploy
+
+on:
+  push:
+    tags:
+      - "prod-*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing prod-YYYYMMDD-<commit-sha> tag to deploy again.
+        required: true
+        type: string
+      confirm:
+        description: Type DEPLOY to deploy the selected existing production tag.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: greatsellai-hr-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy production tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment:
+      name: production
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Validate deployment request
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_TAG" =~ ^prod-[0-9]{8}-[0-9a-f]{7,40}$ ]] || { echo "Invalid production tag." >&2; exit 1; }
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Manual production deployments must be started from main." >&2; exit 1; }
+            [[ "$CONFIRM" == "DEPLOY" ]] || { echo "Confirmation must be DEPLOY." >&2; exit 1; }
+          fi
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref_name }}
+      - name: Verify production tag identity
+        run: |
+          set -Eeuo pipefail
+          expected_short_sha="${RELEASE_TAG##*-}"
+          [[ "$(git rev-parse HEAD)" == "$expected_short_sha"* ]] || {
+            echo "Production tag suffix does not match its target commit." >&2
+            exit 1
+          }
+      - name: Configure production SSH
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          : "${PROD_SSH_PRIVATE_KEY:?Missing production secret PROD_SSH_PRIVATE_KEY}"
+          : "${PROD_SSH_KNOWN_HOSTS:?Missing production secret PROD_SSH_KNOWN_HOSTS}"
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-production-deploy"
+          chmod 600 "$RUNNER_TEMP/greatsell-production-deploy"
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "${PROD_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null || {
+            echo "Production known_hosts does not contain the configured host." >&2
+            exit 1
+          }
+      - name: Deploy existing tag
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
+          : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
+          scripts/deploy-production.sh "$RELEASE_TAG" \
+            --host "$PROD_DEPLOY_HOST" \
+            --project-dir "$PROD_PROJECT_DIR" \
+            --history-dir "$PROD_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"

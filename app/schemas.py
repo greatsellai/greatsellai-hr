@@ -758,10 +758,11 @@ class AiRunUsageSummaryResponse(ApiModel):
 
 
 class AiUsageAggregateResponse(ApiModel):
-    """Platform-only aggregate by workspace, feature, and model profile."""
+    """Platform-only aggregate by workspace, feature, Provider, and model."""
 
     organization_id: str
     feature: str
+    provider_slug: str
     model_slug: str
     invocation_count: int
     costed_invocation_count: int
@@ -778,6 +779,29 @@ class AiUsageAggregateResponse(ApiModel):
     known_run_count: int
     partial_run_count: int
     unavailable_run_count: int
+
+
+class AiUsageTrendBucketResponse(ApiModel):
+    """One platform-only Provider/model Token time bucket.
+
+    It intentionally excludes price, cost, business references, candidate
+    data, prompts, source documents, and model outputs.  ``bucket_started_at``
+    is a UTC instant corresponding to the beginning of the requested IANA
+    ``time_zone`` civil bucket, never the database server's local timezone.
+    """
+
+    bucket_started_at: datetime
+    time_zone: str
+    provider_slug: str
+    model_slug: str
+    invocation_count: int
+    token_usage_invocation_count: int
+    input_tokens: int
+    cached_read_input_tokens: int
+    cached_write_input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    total_tokens: int
 
 
 class MailboxConfigCreate(ApiModel):

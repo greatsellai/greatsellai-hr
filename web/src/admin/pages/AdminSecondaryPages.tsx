@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react
 import { Icon } from "../../icons";
 import { adminApi, adminErrorMessage } from "../admin-api";
 import type {
-  AiModelPriceVersion,
   AiModelProfile,
   AiProviderProfile,
   AiRoutePolicy,
   AiRunUsage,
   AiUsageAggregate,
+  AiUsageTrendBucket,
+  AiUsageTrendGranularity,
   PlatformAuditEvent,
   PlatformUserDetail,
   PlatformUserSummary,
@@ -21,12 +22,12 @@ import {
   AdminPageHeader,
   AdminPagination,
   AdminStatus,
-  currencyFromMicros,
   formatDate,
   numberFormat,
   shortId,
 } from "../AdminComponents";
 import { AdminAiConfigurationPanel } from "./AdminAiConfigurationPanel";
+import { TokenUsageTrendChart } from "../TokenUsageTrendChart";
 
 const PAGE_SIZE = 30;
 
@@ -396,11 +397,13 @@ function TokenUsageCell({
   const hasProviderUsage = tokenUsageInvocationCount > 0;
   const isPartial = hasProviderUsage && tokenUsageInvocationCount < invocationCount;
   const hasBreakdown = inputTokens !== undefined && outputTokens !== undefined;
+  const inputTotal = (inputTokens ?? 0) + (cachedReadInputTokens ?? 0) + (cachedWriteInputTokens ?? 0);
+  const outputTotal = (outputTokens ?? 0) + (reasoningTokens ?? 0);
   const title = hasProviderUsage && hasBreakdown
     ? [
       `总计 ${numberFormat(totalTokens)} Token`,
-      `输入 ${numberFormat(inputTokens)} Token`,
-      `输出 ${numberFormat(outputTokens)} Token`,
+      `输入（含缓存） ${numberFormat(inputTotal)} Token`,
+      `输出及推理 ${numberFormat(outputTotal)} Token`,
       cachedReadInputTokens ? `缓存读取 ${numberFormat(cachedReadInputTokens)} Token` : "",
       cachedWriteInputTokens ? `缓存写入 ${numberFormat(cachedWriteInputTokens)} Token` : "",
       reasoningTokens ? `推理 ${numberFormat(reasoningTokens)} Token` : "",
@@ -411,60 +414,319 @@ function TokenUsageCell({
     <span title={title}>
       <strong>{hasProviderUsage ? numberFormat(totalTokens) : "未返回"}</strong>
       <small>{hasProviderUsage ? `已返回 ${numberFormat(tokenUsageInvocationCount)}/${numberFormat(invocationCount)} 次${isPartial ? "，部分统计" : ""}` : "模型未提供用量"}</small>
-      {hasProviderUsage && hasBreakdown && <small>输入 {numberFormat(inputTokens)} · 输出 {numberFormat(outputTokens)}</small>}
+      {hasProviderUsage && hasBreakdown && <small>输入 {numberFormat(inputTotal)} · 输出 {numberFormat(outputTotal)}</small>}
     </span>
   );
 }
 
+const DEFAULT_TOKEN_USAGE_RANGE_DAYS = 30;
+const MAX_TOKEN_TREND_RANGE_DAYS = 90;
+
+function localDateInputValue(date: Date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
+}
+
+function defaultTokenUsageRange() {
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - (DEFAULT_TOKEN_USAGE_RANGE_DAYS - 1));
+  return { start: localDateInputValue(start), end: localDateInputValue(end) };
+}
+
+function localDayBoundaryIso(value: string, boundary: "start" | "end") {
+  if (!value) return undefined;
+  const time = boundary === "start" ? "00:00:00.000" : "23:59:59.999";
+  const date = new Date(`${value}T${time}`);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function tokenUsageRangeLabel(start: string, end: string) {
+  if (!start && !end) return "全部时间";
+  return `${start || "最早记录"} 至 ${end || "今天"}`;
+}
+
+type ModelScope = {
+  providerSlug: string;
+  modelSlug: string;
+};
+
+const MODEL_SCOPE_SEPARATOR = "::";
+
+function parseModelScope(value: string): ModelScope | null {
+  if (!value) return null;
+  const [providerSlug, modelSlug, extra] = value.split(MODEL_SCOPE_SEPARATOR);
+  if (!providerSlug || !modelSlug || extra !== undefined) return null;
+  return { providerSlug, modelSlug };
+}
+
+function trendGranularity(start: string, end: string): AiUsageTrendGranularity {
+  if (!start || !end) return "day";
+  const startTime = new Date(`${start}T00:00:00`).getTime();
+  const endTime = new Date(`${end}T23:59:59.999`).getTime();
+  if (Number.isNaN(startTime) || Number.isNaN(endTime)) return "day";
+  return endTime - startTime < 3 * 24 * 60 * 60 * 1_000 ? "hour" : "day";
+}
+
+function usageRangeDays(start: string, end: string) {
+  const startTime = new Date(`${start}T00:00:00`).getTime();
+  const endTime = new Date(`${end}T23:59:59.999`).getTime();
+  if (Number.isNaN(startTime) || Number.isNaN(endTime)) return 0;
+  return Math.floor((endTime - startTime) / (24 * 60 * 60 * 1_000)) + 1;
+}
+
+function browserTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
 export function AdminAiPage() {
+  const initialUsageRange = useMemo(() => defaultTokenUsageRange(), []);
+  const timeZone = useMemo(() => browserTimeZone(), []);
   const [state, setState] = useState<RequestState>("loading");
   const [error, setError] = useState("");
+  const [filterError, setFilterError] = useState("");
   const [tab, setTab] = useState<AiTab>("runs");
   const [organizationDraft, setOrganizationDraft] = useState("");
   const [featureDraft, setFeatureDraft] = useState("");
+  const [usageStartDraft, setUsageStartDraft] = useState(initialUsageRange.start);
+  const [usageEndDraft, setUsageEndDraft] = useState(initialUsageRange.end);
+  const [modelScopeDraft, setModelScopeDraft] = useState("");
   const [organizationId, setOrganizationId] = useState("");
   const [feature, setFeature] = useState("");
+  const [usageStart, setUsageStart] = useState(initialUsageRange.start);
+  const [usageEnd, setUsageEnd] = useState(initialUsageRange.end);
+  const [modelScope, setModelScope] = useState("");
   const [runs, setRuns] = useState<AiRunUsage[]>([]);
   const [usage, setUsage] = useState<AiUsageAggregate[]>([]);
+  const [usageTrend, setUsageTrend] = useState<AiUsageTrendBucket[]>([]);
+  const [usageTrendState, setUsageTrendState] = useState<RequestState>("loading");
+  const [usageTrendError, setUsageTrendError] = useState("");
   const [providers, setProviders] = useState<AiProviderProfile[]>([]);
   const [models, setModels] = useState<AiModelProfile[]>([]);
   const [routes, setRoutes] = useState<AiRoutePolicy[]>([]);
-  const [prices, setPrices] = useState<AiModelPriceVersion[]>([]);
 
   const refreshData = useCallback(async () => {
-    const query = { organization_id: organizationId || undefined, feature: feature || undefined, limit: 100, offset: 0 };
-    const [nextRuns, nextUsage, nextProviders, nextModels, nextRoutes, nextPrices] = await Promise.all([
-      adminApi.listAiRuns(query), adminApi.listAiUsage(query), adminApi.listAiProviders(), adminApi.listAiModels(), adminApi.listAiRoutes(), adminApi.listAiPrices(),
+    const selectedModelScope = parseModelScope(modelScope);
+    const baseQuery = {
+      organization_id: organizationId || undefined,
+      feature: feature || undefined,
+      limit: 100,
+      offset: 0,
+    };
+    const usageQuery = {
+      ...baseQuery,
+      provider_slug: selectedModelScope?.providerSlug,
+      model_slug: selectedModelScope?.modelSlug,
+      started_at_from: localDayBoundaryIso(usageStart, "start"),
+      started_at_to: localDayBoundaryIso(usageEnd, "end"),
+    };
+    const [nextRuns, nextUsage, nextProviders, nextModels, nextRoutes] = await Promise.all([
+      adminApi.listAiRuns(baseQuery),
+      adminApi.listAiUsage(usageQuery),
+      adminApi.listAiProviders(),
+      adminApi.listAiModels(),
+      adminApi.listAiRoutes(),
     ]);
-    setRuns(nextRuns); setUsage(nextUsage); setProviders(nextProviders); setModels(nextModels); setRoutes(nextRoutes); setPrices(nextPrices);
-  }, [feature, organizationId]);
+    setRuns(nextRuns);
+    setUsage(nextUsage);
+    setProviders(nextProviders);
+    setModels(nextModels);
+    setRoutes(nextRoutes);
+  }, [feature, modelScope, organizationId, usageEnd, usageStart]);
+
+  const refreshUsageTrend = useCallback(async () => {
+    const selectedModelScope = parseModelScope(modelScope);
+    setUsageTrendState("loading");
+    setUsageTrendError("");
+    try {
+      const nextUsageTrend = await adminApi.listAiUsageTrend({
+        organization_id: organizationId || undefined,
+        feature: feature || undefined,
+        provider_slug: selectedModelScope?.providerSlug,
+        model_slug: selectedModelScope?.modelSlug,
+        started_at_from: localDayBoundaryIso(usageStart, "start"),
+        started_at_to: localDayBoundaryIso(usageEnd, "end"),
+        granularity: trendGranularity(usageStart, usageEnd),
+        time_zone: timeZone,
+      });
+      setUsageTrend(nextUsageTrend);
+      setUsageTrendState("ready");
+    } catch (trendError) {
+      setUsageTrend([]);
+      setUsageTrendError(adminErrorMessage(trendError));
+      setUsageTrendState("error");
+    }
+  }, [feature, modelScope, organizationId, timeZone, usageEnd, usageStart]);
 
   const load = useCallback(async () => {
-    setState("loading"); setError("");
+    setState("loading");
+    setError("");
     try {
       await refreshData();
+      if (tab === "usage") await refreshUsageTrend();
       setState("ready");
-    } catch (loadError) { setError(adminErrorMessage(loadError)); setState("error"); }
-  }, [refreshData]);
+    } catch (loadError) {
+      setError(adminErrorMessage(loadError));
+      setState("error");
+    }
+  }, [refreshData, refreshUsageTrend, tab]);
 
   useEffect(() => { void load(); }, [load]);
-  const apply = (event: FormEvent) => { event.preventDefault(); setOrganizationId(organizationDraft.trim()); setFeature(featureDraft.trim()); };
+
+  const providerNames = useMemo(
+    () => new Map(providers.map((provider) => [provider.slug, provider.display_name])),
+    [providers],
+  );
+  const modelNames = useMemo(
+    () => new Map(models.map((model) => [model.slug, model.display_name])),
+    [models],
+  );
+  const selectedModelScope = useMemo(() => parseModelScope(modelScope), [modelScope]);
+  const selectedModel = useMemo(() => {
+    if (!selectedModelScope) return null;
+    return models.find((model) => (
+      model.provider_slug === selectedModelScope.providerSlug
+      && model.slug === selectedModelScope.modelSlug
+    )) ?? null;
+  }, [models, selectedModelScope]);
+  const modelScopeOptions = useMemo(() => [...models].sort((left, right) => (
+    `${left.provider_slug}/${left.display_name}`.localeCompare(`${right.provider_slug}/${right.display_name}`, "zh-CN")
+  )), [models]);
+  const tokenUsageScopeLabel = selectedModelScope
+    ? selectedModel
+      ? `${providerNames.get(selectedModelScope.providerSlug) ?? selectedModelScope.providerSlug} / ${selectedModel.display_name} · ${selectedModel.slug}`
+      : `${selectedModelScope.providerSlug} / 已归档模型 · ${selectedModelScope.modelSlug}`
+    : "全部 Provider / 模型合计";
+  const tokenUsageCoverageLabel = `${organizationId ? `工作区 ${shortId(organizationId)}` : "全部工作区"} · ${feature ? `功能 ${featureName(feature)}` : "全部功能"}`;
+  const tokenSummary = useMemo(() => usage.reduce((summary, item) => ({
+    invocationCount: summary.invocationCount + item.invocation_count,
+    tokenUsageInvocationCount: summary.tokenUsageInvocationCount + item.token_usage_invocation_count,
+    inputTokens: summary.inputTokens + item.input_tokens,
+    cachedReadTokens: summary.cachedReadTokens + item.cached_read_input_tokens,
+    cachedWriteTokens: summary.cachedWriteTokens + item.cached_write_input_tokens,
+    outputTokens: summary.outputTokens + item.output_tokens + item.reasoning_tokens,
+    totalTokens: summary.totalTokens + item.total_tokens,
+  }), {
+    invocationCount: 0,
+    tokenUsageInvocationCount: 0,
+    inputTokens: 0,
+    cachedReadTokens: 0,
+    cachedWriteTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+  }), [usage]);
+  const modelCount = useMemo(
+    () => new Set(usage.map((item) => `${item.provider_slug}/${item.model_slug}`)).size,
+    [usage],
+  );
+  const isDefaultUsageRange = (
+    usageStart === initialUsageRange.start
+    && usageEnd === initialUsageRange.end
+  );
+  const hasActiveFilters = Boolean(
+    organizationId
+    || feature
+    || (tab === "usage" && (modelScope || !isDefaultUsageRange)),
+  );
+  const usageRange = tokenUsageRangeLabel(usageStart, usageEnd);
+  const usageTrendGranularity = trendGranularity(usageStart, usageEnd);
+
+  const apply = (event: FormEvent) => {
+    event.preventDefault();
+    if (tab === "usage" && (!usageStartDraft || !usageEndDraft)) {
+      setFilterError("趋势图需要同时选择开始和结束日期。");
+      return;
+    }
+    if (usageStartDraft && usageEndDraft && usageStartDraft > usageEndDraft) {
+      setFilterError("结束日期不能早于开始日期。");
+      return;
+    }
+    if (tab === "usage" && usageRangeDays(usageStartDraft, usageEndDraft) > MAX_TOKEN_TREND_RANGE_DAYS) {
+      setFilterError(`趋势图最多支持 ${MAX_TOKEN_TREND_RANGE_DAYS} 天，请缩小日期范围。`);
+      return;
+    }
+    setFilterError("");
+    setOrganizationId(organizationDraft.trim());
+    setFeature(featureDraft.trim());
+    setUsageStart(usageStartDraft);
+    setUsageEnd(usageEndDraft);
+    setModelScope(modelScopeDraft);
+  };
+
+  const clearFilters = () => {
+    setFilterError("");
+    setOrganizationDraft("");
+    setFeatureDraft("");
+    setUsageStartDraft(initialUsageRange.start);
+    setUsageEndDraft(initialUsageRange.end);
+    setModelScopeDraft("");
+    setOrganizationId("");
+    setFeature("");
+    setUsageStart(initialUsageRange.start);
+    setUsageEnd(initialUsageRange.end);
+    setModelScope("");
+  };
 
   return (
     <section className="admin-page-frame admin-page-frame-wide" aria-labelledby="admin-ai-title">
-      <AdminPageHeader actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新 AI 数据</button>} description="查看不含候选人内容的运行账本、成本汇总、当前资源，以及平台级模型路由。" title="AI 运营" />
-      <div className="admin-segmented" aria-label="AI 运营视图">{([['runs','运行记录'],['usage','用量与成本'],['resources','路由与资源'],['configure','配置与发布']] as Array<[AiTab,string]>).map(([value,label]) => <button aria-pressed={tab === value} key={value} onClick={() => setTab(value)} type="button">{label}</button>)}</div>
-      {(tab === "runs" || tab === "usage") && <form className="admin-filter-bar" onSubmit={apply}><label className="admin-search-field"><span className="sr-only">工作区 ID</span><Icon name="briefcase" size={16} /><input onChange={(event) => setOrganizationDraft(event.target.value)} placeholder="工作区 ID" value={organizationDraft} /></label><label className="admin-search-field"><span className="sr-only">AI 功能</span><Icon name="spark" size={16} /><input onChange={(event) => setFeatureDraft(event.target.value)} placeholder="功能，例如 resume_score" value={featureDraft} /></label><button className="button button-primary" type="submit">筛选记录</button>{(organizationId || feature) && <button className="button button-ghost" onClick={() => { setOrganizationDraft(""); setFeatureDraft(""); setOrganizationId(""); setFeature(""); }} type="button">清除条件</button>}</form>}
+      <AdminPageHeader
+        actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新 AI 数据</button>}
+        description="查看不含候选人内容的运行记录、按 Provider 与模型归属的 Token 用量，以及平台级模型路由。"
+        title="AI 运营"
+      />
+      <div className="admin-segmented" aria-label="AI 运营视图">
+        {([['runs', '运行记录'], ['usage', 'Token 用量'], ['resources', '路由与资源'], ['configure', '配置与发布']] as Array<[AiTab, string]>).map(([value, label]) => (
+          <button aria-pressed={tab === value} key={value} onClick={() => setTab(value)} type="button">{label}</button>
+        ))}
+      </div>
+      {(tab === "runs" || tab === "usage") && (
+        <form className="admin-filter-bar" onSubmit={apply}>
+          <label className="admin-search-field"><span className="sr-only">工作区 ID</span><Icon name="briefcase" size={16} /><input onChange={(event) => setOrganizationDraft(event.target.value)} placeholder="工作区 ID" value={organizationDraft} /></label>
+          <label className="admin-search-field"><span className="sr-only">AI 功能</span><Icon name="spark" size={16} /><input onChange={(event) => setFeatureDraft(event.target.value)} placeholder="功能，例如 resume_score" value={featureDraft} /></label>
+          {tab === "usage" && <>
+            <label className="admin-date-field"><span>开始日期</span><input className="field" onChange={(event) => { setUsageStartDraft(event.target.value); setFilterError(""); }} type="date" value={usageStartDraft} /></label>
+            <label className="admin-date-field"><span>结束日期</span><input className="field" onChange={(event) => { setUsageEndDraft(event.target.value); setFilterError(""); }} type="date" value={usageEndDraft} /></label>
+            <label className="admin-model-scope-field"><span>Provider / 模型</span><select className="select-field" onChange={(event) => setModelScopeDraft(event.target.value)} value={modelScopeDraft}><option value="">全部 Provider / 模型</option>{modelScopeDraft && !modelScopeOptions.some((model) => `${model.provider_slug}${MODEL_SCOPE_SEPARATOR}${model.slug}` === modelScopeDraft) && <option value={modelScopeDraft}>已归档的模型范围</option>}{modelScopeOptions.map((model) => <option key={model.model_id} value={`${model.provider_slug}${MODEL_SCOPE_SEPARATOR}${model.slug}`}>{providerNames.get(model.provider_slug) ?? model.provider_slug} / {model.display_name} · {model.slug}</option>)}</select></label>
+          </>}
+          <button className="button button-primary" type="submit">{tab === "usage" ? "查看 Token" : "筛选记录"}</button>
+          {hasActiveFilters && <button className="button button-ghost" onClick={clearFilters} type="button">清除条件</button>}
+          {filterError && <p className="admin-form-error admin-filter-error" role="alert">{filterError}</p>}
+        </form>
+      )}
       {state === "loading" && <div className="admin-panel"><AdminLoading label="正在汇总 AI 运行数据…" /></div>}
       {state === "error" && <div className="admin-panel"><AdminError message={error} onRetry={() => void load()} /></div>}
-      {state === "ready" && tab === "runs" && <div className="admin-table-panel"><div className="admin-table-note"><span>最近 {runs.length} 条运行</span><small>不含 Prompt、简历或模型输出；未返回用量不会记为 0 Token</small></div>{runs.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>开始时间</th><th>工作区</th><th>功能</th><th>服务</th><th>状态</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th><th>成本</th></tr></thead><tbody>{runs.map((run) => <tr key={run.run_id}><td>{formatDate(run.started_at,true)}</td><td title={run.organization_id}>{shortId(run.organization_id)}</td><td>{featureName(run.feature)}</td><td>{run.service_kind}</td><td><AdminStatus status={run.status} /></td><td>{numberFormat(run.invocation_count)}</td><td><TokenUsageCell invocationCount={run.invocation_count} tokenUsageInvocationCount={run.token_usage_invocation_count} totalTokens={run.total_tokens} /></td><td>{currencyFromMicros(run.total_cost_cny_micros)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有 AI 运行记录。" />}</div>}
-      {state === "ready" && tab === "usage" && <div className="admin-table-panel"><div className="admin-table-note"><span>按工作区、功能与模型汇总</span><small>费用来自已发布的模型价格版本；Token 仅统计模型返回的用量</small></div>{usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>工作区</th><th>功能</th><th>模型</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th><th>已核算</th><th>待核算</th><th>报告成本</th></tr></thead><tbody>{usage.map((item,index) => <tr key={`${item.organization_id}-${item.feature}-${item.model_slug}-${index}`}><td title={item.organization_id}>{shortId(item.organization_id)}</td><td>{featureName(item.feature)}</td><td>{item.model_slug}</td><td>{numberFormat(item.invocation_count)}</td><td><TokenUsageCell cachedReadInputTokens={item.cached_read_input_tokens} cachedWriteInputTokens={item.cached_write_input_tokens} inputTokens={item.input_tokens} invocationCount={item.invocation_count} outputTokens={item.output_tokens} reasoningTokens={item.reasoning_tokens} tokenUsageInvocationCount={item.token_usage_invocation_count} totalTokens={item.total_tokens} /></td><td>{numberFormat(item.costed_invocation_count)}</td><td>{numberFormat(item.unavailable_cost_invocation_count)}</td><td>{currencyFromMicros(item.reported_cost_cny_micros)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有可汇总的用量。" />}</div>}
+      {state === "ready" && tab === "runs" && (
+        <div className="admin-table-panel">
+          <div className="admin-table-note"><span>最近 {runs.length} 条运行</span><small>不含 Prompt、简历或模型输出；模型 Token 请在「Token 用量」按 Provider 与模型查看。</small></div>
+          {runs.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>开始时间</th><th>工作区</th><th>功能</th><th>服务</th><th>状态</th><th>调用</th></tr></thead><tbody>{runs.map((run) => <tr key={run.run_id}><td>{formatDate(run.started_at, true)}</td><td title={run.organization_id}>{shortId(run.organization_id)}</td><td>{featureName(run.feature)}</td><td>{run.service_kind}</td><td><AdminStatus status={run.status} /></td><td>{numberFormat(run.invocation_count)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有 AI 运行记录。" />}
+        </div>
+      )}
+      {state === "ready" && tab === "usage" && (
+        <>
+          <section aria-label="当前 Token 统计区间" className="admin-token-summary">
+            <div><span>统计区间</span><strong>{usageRange}</strong><small>按模型调用开始时间统计，日期使用当前浏览器时区（{timeZone}）。</small></div>
+            <div><span>{selectedModelScope ? "已选模型合计" : "全部模型合计"}</span><strong>{numberFormat(tokenSummary.totalTokens)} Token</strong><small>{selectedModelScope ? tokenUsageScopeLabel : `输入 ${numberFormat(tokenSummary.inputTokens)} · 输出及推理 ${numberFormat(tokenSummary.outputTokens)} · 缓存 ${numberFormat(tokenSummary.cachedReadTokens + tokenSummary.cachedWriteTokens)}`}</small></div>
+            <div><span>已返回用量的调用</span><strong>{numberFormat(tokenSummary.tokenUsageInvocationCount)} / {numberFormat(tokenSummary.invocationCount)} 次</strong><small>{selectedModelScope ? "仅统计所选 Provider / 模型；未返回 usage 不按 0 Token 处理。" : `${numberFormat(modelCount)} 个 Provider / 模型组合；未返回 usage 不按 0 Token 处理。`}</small></div>
+          </section>
+          {usageTrendState === "loading" && <section className="admin-token-trend-panel"><AdminLoading label="正在汇总 Token 趋势…" /></section>}
+          {usageTrendState === "error" && <section className="admin-token-trend-panel"><AdminError message={usageTrendError} onRetry={() => void refreshUsageTrend()} /></section>}
+          {usageTrendState === "ready" && <TokenUsageTrendChart buckets={usageTrend} coverageLabel={tokenUsageCoverageLabel} granularity={usageTrendGranularity} isCrossModelAggregate={!selectedModelScope} rangeEnd={usageEnd} rangeLabel={usageRange} rangeStart={usageStart} scopeLabel={tokenUsageScopeLabel} timeZone={timeZone} />}
+          <div className="admin-table-panel">
+            <div className="admin-table-note"><span>按工作区、功能、Provider 与模型拆分</span><small>每一行的 Token 仅属于该行左侧 Provider 和模型，不做金额估算。</small></div>
+            {usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table admin-token-usage-table"><thead><tr><th>工作区</th><th>功能</th><th>Provider</th><th>模型</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th></tr></thead><tbody>{usage.map((item, index) => <tr key={`${item.organization_id}-${item.feature}-${item.provider_slug}-${item.model_slug}-${index}`}><td title={item.organization_id}>{shortId(item.organization_id)}</td><td>{featureName(item.feature)}</td><td><strong>{providerNames.get(item.provider_slug) ?? item.provider_slug}</strong><small>{item.provider_slug}</small></td><td><strong>{modelNames.get(item.model_slug) ?? item.model_slug}</strong><small>{item.model_slug}</small></td><td>{numberFormat(item.invocation_count)}</td><td><TokenUsageCell cachedReadInputTokens={item.cached_read_input_tokens} cachedWriteInputTokens={item.cached_write_input_tokens} inputTokens={item.input_tokens} invocationCount={item.invocation_count} outputTokens={item.output_tokens} reasoningTokens={item.reasoning_tokens} tokenUsageInvocationCount={item.token_usage_invocation_count} totalTokens={item.total_tokens} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前时间区间内没有可汇总的模型 Token 用量。" />}
+          </div>
+        </>
+      )}
       {state === "ready" && tab === "resources" && <div className="admin-resource-stack">
         <section className="admin-table-panel"><div className="admin-table-note"><span>Provider</span><small>实际密钥不会显示；运行时状态仅表示当前 API 是否能解析部署引用</small></div>{providers.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>名称</th><th>驱动</th><th>端点</th><th>运行时凭据</th><th>状态</th></tr></thead><tbody>{providers.map((item) => <tr key={item.provider_id}><td><strong>{item.display_name}</strong><small>{item.slug}</small></td><td>{item.driver}</td><td className="admin-cell-truncate" title={item.endpoint_url}>{item.endpoint_url}</td><td><AdminStatus status={item.credential_configured ? "verified" : "warning"} label={item.credential_configured ? "已配置" : "未配置"} /></td><td><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="尚未配置 AI Provider。" />}</section>
         <section className="admin-table-panel"><div className="admin-table-note"><span>模型</span><small>{models.length} 个模型配置</small></div>{models.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>模型</th><th>Provider</th><th>能力</th><th>上下文</th><th>最大输出</th><th>状态</th></tr></thead><tbody>{models.map((item) => <tr key={item.model_id}><td><strong>{item.display_name}</strong><small>{item.slug}</small></td><td>{item.provider_slug}</td><td>{item.capabilities.join("、") || "—"}</td><td>{item.context_window_tokens ? numberFormat(item.context_window_tokens) : "—"}</td><td>{item.max_output_tokens ? numberFormat(item.max_output_tokens) : "—"}</td><td><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="尚未配置模型。" />}</section>
-        <div className="admin-resource-grid"><section className="admin-table-panel"><div className="admin-table-note"><span>路由策略</span><small>{routes.length} 项功能路由</small></div>{routes.length ? <ul className="admin-resource-list">{routes.map((item) => <li key={item.policy_id}><span><strong>{item.display_name}</strong><small>{featureName(item.feature)} · 版本 {item.current_version ?? "—"}</small></span><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} /></li>)}</ul> : <DataTableEmpty description="尚未发布路由策略。" />}</section><section className="admin-table-panel"><div className="admin-table-note"><span>模型价格</span><small>{prices.length} 个价格版本</small></div>{prices.length ? <ul className="admin-resource-list">{prices.slice(0,20).map((item) => <li key={item.price_version_id}><span><strong>{item.model_slug}</strong><small>{item.currency} · {formatDate(item.effective_from)} · {item.source}</small></span><AdminStatus status={item.is_active ? "active" : "inactive"} /></li>)}</ul> : <DataTableEmpty description="尚未配置模型价格。" />}</section></div>
+        <section className="admin-table-panel"><div className="admin-table-note"><span>路由策略</span><small>{routes.length} 项功能路由</small></div>{routes.length ? <ul className="admin-resource-list">{routes.map((item) => <li key={item.policy_id}><span><strong>{item.display_name}</strong><small>{featureName(item.feature)} · 版本 {item.current_version ?? "—"}</small></span><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} /></li>)}</ul> : <DataTableEmpty description="尚未发布路由策略。" />}</section>
       </div>}
-      {state === "ready" && tab === "configure" && <AdminAiConfigurationPanel models={models} onChanged={refreshData} prices={prices} providers={providers} routes={routes} />}
+      {state === "ready" && tab === "configure" && <AdminAiConfigurationPanel models={models} onChanged={refreshData} providers={providers} routes={routes} />}
     </section>
   );
 }

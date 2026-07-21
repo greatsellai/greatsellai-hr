@@ -1,0 +1,151 @@
+name: Production release
+
+on:
+  workflow_run:
+    workflows: ["Continuous integration"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type RELEASE to manually create an immutable production tag and deploy it.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: greatsellai-hr-production
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and deploy production release
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment:
+      name: production
+    env:
+      RELEASE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Validate release request
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Manual production releases must be run from main." >&2; exit 1; }
+            [[ "$CONFIRM" == "RELEASE" ]] || { echo "Confirmation must be RELEASE." >&2; exit 1; }
+          else
+            [[ "$WORKFLOW_CONCLUSION" == "success" ]] || { echo "Automatic release requires successful CI." >&2; exit 1; }
+            [[ "$WORKFLOW_EVENT" == "push" ]] || { echo "Automatic release only accepts CI from a main push." >&2; exit 1; }
+            [[ "$WORKFLOW_HEAD_BRANCH" == "main" ]] || { echo "Automatic release only accepts CI from main." >&2; exit 1; }
+          fi
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid release commit SHA." >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: ${{ env.RELEASE_SHA }}
+      - name: Resolve current release target
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          git fetch origin main --tags --prune
+          git switch --force-create main origin/main
+          if [[ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+            if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
+              echo "Skipping a superseded CI commit; the current main commit must pass CI before release."
+              exit 0
+            fi
+            echo "main advanced after this manual release was requested. Re-run it from current main." >&2
+            exit 1
+          fi
+          [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || {
+            echo "Checked-out main is not origin/main." >&2
+            exit 1
+          }
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+      - name: Validate and configure production SSH
+        if: steps.target.outputs.deploy == 'true'
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+          PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
+          : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
+          : "${PROD_SSH_PRIVATE_KEY:?Missing production secret PROD_SSH_PRIVATE_KEY}"
+          : "${PROD_SSH_KNOWN_HOSTS:?Missing production secret PROD_SSH_KNOWN_HOSTS}"
+          [[ "$PROD_PROJECT_DIR" == /home/ubuntu/* && "$PROD_PROJECT_DIR" != /home/ubuntu/ ]] || {
+            echo "PROD_PROJECT_DIR must be a non-root /home/ubuntu path." >&2
+            exit 1
+          }
+          [[ "$PROD_HISTORY_DIR" == /home/ubuntu/* && "$PROD_HISTORY_DIR" != /home/ubuntu/ ]] || {
+            echo "PROD_HISTORY_DIR must be a non-root /home/ubuntu path." >&2
+            exit 1
+          }
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-production-deploy"
+          chmod 600 "$RUNNER_TEMP/greatsell-production-deploy"
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "${PROD_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null || {
+            echo "Production known_hosts does not contain the configured host." >&2
+            exit 1
+          }
+      - name: Create immutable production tag
+        if: steps.target.outputs.deploy == 'true'
+        id: release
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          tag="prod-$(date -u +%Y%m%d)-$(git rev-parse --short=7 HEAD)"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+            existing_commit="$(git rev-parse "refs/tags/$tag^{commit}")"
+            [[ "$existing_commit" == "$(git rev-parse HEAD)" ]] || {
+              echo "Existing production tag '$tag' points to a different commit." >&2
+              exit 1
+            }
+            echo "Reusing existing immutable production tag $tag."
+          else
+            scripts/create-production-tag.sh "$tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Deploy tagged release
+        if: steps.target.outputs.deploy == 'true'
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
+          : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
+          scripts/deploy-production.sh "$RELEASE_TAG" \
+            --host "$PROD_DEPLOY_HOST" \
+            --project-dir "$PROD_PROJECT_DIR" \
+            --history-dir "$PROD_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"

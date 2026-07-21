@@ -459,6 +459,7 @@ def test_every_platform_endpoint_rejects_anonymous_and_tenant_roles(
         ),
         ("GET", "/v1/platform/ai/usage/runs", None),
         ("GET", "/v1/platform/ai/usage/summary", None),
+        ("GET", "/v1/platform/ai/usage/trend", None),
     ]
 
     for method, path, body in cases:

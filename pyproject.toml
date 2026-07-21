@@ -18,6 +18,9 @@ dependencies = [
   "python-multipart>=0.0.12,<1",
   "sqlalchemy>=2.0,<3",
   "tencentcloud-sdk-python>=3.1,<4",
+  # Guarantees IANA timezone data in the slim production image as well as
+  # local SQLite tests; ``zoneinfo`` otherwise depends on OS packages.
+  "tzdata>=2025.2,<2027",
   "uvicorn[standard]>=0.30,<1",
 ]
 

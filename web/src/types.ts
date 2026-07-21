@@ -809,6 +809,8 @@ export interface CandidateSearchRequest {
   keyword_match_mode?: "broad" | "precise";
   keywords_all_of?: string[];
   keywords_any_of?: string[];
+  /** Current score template used only for comparable score ordering. */
+  score_template_id?: string | null;
   limit?: number;
   cursor?: string | null;
 }
@@ -860,9 +862,20 @@ export interface CandidateSearchItem {
   highest_degree: DegreeLevel | null;
   employment_months: number;
   employment_or_internship_months: number;
+  education_school: string | null;
+  education_major: string | null;
+  latest_experience_title: string | null;
+  latest_experience_organization: string | null;
+  latest_experience_type: string | null;
+  skill_highlights: string[];
   summary_preview: string | null;
+  score_id: string | null;
+  score_template_id: string | null;
   score_total: number | null;
+  score_status: string | null;
   score_template_name: string | null;
+  /** Percentage of score weight grounded in explicit resume facts. */
+  score_confidence: number | null;
   display_fields: CandidateSearchDisplayField[];
   matched_filters: string[];
   matched_evidence: CandidateSearchMatch[];

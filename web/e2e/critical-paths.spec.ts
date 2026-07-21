@@ -95,11 +95,28 @@ test.describe("招聘工作台关键路径", () => {
   test("筛选、批量评分和 JD 三栏均走真实工作区 API", async ({ page }) => {
     await registerAndVerify(page, "screen-score-match");
     await seedWorkspaceFixture(page);
+    await page.reload();
 
     await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    await expect(page.getByLabel("综合评分排序规则")).not.toHaveValue("");
     await page.locator("#school-name").fill("清华");
     await page.getByRole("button", { name: "应用筛选条件" }).click();
     await expect(page.getByText("E2E 推荐候选人")).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "学历 / 院校", exact: true })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "经历", exact: true })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "核心技能", exact: true })).toBeVisible();
+    await expect(page.getByText("e2e-fixture-1.pdf", { exact: true })).toHaveCount(0);
+
+    await page.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" }).click();
+    await expect(page.getByRole("tab", { name: "评分详情" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByRole("heading", { name: "评分详情", exact: true })).toBeVisible();
+    await expect(page.getByText("AI 评分理由", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("简历事实依据", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("待确认项", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "关闭简历详情" }).click();
 
     await page.getByRole("button", { name: "评分规则", exact: true }).click();
     await expect(page.getByRole("heading", { name: "评分规则", exact: true })).toBeVisible();
@@ -114,9 +131,9 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("heading", { name: "推荐候选人" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "待核实候选人" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "明确不匹配" })).toBeVisible();
-    await expect(page.getByText("E2E 推荐候选人")).toBeVisible();
-    await expect(page.getByText("E2E 待核实候选人")).toBeVisible();
-    await expect(page.getByText("E2E 不匹配候选人")).toBeVisible();
+    await expect(page.getByText("E2E 推荐候选人", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("E2E 待核实候选人", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("E2E 不匹配候选人", { exact: true }).first()).toBeVisible();
   });
 
   test("邮箱通道保存后同步请求只进入后台队列", async ({ page }) => {

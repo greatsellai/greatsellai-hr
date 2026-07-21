@@ -8,6 +8,7 @@ production entry point, Docker image, or deployment configuration.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 from pathlib import Path
@@ -26,7 +27,10 @@ from app.models import (
     JobMatchRequirementResult,
     Resume,
     ResumeFactSnapshot,
+    ResumeScore,
     ResumeSourceBlock,
+    ScoreTemplate,
+    ScoreTemplateDimension,
 )
 from app.schemas import JobCreate, JobRequirements, ResumeFactsSaveRequest
 from app.services.identity_service import AuthPrincipal, principal_from_session
@@ -340,6 +344,107 @@ def _seed_match(
     session.flush()
 
 
+def _seed_score_detail_fixture(session: Session, *, resume: Resume) -> None:
+    """Create one deterministic, source-grounded score for browser coverage.
+
+    This stays inside the loopback-only Playwright fixture. It exercises the
+    production score read API without invoking a provider or creating any
+    external model traffic.
+    """
+
+    snapshot = session.scalar(
+        select(ResumeFactSnapshot).where(
+            ResumeFactSnapshot.resume_id == resume.id,
+            ResumeFactSnapshot.facts_version == resume.facts_version,
+        )
+    )
+    if snapshot is None:
+        raise RuntimeError("e2e_fixture_score_snapshot_missing")
+    canonical_facts = json.loads(snapshot.canonical_facts_json)
+    skills = canonical_facts.get("skills") if isinstance(canonical_facts, dict) else []
+    skill_fact_id = (
+        skills[0].get("fact_id")
+        if isinstance(skills, list) and skills and isinstance(skills[0], dict)
+        else None
+    )
+    if not isinstance(skill_fact_id, str) or not skill_fact_id:
+        raise RuntimeError("e2e_fixture_score_skill_missing")
+
+    template = ScoreTemplate(
+        name="E2E 评分规则",
+        description="Deterministic browser score fixture.",
+        version=1,
+    )
+    session.add(template)
+    session.flush()
+    session.add_all(
+        (
+            ScoreTemplateDimension(
+                template_id=template.id,
+                key="skills",
+                label="技能匹配",
+                weight=60,
+                guidance="Use explicit resume skills only.",
+                sort_order=0,
+            ),
+            ScoreTemplateDimension(
+                template_id=template.id,
+                key="experience",
+                label="经历匹配",
+                weight=40,
+                guidance="Use explicit resume experience only.",
+                sort_order=1,
+            ),
+        )
+    )
+    session.flush()
+    session.add(
+        ResumeScore(
+            resume_id=resume.id,
+            fact_snapshot_id=snapshot.id,
+            template_id=template.id,
+            facts_version=resume.facts_version,
+            template_version=template.version,
+            total_score=76.0,
+            ai_total_score=76.0,
+            dimension_scores=[
+                {
+                    "key": "skills",
+                    "label": "技能匹配",
+                    "weight": 60,
+                    "raw_score": 80,
+                    "rationale": "简历明确列出 Python。",
+                    "fact_ids": [skill_fact_id],
+                    "uncertainties": [],
+                },
+                {
+                    "key": "experience",
+                    "label": "经历匹配",
+                    "weight": 40,
+                    "raw_score": 70,
+                    "rationale": "存在后端经验描述，但项目规模尚未核实。",
+                    "fact_ids": [],
+                    "uncertainties": ["项目规模需在面试中核实。"],
+                },
+            ],
+            analysis={
+                "schema_version": "e2e_score.v1",
+                "overall_summary": "适合进入人工复核阶段。",
+                "risk_flags": [
+                    {
+                        "message": "请核实项目规模与职责范围。",
+                        "fact_ids": [skill_fact_id],
+                    }
+                ],
+                "needs_human_review": True,
+            },
+            status="needs_review",
+            model_name="e2e-fixture",
+        )
+    )
+    session.flush()
+
+
 @app.post("/__e2e__/fixture/seed")
 def seed_e2e_workspace_fixture(
     request: Request,
@@ -407,6 +512,7 @@ def seed_e2e_workspace_fixture(
             requirements=requirements,
             lane=lane,
         )
+    _seed_score_detail_fixture(session, resume=resumes[0])
     session.commit()
     return {
         "resume_ids": [resume.id for resume in resumes],

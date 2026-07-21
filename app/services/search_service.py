@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.filter_options import (
@@ -20,6 +20,7 @@ from app.models import (
     ResumeLanguageCredential,
     ResumeScore,
     ResumeSummary,
+    ScoreTemplate,
 )
 from app.schemas import (
     CandidateSearchDisplayField,
@@ -105,12 +106,19 @@ def _current_summary(resume: Resume) -> ResumeSummary | None:
     return max(candidates, key=lambda item: (item.created_at, item.id), default=None)
 
 
-def _latest_score(resume: Resume) -> ResumeScore | None:
+def _latest_score(
+    resume: Resume,
+    *,
+    template_id: str | None = None,
+    template_version: int | None = None,
+) -> ResumeScore | None:
     candidates = [
         score
         for score in resume.scores
         if score.facts_version == resume.facts_version
         and score.status in _CURRENT_SCORE_STATUSES
+        and (template_id is None or score.template_id == template_id)
+        and (template_version is None or score.template_version == template_version)
     ]
     return max(candidates, key=lambda item: (item.created_at, item.id), default=None)
 
@@ -320,6 +328,69 @@ def _highest_education(resume: Resume) -> object | None:
     )
 
 
+def _latest_relevant_experience(resume: Resume) -> object | None:
+    """Return the most recent job, or internship when no job is present.
+
+    A recruiter-facing table needs one compact experience label.  Only formal
+    work and internships belong there, so projects and competitions cannot
+    accidentally look like an employer or current role.
+    """
+
+    relevant = [
+        experience
+        for experience in resume.experiences
+        if experience.experience_type in {"employment", "internship"}
+    ]
+    return max(
+        relevant,
+        key=lambda item: (
+            item.experience_type == "employment",
+            bool(item.is_current),
+            item.end_month or "",
+            item.start_month or "",
+            item.id,
+        ),
+        default=None,
+    )
+
+
+def _score_confidence(score: ResumeScore | None) -> float | None:
+    """Return the share of score weight supported by cited resume facts.
+
+    This is intentionally named confidence in the API/UI, but it measures
+    evidence coverage only.  A low value means information needs checking; it
+    never means the candidate is weak.
+    """
+
+    if score is None or not isinstance(score.dimension_scores, list):
+        return None
+
+    total_weight = 0.0
+    grounded_weight = 0.0
+    for record in score.dimension_scores:
+        if not isinstance(record, dict):
+            continue
+        try:
+            weight = max(float(record.get("weight", 0)), 0.0)
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0:
+            continue
+        total_weight += weight
+        evidence_state = record.get("evidence_state")
+        # Older immutable rows predate the explicit state.  Their cited fact
+        # ids are still the only safe evidence signal available to the table.
+        grounded = evidence_state == "grounded" or (
+            evidence_state is None and bool(record.get("fact_ids"))
+        )
+        if grounded:
+            grounded_weight += weight
+
+    if total_weight <= 0:
+        return None
+    return round(grounded_weight / total_weight * 100, 1)
+
+
 def _matches_graduation_status(resume: Resume, request: CandidateSearchRequest) -> bool:
     if request.graduation_status == "any":
         return True
@@ -479,6 +550,12 @@ def search_candidates(
     session: Session,
     request: CandidateSearchRequest,
 ) -> CandidateSearchResponse:
+    score_template: ScoreTemplate | None = None
+    if request.score_template_id is not None:
+        score_template = session.get(ScoreTemplate, request.score_template_id)
+        if score_template is None or score_template.is_archived:
+            raise SearchValidationError("score_template_not_found")
+
     statement = (
         select(Resume)
         .join(Resume.candidate)
@@ -509,17 +586,13 @@ def search_candidates(
             Resume.employment_or_internship_months
             >= request.min_employment_or_internship_months
         )
+    # Filtering already evaluates the candidate facts in Python so that one
+    # education/experience record must satisfy a compound condition.  Keep the
+    # cursor out of the SQL statement, then apply it after the same score-first
+    # ordering used by the recruiter table is known.
+    cursor_resume_id: str | None = None
     if request.cursor is not None:
-        cursor_updated_at, cursor_resume_id = _decode_cursor(request.cursor)
-        statement = statement.where(
-            or_(
-                Resume.updated_at < cursor_updated_at,
-                and_(
-                    Resume.updated_at == cursor_updated_at,
-                    Resume.id < cursor_resume_id,
-                ),
-            )
-        )
+        _, cursor_resume_id = _decode_cursor(request.cursor)
 
     results: list[_SearchResult] = []
     for resume in session.scalars(statement).all():
@@ -1203,7 +1276,23 @@ def search_candidates(
 
         candidate: Candidate = resume.candidate
         summary = _current_summary(resume)
-        score = _latest_score(resume)
+        score = _latest_score(
+            resume,
+            template_id=score_template.id if score_template is not None else None,
+            template_version=(
+                score_template.version if score_template is not None else None
+            ),
+        )
+        highest_education = _highest_education(resume)
+        latest_experience = _latest_relevant_experience(resume)
+        skill_highlights = sorted(
+            {
+                skill.skill_display.strip()
+                for skill in resume.skills
+                if isinstance(skill.skill_display, str) and skill.skill_display.strip()
+            },
+            key=normalized_key,
+        )
         results.append(
             _SearchResult(
                 item=CandidateSearchItem(
@@ -1216,9 +1305,39 @@ def search_candidates(
                 highest_degree=resume.highest_degree,
                 employment_months=resume.employment_months,
                 employment_or_internship_months=resume.employment_or_internship_months,
+                education_school=(
+                    highest_education.school_name_raw
+                    if highest_education is not None
+                    else None
+                ),
+                education_major=(
+                    highest_education.major_raw
+                    if highest_education is not None
+                    else None
+                ),
+                latest_experience_title=(
+                    latest_experience.title_raw
+                    if latest_experience is not None
+                    else None
+                ),
+                latest_experience_organization=(
+                    latest_experience.organization_name_raw
+                    if latest_experience is not None
+                    else None
+                ),
+                latest_experience_type=(
+                    latest_experience.experience_type
+                    if latest_experience is not None
+                    else None
+                ),
+                skill_highlights=skill_highlights,
                 summary_preview=_summary_preview(summary),
+                score_id=score.id if score else None,
+                score_template_id=score.template_id if score else None,
                 score_total=score.total_score if score else None,
+                score_status=score.status if score else None,
                 score_template_name=score.template.name if score and score.template else None,
+                score_confidence=_score_confidence(score),
                 display_fields=_display_fields(display_field_values),
                 matched_filters=matched_filters,
                 matched_evidence=matched_evidence,
@@ -1226,6 +1345,45 @@ def search_candidates(
                 updated_at=resume.updated_at,
             )
         )
+    if score_template is not None:
+        # Scores from different templates, or from an older version of this
+        # template, are not the same measurement.  Only a recruiter-selected
+        # current template is allowed to determine the default score order.
+        # Records without that score follow all scored candidates, then keep
+        # existing recency/id tie-breakers for a stable cursor.
+        results.sort(
+            key=lambda result: (
+                result.item.score_total is not None,
+                (
+                    result.item.score_total
+                    if result.item.score_total is not None
+                    else -1.0
+                ),
+                result.updated_at,
+                result.item.resume_id,
+            ),
+            reverse=True,
+        )
+    else:
+        # A score without a selected common template remains visible as a
+        # per-candidate reference, but must not silently rank candidates.
+        results.sort(
+            key=lambda result: (result.updated_at, result.item.resume_id),
+            reverse=True,
+        )
+    if cursor_resume_id is not None:
+        cursor_index = next(
+            (
+                index
+                for index, result in enumerate(results)
+                if result.item.resume_id == cursor_resume_id
+            ),
+            None,
+        )
+        if cursor_index is None:
+            raise SearchValidationError("invalid_cursor")
+        results = results[cursor_index + 1 :]
+
     page_results = results[: request.limit]
     page_items = [result.item for result in page_results]
     next_cursor = (

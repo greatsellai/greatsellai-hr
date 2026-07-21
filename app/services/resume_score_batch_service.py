@@ -361,6 +361,7 @@ def list_resume_score_batch_items(
         raise ScoreServiceError("resume_score_batch_not_found")
     items = session.scalars(
         select(ResumeScoreBatchItem)
+        .join(Resume, Resume.id == ResumeScoreBatchItem.resume_id)
         .where(ResumeScoreBatchItem.batch_id == batch_id)
         .options(
             selectinload(ResumeScoreBatchItem.resume).selectinload(Resume.candidate)

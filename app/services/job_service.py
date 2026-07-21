@@ -658,7 +658,14 @@ def _ready_resume_snapshot(
     *,
     resume_id: str,
 ) -> tuple[Resume, ResumeFactSnapshot, dict[str, object]]:
-    resume = session.get(Resume, resume_id)
+    # The gateway call below can outlive a concurrent logical deletion.  Do
+    # not let an already-cached identity-map instance bypass the scoped
+    # lifecycle filter when this helper is used before or after that call.
+    resume = session.scalar(
+        select(Resume)
+        .where(Resume.id == resume_id)
+        .execution_options(populate_existing=True)
+    )
     if resume is None:
         raise JobServiceError("resume_not_found")
     if resume.extraction_status != "ready" or not resume.is_active:
@@ -669,6 +676,7 @@ def _ready_resume_snapshot(
         select(ResumeFactSnapshot)
         .where(ResumeFactSnapshot.resume_id == resume.id)
         .order_by(ResumeFactSnapshot.facts_version.desc())
+        .execution_options(populate_existing=True)
     )
     if snapshot is None or snapshot.facts_version != resume.facts_version:
         raise JobServiceError("resume_fact_snapshot_not_current")
@@ -679,6 +687,30 @@ def _ready_resume_snapshot(
     if not isinstance(payload, dict):
         raise JobServiceError("resume_fact_snapshot_invalid")
     return resume, snapshot, payload
+
+
+def _require_unchanged_resume_snapshot(
+    session: Session,
+    *,
+    resume_id: str,
+    expected_snapshot_id: str,
+    expected_facts_version: int,
+) -> tuple[Resume, ResumeFactSnapshot]:
+    """Reject a direct JD-match result that raced deletion or fact changes."""
+
+    session.flush()
+    session.expire_all()
+    try:
+        resume, snapshot, _ = _ready_resume_snapshot(session, resume_id=resume_id)
+    except JobServiceError as exc:
+        raise JobServiceError("resume_changed_before_job_match_completed") from exc
+    if (
+        snapshot.id != expected_snapshot_id
+        or snapshot.facts_version != expected_facts_version
+        or resume.facts_version != expected_facts_version
+    ):
+        raise JobServiceError("resume_changed_before_job_match_completed")
+    return resume, snapshot
 
 
 def derive_job_match_score(
@@ -820,6 +852,8 @@ def run_job_match(
     if not requirements:
         raise JobServiceError("job_version_has_no_requirements")
     resume, snapshot, fact_snapshot = _ready_resume_snapshot(session, resume_id=resume_id)
+    expected_snapshot_id = snapshot.id
+    expected_facts_version = snapshot.facts_version
     api_key, model, timeout_seconds = _gateway_compatibility_credentials(settings)
     try:
         with ai_gateway_execution(
@@ -853,6 +887,12 @@ def run_job_match(
             )
     except AiGatewayError as exc:
         raise JobServiceError(str(exc)) from exc
+    resume, snapshot = _require_unchanged_resume_snapshot(
+        session,
+        resume_id=resume_id,
+        expected_snapshot_id=expected_snapshot_id,
+        expected_facts_version=expected_facts_version,
+    )
     result_by_key = {
         result["requirement_id"]: result
         for result in provider_result["requirement_matches"]
@@ -937,7 +977,11 @@ def run_job_match(
 
 
 def get_job_match(session: Session, *, match_id: str) -> JobMatchResponse:
-    job_match = session.get(JobMatch, match_id)
+    job_match = session.scalar(
+        select(JobMatch)
+        .join(Resume, Resume.id == JobMatch.resume_id)
+        .where(JobMatch.id == match_id)
+    )
     if job_match is None:
         raise JobMatchNotFoundError("job_match_not_found")
     return _match_response(job_match)
@@ -952,6 +996,7 @@ def list_resume_job_matches(
         raise JobServiceError("resume_not_found")
     matches = session.scalars(
         select(JobMatch)
+        .join(Resume, Resume.id == JobMatch.resume_id)
         .where(JobMatch.resume_id == resume_id)
         .order_by(JobMatch.created_at.desc(), JobMatch.id.desc())
     ).all()
@@ -967,6 +1012,7 @@ def list_job_version_matches(
         raise JobVersionNotFoundError("job_version_not_found")
     matches = session.scalars(
         select(JobMatch)
+        .join(Resume, Resume.id == JobMatch.resume_id)
         .where(JobMatch.job_version_id == job_version_id)
         .order_by(JobMatch.created_at.desc(), JobMatch.id.desc())
     ).all()

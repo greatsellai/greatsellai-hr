@@ -399,6 +399,7 @@ export interface ResumeDetail {
   ai_extraction_status: AiExtractionStatus;
   ai_extraction_error: string | null;
   is_active: boolean;
+  retention_hold: boolean;
   /** null means the school decision still needs a reviewer. */
   is_985_211: boolean | null;
   highest_degree: DegreeLevel | null;
@@ -407,6 +408,149 @@ export interface ResumeDetail {
   source_page_count: number;
   parsed_page_count: number;
   quality_flags: string[];
+}
+
+/**
+ * A short-lived, session-bound link to an original candidate document.  The
+ * browser requests one only after an explicit preview or download action so
+ * the server can keep those two audit events distinct.
+ */
+export type CandidateDataFileAccessPurpose = "view" | "download";
+
+export interface CandidateDataFileAccessRequest {
+  purpose: CandidateDataFileAccessPurpose;
+}
+
+export interface CandidateDataFileAccessResponse {
+  access_url: string;
+  expires_at: string;
+}
+
+export type CandidateDataDeletionReason =
+  | "candidate_request"
+  | "recruitment_closed"
+  | "duplicate"
+  | "retention_expired"
+  | "other";
+
+export interface CandidateDataDeletionRequest {
+  reason: CandidateDataDeletionReason;
+  /** Used only to confirm an `other` deletion reason; the server does not persist it. */
+  other_note?: string | null;
+}
+
+export interface CandidateDataDeletionResponse {
+  deletion_batch_id: string;
+  recovery_deadline_at: string;
+  purge_after_at: string;
+  affected_candidate_count: number;
+  affected_resume_count: number;
+}
+
+export interface CandidateDataRestoreResponse {
+  deletion_batch_id: string;
+  restored_candidate_count: number;
+  restored_resume_count: number;
+  restored_at: string;
+}
+
+/** Metadata-only recovery item. It intentionally contains no candidate name or file name. */
+export interface CandidateDataDeletionBatch {
+  deletion_batch_id: string;
+  trigger_type: string;
+  reason: CandidateDataDeletionReason;
+  status: string;
+  recovery_deadline_at: string;
+  purge_after_at: string;
+  affected_candidate_count: number;
+  affected_resume_count: number;
+  restorable: boolean;
+  restored_at: string | null;
+  purged_at: string | null;
+}
+
+export interface CandidateDataDeletionBatchList {
+  items: CandidateDataDeletionBatch[];
+  total: number;
+}
+
+export type CandidateDataRetentionMode = "manual" | "automatic";
+
+export interface CandidateDataRetentionPolicy {
+  mode: CandidateDataRetentionMode;
+  retention_days: number | null;
+  version: number;
+  updated_at: string;
+}
+
+export interface CandidateDataRetentionPreview {
+  preview_token: string;
+  policy_version: number;
+  retention_days: number;
+  eligible_candidate_count: number;
+  eligible_resume_count: number;
+  held_candidate_count: number;
+  already_deleted_count: number;
+  calculated_at: string;
+}
+
+export interface CandidateDataRetentionCleanupRun {
+  run_id: string;
+  trigger_type: "manual" | "scheduled";
+  status: string;
+  policy_version: number;
+  retention_days: number | null;
+  started_at: string;
+  finished_at: string | null;
+  scanned_count: number;
+  queued_count: number;
+  skipped_hold_count: number;
+  failed_count: number;
+  error_code: string | null;
+}
+
+export interface CandidateDataRetentionCleanupRunList {
+  items: CandidateDataRetentionCleanupRun[];
+  total: number;
+}
+
+export interface CandidateDataExportCreate {
+  candidate_ids: string[];
+  include_originals: boolean;
+}
+
+export interface CandidateDataExport {
+  export_id: string;
+  status: string;
+  item_count: number;
+  include_originals: boolean;
+  requested_at: string;
+  completed_at: string | null;
+  expires_at: string | null;
+  error_code: string | null;
+}
+
+export interface CandidateDataExportList {
+  items: CandidateDataExport[];
+  total: number;
+}
+
+/** Opaque audit metadata, deliberately without candidate content. */
+export interface CandidateDataAuditEvent {
+  event_id: string;
+  actor_user_id: string | null;
+  actor_kind: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  result: string;
+  reason_code: string | null;
+  created_at: string;
+}
+
+export interface CandidateDataAuditEventList {
+  items: CandidateDataAuditEvent[];
+  total: number;
 }
 
 export interface ResumeSourceBlock {

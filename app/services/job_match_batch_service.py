@@ -281,6 +281,7 @@ def list_job_match_batch_items(
         raise JobServiceError("job_match_batch_not_found")
     items = session.scalars(
         select(JobMatchBatchItem)
+        .join(Resume, Resume.id == JobMatchBatchItem.resume_id)
         .where(JobMatchBatchItem.batch_id == batch_id)
         .options(selectinload(JobMatchBatchItem.resume).selectinload(Resume.candidate))
         .order_by(JobMatchBatchItem.updated_at.desc(), JobMatchBatchItem.id.desc())
@@ -504,6 +505,13 @@ def _process_claimed_item(
                     raise JobServiceError("resume_source_text_unreliable")
                 item.fact_snapshot_id = latest_snapshot.id
                 item.facts_version = latest_snapshot.facts_version
+                # ``run_job_match`` persists its result in this same business
+                # session.  It cannot run in a savepoint because the gateway
+                # keeps a separate durable ledger session (SQLite test
+                # connections can release that savepoint).  The result itself
+                # remains uncommitted until this worker finishes; a failed
+                # freshness check below therefore rolls it back with the
+                # surrounding worker transaction.
                 cached_match = session.scalar(
                     select(JobMatch)
                     .where(
@@ -527,12 +535,19 @@ def _process_claimed_item(
                         ai_run_business_ref_id=item.id,
                     )
                     match_id = matched.match_id
-                    persisted_match = session.get(JobMatch, match_id)
-                    if (
-                        persisted_match is None
-                        or persisted_match.organization_id != claimed.organization_id
-                    ):
-                        raise JobServiceError("job_match_workspace_mismatch")
+                _require_unchanged_resume_snapshot(
+                    session,
+                    resume_id=item.resume_id,
+                    organization_id=claimed.organization_id,
+                    expected_snapshot_id=latest_snapshot.id,
+                    expected_facts_version=latest_snapshot.facts_version,
+                )
+                persisted_match = session.get(JobMatch, match_id)
+                if (
+                    persisted_match is None
+                    or persisted_match.organization_id != claimed.organization_id
+                ):
+                    raise JobServiceError("job_match_workspace_mismatch")
                 _finish_item_success(session, item=item, worker_id=worker_id, match_id=match_id)
                 session.commit()
     except DeepSeekProviderError as exc:
@@ -580,6 +595,55 @@ def _owned_item(
     if organization_id is not None:
         statement = statement.where(JobMatchBatchItem.organization_id == organization_id)
     return session.scalar(statement)
+
+
+def _require_unchanged_resume_snapshot(
+    session: Session,
+    *,
+    resume_id: str,
+    organization_id: str,
+    expected_snapshot_id: str,
+    expected_facts_version: int,
+) -> None:
+    """Ensure a batch model result still belongs to the current resume facts.
+
+    Job-match execution spans an external model call.  The Resume privacy root
+    can be logically deleted (or its reviewed facts replaced) while that call
+    is in flight.  A fresh, lifecycle-scoped read immediately before the batch
+    item is completed is therefore required.  The caller keeps any newly
+    created ``JobMatch`` uncommitted until this check succeeds.
+    """
+
+    session.flush()
+    session.expire_all()
+    latest_snapshot_row = session.execute(
+        select(Resume, ResumeFactSnapshot)
+        .join(
+            ResumeFactSnapshot,
+            and_(
+                ResumeFactSnapshot.resume_id == Resume.id,
+                ResumeFactSnapshot.facts_version == Resume.facts_version,
+            ),
+        )
+        .where(
+            Resume.id == resume_id,
+            Resume.organization_id == organization_id,
+            Resume.is_active.is_(True),
+            Resume.extraction_status == "ready",
+            ResumeFactSnapshot.organization_id == organization_id,
+        )
+        .execution_options(populate_existing=True)
+    ).first()
+    if latest_snapshot_row is None:
+        raise JobServiceError("resume_changed_before_job_match_completed")
+    resume, snapshot = latest_snapshot_row
+    if (
+        snapshot.id != expected_snapshot_id
+        or snapshot.facts_version != expected_facts_version
+        or resume.facts_version != expected_facts_version
+        or has_unreliable_source_text(resume.quality_flags)
+    ):
+        raise JobServiceError("resume_changed_before_job_match_completed")
 
 
 def _finish_item_success(

@@ -1,7 +1,7 @@
 """Persist exact, evidence-led education institution classifications.
 
-Revision ID: 20260721_0026
-Revises: 20260721_0025
+Revision ID: 20260721_0027
+Revises: 20260721_0026
 Create Date: 2026-07-21 14:00:00
 
 The migration only backfills classifications that were already provable from
@@ -18,8 +18,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260721_0026"
-down_revision: Union[str, Sequence[str], None] = "20260721_0025"
+revision: str = "20260721_0027"
+down_revision: Union[str, Sequence[str], None] = "20260721_0026"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

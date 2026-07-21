@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 
+from app.config import AppSettings
 from app.database import Base
 from app.models import (
     EmailAttachmentImport,
@@ -34,6 +36,13 @@ def test_owner_cannot_finish_before_the_waiter_audit_is_committed() -> None:
     """
 
     assert _POSTGRES_TEST_URL is not None
+    settings = AppSettings(
+        project_dir=Path.cwd(),
+        data_dir=Path.cwd(),
+        upload_dir=Path.cwd() / "uploads",
+        database_url=_POSTGRES_TEST_URL,
+        candidate_data_tombstone_secret="postgres-lifecycle-test-secret",
+    )
     schema_name = f"mailbox_dedup_{uuid4().hex}"
     admin_engine = create_engine(_POSTGRES_TEST_URL, pool_pre_ping=True)
     test_engine = None
@@ -94,6 +103,7 @@ def test_owner_cannot_finish_before_the_waiter_audit_is_committed() -> None:
             owner_claim = mailbox_import_service._claim_attachment_content(
                 setup_session,
                 record=owner,
+                settings=settings,
             )
             assert owner_claim.outcome == "owner"
             setup_session.commit()
@@ -121,6 +131,7 @@ def test_owner_cannot_finish_before_the_waiter_audit_is_committed() -> None:
         waiter_claim = mailbox_import_service._claim_attachment_content(
             waiter_session,
             record=waiter,
+            settings=settings,
         )
         assert waiter_claim.outcome == "waiting"
         waiter_id = waiter.id

@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
+    CandidateDataRetentionPolicy,
     Organization,
     OrganizationInvitation,
     OrganizationMembership,
@@ -41,7 +42,11 @@ from app.schemas import (
     RegistrationOfferResponse,
     TrialAccessResponse,
 )
-from app.tenant_scope import LEGACY_ORGANIZATION_ID
+from app.tenant_scope import (
+    LEGACY_ORGANIZATION_ID,
+    clear_organization_context,
+    set_organization_context,
+)
 
 
 LEGACY_USER_ID = "00000000-0000-4000-8000-000000000002"
@@ -284,6 +289,22 @@ def ensure_identity_bootstrap(session: Session) -> None:
                 is_active=True,
             )
         )
+    # ``create_all`` development databases do not execute Alembic's data
+    # seed, so give the compatibility workspace the same explicit manual
+    # policy as migrated and newly registered workspaces.
+    if session.scalar(
+        select(CandidateDataRetentionPolicy.id).where(
+            CandidateDataRetentionPolicy.organization_id == LEGACY_ORGANIZATION_ID
+        )
+    ) is None:
+        session.add(
+            CandidateDataRetentionPolicy(
+                organization_id=LEGACY_ORGANIZATION_ID,
+                mode="manual",
+                retention_days=None,
+                version=1,
+            )
+        )
 
 
 def _membership_with_context(
@@ -353,6 +374,10 @@ def establish_session(values: dict[str, object], principal: AuthPrincipal) -> No
     values["resume_v3_user_id"] = principal.user.id
     values["resume_v3_organization_id"] = principal.organization.id
     values["resume_v3_membership_id"] = principal.membership.id
+    # The signed browser session already authenticates the caller; a fresh
+    # nonce lets short-lived file/export grants additionally bind to this
+    # particular login rather than every browser session of the same user.
+    values["resume_v3_session_nonce"] = secrets.token_urlsafe(32)
 
 
 def clear_session(values: dict[str, object]) -> None:
@@ -399,6 +424,22 @@ def create_registration(session: Session, payload: AuthRegistration) -> AuthPrin
     )
     session.add(membership)
     session.flush()
+    # The lifecycle migration seeds existing workspaces.  New registrations
+    # need the same explicit manual default without making a future preview
+    # endpoint create state as a side effect.
+    set_organization_context(session, organization.id)
+    try:
+        session.add(
+            CandidateDataRetentionPolicy(
+                organization_id=organization.id,
+                mode="manual",
+                retention_days=None,
+                version=1,
+            )
+        )
+        session.flush()
+    finally:
+        clear_organization_context(session)
     return AuthPrincipal(user=user, membership=membership, organization=organization, plan=plan)
 
 

@@ -18,12 +18,13 @@ from typing import Callable, Iterator, Literal
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import and_, desc, func, or_, select, update
+from sqlalchemy import and_, desc, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import AppSettings
 from app.models import (
+    Candidate,
     EmailAttachmentImport,
     EmailAttachmentImportAttempt,
     MailboxAttachmentContentIdentity,
@@ -72,6 +73,10 @@ from app.services.resume_service import (
     create_candidate,
     discard_uploaded_pdf,
     save_pdf_resume,
+)
+from app.services.candidate_data_lifecycle_service import (
+    CandidateDataLifecycleError,
+    mailbox_attachment_is_tombstoned,
 )
 
 
@@ -820,10 +825,25 @@ def list_mailbox_imports(
             config_id=mailbox_config_id,
             include_archived=True,
         )
+    visible_resume = exists(
+        select(Resume.id)
+        .join(Candidate, Candidate.id == Resume.candidate_id)
+        .where(
+            Resume.id == EmailAttachmentImport.resume_id,
+            Resume.deleted_at.is_(None),
+            Candidate.deleted_at.is_(None),
+        )
+    )
+    visibility_predicate = or_(
+        EmailAttachmentImport.resume_id.is_(None),
+        visible_resume,
+    )
     statement = select(EmailAttachmentImport).options(
         selectinload(EmailAttachmentImport.mailbox_config)
+    ).where(visibility_predicate)
+    count_statement = select(func.count()).select_from(EmailAttachmentImport).where(
+        visibility_predicate
     )
-    count_statement = select(func.count()).select_from(EmailAttachmentImport)
     if mailbox_config_id is not None:
         statement = statement.where(EmailAttachmentImport.mailbox_config_id == mailbox_config_id)
         count_statement = count_statement.where(
@@ -899,6 +919,18 @@ def get_retryable_mailbox_attachment(
     )
     if record is None:
         raise MailboxImportError("mailbox_import_not_found")
+    if record.resume_id is not None:
+        visible = session.scalar(
+            select(Resume.id)
+            .join(Candidate, Candidate.id == Resume.candidate_id)
+            .where(
+                Resume.id == record.resume_id,
+                Resume.deleted_at.is_(None),
+                Candidate.deleted_at.is_(None),
+            )
+        )
+        if visible is None:
+            raise MailboxImportError("mailbox_import_not_found")
     if not _can_retry(record):
         raise MailboxImportError("mailbox_import_not_retryable")
     return record
@@ -983,7 +1015,7 @@ def _record(
 class _ContentClaim:
     """The outcome of claiming one workspace-scoped attachment byte identity."""
 
-    outcome: Literal["owner", "duplicate", "waiting"]
+    outcome: Literal["owner", "duplicate", "waiting", "deleted"]
     identity_id: str
     owner_import_id: str | None = None
     claim_token: str | None = None
@@ -1201,6 +1233,7 @@ def _claim_attachment_content(
     session: Session,
     *,
     record: EmailAttachmentImport,
+    settings: AppSettings,
 ) -> _ContentClaim:
     """Atomically make one import the owner of its attachment bytes.
 
@@ -1214,6 +1247,20 @@ def _claim_attachment_content(
     organization_id = organization_context_id(session)
     if record.organization_id != organization_id:
         raise MailboxImportError("mailbox_workspace_mismatch")
+
+    try:
+        if mailbox_attachment_is_tombstoned(
+            session,
+            settings=settings,
+            attachment_sha256=record.attachment_sha256,
+        ):
+            # This is intentionally a terminal non-owner result: automatic
+            # IMAP polling and attachment retries never recreate a candidate
+            # the workspace has deleted, while a fresh manual upload remains
+            # an explicit separate choice.
+            return _ContentClaim(outcome="deleted", identity_id="tombstone")
+    except CandidateDataLifecycleError as exc:
+        raise MailboxImportError("mailbox_attachment_tombstone_unavailable") from exc
 
     now = _utcnow()
     for _ in range(4):
@@ -1589,6 +1636,11 @@ def _complete_non_owner_processing_import(
         error = None
         resume_id = None
         canonical_import_id = None
+    elif claim.outcome == "deleted":
+        status = "skipped"
+        error = "attachment_deleted_by_candidate_lifecycle"
+        resume_id = None
+        canonical_import_id = None
     else:
         raise MailboxImportError("mailbox_content_claim_conflict")
 
@@ -1634,7 +1686,7 @@ def _complete_non_owner_processing_import(
             status=status,
             error=error,
             resume_id=resume_id,
-            completed_at=now if status == "duplicate" else None,
+            completed_at=now if status in {"duplicate", "skipped"} else None,
         )
     )
     if attempt.rowcount != 1:
@@ -1654,6 +1706,7 @@ def _begin_automatic_content_import(
     attachment_sha256: str,
     received_at: datetime | None,
     source_uidvalidity: int | None,
+    settings: AppSettings,
 ) -> tuple[EmailAttachmentImport, _ContentClaim | None, MailboxImportResponse | None]:
     """Create the per-email audit row, then reserve or reuse its bytes."""
 
@@ -1671,7 +1724,7 @@ def _begin_automatic_content_import(
         source_uidvalidity=source_uidvalidity,
         attempt_completed=False,
     )
-    claim = _claim_attachment_content(session, record=record)
+    claim = _claim_attachment_content(session, record=record, settings=settings)
     if claim.outcome == "owner":
         # Do not keep a database write or unique-index lock while document
         # conversion runs.  The committed lease is what protects the owner.
@@ -2491,7 +2544,11 @@ def retry_mailbox_attachment(
 
     try:
         pulse()
-        content_claim = _claim_attachment_content(session, record=record)
+        content_claim = _claim_attachment_content(
+            session,
+            record=record,
+            settings=settings,
+        )
         if content_claim.outcome == "duplicate":
             result = complete(
                 status="duplicate",
@@ -2509,6 +2566,12 @@ def retry_mailbox_attachment(
             return complete(
                 status="deduplicating",
                 error=None,
+                resume_id=None,
+            )
+        if content_claim.outcome == "deleted":
+            return complete(
+                status="skipped",
+                error="attachment_deleted_by_candidate_lifecycle",
                 resume_id=None,
             )
         # Persist the ownership lease before any IMAP, document conversion, or
@@ -3288,6 +3351,7 @@ def sync_mailbox(
                     attachment_sha256=digest,
                     received_at=received_at,
                     source_uidvalidity=imap_uidvalidity,
+                    settings=settings,
                 )
                 if terminal is not None:
                     # A waiter has not become a duplicate yet: its canonical
@@ -3299,6 +3363,8 @@ def sync_mailbox(
                         duplicates += 1
                     elif terminal.status == "failed":
                         failed += 1
+                    else:
+                        skipped += 1
                     continue
 
                 assert content_claim is not None

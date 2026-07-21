@@ -1397,8 +1397,7 @@
 .admin-feature-flags label span {
   overflow: hidden;
   color: var(--ink);
-  font-family: ui-monospace, "Cascadia Code", monospace;
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

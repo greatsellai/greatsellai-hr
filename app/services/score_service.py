@@ -425,7 +425,16 @@ def _load_ready_resume_and_snapshot(
     *,
     resume_id: str,
 ) -> tuple[Resume, ResumeFactSnapshot, dict[str, object]]:
-    resume = session.get(Resume, resume_id)
+    # Do not use ``session.get`` here.  A long-running model call can leave a
+    # Resume instance in the identity map while another request has logically
+    # deleted it or written a newer fact snapshot.  ``populate_existing``
+    # forces a fresh scoped read, so the CandidateDataLifecycle filter also
+    # turns a newly deleted resume into a normal not-found result.
+    resume = session.scalar(
+        select(Resume)
+        .where(Resume.id == resume_id)
+        .execution_options(populate_existing=True)
+    )
     if resume is None:
         raise ScoreServiceError("resume_not_found")
     if resume.extraction_status != "ready" or not resume.is_active:
@@ -436,6 +445,7 @@ def _load_ready_resume_and_snapshot(
         select(ResumeFactSnapshot)
         .where(ResumeFactSnapshot.resume_id == resume.id)
         .order_by(ResumeFactSnapshot.facts_version.desc())
+        .execution_options(populate_existing=True)
     )
     if snapshot is None or snapshot.facts_version != resume.facts_version:
         raise ScoreServiceError("resume_fact_snapshot_not_current")
@@ -446,6 +456,42 @@ def _load_ready_resume_and_snapshot(
     if not isinstance(parsed_snapshot, dict):
         raise ScoreServiceError("resume_fact_snapshot_invalid")
     return resume, snapshot, parsed_snapshot
+
+
+def _require_unchanged_resume_snapshot(
+    session: Session,
+    *,
+    resume_id: str,
+    expected_snapshot_id: str,
+    expected_facts_version: int,
+) -> tuple[Resume, ResumeFactSnapshot]:
+    """Re-check the privacy root immediately before writing model output.
+
+    The provider request runs outside the database's control.  During that
+    time a recruiter may delete the resume, or an editor may save a newer
+    reviewed-facts version.  In either case the model output is no longer
+    eligible to become a candidate-visible score.
+    """
+
+    # Flush only work that pre-dates the result write (for example the gateway
+    # ledger), then discard cached ORM state so the following scoped SELECT
+    # cannot accidentally reuse the pre-call Resume instance.
+    session.flush()
+    session.expire_all()
+    try:
+        resume, snapshot, _ = _load_ready_resume_and_snapshot(
+            session,
+            resume_id=resume_id,
+        )
+    except ScoreServiceError as exc:
+        raise ScoreServiceError("resume_changed_before_scoring_completed") from exc
+    if (
+        snapshot.id != expected_snapshot_id
+        or snapshot.facts_version != expected_facts_version
+        or resume.facts_version != expected_facts_version
+    ):
+        raise ScoreServiceError("resume_changed_before_scoring_completed")
+    return resume, snapshot
 
 
 def _dimension_records(
@@ -515,6 +561,8 @@ def run_resume_score(
         session,
         resume_id=resume_id,
     )
+    expected_snapshot_id = snapshot.id
+    expected_facts_version = snapshot.facts_version
     compatibility_api_key, compatibility_model, compatibility_timeout_seconds = (
         gateway_prompt_transport_arguments(settings)
     )
@@ -554,6 +602,12 @@ def run_resume_score(
         # Keep domain callers/provider-agnostic HTTP handling independent of
         # the current gateway implementation while preserving stable errors.
         raise ScoreServiceError(str(exc)) from exc
+    resume, snapshot = _require_unchanged_resume_snapshot(
+        session,
+        resume_id=resume_id,
+        expected_snapshot_id=expected_snapshot_id,
+        expected_facts_version=expected_facts_version,
+    )
     dimension_scores, ai_total_score = _dimension_records(
         dimensions=dimensions,
         provider_result=provider_result,
@@ -588,6 +642,7 @@ def run_resume_score(
 def get_resume_score(session: Session, *, score_id: str) -> ResumeScoreResponse:
     score = session.scalar(
         select(ResumeScore)
+        .join(Resume, Resume.id == ResumeScore.resume_id)
         .where(ResumeScore.id == score_id)
         .options(
             selectinload(ResumeScore.resume),
@@ -609,6 +664,7 @@ def list_resume_scores(
         raise ScoreServiceError("resume_not_found")
     scores = session.scalars(
         select(ResumeScore)
+        .join(Resume, Resume.id == ResumeScore.resume_id)
         .where(ResumeScore.resume_id == resume_id)
         .options(
             selectinload(ResumeScore.resume),
@@ -636,7 +692,11 @@ def override_score_dimension(
     dimension_key: str,
     payload: ResumeScoreOverride,
 ) -> ResumeScoreResponse:
-    score = session.get(ResumeScore, score_id)
+    score = session.scalar(
+        select(ResumeScore)
+        .join(Resume, Resume.id == ResumeScore.resume_id)
+        .where(ResumeScore.id == score_id)
+    )
     if score is None:
         raise ResumeScoreNotFoundError("resume_score_not_found")
     records = [dict(record) for record in (score.dimension_scores or [])]

@@ -31,6 +31,24 @@ import { TokenUsageTrendChart } from "../TokenUsageTrendChart";
 
 const PAGE_SIZE = 30;
 
+const PLAN_FEATURE_LABELS: Record<string, string> = {
+  resume_library: "简历库",
+  candidate_filtering: "候选人筛选",
+  ai_scoring: "AI 简历评分",
+  ai_summary: "AI 简历总结",
+  jd_matching: "JD 匹配",
+  recruiting_agent: "招聘智能助手",
+  mailbox_import: "邮箱简历入库",
+  ai_jd_generation: "AI 生成 JD",
+  interview_questions: "面试题生成",
+  interview_records: "面试记录",
+  hrbp_reference: "HRBP 面试结论参考",
+};
+
+function planFeatureLabel(feature: string) {
+  return PLAN_FEATURE_LABELS[feature] ?? feature;
+}
+
 function querySearch() {
   return new URLSearchParams(window.location.search).get("search")?.trim() || "";
 }
@@ -313,7 +331,7 @@ export function AdminPlansPage() {
             </fieldset>
             <fieldset className="admin-feature-flags"><legend>功能范围</legend>
               {Object.keys(draft.feature_flags).length ? Object.entries(draft.feature_flags).sort(([a], [b]) => a.localeCompare(b)).map(([flag, enabled]) => (
-                <label key={flag}><input checked={enabled} onChange={(event) => setDraft({ ...draft, feature_flags: { ...draft.feature_flags, [flag]: event.target.checked } })} type="checkbox" /><span>{flag}</span></label>
+                <label key={flag}><input checked={enabled} onChange={(event) => setDraft({ ...draft, feature_flags: { ...draft.feature_flags, [flag]: event.target.checked } })} type="checkbox" /><span>{planFeatureLabel(flag)}</span></label>
               )) : <p>此套餐没有单独的功能开关。</p>}
             </fieldset>
             <label className="admin-reason-field"><span>变更原因</span><textarea className="textarea-field" maxLength={500} onChange={(event) => setReason(event.target.value)} placeholder="填写定价调整、发布计划或客户政策依据" required rows={3} value={reason} /></label>

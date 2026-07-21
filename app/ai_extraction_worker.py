@@ -15,6 +15,16 @@ from app.services.mailbox_background_job_service import (
     run_mailbox_background_job_worker_once,
 )
 from app.services.mailbox_retention_service import cleanup_due_mailbox_retention
+from app.services.candidate_data_lifecycle_service import (
+    run_due_candidate_data_retention_cleanup,
+)
+from app.services.candidate_data_purge_service import (
+    run_candidate_data_purge_worker_once,
+)
+from app.services.candidate_data_export_service import (
+    cleanup_expired_candidate_data_exports,
+    run_candidate_data_export_worker_once,
+)
 from app.services.resume_score_batch_service import run_resume_score_batch_worker_once
 from app.services.institution_service import (
     is_institution_registry_seeded,
@@ -78,6 +88,26 @@ def run_forever(settings: AppSettings) -> None:
                 database=database,
                 settings=settings,
             )
+            ran_candidate_data_retention_cleanup = (
+                run_due_candidate_data_retention_cleanup(
+                    database,
+                    settings=settings,
+                )
+            )
+            ran_candidate_data_purge = run_candidate_data_purge_worker_once(
+                database,
+                settings=settings,
+                worker_id=worker_id,
+            )
+            ran_candidate_data_export = run_candidate_data_export_worker_once(
+                database,
+                settings=settings,
+                worker_id=worker_id,
+            )
+            cleaned_candidate_data_exports = cleanup_expired_candidate_data_exports(
+                database,
+                settings=settings,
+            )
             if (
                 not ran_extraction
                 and not ran_job_match
@@ -85,6 +115,10 @@ def run_forever(settings: AppSettings) -> None:
                 and not ran_mailbox_job
                 and not queued_due_mailbox_sync
                 and not ran_mailbox_retention_cleanup
+                and not ran_candidate_data_retention_cleanup
+                and not ran_candidate_data_purge
+                and not ran_candidate_data_export
+                and not cleaned_candidate_data_exports
             ):
                 time.sleep(settings.ai_extraction_worker_poll_seconds)
     finally:
@@ -135,6 +169,18 @@ def main() -> None:
                 )
         enqueue_due_mailbox_sync_jobs(database=database, settings=settings)
         cleanup_due_mailbox_retention(database=database, settings=settings)
+        run_due_candidate_data_retention_cleanup(database, settings=settings)
+        run_candidate_data_purge_worker_once(
+            database,
+            settings=settings,
+            worker_id=_worker_id(),
+        )
+        run_candidate_data_export_worker_once(
+            database,
+            settings=settings,
+            worker_id=_worker_id(),
+        )
+        cleanup_expired_candidate_data_exports(database, settings=settings)
     finally:
         database.dispose()
 

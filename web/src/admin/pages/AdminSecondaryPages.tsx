@@ -419,8 +419,8 @@ function TokenUsageCell({
   );
 }
 
-const DEFAULT_TOKEN_USAGE_RANGE_DAYS = 30;
-const DEFAULT_TOKEN_TREND_GRANULARITY: AiUsageTrendGranularity = "day";
+const DEFAULT_TOKEN_USAGE_RANGE_DAYS = 1;
+const DEFAULT_TOKEN_TREND_GRANULARITY: AiUsageTrendGranularity = "hour";
 const MAX_TOKEN_TREND_RANGE_DAYS: Record<AiUsageTrendGranularity, number> = {
   hour: 31,
   day: 90,

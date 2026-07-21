@@ -107,6 +107,19 @@ function buildTrendPoints(buckets: AiUsageTrendBucket[]) {
   ));
 }
 
+function emptyTrendPoint(bucketStartedAt: number): TrendPoint {
+  return {
+    bucketStartedAt: new Date(bucketStartedAt).toISOString(),
+    invocationCount: 0,
+    tokenUsageInvocationCount: 0,
+    inputTokens: 0,
+    cachedReadTokens: 0,
+    cachedWriteTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+  };
+}
+
 function localRangeBoundaries(start: string, end: string) {
   const startAt = new Date(`${start}T00:00:00`).getTime();
   const endAt = new Date(`${end}T23:59:59.999`).getTime();
@@ -117,21 +130,69 @@ function localRangeBoundaries(start: string, end: string) {
   return { startAt: now - DAY_MS, endAt: now };
 }
 
-function chartSeriesData(points: TrendPoint[], key: TrendSeriesKey, granularity: AiUsageTrendGranularity) {
-  const expectedBucketMs = granularity === "hour" ? 60 * 60 * 1_000 : DAY_MS;
-  return points.flatMap((point, index) => {
+function bucketStartAt(timestamp: number, granularity: AiUsageTrendGranularity) {
+  const bucket = new Date(timestamp);
+  if (granularity === "hour") {
+    bucket.setMinutes(0, 0, 0);
+  } else {
+    bucket.setHours(0, 0, 0, 0);
+  }
+  return bucket.getTime();
+}
+
+function nextBucketStart(timestamp: number, granularity: AiUsageTrendGranularity) {
+  const next = new Date(timestamp);
+  if (granularity === "hour") {
+    next.setHours(next.getHours() + 1, 0, 0, 0);
+  } else {
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+  }
+  return next.getTime();
+}
+
+function completeTrendPoints(
+  points: TrendPoint[],
+  rangeStart: string,
+  rangeEnd: string,
+  granularity: AiUsageTrendGranularity,
+  nowAt = Date.now(),
+) {
+  const { startAt, endAt } = localRangeBoundaries(rangeStart, rangeEnd);
+  const latestBucketAt = bucketStartAt(Math.min(endAt, nowAt), granularity);
+  const firstBucketAt = bucketStartAt(startAt, granularity);
+  if (!Number.isFinite(latestBucketAt) || latestBucketAt < firstBucketAt) return [];
+
+  const byBucketStart = new Map<number, TrendPoint>();
+  for (const point of points) {
     const timestamp = new Date(point.bucketStartedAt).getTime();
-    if (!Number.isFinite(timestamp)) return [];
-    const previous = points[index - 1];
-    const previousTimestamp = previous ? new Date(previous.bucketStartedAt).getTime() : null;
-    const hasGap = previousTimestamp !== null && Number.isFinite(previousTimestamp) && timestamp - previousTimestamp > expectedBucketMs * 1.5;
-    if (hasGap) {
-      return [
-        [previousTimestamp + expectedBucketMs, null] as [number, number | null],
-        [timestamp, point[key]] as [number, number | null],
-      ];
-    }
-    return [[timestamp, point[key]] as [number, number | null]];
+    if (!Number.isFinite(timestamp)) continue;
+    const bucketStartedAt = bucketStartAt(timestamp, granularity);
+    const current = byBucketStart.get(bucketStartedAt) ?? emptyTrendPoint(bucketStartedAt);
+    current.invocationCount += point.invocationCount;
+    current.tokenUsageInvocationCount += point.tokenUsageInvocationCount;
+    current.inputTokens += point.inputTokens;
+    current.cachedReadTokens += point.cachedReadTokens;
+    current.cachedWriteTokens += point.cachedWriteTokens;
+    current.outputTokens += point.outputTokens;
+    current.totalTokens += point.totalTokens;
+    byBucketStart.set(bucketStartedAt, current);
+  }
+
+  const completed: TrendPoint[] = [];
+  for (let bucketStartedAt = firstBucketAt; bucketStartedAt <= latestBucketAt;) {
+    completed.push(byBucketStart.get(bucketStartedAt) ?? emptyTrendPoint(bucketStartedAt));
+    const next = nextBucketStart(bucketStartedAt, granularity);
+    if (!Number.isFinite(next) || next <= bucketStartedAt) break;
+    bucketStartedAt = next;
+  }
+  return completed;
+}
+
+function chartSeriesData(points: TrendPoint[], key: TrendSeriesKey) {
+  return points.flatMap((point) => {
+    const timestamp = new Date(point.bucketStartedAt).getTime();
+    return Number.isFinite(timestamp) ? [[timestamp, point[key]] as [number, number]] : [];
   });
 }
 
@@ -221,7 +282,12 @@ export function TokenUsageTrendChart({
   isCrossModelAggregate: boolean;
   timeZone: string;
 }) {
-  const points = useMemo(() => buildTrendPoints(buckets), [buckets]);
+  const points = useMemo(() => completeTrendPoints(
+    buildTrendPoints(buckets),
+    rangeStart,
+    rangeEnd,
+    granularity,
+  ), [buckets, granularity, rangeEnd, rangeStart]);
   const summary = useMemo(() => points.reduce((current, point) => ({
     invocationCount: current.invocationCount + point.invocationCount,
     tokenUsageInvocationCount: current.tokenUsageInvocationCount + point.tokenUsageInvocationCount,
@@ -239,7 +305,13 @@ export function TokenUsageTrendChart({
     outputTokens: 0,
     totalTokens: 0,
   }), [points]);
-  const { startAt, endAt } = useMemo(() => localRangeBoundaries(rangeStart, rangeEnd), [rangeEnd, rangeStart]);
+  const { startAt, endAt: requestedEndAt } = useMemo(
+    () => localRangeBoundaries(rangeStart, rangeEnd),
+    [rangeEnd, rangeStart],
+  );
+  // Future hours have no observed usage yet, so the chart ends at the current
+  // instant instead of presenting them as an artificial empty tail.
+  const endAt = Math.max(startAt, Math.min(requestedEndAt, Date.now()));
   const hasReportedUsage = summary.tokenUsageInvocationCount > 0;
   const includeYearInAxis = new Date(rangeStart).getFullYear() !== new Date(rangeEnd).getFullYear();
   const chartDescription = hasReportedUsage
@@ -317,6 +389,7 @@ export function TokenUsageTrendChart({
     yAxis: {
       type: "value",
       min: 0,
+      max: (value: { max: number }) => Math.max(value.max, 1),
       splitNumber: 4,
       axisLine: { show: false },
       axisTick: { show: false },
@@ -336,10 +409,10 @@ export function TokenUsageTrendChart({
     series: trendSeries.map((series, index) => ({
       name: series.label,
       type: "line" as const,
-      data: chartSeriesData(points, series.key, granularity),
+      data: chartSeriesData(points, series.key),
       showSymbol: false,
       smooth: 0.22,
-      connectNulls: false,
+      connectNulls: true,
       lineStyle: {
         width: series.lineType === "solid" ? 2.5 : 2,
         type: series.lineType,
@@ -360,7 +433,7 @@ export function TokenUsageTrendChart({
         <div>
           <div className="admin-token-trend-title"><Icon name="activity" size={18} /><h2 id="admin-token-trend-title">Token 使用趋势</h2></div>
           <p>{scopeLabel} · {coverageLabel} · {rangeLabel}</p>
-          <small className="admin-token-trend-scope-note">{isCrossModelAggregate ? `按 ${timeZone} 分桶；当前为跨模型汇总，不用于模型间比较。` : `按 ${timeZone} 分桶；所有 Token 均归属于所选 Provider / 模型。`}</small>
+          <small className="admin-token-trend-scope-note">{isCrossModelAggregate ? `按 ${timeZone} 分桶；空闲时段按 0 Token 连续展示，当前为跨模型汇总，不用于模型间比较。` : `按 ${timeZone} 分桶；空闲时段按 0 Token 连续展示，所有 Token 均归属于所选 Provider / 模型。`}</small>
         </div>
         <dl className="admin-token-trend-metrics">
           <Metric label="输入" value={`${formatTokenVolume(summary.inputTokens)} Token`} description={numberFormat(summary.inputTokens)} />
@@ -370,7 +443,7 @@ export function TokenUsageTrendChart({
         </dl>
       </header>
 
-      {hasReportedUsage ? (
+      {points.length ? (
         <div aria-label="Token 使用趋势图" className="admin-token-chart-frame">
           <EChartsTrendCanvas description={chartDescription} option={chartOption} />
         </div>

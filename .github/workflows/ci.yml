@@ -90,14 +90,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build application production image
-        run: >-
-          docker build --build-arg DEBIAN_MIRROR=deb.debian.org
-          --build-arg PIP_INDEX_URL=https://pypi.org/simple
-          --tag "greatsellai-hr-ci:${{ github.sha }}" .
+        shell: bash
+        run: |
+          # Base-image, apt, and package-index fetches are external network
+          # operations. Retry once so a transient hosted-runner failure does
+          # not block a healthy production release.
+          for attempt in 1 2; do
+            if docker build --build-arg DEBIAN_MIRROR=deb.debian.org \
+              --build-arg PIP_INDEX_URL=https://pypi.org/simple \
+              --tag "greatsellai-hr-ci:${{ github.sha }}" .; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 2 ]; then
+              exit 1
+            fi
+
+            echo "Application image build failed; retrying once in 15 seconds."
+            sleep 15
+          done
       - name: Build Caddy production image
-        run: >-
-          docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org/
-          --file deploy/Caddy.Dockerfile
-          --tag "greatsellai-hr-caddy-ci:${{ github.sha }}" .
+        shell: bash
+        run: |
+          # The Caddy image rebuilds the SPA and can occasionally hit a
+          # transient registry/network failure on hosted runners. Retrying
+          # once keeps a healthy commit from blocking the production release.
+          for attempt in 1 2; do
+            if docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org/ \
+              --file deploy/Caddy.Dockerfile \
+              --tag "greatsellai-hr-caddy-ci:${{ github.sha }}" .; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 2 ]; then
+              exit 1
+            fi
+
+            echo "Caddy image build failed; retrying once in 15 seconds."
+            sleep 15
+          done
       - name: Validate production Compose model
         run: docker compose --env-file .env.production.example config --quiet

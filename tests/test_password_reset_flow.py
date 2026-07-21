@@ -181,3 +181,56 @@ def test_password_reset_rejects_expired_link(password_reset_client: TestClient) 
         json={"email": email, "password": "password-reset-expired-old"},
     )
     assert old_password_still_works.status_code == 200, old_password_still_works.text
+
+
+def test_password_reset_revokes_another_browser_session(tmp_path: Path) -> None:
+    """A recovery action invalidates every signed session for that account."""
+
+    settings = AppSettings(
+        project_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        upload_dir=tmp_path / "data" / "uploads",
+        database_url="sqlite://",
+        session_secret="password-reset-session-revocation-test-secret",
+        transactional_email_provider="test",
+        public_app_url="http://testserver",
+        allow_unauthenticated=False,
+    )
+    app = create_app(settings)
+    with TestClient(app):
+        reset_browser = TestClient(app)
+        other_browser = TestClient(app)
+        try:
+            email = "password-reset-session@example.test"
+            old_password = "password-reset-session-old"
+            new_password = "password-reset-session-new"
+            _register_and_verify(reset_browser, email=email, password=old_password)
+
+            existing_login = other_browser.post(
+                "/v1/auth/login",
+                json={"email": email, "password": old_password},
+            )
+            assert existing_login.status_code == 200, existing_login.text
+            assert other_browser.get("/v1/resume-library").status_code == 200
+
+            _, token = _request_reset(reset_browser, email)
+            completed = reset_browser.post(
+                "/v1/auth/password-reset/complete",
+                json={"token": token, "password": new_password},
+            )
+            assert completed.status_code == 204, completed.text
+
+            # The old signed cookie is still present in this browser, but the
+            # server rejects it because its auth-session version is stale.
+            assert other_browser.get("/v1/resume-library").status_code == 401
+            assert other_browser.get("/v1/auth/session").json()["authenticated"] is False
+
+            relogged = other_browser.post(
+                "/v1/auth/login",
+                json={"email": email, "password": new_password},
+            )
+            assert relogged.status_code == 200, relogged.text
+            assert other_browser.get("/v1/resume-library").status_code == 200
+        finally:
+            other_browser.close()
+            reset_browser.close()

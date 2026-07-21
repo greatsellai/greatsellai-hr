@@ -163,6 +163,7 @@ from app.services.identity_service import (
     issue_password_reset,
     issue_email_verification,
     legacy_principal,
+    legacy_principal_from_session,
     list_product_plans,
     normalize_email,
     principal_from_session,
@@ -899,8 +900,8 @@ async def require_authenticated_member(
         principal = principal_from_session(session, request.session)
         # Existing signed browser sessions and the optional header remain a
         # migration bridge into *only* the legacy workspace.
-        if principal is None and request.session.get("resume_v3_authenticated") is True:
-            principal = legacy_principal(session)
+        if principal is None:
+            principal = legacy_principal_from_session(session, request.session)
         if (
             principal is None
             and settings.admin_token
@@ -1043,8 +1044,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             else principal_from_session(session, request.session)
         )
         # Preserve an existing migration session only as a legacy identity.
-        if principal is None and request.session.get("resume_v3_authenticated") is True:
-            principal = legacy_principal(session)
+        if principal is None:
+            principal = legacy_principal_from_session(session, request.session)
         if principal is not None:
             set_organization_context(session, principal.organization_id)
         return auth_session_response(principal, login_required=not settings.allow_unauthenticated)
@@ -1178,11 +1179,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> AuthSession:
         existing_principal = principal_from_session(session, request.session)
-        if (
-            existing_principal is None
-            and request.session.get("resume_v3_authenticated") is True
-        ):
-            existing_principal = legacy_principal(session)
+        if existing_principal is None:
+            existing_principal = legacy_principal_from_session(session, request.session)
         try:
             principal = complete_email_verification(
                 session,

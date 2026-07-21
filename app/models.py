@@ -184,6 +184,14 @@ class UserAccount(Base):
     email_key: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(200))
     password_hash: Mapped[str] = mapped_column(Text)
+    # Every signed browser session carries this version.  Security-sensitive
+    # account events such as password reset increment it to revoke all older
+    # cookies without retaining a server-side session table.
+    auth_session_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

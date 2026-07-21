@@ -45,6 +45,7 @@ from app.services.institution_service import (
     classify_education_institution,
     resolve_institution,
     resolve_institution_by_roster_id,
+    resolve_registry_institution,
 )
 from app.services.normalization import (
     highest_degree,
@@ -1491,15 +1492,29 @@ def _replace_facts(
         is_ai_rulebook_match = False
         if not is_local_match and force_pending_review:
             if education.ai_985_211_judgment:
-                institution = resolve_institution_by_roster_id(
-                    session,
-                    education.ai_institution_roster_id,
+                source_registry_institution = resolve_registry_institution(
+                    education.school_name_raw
                 )
-                if institution is not None and institution.is_985_211:
-                    is_ai_rulebook_match = True
-                    has_ai_rulebook_match = True
+                # An LLM-supplied roster ID is never authority by itself.  It
+                # may only recover a missing local relation when the raw,
+                # source-grounded school name has already matched the same
+                # controlled roster entry exactly.
+                if (
+                    source_registry_institution is not None
+                    and education.ai_institution_roster_id
+                    == source_registry_institution.roster_id
+                ):
+                    ai_institution = resolve_institution_by_roster_id(
+                        session,
+                        education.ai_institution_roster_id,
+                    )
+                    if ai_institution is not None and ai_institution.is_985_211:
+                        institution = ai_institution
+                        is_ai_rulebook_match = True
+                        has_ai_rulebook_match = True
+                    else:
+                        has_invalid_ai_rulebook_reference = True
                 else:
-                    institution = None
                     has_invalid_ai_rulebook_reference = True
             elif education.ai_institution_roster_id is not None:
                 has_invalid_ai_rulebook_reference = True

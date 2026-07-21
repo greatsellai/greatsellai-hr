@@ -97,6 +97,40 @@ _OVERSEAS_NON_DEGREE_MARKERS = (
     "\u5408\u4f5c\u529e\u5b66",
     "\u8054\u5408\u57f9\u517b",
 )
+
+# These describe non-degree study itself, rather than the school.  They are
+# checked in a small window around the extracted school name before *any*
+# positive classification is made.  That prevents a summer school, exchange,
+# training course, or certificate from inheriting the host university's 985,
+# 211, undergraduate, or other label.
+_NON_DEGREE_EDUCATION_MARKERS = (
+    "\u6691\u671f\u5b66\u6821",
+    "\u6691\u6821",
+    "\u590f\u6821",
+    "\u4ea4\u6362\u751f",
+    "\u4ea4\u6362\u5b66\u4e60",
+    "\u8bbf\u5b66",
+    "\u6e38\u5b66",
+    "\u77ed\u671f",
+    "\u57f9\u8bad",
+    "\u57f9\u8bad\u73ed",
+    "\u8fdb\u4fee",
+    "\u7814\u4fee",
+    "\u7ee7\u7eed\u6559\u80b2",
+    "\u975e\u5b66\u5386",
+    "\u8bc1\u4e66\u8bfe\u7a0b",
+    "summer school",
+    "summer program",
+    "exchange program",
+    "visiting student",
+    "short-term",
+    "short term",
+    "training program",
+    "non-degree",
+    "nondegree",
+    "certificate program",
+)
+_SCHOOL_EVIDENCE_CONTEXT_RADIUS = 180
 _FOREIGN_NAME_TOKEN = re.compile(r"[A-Za-z]{3,}")
 
 # Only unambiguous, commonly used abbreviations are accepted. Ambiguous short
@@ -335,6 +369,51 @@ def _has_any_marker(source_text: str, markers: tuple[str, ...]) -> bool:
     return any(normalized_key(marker) in source_key for marker in markers)
 
 
+def _school_evidence_context(
+    *,
+    school_name_raw: str,
+    evidence_text: str,
+) -> str:
+    """Return only the source text surrounding the grounded school name.
+
+    Resume source blocks are currently page-level.  Looking for a country or
+    school-type marker in the whole page can accidentally apply a project,
+    another education record, or a side note to the wrong school.  The caller
+    already validates that the school name is grounded in ``evidence_text``;
+    nevertheless, if a literal span cannot be found we deliberately return
+    only the school name rather than widening back to the entire page.
+    """
+
+    school_name = school_name_raw.strip()
+    if not school_name or not evidence_text:
+        return school_name
+
+    source_key = evidence_text.casefold()
+    school_key = school_name.casefold()
+    positions: list[int] = []
+    start = 0
+    while len(positions) < 6:
+        position = source_key.find(school_key, start)
+        if position < 0:
+            break
+        positions.append(position)
+        start = position + max(1, len(school_key))
+
+    if not positions:
+        return school_name
+
+    windows = [
+        evidence_text[
+            max(0, position - _SCHOOL_EVIDENCE_CONTEXT_RADIUS) : min(
+                len(evidence_text),
+                position + len(school_name) + _SCHOOL_EVIDENCE_CONTEXT_RADIUS,
+            )
+        ]
+        for position in positions
+    ]
+    return "\n".join(windows)
+
+
 def _is_explicit_overseas_education(
     *,
     school_name_raw: str,
@@ -347,10 +426,23 @@ def _is_explicit_overseas_education(
     programmes, whose degree-awarding institution cannot be assumed.
     """
 
-    combined = f"{school_name_raw}\n{evidence_text}"
+    local_context = _school_evidence_context(
+        school_name_raw=school_name_raw,
+        evidence_text=evidence_text,
+    )
+    combined = f"{school_name_raw}\n{local_context}"
     if _has_any_marker(combined, _OVERSEAS_NON_DEGREE_MARKERS):
         return False
-    if not _has_any_marker(combined, _OVERSEAS_CONTEXT_MARKERS):
+    # A country word embedded only in the school name is not independently
+    # reliable (for example, a domestic cooperation programme).  Require the
+    # overseas/country cue to appear in the surrounding education context.
+    context_without_school = re.sub(
+        re.escape(school_name_raw.strip()),
+        "",
+        local_context,
+        flags=re.IGNORECASE,
+    )
+    if not _has_any_marker(context_without_school, _OVERSEAS_CONTEXT_MARKERS):
         return False
     # A country/overseas marker elsewhere on a page is not enough by itself.
     # Require a foreign-style school name or a clear education completion cue.
@@ -383,10 +475,33 @@ def classify_education_institution(
     """
 
     block_ids = _sorted_evidence_block_ids(evidence_block_ids)
-    registry_institution = (
-        _registry_institution_by_roster_id().get(registry_roster_id or "")
-        or resolve_registry_institution(school_name_raw)
+    local_context = _school_evidence_context(
+        school_name_raw=school_name_raw,
+        evidence_text=evidence_text,
     )
+    # A school name is not by itself proof of a formal degree record.  Reject
+    # unknown-degree and explicitly non-degree study before consulting any
+    # whitelist; otherwise a summer school at a 985 university would become a
+    # false positive 985 classification.
+    if degree == "unknown" or _has_any_marker(
+        local_context,
+        _NON_DEGREE_EDUCATION_MARKERS,
+    ):
+        return EducationInstitutionClassification(None, None, None, ())
+
+    # ``registry_roster_id`` is a compatibility/local-relation hint, never a
+    # classification authority.  Even an existing roster ID must agree with
+    # the source-grounded raw school name before it can participate.
+    registry_institution = resolve_registry_institution(school_name_raw)
+    hinted_registry_institution = _registry_institution_by_roster_id().get(
+        registry_roster_id or ""
+    )
+    if (
+        registry_institution is not None
+        and hinted_registry_institution is not None
+        and hinted_registry_institution.roster_id == registry_institution.roster_id
+    ):
+        registry_institution = hinted_registry_institution
     if registry_institution is not None:
         classification = (
             "985"
@@ -411,7 +526,7 @@ def classify_education_institution(
             evidence_block_ids=block_ids,
         )
 
-    combined = f"{school_name_raw}\n{evidence_text}"
+    combined = f"{school_name_raw}\n{local_context}"
     if _has_any_marker(combined, _SECONDARY_VOCATIONAL_MARKERS):
         return EducationInstitutionClassification(
             classification="secondary_vocational",
@@ -419,11 +534,6 @@ def classify_education_institution(
             registry_version=None,
             evidence_block_ids=block_ids,
         )
-    # Extracted records with no degree are often courses, training, or a
-    # partially parsed line.  Unlike an explicit secondary-school marker,
-    # overseas context alone is not enough for those records.
-    if degree == "unknown":
-        return EducationInstitutionClassification(None, None, None, ())
     if _is_explicit_overseas_education(
         school_name_raw=school_name_raw,
         evidence_text=evidence_text,

@@ -347,6 +347,7 @@ const institutionClassificationLabels: Record<InstitutionClassification, string>
   ) as Record<InstitutionClassification, string>;
 
 const legacyInstitutionTierLabels: Record<InstitutionTier, string> = {
+  ...institutionClassificationLabels,
   "211": "211",
   "985": "985",
   double_first_class: "双一流",

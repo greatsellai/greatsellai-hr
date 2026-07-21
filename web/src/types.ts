@@ -576,7 +576,10 @@ export interface ExperienceFilter {
 export type InstitutionTier =
   | "211" | "985" | "double_first_class" | "key_undergraduate"
   | "first_tier" | "second_tier" | "regular_undergraduate"
-  | "private_undergraduate" | "higher_vocational" | "overseas";
+  | "private_undergraduate" | "higher_vocational" | "overseas"
+  // Kept for legacy response compatibility. New UI writes the exact
+  // `InstitutionClassification` field instead.
+  | "undergraduate" | "associate" | "secondary_vocational";
 
 /**
  * Stable, mutually exclusive labels used by the recruiter-facing table and

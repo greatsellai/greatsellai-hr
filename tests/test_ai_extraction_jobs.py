@@ -431,14 +431,14 @@ def test_worker_drops_only_ungrounded_experience_detail_item(
     assert "ai_draft_partial_source_grounding" in payload["quality_flags"]
 
 
-def test_worker_accepts_a_valid_positive_ai_rulebook_reference(
+def test_worker_accepts_a_source_matched_positive_ai_rulebook_reference(
     ai_client,
     monkeypatch,
 ) -> None:
     uploaded = _upload_new_resume(ai_client)
     resume_id = str(uploaded["resume_id"])
     roster_entry = load_registry().institutions[0]
-    school_raw = f"{roster_entry.canonical_name} Main Campus"
+    school_raw = roster_entry.canonical_name
     database = ai_client.app.state.database
     with database.session_factory() as session:
         block = session.scalar(
@@ -484,8 +484,8 @@ def test_worker_accepts_a_valid_positive_ai_rulebook_reference(
     assert payload["extraction_status"] == "ready"
     assert payload["is_active"] is True
     assert payload["is_985_211"] is True
-    assert payload["education"][0]["school_match_state"] == "ai_rulebook"
-    assert "ai_985_211_rulebook_match" in payload["quality_flags"]
+    assert payload["education"][0]["school_match_state"] == "exact"
+    assert "ai_985_211_invalid_rulebook_reference" not in payload["quality_flags"]
 
 
 def test_worker_maps_ai_nonmember_or_invalid_reference_to_false(
@@ -494,6 +494,7 @@ def test_worker_maps_ai_nonmember_or_invalid_reference_to_false(
 ) -> None:
     uploaded = _upload_new_resume(ai_client)
     resume_id = str(uploaded["resume_id"])
+    wrong_roster_id = load_registry().institutions[0].roster_id
     database = ai_client.app.state.database
     with database.session_factory() as session:
         block = session.scalar(
@@ -514,7 +515,9 @@ def test_worker_maps_ai_nonmember_or_invalid_reference_to_false(
                         "school_name_raw": "Example University",
                         "degree": "bachelor",
                         "ai_985_211_judgment": True,
-                        "ai_institution_roster_id": "not-a-registry-id",
+                        # A real roster ID is still invalid when it does not
+                        # exactly match the grounded raw school name.
+                        "ai_institution_roster_id": wrong_roster_id,
                         "major_raw": "Computer Science",
                         "evidence_block_ids": ["page-001"],
                     }

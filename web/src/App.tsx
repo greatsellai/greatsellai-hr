@@ -3857,6 +3857,19 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
   return { label: "等待启用", tone: "waiting" };
 }
 
+function resumeLibraryScoreState(status: string | null): string {
+  switch (status) {
+    case "overridden":
+      return "含人工调整";
+    case "needs_review":
+      return "建议复核";
+    case "succeeded":
+      return "AI 已完成";
+    default:
+      return "评分已生成";
+  }
+}
+
 function ResumeLibraryPage({
   selectedResumeId,
   refreshToken,
@@ -3929,6 +3942,19 @@ function ResumeLibraryPage({
   const totalPages = Math.max(1, Math.ceil(total / RESUME_LIBRARY_PAGE_SIZE));
   const canPageBack = page > 1;
   const canPageForward = page < totalPages;
+  const pageOverview = items.reduce(
+    (summary, item) => {
+      const status = resumeLibraryStatus(item);
+      summary[status.tone] += 1;
+      if (status.tone === "ready" && item.score_total === null) {
+        summary.unscored += 1;
+      }
+      return summary;
+    },
+    { ready: 0, progress: 0, attention: 0, waiting: 0, unscored: 0 },
+  );
+  const firstItemIndex = total ? (page - 1) * RESUME_LIBRARY_PAGE_SIZE + 1 : 0;
+  const lastItemIndex = Math.min(page * RESUME_LIBRARY_PAGE_SIZE, total);
 
   return (
     <div className="page-frame resume-library-page">
@@ -3936,7 +3962,7 @@ function ResumeLibraryPage({
         <div>
           <h1>简历库</h1>
           <p>
-            每份已上传的 PDF 都会保留在这里；查看 AI 总结、AI 评分和原始简历。
+            一眼查看入库进度、AI 总结和 AI 评分；打开后可继续查看原始文件与提取依据。
           </p>
         </div>
         <div className="resume-library-actions">
@@ -3993,6 +4019,16 @@ function ResumeLibraryPage({
         </div>
       </header>
 
+      {library && (
+        <section aria-label="当前页面简历状态" className="library-queue-summary">
+          <span className="library-queue-total"><strong>{total}</strong> 份已入库</span>
+          <span className="library-queue-item is-ready">本页已启用 <strong>{pageOverview.ready}</strong></span>
+          {(pageOverview.progress + pageOverview.waiting) > 0 && <span className="library-queue-item is-progress">处理中 <strong>{pageOverview.progress + pageOverview.waiting}</strong></span>}
+          {pageOverview.attention > 0 && <span className="library-queue-item is-attention">需处理 <strong>{pageOverview.attention}</strong></span>}
+          {pageOverview.unscored > 0 && <span className="library-queue-item">待评分 <strong>{pageOverview.unscored}</strong></span>}
+        </section>
+      )}
+
       {error && (
         <p className="library-error" role="status">
           {error}
@@ -4044,22 +4080,29 @@ function ResumeLibraryPage({
                       }}
                       tabIndex={0}
                     >
-                      <td>
+                      <td className="library-candidate-cell">
                         <div className="candidate-person">
-                          <span className="candidate-name">
-                            {item.display_name?.trim() || "未命名候选人"}
-                          </span>
-                          <span
-                            className="candidate-meta"
-                            title={item.original_filename}
-                          >
-                            {item.original_filename}
-                          </span>
-                          <span className="candidate-meta library-source-label">
-                            {item.source_mailbox_label
-                              ? `邮箱 · ${item.source_mailbox_label}`
-                              : "手动上传"}
-                          </span>
+                          <div className="library-candidate-title">
+                            <span className="candidate-name">
+                              {item.display_name?.trim() || "未命名候选人"}
+                            </span>
+                            <span className="library-file-type">
+                              {resumeFileTypeLabel(item.original_filename)}
+                            </span>
+                          </div>
+                          <div className="library-origin">
+                            <span
+                              className="candidate-meta library-filename"
+                              title={item.original_filename}
+                            >
+                              {item.original_filename}
+                            </span>
+                            <span className="candidate-meta library-source-label">
+                              {item.source_mailbox_label
+                                ? `邮箱 · ${item.source_mailbox_label}`
+                                : "手动上传"}
+                            </span>
+                          </div>
                         </div>
                       </td>
                       <td className="library-summary-cell">
@@ -4098,13 +4141,11 @@ function ResumeLibraryPage({
                         ) : item.score_total !== null ? (
                           <div
                             className="library-score"
-                            title={item.score_template_name ?? undefined}
+                            title={`${item.score_template_name ?? "评分规则"} · ${resumeLibraryScoreState(item.score_status)}`}
                           >
                             <strong>{item.score_total.toFixed(1)}</strong>
                             <span>/ 100</span>
-                            {item.score_template_name && (
-                              <small>{item.score_template_name}</small>
-                            )}
+                            <small>{item.score_template_name ?? "评分规则"} · {resumeLibraryScoreState(item.score_status)}</small>
                           </div>
                         ) : item.is_active ? (
                           <button
@@ -4113,6 +4154,7 @@ function ResumeLibraryPage({
                               event.stopPropagation();
                               onScoreResume(item);
                             }}
+                            onKeyDown={(event) => event.stopPropagation()}
                             type="button"
                           >
                             去评分 <Icon name="arrow-right" size={14} />
@@ -4123,7 +4165,7 @@ function ResumeLibraryPage({
                           </span>
                         )}
                       </td>
-                      <td>
+                      <td className="library-status-cell">
                         <span
                           className={`library-status is-${status.tone}`}
                           title={
@@ -4136,14 +4178,19 @@ function ResumeLibraryPage({
                         >
                           {status.label}
                         </span>
+                        {status.tone === "progress" && (
+                          <small>完成后会自动更新</small>
+                        )}
                       </td>
                       <td>
                         <span className="candidate-meta">
                           {formatLibraryDate(item.created_at)}
                         </span>
                       </td>
-                      <td>
-                        <Icon name="chevron-right" size={18} />
+                      <td className="library-open-cell">
+                        <span aria-hidden="true" className="library-open-affordance">
+                          查看 <Icon name="chevron-right" size={17} />
+                        </span>
                       </td>
                     </tr>
                   );
@@ -4182,7 +4229,7 @@ function ResumeLibraryPage({
               正在更新简历库…
             </span>
           ) : (
-            `共 ${total} 份简历`
+            total ? `显示第 ${firstItemIndex}–${lastItemIndex} 份，共 ${total} 份` : "共 0 份简历"
           )}
         </span>
         {totalPages > 1 && (
@@ -4544,7 +4591,6 @@ function OriginalDocumentTab({
   loading: boolean;
   error: string | null;
 }) {
-  const pageCount = Math.min(review?.source_page_count ?? 1, 4);
   const filename = review?.original_filename ?? "";
   const canPreview = canPreviewInline(filename);
   const isImage = [".png", ".jpg", ".jpeg"].includes(
@@ -4552,16 +4598,6 @@ function OriginalDocumentTab({
   );
   return (
     <div className="pdf-viewer">
-      <div className="pdf-thumbnails" aria-label="原始文件页码">
-        {Array.from({ length: pageCount }, (_, index) => (
-          <div
-            className={`pdf-thumb${index === 0 ? " is-current" : ""}`}
-            key={index}
-          >
-            {index + 1}
-          </div>
-        ))}
-      </div>
       <div className="pdf-canvas">
         {loading ? (
           <div className="pdf-loading">

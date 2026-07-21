@@ -13,7 +13,6 @@ import {
   AdminLoading,
   AdminPageHeader,
   AdminStatus,
-  currencyFromMicros,
   formatDate,
   numberFormat,
   shortId,
@@ -67,7 +66,7 @@ export function AdminOverviewPage({ onNavigate }: { onNavigate: (view: AdminView
     <section className="admin-page-frame" aria-labelledby="admin-overview-title">
       <AdminPageHeader
         actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新数据</button>}
-        description="先处理异常和临期事项，再查看平台规模与 AI 成本。"
+        description="先处理异常和临期事项，再查看平台规模与 AI 运行状态。"
         title="平台概览"
       />
       {state === "loading" && <div className="admin-panel"><AdminLoading label="正在汇总平台状态…" /></div>}
@@ -89,11 +88,6 @@ export function AdminOverviewPage({ onNavigate }: { onNavigate: (view: AdminView
               <span>AI 运行</span>
               <strong>{numberFormat(dashboard.ai_runs_total)}</strong>
               <small>成功 {numberFormat(dashboard.ai_runs_succeeded)}，失败 {numberFormat(dashboard.ai_runs_failed)}</small>
-            </article>
-            <article>
-              <span>累计 AI 成本</span>
-              <strong>{currencyFromMicros(dashboard.ai_cost_cny_micros)}</strong>
-              <small>{dashboard.ai_cost_unavailable_runs ? `${dashboard.ai_cost_unavailable_runs} 次运行待核算` : "费用记录完整"}</small>
             </article>
           </div>
 
@@ -122,14 +116,6 @@ export function AdminOverviewPage({ onNavigate }: { onNavigate: (view: AdminView
                   <b>{numberFormat(dashboard.mailboxes_total)}</b>
                   <Icon name="chevron-right" size={17} />
                 </button>
-                {dashboard.ai_cost_unavailable_runs > 0 && (
-                  <button onClick={() => onNavigate("ai")} type="button">
-                    <span className="admin-attention-icon is-warning"><Icon name="history" size={18} /></span>
-                    <span><strong>费用待核算</strong><small>模型价格缺失或运行只记录了部分成本。</small></span>
-                    <b>{numberFormat(dashboard.ai_cost_unavailable_runs)}</b>
-                    <Icon name="chevron-right" size={17} />
-                  </button>
-                )}
               </div>
             </section>
 

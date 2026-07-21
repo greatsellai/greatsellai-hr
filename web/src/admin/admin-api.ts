@@ -1,7 +1,5 @@
 import type { AuthSession } from "../types";
 import type {
-  AiModelPriceVersionCreateInput,
-  AiModelPriceVersion,
   AiModelProfileCreateInput,
   AiModelProfile,
   AiProviderProfileCreateInput,
@@ -177,9 +175,6 @@ export const adminApi = {
       method: "PUT",
       body: body(payload),
     }),
-  listAiPrices: () => request<AiModelPriceVersion[]>("/platform/ai/model-prices"),
-  createAiModelPrice: (payload: AiModelPriceVersionCreateInput) =>
-    request<AiModelPriceVersion>("/platform/ai/model-prices", { method: "POST", body: body(payload) }),
 };
 
 export function adminErrorMessage(error: unknown) {

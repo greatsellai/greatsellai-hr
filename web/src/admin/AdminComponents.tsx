@@ -156,16 +156,6 @@ export function numberFormat(value: number) {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
-export function currencyFromMicros(value: number | null | undefined) {
-  if (value === null || value === undefined) return "待核算";
-  return new Intl.NumberFormat("zh-CN", {
-    style: "currency",
-    currency: "CNY",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
-  }).format(value / 1_000_000);
-}
-
 export function shortId(value: string | null | undefined) {
   if (!value) return "—";
   return value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;

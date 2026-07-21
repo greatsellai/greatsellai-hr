@@ -7,8 +7,6 @@ import {
 } from "../AdminComponents";
 import type {
   AiModelCapability,
-  AiModelPriceVersion,
-  AiModelPriceVersionCreateInput,
   AiModelProfile,
   AiModelProfileCreateInput,
   AiProviderProfile,
@@ -19,7 +17,7 @@ import type {
   AiRoutePolicyVersion,
 } from "../admin-types";
 
-type ConfigurationSection = "provider" | "model" | "price" | "route";
+type ConfigurationSection = "provider" | "model" | "route";
 
 type RouteTargetDraft = {
   model_slug: string;
@@ -100,32 +98,12 @@ function supportsRouteCapabilities(model: AiModelProfile, capabilities: AiModelC
   return capabilities.every((capability) => model.capabilities.includes(capability));
 }
 
-function localDateTimeValue() {
-  const now = new Date();
-  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-  return now.toISOString().slice(0, 16);
-}
-
-function requiredIsoDate(value: string, label: string) {
-  const date = new Date(value);
-  if (!value || Number.isNaN(date.getTime())) throw new Error(`请填写有效的${label}。`);
-  return date.toISOString();
-}
-
 function optionalPositiveInteger(value: string, label: string) {
   const normalized = value.trim();
   if (!normalized) return undefined;
   const number = Number(normalized);
   if (!Number.isInteger(number) || number < 1) throw new Error(`${label}必须是大于 0 的整数。`);
   return number;
-}
-
-function optionalDecimal(value: string, label: string) {
-  const normalized = value.trim();
-  if (!normalized) return undefined;
-  const number = Number(normalized);
-  if (!Number.isFinite(number) || number < 0) throw new Error(`${label}必须是大于等于 0 的数字。`);
-  return normalized;
 }
 
 function reasonValue(value: string) {
@@ -220,13 +198,11 @@ function routePublicationChanges(
 export function AdminAiConfigurationPanel({
   providers,
   models,
-  prices,
   routes,
   onChanged,
 }: {
   providers: AiProviderProfile[];
   models: AiModelProfile[];
-  prices: AiModelPriceVersion[];
   routes: AiRoutePolicy[];
   onChanged: () => Promise<void>;
 }) {
@@ -262,22 +238,6 @@ export function AdminAiConfigurationPanel({
     is_enabled: true,
     reason: "",
   });
-  const [priceDraft, setPriceDraft] = useState({
-    model_slug: "",
-    currency: "CNY",
-    effective_from: localDateTimeValue(),
-    effective_to: "",
-    input_per_million: "",
-    cached_read_input_per_million: "",
-    cached_write_input_per_million: "",
-    output_per_million: "",
-    reasoning_per_million: "",
-    request_unit_price: "",
-    page_unit_price: "",
-    source: "",
-    is_active: true,
-    reason: "",
-  });
   const [routeFeature, setRouteFeature] = useState<RouteFeature>("resume_extract_rich");
   const routeCapabilities = useMemo(() => routeCapabilityRequirements(routeFeature), [routeFeature]);
   const routeModels = useMemo(() => models.filter((model) => (
@@ -309,7 +269,6 @@ export function AdminAiConfigurationPanel({
   const selectedRouteFeature = routeFeatures.find((feature) => feature.value === routeFeature) ?? routeFeatures[0];
   const currentRoute = routes.find((route) => route.feature === routeFeature) ?? null;
   const activeRouteVersion = latestRouteVersion(routeVersions);
-  const activePriceCount = prices.filter((price) => price.is_active).length;
   const routeCapabilitiesLabel = routeCapabilities.join("、");
 
   useEffect(() => {
@@ -317,12 +276,6 @@ export function AdminAiConfigurationPanel({
       setModelDraft((draft) => ({ ...draft, provider_slug: enabledProviders[0].slug }));
     }
   }, [enabledProviders, modelDraft.provider_slug]);
-
-  useEffect(() => {
-    if (!priceDraft.model_slug && models[0]) {
-      setPriceDraft((draft) => ({ ...draft, model_slug: models[0].slug }));
-    }
-  }, [models, priceDraft.model_slug]);
 
   const loadRouteVersions = useCallback(async () => {
     if (section !== "route") return;
@@ -434,48 +387,6 @@ export function AdminAiConfigurationPanel({
         context_window_tokens: "", max_output_tokens: "", is_enabled: true, reason: "",
       });
       await finishSubmission(`模型「${created.display_name}」已创建。`);
-    } catch (submissionError) {
-      failSubmission(submissionError);
-    }
-  };
-
-  const submitPrice = async (event: FormEvent) => {
-    event.preventDefault();
-    beginSubmission("price");
-    try {
-      const effectiveFrom = requiredIsoDate(priceDraft.effective_from, "生效时间");
-      const effectiveTo = priceDraft.effective_to ? requiredIsoDate(priceDraft.effective_to, "结束时间") : undefined;
-      if (effectiveTo && new Date(effectiveTo) <= new Date(effectiveFrom)) throw new Error("结束时间必须晚于生效时间。");
-      const inputPerMillion = optionalDecimal(priceDraft.input_per_million, "每百万输入 Token 价格");
-      const cachedReadInputPerMillion = optionalDecimal(priceDraft.cached_read_input_per_million, "每百万缓存读取 Token 价格");
-      const cachedWriteInputPerMillion = optionalDecimal(priceDraft.cached_write_input_per_million, "每百万缓存写入 Token 价格");
-      const outputPerMillion = optionalDecimal(priceDraft.output_per_million, "每百万输出 Token 价格");
-      const reasoningPerMillion = optionalDecimal(priceDraft.reasoning_per_million, "每百万推理 Token 价格");
-      const requestUnitPrice = optionalDecimal(priceDraft.request_unit_price, "每请求价格");
-      const pageUnitPrice = optionalDecimal(priceDraft.page_unit_price, "每页价格");
-      const payload: AiModelPriceVersionCreateInput = {
-        model_slug: priceDraft.model_slug,
-        currency: priceDraft.currency.trim().toUpperCase(),
-        effective_from: effectiveFrom,
-        ...(effectiveTo ? { effective_to: effectiveTo } : {}),
-        ...(inputPerMillion !== undefined ? { input_per_million: inputPerMillion } : {}),
-        ...(cachedReadInputPerMillion !== undefined ? { cached_read_input_per_million: cachedReadInputPerMillion } : {}),
-        ...(cachedWriteInputPerMillion !== undefined ? { cached_write_input_per_million: cachedWriteInputPerMillion } : {}),
-        ...(outputPerMillion !== undefined ? { output_per_million: outputPerMillion } : {}),
-        ...(reasoningPerMillion !== undefined ? { reasoning_per_million: reasoningPerMillion } : {}),
-        ...(requestUnitPrice !== undefined ? { request_unit_price: requestUnitPrice } : {}),
-        ...(pageUnitPrice !== undefined ? { page_unit_price: pageUnitPrice } : {}),
-        source: priceDraft.source.trim(),
-        is_active: priceDraft.is_active,
-        reason: reasonValue(priceDraft.reason),
-      };
-      const created = await adminApi.createAiModelPrice(payload);
-      setPriceDraft({
-        model_slug: models[0]?.slug ?? "", currency: "CNY", effective_from: localDateTimeValue(), effective_to: "", input_per_million: "",
-        cached_read_input_per_million: "", cached_write_input_per_million: "", output_per_million: "", reasoning_per_million: "",
-        request_unit_price: "", page_unit_price: "", source: "", is_active: true, reason: "",
-      });
-      await finishSubmission(`模型「${created.model_slug}」的价格版本已创建。`);
     } catch (submissionError) {
       failSubmission(submissionError);
     }
@@ -623,7 +534,7 @@ export function AdminAiConfigurationPanel({
         <h2>按顺序配置，再发布路由</h2>
         <ol>
           <li>创建 Provider，只填写服务端的凭据引用。</li>
-          <li>为 Provider 注册模型和计费版本。</li>
+          <li>为 Provider 注册可路由的模型。</li>
           <li>为每个 AI 功能发布一条可追溯的路由版本。</li>
         </ol>
         <p>不会在浏览器中录入、保存或回显 API Key。请先在服务器环境中配置对应的凭据引用。</p>
@@ -631,7 +542,6 @@ export function AdminAiConfigurationPanel({
           <div><dt>Provider</dt><dd>{providers.length} 个</dd></div>
           <div><dt>可路由 Provider</dt><dd>{routableProviderCount} / {providers.length}</dd></div>
           <div><dt>模型</dt><dd>{models.length} 个</dd></div>
-          <div><dt>有效价格</dt><dd>{activePriceCount} 个</dd></div>
           <div><dt>已发布路由</dt><dd>{routes.length} 项</dd></div>
         </dl>
       </aside>
@@ -640,11 +550,11 @@ export function AdminAiConfigurationPanel({
         <header className="admin-section-heading">
           <div>
             <h2 id="admin-ai-config-title">配置与发布</h2>
-            <p>创建记录后不可直接覆盖；价格和路由会生成新的可审计版本。</p>
+            <p>创建记录后不可直接覆盖；模型与路由变更都会留下可审计版本。</p>
           </div>
         </header>
         <div className="admin-segmented admin-ai-config-tabs" aria-label="AI 配置操作">
-          {([['provider', '1 Provider'], ['model', '2 模型'], ['price', '3 价格'], ['route', '4 发布路由']] as Array<[ConfigurationSection, string]>).map(([value, label]) => (
+          {([['provider', '1 Provider'], ['model', '2 模型'], ['route', '3 发布路由']] as Array<[ConfigurationSection, string]>).map(([value, label]) => (
             <button aria-pressed={section === value} key={value} onClick={() => { setSection(value); setError(""); setNotice(""); }} type="button">{label}</button>
           ))}
         </div>
@@ -703,29 +613,6 @@ export function AdminAiConfigurationPanel({
           <div className="admin-form-actions"><button className="button button-primary" disabled={saving === "model" || !enabledProviders.length} type="submit">{saving === "model" ? <><i className="spinner" />正在创建</> : <><Icon name="plus" size={16} />创建模型</>}</button></div>
         </form>}
 
-        {section === "price" && <form className="admin-management-form admin-ai-config-form" onSubmit={submitPrice}>
-          <div className="admin-ai-form-heading"><div><h3>配置模型价格</h3><p>每次保存都会建立一个新的价格版本，运行账本会按调用时间匹配对应价格。</p></div><span className="admin-ai-step-count">{prices.length} 个历史版本</span></div>
-          {!models.length && <p className="admin-form-warning">请先配置至少一个模型，才能登记价格。</p>}
-          <div className="admin-form-grid">
-            <label><span>模型</span><select className="select-field" disabled={!models.length} onChange={(event) => setPriceDraft({ ...priceDraft, model_slug: event.target.value })} required value={priceDraft.model_slug}>{!models.length && <option value="">暂无模型</option>}{models.map((model) => <option key={model.model_id} value={model.slug}>{model.display_name} · {model.slug}</option>)}</select></label>
-            <label><span>币种</span><input autoCapitalize="characters" className="field" maxLength={3} onChange={(event) => setPriceDraft({ ...priceDraft, currency: event.target.value.toUpperCase() })} pattern="[A-Za-z]{3}" required value={priceDraft.currency} /></label>
-            <label><span>生效时间</span><input className="field" onChange={(event) => setPriceDraft({ ...priceDraft, effective_from: event.target.value })} required type="datetime-local" value={priceDraft.effective_from} /></label>
-            <label><span>结束时间（可选）</span><input className="field" onChange={(event) => setPriceDraft({ ...priceDraft, effective_to: event.target.value })} type="datetime-local" value={priceDraft.effective_to} /></label>
-            <label><span>每百万输入 Token</span><input className="field" min="0" onChange={(event) => setPriceDraft({ ...priceDraft, input_per_million: event.target.value })} placeholder="例如：2" step="any" type="number" value={priceDraft.input_per_million} /></label>
-            <label><span>每百万输出 Token</span><input className="field" min="0" onChange={(event) => setPriceDraft({ ...priceDraft, output_per_million: event.target.value })} placeholder="例如：8" step="any" type="number" value={priceDraft.output_per_million} /></label>
-            <label><span>每百万缓存读取 Token</span><input className="field" min="0" onChange={(event) => setPriceDraft({ ...priceDraft, cached_read_input_per_million: event.target.value })} step="any" type="number" value={priceDraft.cached_read_input_per_million} /></label>
-            <label><span>每百万缓存写入 Token</span><input className="field" min="0" onChange={(event) => setPriceDraft({ ...priceDraft, cached_write_input_per_million: event.target.value })} step="any" type="number" value={priceDraft.cached_write_input_per_million} /></label>
-            <label><span>每百万推理 Token</span><input className="field" min="0" onChange={(event) => setPriceDraft({ ...priceDraft, reasoning_per_million: event.target.value })} step="any" type="number" value={priceDraft.reasoning_per_million} /></label>
-            <label><span>每请求价格</span><input className="field" min="0" onChange={(event) => setPriceDraft({ ...priceDraft, request_unit_price: event.target.value })} step="any" type="number" value={priceDraft.request_unit_price} /></label>
-            <label><span>每页价格</span><input className="field" min="0" onChange={(event) => setPriceDraft({ ...priceDraft, page_unit_price: event.target.value })} step="any" type="number" value={priceDraft.page_unit_price} /></label>
-            <label><span>价格来源</span><input className="field" maxLength={120} onChange={(event) => setPriceDraft({ ...priceDraft, source: event.target.value })} placeholder="例如：供应商官网 2026-07" required value={priceDraft.source} /></label>
-          </div>
-          <fieldset className="admin-toggle-group"><legend>价格版本状态</legend><label><input checked={priceDraft.is_active} onChange={(event) => setPriceDraft({ ...priceDraft, is_active: event.target.checked })} type="checkbox" /><span><strong>立即启用该价格版本</strong><small>禁用版本不会用于新的成本归集。</small></span></label></fieldset>
-          <label className="admin-reason-field"><span>变更原因</span><textarea className="textarea-field" maxLength={500} onChange={(event) => setPriceDraft({ ...priceDraft, reason: event.target.value })} placeholder="例如：按供应商最新公开报价更新" required rows={3} value={priceDraft.reason} /></label>
-          {error && <p className="admin-form-error" role="alert">{error}</p>}{notice && <p className="admin-form-success" role="status">{notice}</p>}
-          <div className="admin-form-actions"><button className="button button-primary" disabled={saving === "price" || !models.length} type="submit">{saving === "price" ? <><i className="spinner" />正在创建</> : <><Icon name="plus" size={16} />创建价格版本</>}</button></div>
-        </form>}
-
         {section === "route" && <form aria-busy={routeVersionsState === "loading" || saving === "route"} className="admin-management-form admin-ai-config-form" onSubmit={prepareRouteReview}>
           <div className="admin-ai-form-heading"><div><h3>发布功能路由</h3><p>按顺序设置主模型与失败回退。每次发布都会生成不可变的新版本，不会静默改写旧版本。</p></div>{currentRoute && <AdminStatus status={currentRoute.is_enabled ? "enabled" : "disabled"} label={`当前 v${activeRouteVersion?.version ?? currentRoute.current_version ?? "—"}`} />}</div>
           {(routeVersionsState === "idle" || routeVersionsState === "loading") && <p className="admin-ai-route-load-state" role="status"><i aria-hidden="true" className="spinner" />正在加载当前路由版本，加载完成前不能发布。</p>}
@@ -736,7 +623,7 @@ export function AdminAiConfigurationPanel({
             <div className="admin-form-grid">
               <label><span>AI 功能</span><select className="select-field" onChange={(event) => selectRouteFeature(event.target.value as RouteFeature)} value={routeFeature}>{routeFeatures.map((feature) => <option key={feature.value} value={feature.value}>{feature.label}</option>)}</select><small>{selectedRouteFeature.detail}</small></label>
               <label><span>路由显示名称</span><input className="field" maxLength={120} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, display_name: event.target.value }))} required value={routeDraft.display_name} /></label>
-              <label className="admin-ai-field-wide"><span>用途说明（可选）</span><textarea className="textarea-field" maxLength={1000} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, description: event.target.value }))} placeholder="说明该路由的质量、速度或成本取舍" rows={3} value={routeDraft.description} /></label>
+              <label className="admin-ai-field-wide"><span>用途说明（可选）</span><textarea className="textarea-field" maxLength={1000} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, description: event.target.value }))} placeholder="说明该路由的质量、速度或稳定性取舍" rows={3} value={routeDraft.description} /></label>
               <label><span>提示词版本（可选）</span><input className="field" maxLength={120} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, prompt_revision: event.target.value }))} placeholder="例如：resume-extract-v3" value={routeDraft.prompt_revision} /></label>
             </div>
             <fieldset className="admin-ai-route-targets"><legend>路由目标</legend>

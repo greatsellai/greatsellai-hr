@@ -20,7 +20,7 @@ from datetime import datetime
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
-from app.models import AiModelProfile, AiRun, ApiInvocation
+from app.models import AiModelProfile, AiProviderProfile, AiRun, ApiInvocation
 
 
 class AiUsageReportingError(ValueError):
@@ -31,10 +31,12 @@ class AiUsageReportingError(ValueError):
 class AiUsageQuery:
     """Filters for a platform-owned AI usage report.
 
-    ``started_at_from`` and ``started_at_to`` are inclusive and apply to the
-    durable run start time.  ``organization_id=None`` intentionally means all
-    workspaces, which is why this query is only valid after platform-admin
-    authorization at the API boundary.
+    ``started_at_from`` and ``started_at_to`` are inclusive.  Run-list queries
+    apply them to the durable run start time; model-level usage aggregation
+    applies them to the actual provider invocation start time, which is when
+    the measured Token usage occurred.  ``organization_id=None`` intentionally
+    means all workspaces, which is why this query is only valid after
+    platform-admin authorization at the API boundary.
     """
 
     organization_id: str | None = None
@@ -83,7 +85,7 @@ class AiRunUsageSummary:
 
 @dataclass(frozen=True, slots=True)
 class AiUsageAggregate:
-    """Cost and call totals grouped by workspace, feature, and model.
+    """Usage and call totals grouped by workspace, feature, Provider, and model.
 
     ``reported_cost_cny_micros`` includes only CNY invocation costs whose
     value is known.  It intentionally does not turn unknown cost into zero.
@@ -94,6 +96,7 @@ class AiUsageAggregate:
 
     organization_id: str
     feature: str
+    provider_slug: str
     model_slug: str
     invocation_count: int
     costed_invocation_count: int
@@ -271,7 +274,7 @@ def summarize_platform_ai_usage(
     *,
     query: AiUsageQuery,
 ) -> list[AiUsageAggregate]:
-    """Aggregate AI calls and CNY costs by workspace, feature, and model.
+    """Aggregate AI calls and Token usage by workspace, feature, Provider, and model.
 
     Runs without an external invocation have no selected model and are
     intentionally absent from this model-level report.  They remain visible
@@ -325,6 +328,7 @@ def summarize_platform_ai_usage(
         select(
             AiRun.organization_id,
             AiRun.feature,
+            AiProviderProfile.slug.label("provider_slug"),
             AiModelProfile.slug.label("model_slug"),
             func.count(ApiInvocation.id).label("invocation_count"),
             func.coalesce(func.sum(case((has_cny_cost, 1), else_=0)), 0).label(
@@ -371,17 +375,32 @@ def summarize_platform_ai_usage(
             ),
         )
         .join(AiModelProfile, AiModelProfile.id == ApiInvocation.model_profile_id)
-        .group_by(AiRun.organization_id, AiRun.feature, AiModelProfile.slug)
-        .order_by(AiRun.organization_id, AiRun.feature, AiModelProfile.slug)
+        .join(
+            AiProviderProfile,
+            AiProviderProfile.id == ApiInvocation.provider_profile_id,
+        )
+        .group_by(
+            AiRun.organization_id,
+            AiRun.feature,
+            AiProviderProfile.slug,
+            AiModelProfile.slug,
+        )
+        .order_by(
+            AiRun.organization_id,
+            AiRun.feature,
+            AiProviderProfile.slug,
+            AiModelProfile.slug,
+        )
         # Platform-only read path.  See module-level security boundary.
         .execution_options(skip_organization_scope=True)
     )
-    statement = _apply_run_filters(statement, query)
+    statement = _apply_usage_summary_filters(statement, query)
     rows = session.execute(statement).mappings()
     return [
         AiUsageAggregate(
             organization_id=str(row["organization_id"]),
             feature=str(row["feature"]),
+            provider_slug=str(row["provider_slug"]),
             model_slug=str(row["model_slug"]),
             invocation_count=int(row["invocation_count"] or 0),
             costed_invocation_count=int(row["costed_invocation_count"] or 0),
@@ -424,6 +443,26 @@ def _apply_run_filters(statement: object, query: AiUsageQuery) -> object:
         statement = statement.where(AiRun.started_at >= query.started_at_from)
     if query.started_at_to is not None:
         statement = statement.where(AiRun.started_at <= query.started_at_to)
+    return statement
+
+
+def _apply_usage_summary_filters(statement: object, query: AiUsageQuery) -> object:
+    """Apply platform filters to model usage without blurring time semantics.
+
+    Workspace and feature remain properties of the durable AI run.  The date
+    range deliberately uses the provider invocation timestamp so a long-lived
+    run is counted in the period where its measured Token use actually
+    happened.
+    """
+
+    if query.organization_id is not None:
+        statement = statement.where(AiRun.organization_id == query.organization_id)
+    if query.feature is not None:
+        statement = statement.where(AiRun.feature == query.feature)
+    if query.started_at_from is not None:
+        statement = statement.where(ApiInvocation.started_at >= query.started_at_from)
+    if query.started_at_to is not None:
+        statement = statement.where(ApiInvocation.started_at <= query.started_at_to)
     return statement
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AiModelProfile, AiProviderProfile, AiRun, ApiInvocation, Organization
@@ -242,6 +243,7 @@ def test_platform_reporting_aggregates_cost_status_and_uncertain_billing(ai_clie
 
         score = by_feature["resume_score"]
         assert score.organization_id == ORG_A_ID
+        assert score.provider_slug == "usage-reporting-provider"
         assert score.model_slug == "usage-reporting-primary"
         assert score.invocation_count == 1
         assert score.costed_invocation_count == 1
@@ -261,6 +263,7 @@ def test_platform_reporting_aggregates_cost_status_and_uncertain_billing(ai_clie
 
         match = by_feature["jd_match"]
         assert match.organization_id == ORG_A_ID
+        assert match.provider_slug == "usage-reporting-provider"
         assert match.model_slug == "usage-reporting-secondary"
         assert match.invocation_count == 2
         assert match.costed_invocation_count == 1
@@ -293,6 +296,111 @@ def test_platform_reporting_aggregates_cost_status_and_uncertain_billing(ai_clie
         assert other_workspace_score.total_tokens == 0
 
 
+def test_platform_usage_summary_filters_tokens_by_provider_invocation_time(ai_client) -> None:
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        _seed_usage_ledger(session)
+        set_organization_context(session, ORG_A_ID)
+        score_run = session.scalar(
+            select(AiRun).where(
+                AiRun.organization_id == ORG_A_ID,
+                AiRun.feature == "resume_score",
+            )
+        )
+        assert score_run is not None
+        score_invocation = session.scalar(
+            select(ApiInvocation).where(ApiInvocation.ai_run_id == score_run.id)
+        )
+        assert score_invocation is not None
+        # The durable run was created on day 2, but its provider call happened
+        # on day 5.  A Token report must follow the call, not the run shell.
+        score_invocation.started_at = _at(5)
+        session.commit()
+
+        aggregates = summarize_platform_ai_usage(
+            session,
+            query=AiUsageQuery(started_at_from=_at(5), started_at_to=_at(5)),
+        )
+
+        assert [(row.provider_slug, row.model_slug, row.total_tokens) for row in aggregates] == [
+            ("usage-reporting-provider", "usage-reporting-primary", 138),
+        ]
+        assert list_platform_ai_run_summaries(
+            session,
+            query=AiUsageQuery(started_at_from=_at(5), started_at_to=_at(5)),
+        ) == []
+
+
+def test_platform_usage_summary_keeps_provider_model_token_rows_separate(ai_client) -> None:
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        _seed_usage_ledger(session)
+        set_organization_context(session, ORG_A_ID)
+        alternate_provider = AiProviderProfile(
+            slug="usage-reporting-alternate-provider",
+            display_name="Usage reporting alternate provider",
+            driver="openai_compatible",
+            base_url="https://alternate-provider.example.test/v1/chat/completions",
+            credential_ref="usage-reporting-alternate-credential",
+        )
+        alternate_model = AiModelProfile(
+            provider_profile=alternate_provider,
+            slug="usage-reporting-alternate-model",
+            display_name="Usage reporting alternate model",
+            provider_model_id="alternate-model",
+        )
+        session.add_all([alternate_provider, alternate_model])
+        session.flush()
+        score_run = session.scalar(
+            select(AiRun).where(
+                AiRun.organization_id == ORG_A_ID,
+                AiRun.feature == "resume_score",
+            )
+        )
+        assert score_run is not None
+        session.add(
+            ApiInvocation(
+                ai_run_id=score_run.id,
+                attempt_no=2,
+                provider_profile_id=alternate_provider.id,
+                model_profile_id=alternate_model.id,
+                provider_driver="openai_compatible",
+                provider_model_id="alternate-model",
+                status="succeeded",
+                started_at=_at(2),
+                completed_at=_at(2),
+                usage_source="provider",
+                input_tokens=7,
+                cached_read_input_tokens=2,
+                cached_write_input_tokens=1,
+                output_tokens=11,
+                reasoning_tokens=4,
+            )
+        )
+        session.commit()
+
+        aggregates = summarize_platform_ai_usage(
+            session,
+            query=AiUsageQuery(
+                organization_id=ORG_A_ID,
+                feature="resume_score",
+            ),
+        )
+
+        assert [
+            (
+                row.provider_slug,
+                row.model_slug,
+                row.invocation_count,
+                row.total_tokens,
+            )
+            for row in aggregates
+        ] == [
+            ("usage-reporting-alternate-provider", "usage-reporting-alternate-model", 1, 25),
+            ("usage-reporting-provider", "usage-reporting-primary", 1, 138),
+        ]
+
+
 def test_platform_usage_api_returns_token_totals_without_business_content(ai_client) -> None:
     database = ai_client.app.state.database
     with database.session_factory() as session:
@@ -311,11 +419,18 @@ def test_platform_usage_api_returns_token_totals_without_business_content(ai_cli
 
     usage_response = ai_client.get(
         "/v1/platform/ai/usage/summary",
-        params={"organization_id": ORG_A_ID},
+        params={
+            "organization_id": ORG_A_ID,
+            "started_at_from": _at(2).isoformat(),
+            "started_at_to": _at(2).isoformat(),
+        },
     )
     assert usage_response.status_code == 200, usage_response.text
+    assert len(usage_response.json()) == 1
     usage_by_feature = {item["feature"]: item for item in usage_response.json()}
     score = usage_by_feature["resume_score"]
+    assert score["provider_slug"] == "usage-reporting-provider"
+    assert score["model_slug"] == "usage-reporting-primary"
     assert score["input_tokens"] == 100
     assert score["cached_read_input_tokens"] == 10
     assert score["cached_write_input_tokens"] == 5

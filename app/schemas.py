@@ -758,10 +758,11 @@ class AiRunUsageSummaryResponse(ApiModel):
 
 
 class AiUsageAggregateResponse(ApiModel):
-    """Platform-only aggregate by workspace, feature, and model profile."""
+    """Platform-only aggregate by workspace, feature, Provider, and model."""
 
     organization_id: str
     feature: str
+    provider_slug: str
     model_slug: str
     invocation_count: int
     costed_invocation_count: int

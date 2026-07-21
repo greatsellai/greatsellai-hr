@@ -1723,7 +1723,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         _: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
     ) -> list[AiUsageAggregateResponse]:
-        """Aggregate platform AI usage by workspace, feature, and model."""
+        """Aggregate platform AI usage by workspace, feature, Provider, and model."""
 
         try:
             rows = summarize_platform_ai_usage(
@@ -1734,7 +1734,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     started_at_from=started_at_from,
                     started_at_to=started_at_to,
                     # Aggregation is not paginated; it has one bounded group
-                    # per workspace/feature/model and does not expose rows.
+                    # per workspace/feature/Provider/model and does not expose rows.
                     limit=500,
                 ),
             )
@@ -1747,6 +1747,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             AiUsageAggregateResponse(
                 organization_id=row.organization_id,
                 feature=row.feature,
+                provider_slug=row.provider_slug,
                 model_slug=row.model_slug,
                 invocation_count=row.invocation_count,
                 costed_invocation_count=row.costed_invocation_count,

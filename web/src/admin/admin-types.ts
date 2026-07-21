@@ -289,42 +289,6 @@ export interface AiRoutePolicyVersion {
   published_by_user_id: string | null;
 }
 
-export interface AiModelPriceVersion {
-  price_version_id: string;
-  model_id: string;
-  model_slug: string;
-  currency: string;
-  effective_from: string;
-  effective_to: string | null;
-  input_per_million: string | number | null;
-  cached_read_input_per_million: string | number | null;
-  cached_write_input_per_million: string | number | null;
-  output_per_million: string | number | null;
-  reasoning_per_million: string | number | null;
-  request_unit_price: string | number | null;
-  page_unit_price: string | number | null;
-  source: string;
-  is_active: boolean;
-  created_at: string;
-}
-
-export interface AiModelPriceVersionCreateInput {
-  model_slug: string;
-  currency: string;
-  effective_from: string;
-  effective_to?: string;
-  input_per_million?: string;
-  cached_read_input_per_million?: string;
-  cached_write_input_per_million?: string;
-  output_per_million?: string;
-  reasoning_per_million?: string;
-  request_unit_price?: string;
-  page_unit_price?: string;
-  source: string;
-  is_active: boolean;
-  reason?: string;
-}
-
 export interface AiRunUsage {
   run_id: string;
   organization_id: string;
@@ -344,6 +308,7 @@ export interface AiRunUsage {
 export interface AiUsageAggregate {
   organization_id: string;
   feature: string;
+  provider_slug: string;
   model_slug: string;
   invocation_count: number;
   costed_invocation_count: number;

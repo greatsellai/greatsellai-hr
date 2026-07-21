@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -588,58 +589,171 @@ def _normalized_mailbox_name(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).strip().split()).casefold()
 
 
-def _contains_explicit_sync_intent(normalized_message: str) -> bool:
-    """Recognize a user-authorized sync request, never a model guess.
+_SYNC_ACTION_PATTERN = r"(?:同步|拉取|刷新|收取)"
+_ENGLISH_SYNC_ACTION_ALTERNATION = r"sync|pull|refresh|fetch|collect"
+_ENGLISH_SYNC_ACTION_PATTERN = rf"(?:{_ENGLISH_SYNC_ACTION_ALTERNATION})"
+_SYNC_COMMAND_LEADING_PATTERN = (
+    r"(?:(?:麻烦你帮我|麻烦帮我|请帮我|请帮忙|劳烦你|麻烦你|帮我|帮忙|"
+    r"劳烦|麻烦|请你|请|给我|替我|重新|先|只|继续|再|现在|立即|马上|立刻)\s*)*"
+)
+_ENGLISH_SYNC_COMMAND_LEADING_PATTERN = (
+    r"(?:(?:please|kindly|help\s+me|again|first|continue|now)\s+)*"
+)
+_ENGLISH_SYNC_POLITE_QUESTION_LEADING_PATTERN = (
+    r"(?:(?:could|would|can)\s+you\s+)(?:please\s+)?"
+)
+_SYNC_COMMAND_END_PATTERN = r"[。.!！]*"
+_SYNC_TARGET_FIRST_ACTION_SUFFIX_PATTERN = r"(?:\s*(?:一下|下))?[。.!！]*"
+_SYNC_CLAUSE_SEPARATOR = re.compile(
+    r"\s*(?:[,，;；。.!！]\s*|\bbut\b|\bhowever\b|但是|不过|但)\s*"
+)
+_NEGATIVE_SYNC_POLARITY_PATTERN = re.compile(
+    rf"(?:不要|不用|无需|不需要|不必|暂不|先不|不再|先别|别再|别|勿|停止|"
+    rf"暂停|取消|撤销|终止|不能|无法|未|没|不)\s*"
+    rf"(?:(?:继续|再|帮我|给我|替我|马上|立即|现在|对|的)\s*)*{_SYNC_ACTION_PATTERN}"
+    rf"|{_SYNC_ACTION_PATTERN}.*(?:停止|暂停|取消|撤销|终止)"
+)
+_TARGET_NON_COMMAND_STATE_PATTERN = re.compile(
+    r"(?:已完成|完成了|完成|需要多久|多久|多长时间|不行|超时|正在进行|进行中|"
+    r"正在|卡住|没反应|失败|报错|出错|异常|错误|没成功|未完成|不成功)"
+)
+_ENGLISH_NEGATIVE_SYNC_POLARITY_PATTERN = re.compile(
+    rf"\b(?:do\s+not|don't|dont|not|never|no|stop|cancel|pause)\b.*"
+    rf"\b(?:{_ENGLISH_SYNC_ACTION_ALTERNATION})\b"
+    rf"|\b(?:{_ENGLISH_SYNC_ACTION_ALTERNATION})\b.*\b(?:cancelled|canceled|stopped|paused)\b"
+)
+_ENGLISH_TARGET_NON_COMMAND_STATE_PATTERN = re.compile(
+    r"\b(?:not|failed|failure|errors?|issues?|completed|complete|done|how\s+long|"
+    r"timeouts?|timed\s+out|running|in\s+progress|stuck|not\s+working|no\s+response|"
+    r"status|progress|reason|why|how)\b"
+)
+_TARGET_EXCLUSION_PATTERN = re.compile(
+    r"(?:除了|除外|不含|排除)|\b(?:except|unless|excluding?|without|skip|omit)\b"
+)
+_SAFE_SYNC_FOLLOWUP_PATTERN = re.compile(
+    r"^(?:完成后(?:告诉我(?:结果)?|通知我(?:结果)?))$"
+)
+_ALL_MAILBOX_TARGET_PATTERN = (
+    r"(?:(?:全部|所有|全量)(?:已启用的|启用的)?"
+    r"(?:收件邮箱|邮箱|收件箱|收件通道|邮箱通道|通道)"
+    r"|(?:all|every)\s+(?:enabled\s+)?(?:mailboxes?|inboxes?))"
+)
+_ALL_MAILBOX_EXCLUSION_PATTERN = re.compile(
+    r"(?:除了|除外|不含|排除|仅限|只|仅)|\b(?:except|unless|only)\b"
+)
 
-    Mailbox synchronization has an external side effect (a durable worker
-    task).  The model's tool call is not sufficient authorization: the
-    recruiter must explicitly request synchronization and must not negate it.
-    """
 
-    negative_markers = (
-        "不要同步",
-        "不用同步",
-        "无需同步",
-        "不需要同步",
-        "暂不同步",
-        "别同步",
-        "停止同步",
-        "取消同步",
-        "do not sync",
-        "don't sync",
-        "dont sync",
-        "no sync",
-    )
-    if any(marker in normalized_message for marker in negative_markers):
+def _sync_clauses(normalized_message: str) -> list[str]:
+    """Split only at strong boundaries so polarity remains target-local."""
+
+    return [
+        clause.strip()
+        for clause in _SYNC_CLAUSE_SEPARATOR.split(normalized_message)
+        if clause.strip()
+    ]
+
+
+def _clause_negates_sync_target(
+    clause: str,
+    *,
+    target_pattern: re.Pattern[str],
+) -> bool:
+    if target_pattern.search(clause) is None:
         return False
-    return any(marker in normalized_message for marker in ("同步", "拉取", "刷新", "收取", "sync"))
+    clause_without_target = target_pattern.sub("", clause)
+    return bool(
+        _NEGATIVE_SYNC_POLARITY_PATTERN.search(clause_without_target)
+        or _TARGET_NON_COMMAND_STATE_PATTERN.search(clause_without_target)
+        or _ENGLISH_NEGATIVE_SYNC_POLARITY_PATTERN.search(clause_without_target)
+        or _ENGLISH_TARGET_NON_COMMAND_STATE_PATTERN.search(clause_without_target)
+        or _TARGET_EXCLUSION_PATTERN.search(clause_without_target)
+    )
+
+
+def _clause_is_explicit_sync_command(
+    clause: str,
+    *,
+    target_regex: str,
+) -> bool:
+    """Match a deliberately small positive-command grammar around one target."""
+
+    chinese_action_first = re.compile(
+        rf"^{_SYNC_COMMAND_LEADING_PATTERN}{_SYNC_ACTION_PATTERN}\s*"
+        rf"{target_regex}{_SYNC_COMMAND_END_PATTERN}$"
+    )
+    chinese_target_first = re.compile(
+        rf"^{_SYNC_COMMAND_LEADING_PATTERN}(?:把|将)\s*{target_regex}\s*"
+        rf"(?:(?:重新|继续|再|先)\s*)?{_SYNC_ACTION_PATTERN}"
+        rf"{_SYNC_TARGET_FIRST_ACTION_SUFFIX_PATTERN}$"
+    )
+    english_action_first = re.compile(
+        rf"^{_ENGLISH_SYNC_COMMAND_LEADING_PATTERN}{_ENGLISH_SYNC_ACTION_PATTERN}\s+"
+        rf"{target_regex}{_SYNC_COMMAND_END_PATTERN}$"
+    )
+    english_polite_question = re.compile(
+        rf"^{_ENGLISH_SYNC_POLITE_QUESTION_LEADING_PATTERN}"
+        rf"{_ENGLISH_SYNC_ACTION_PATTERN}\s+{target_regex}"
+        rf"\s*[?？]$"
+    )
+    return any(
+        pattern.fullmatch(clause) is not None
+        for pattern in (
+            chinese_action_first,
+            chinese_target_first,
+            english_action_first,
+            english_polite_question,
+        )
+    )
+
+
+def _explicitly_requests_target_sync(message: str, *, target_regex: str) -> bool:
+    normalized_message = _normalized_mailbox_name(message)
+    clauses = _sync_clauses(normalized_message)
+    target_pattern = re.compile(target_regex)
+    command_seen = False
+    followup_seen = False
+    for clause in clauses:
+        if target_pattern.search(clause) is not None:
+            if command_seen or followup_seen:
+                return False
+            if _clause_negates_sync_target(clause, target_pattern=target_pattern):
+                return False
+            if not _clause_is_explicit_sync_command(
+                clause,
+                target_regex=target_regex,
+            ):
+                return False
+            command_seen = True
+            continue
+        if not command_seen or not _SAFE_SYNC_FOLLOWUP_PATTERN.fullmatch(clause):
+            return False
+        followup_seen = True
+    return command_seen
 
 
 def _explicitly_requests_named_mailbox_sync(message: str, mailbox_name: str) -> bool:
-    normalized_message = _normalized_mailbox_name(message)
     normalized_name = _normalized_mailbox_name(mailbox_name)
-    return bool(
-        normalized_name
-        and normalized_name in normalized_message
-        and _contains_explicit_sync_intent(normalized_message)
+    if not normalized_name:
+        return False
+    return _explicitly_requests_target_sync(
+        message,
+        target_regex=re.escape(normalized_name),
     )
 
 
 def _explicitly_requests_all_mailbox_sync(message: str) -> bool:
-    normalized = _normalized_mailbox_name(message)
-    if not _contains_explicit_sync_intent(normalized):
+    normalized_message = _normalized_mailbox_name(message)
+    if _ALL_MAILBOX_EXCLUSION_PATTERN.search(normalized_message):
         return False
     if any(
-        marker in normalized
-        for marker in ("all mailbox", "all mailboxes", "all inbox", "all inboxes", "every mailbox", "every inbox")
+        _NEGATIVE_SYNC_POLARITY_PATTERN.search(clause)
+        or _ENGLISH_NEGATIVE_SYNC_POLARITY_PATTERN.search(clause)
+        for clause in _sync_clauses(normalized_message)
     ):
-        return True
-    return (
-        any(marker in normalized for marker in ("全部", "所有", "全量"))
-        and any(
-            marker in normalized
-            for marker in ("邮箱", "收件箱", "收件邮箱", "收件通道", "邮箱通道", "通道")
-        )
+        return False
+    return _explicitly_requests_target_sync(
+        normalized_message,
+        target_regex=_ALL_MAILBOX_TARGET_PATTERN,
     )
 
 

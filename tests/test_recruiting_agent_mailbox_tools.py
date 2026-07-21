@@ -62,6 +62,205 @@ def _create_mailbox(
     return response.json()
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "查看所有邮箱同步状态",
+        "为什么所有邮箱没有同步？",
+        "不要刷新所有邮箱",
+        "不用拉取全部收件箱",
+        "请停止同步所有收件邮箱",
+        "取消收取全部邮箱",
+        "查询全部收件邮箱的同步进度",
+        "同步所有邮箱的状态",
+        "所有邮箱同步了吗",
+        "同步所有邮箱失败了",
+        "同步所有邮箱报错了",
+        "同步所有邮箱出错了",
+        "同步所有邮箱异常",
+        "sync failed all mailboxes",
+        "sync all mailboxes failure",
+        "sync all mailboxes errors",
+        "sync all mailboxes issue",
+        "同步所有邮箱已完成",
+        "同步所有邮箱需要多久",
+        "同步所有邮箱不行",
+        "同步所有邮箱超时",
+        "同步所有邮箱正在进行",
+        "同步所有邮箱卡住",
+        "同步所有邮箱没反应",
+        "同步所有邮箱，可以吗？",
+        "同步所有邮箱，行不行",
+        "同步所有邮箱，你觉得呢？",
+        "同步所有邮箱，算了",
+        "同步所有邮箱，取消",
+        "同步所有邮箱，刚才失败了",
+        "同步所有邮箱，怎么回事？",
+        "sync all mailboxes, never mind",
+        "sync all mailboxes, cancel that",
+    ],
+)
+def test_all_mailbox_sync_authorization_rejects_non_command_language(
+    message: str,
+) -> None:
+    assert not recruiting_agent_service._explicitly_requests_all_mailbox_sync(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "同步所有邮箱，除了测试邮箱",
+        "同步所有邮箱，测试邮箱除外",
+        "同步所有邮箱，不含测试邮箱",
+        "同步所有邮箱，排除测试邮箱",
+        "sync all mailboxes except test mailbox",
+        "sync all mailboxes unless it is the test mailbox",
+        "only sync all mailboxes",
+        "同步所有邮箱，不同步测试邮箱",
+        "sync all mailboxes, do not sync the test mailbox",
+        "只同步所有邮箱",
+    ],
+)
+def test_all_mailbox_sync_authorization_rejects_exclusions(message: str) -> None:
+    assert not recruiting_agent_service._explicitly_requests_all_mailbox_sync(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "查看校招邮箱的同步状态",
+        "为什么校招邮箱没有同步？",
+        "不要刷新校招邮箱",
+        "不用拉取校招邮箱",
+        "请停止同步校招邮箱",
+        "取消收取校招邮箱",
+        "查询校招邮箱同步进度",
+        "校招邮箱同步了吗",
+        "同步校招邮箱失败了",
+        "同步校招邮箱报错了",
+        "sync 校招邮箱 failed",
+        "同步校招邮箱已完成",
+        "同步校招邮箱需要多久",
+        "同步校招邮箱不行",
+        "同步校招邮箱超时",
+        "同步校招邮箱正在进行",
+        "同步校招邮箱卡住",
+        "同步校招邮箱没反应",
+        "同步校招邮箱，可以吗？",
+        "同步校招邮箱，行不行",
+        "同步校招邮箱，你觉得呢？",
+        "同步校招邮箱，算了",
+        "同步校招邮箱，取消",
+        "同步校招邮箱，刚才失败了",
+        "同步校招邮箱，怎么回事？",
+        "sync 校招邮箱, never mind",
+        "sync 校招邮箱, cancel that",
+    ],
+)
+def test_named_mailbox_sync_authorization_rejects_non_command_language(
+    message: str,
+) -> None:
+    assert not recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        message,
+        "校招邮箱",
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "同步全部收件邮箱",
+        "请同步所有收件邮箱",
+        "请帮我刷新全部收件邮箱",
+        "拉取所有收件箱",
+        "please sync all mailboxes",
+        "can you sync all mailboxes?",
+        "同步所有邮箱，完成后通知我",
+    ],
+)
+def test_all_mailbox_sync_authorization_accepts_explicit_commands(
+    message: str,
+) -> None:
+    assert recruiting_agent_service._explicitly_requests_all_mailbox_sync(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "同步校招邮箱",
+        "请帮我刷新校招邮箱",
+        "请拉取校招邮箱",
+        "麻烦收取校招邮箱",
+        "please sync 校招邮箱",
+        "请把校招邮箱同步一下",
+        "重新同步校招邮箱",
+        "先同步校招邮箱",
+        "只同步校招邮箱",
+        "继续同步校招邮箱",
+        "再同步校招邮箱",
+        "同步校招邮箱，完成后告诉我结果",
+        "同步校招邮箱，完成后通知我",
+        "could you sync 校招邮箱?",
+        "would you please refresh 校招邮箱？",
+    ],
+)
+def test_named_mailbox_sync_authorization_accepts_explicit_commands(
+    message: str,
+) -> None:
+    assert recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        message,
+        "校招邮箱",
+    )
+
+
+def test_named_mailbox_sync_authorization_binds_polarity_to_exact_target() -> None:
+    message = "同步校招邮箱，不同步社招邮箱"
+
+    assert not recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        message,
+        "校招邮箱",
+    )
+    assert not recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        message,
+        "社招邮箱",
+    )
+    assert not recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        "同步社招邮箱，不同步社招邮箱",
+        "社招邮箱",
+    )
+    assert not recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        "同步社招邮箱，社招邮箱同步取消",
+        "社招邮箱",
+    )
+    assert not recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        "同步社招邮箱，could you not sync 社招邮箱?",
+        "社招邮箱",
+    )
+
+
+def test_named_mailbox_sync_authorization_does_not_guess_overlapping_name() -> None:
+    message = "同步校招邮箱吧"
+
+    assert not recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        message,
+        "校招邮箱",
+    )
+    assert recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        message,
+        "校招邮箱吧",
+    )
+
+
+@pytest.mark.parametrize("mailbox_name", ["历史邮箱", "状态邮箱", "异常邮箱"])
+def test_named_mailbox_sync_authorization_does_not_reject_words_inside_name(
+    mailbox_name: str,
+) -> None:
+    assert recruiting_agent_service._explicitly_requests_named_mailbox_sync(
+        f"同步{mailbox_name}",
+        mailbox_name,
+    )
+
+
 def test_agent_queries_mailbox_state_without_receiving_connection_or_attachment_data(
     ai_client: TestClient,
     monkeypatch,

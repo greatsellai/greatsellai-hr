@@ -105,14 +105,15 @@ git push --force-with-lease origin <branch>
 
 ## 5. 发布与回滚
 
-服务器 `/home/ubuntu/resume-screening-v3` 只接收已合并并带生产标签的源码。标准顺序：
+服务器 `/home/ubuntu/resume-screening-v3` 只接收已合并并带生产标签的源码。标准顺序是：
 
-```bash
-git switch main
-git pull --ff-only origin main
-scripts/create-production-tag.sh
-scripts/deploy-production.sh prod-YYYYMMDD-<commit短码> --ssh-key /path/to/key
-```
+1. PR 合并到 `main`。
+2. `main` 的四项 CI 检查全部成功。
+3. GitHub Actions 自动创建不可变生产标签并部署该提交。
+
+需要重试或回滚时，使用 GitHub Actions 中的 **Production deploy** 与
+**Production rollback**；本地 `scripts/create-production-tag.sh` 和
+`scripts/deploy-production.sh` 仅用于受控应急恢复，完整规则见 `docs/CI_CD.md`。
 
 部署脚本不传输或删除 `.env.production`、数据库、候选人 PDF 和 Docker 卷。迁移发布前
 必须完成备份；上线后验证健康、HTTPS、登录、关键 API 和 PDF 鉴权。回滚操作见

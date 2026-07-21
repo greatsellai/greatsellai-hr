@@ -104,6 +104,9 @@ class AppSettings:
     public_app_url: str | None = None
     tencent_ses_region: str = "ap-guangzhou"
     tencent_ses_verification_template_id: int | None = None
+    # Password reset mail uses its own action and therefore its own approved
+    # Tencent SES template. SMTP providers render the reset message directly.
+    tencent_ses_password_reset_template_id: int | None = None
     # Temporary transactional sender backed by a dedicated Feishu public
     # mailbox.  Its app-specific SMTP password must remain environment-only.
     feishu_smtp_host: str = "smtp.feishu.cn"
@@ -115,6 +118,7 @@ class AppSettings:
     email_verification_ttl_seconds: int = 24 * 60 * 60
     email_verification_resend_cooldown_seconds: int = 60
     email_verification_daily_limit: int = 5
+    password_reset_ttl_seconds: int = 60 * 60
     # Public self-registration has separate global, client, and email limits.
     # The limits are persisted in the database so multiple API replicas share
     # the same budget.  Forwarded client headers are accepted only when the
@@ -270,6 +274,9 @@ class AppSettings:
             tencent_ses_verification_template_id=_optional_positive_int(
                 "TENCENT_SES_VERIFICATION_TEMPLATE_ID"
             ),
+            tencent_ses_password_reset_template_id=_optional_positive_int(
+                "TENCENT_SES_PASSWORD_RESET_TEMPLATE_ID"
+            ),
             feishu_smtp_host=os.getenv("RESUME_V3_FEISHU_SMTP_HOST", "smtp.feishu.cn").strip(),
             feishu_smtp_port=int(os.getenv("RESUME_V3_FEISHU_SMTP_PORT", "465")),
             feishu_smtp_tls_mode=os.getenv("RESUME_V3_FEISHU_SMTP_TLS_MODE", "ssl").strip().lower(),
@@ -286,6 +293,9 @@ class AppSettings:
             ),
             email_verification_daily_limit=int(
                 os.getenv("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT", "5")
+            ),
+            password_reset_ttl_seconds=int(
+                os.getenv("RESUME_V3_PASSWORD_RESET_TTL_SECONDS", str(60 * 60))
             ),
             registration_rate_limit_global_limit=int(
                 os.getenv("RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_LIMIT", "20")
@@ -492,6 +502,8 @@ class AppSettings:
             )
         if self.email_verification_daily_limit < 1:
             raise ValueError("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT must be at least 1")
+        if self.password_reset_ttl_seconds < 5 * 60:
+            raise ValueError("RESUME_V3_PASSWORD_RESET_TTL_SECONDS must be at least 300")
         for name, value in (
             ("RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_LIMIT", self.registration_rate_limit_global_limit),
             ("RESUME_V3_REGISTRATION_RATE_LIMIT_CLIENT_LIMIT", self.registration_rate_limit_client_limit),

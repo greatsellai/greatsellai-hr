@@ -12,6 +12,7 @@ from app.config import AppSettings
 from app.main import create_app
 from app.services.transactional_email import (
     FeishuSmtpTransactionalEmailProvider,
+    PasswordResetDelivery,
     TransactionalEmailError,
     VerificationDelivery,
     build_transactional_email_provider,
@@ -38,6 +39,14 @@ def _delivery() -> VerificationDelivery:
     return VerificationDelivery(
         recipient="candidate@example.test",
         verification_url="https://hr.example.test/verify-email?token=fixture-token",
+        expires_minutes=60,
+    )
+
+
+def _password_reset_delivery() -> PasswordResetDelivery:
+    return PasswordResetDelivery(
+        recipient="candidate@example.test",
+        reset_url="https://hr.example.test/reset-password?token=fixture-token",
         expires_minutes=60,
     )
 
@@ -125,6 +134,30 @@ def test_feishu_smtp_ssl_provider_sends_a_multipart_verification_email(
     assert message["Subject"] == "验证你的 GreatSell AI 工作邮箱"
     assert "fixture-token" in message.get_body(preferencelist=("plain",)).get_content()
     assert "验证工作邮箱" in message.get_body(preferencelist=("html",)).get_content()
+
+
+def test_feishu_smtp_ssl_provider_sends_a_multipart_password_reset_email(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _SslSmtpCapture.instances.clear()
+    monkeypatch.setattr(
+        "app.services.transactional_email.smtplib.SMTP_SSL",
+        _SslSmtpCapture,
+    )
+    settings = _settings(tmp_path)
+    provider = build_transactional_email_provider(settings)
+
+    provider.send_password_reset(_password_reset_delivery())
+
+    captured = _SslSmtpCapture.instances[-1]
+    assert captured.message_args is not None
+    message, from_address, recipients = captured.message_args
+    assert from_address == "noreply@example.test"
+    assert recipients == ["candidate@example.test"]
+    assert message["Subject"] == "重置你的 GreatSell AI 登录密码"
+    assert "fixture-token" in message.get_body(preferencelist=("plain",)).get_content()
+    assert "设置新密码" in message.get_body(preferencelist=("html",)).get_content()
 
 
 def test_feishu_smtp_starttls_uses_tls_before_authentication(

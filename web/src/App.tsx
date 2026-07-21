@@ -93,7 +93,7 @@ type MatchMode = "all" | "any";
 type KeywordMode = "broad" | "precise";
 type ToastKind = "success" | "error";
 type JobWorkspaceMode = "create" | "view";
-type AuthRoute = "login" | "register" | "forgot-password" | "verify-email";
+type AuthRoute = "login" | "register" | "forgot-password" | "reset-password" | "verify-email";
 type AppSurface =
   | { kind: "landing" }
   | { kind: "platform" }
@@ -690,6 +690,7 @@ function humanizeError(error: unknown): string {
       email_verification_resend_limit_reached: "今天的验证邮件发送次数已达到上限，请明天再试。",
       invalid_registration_input: "请检查企业名称、姓名、邮箱和密码后重试。",
       password_too_short: "密码至少需要 8 个字符。",
+      password_reset_invalid_or_expired: "这条重置链接无效、已过期或已被使用。请重新申请新的链接。",
       trial_expired: "试用期已结束。数据已保留，请联系 GreatSell AI 团队继续使用。",
       organization_access_suspended: "当前工作区暂不可用，请联系 GreatSell AI 团队。",
       invalid_admin_token: "管理口令无效。请在右上角连接配置中更新后重试。",
@@ -1233,7 +1234,7 @@ function workspaceHref(path = "") {
   // calls to action always cross to the dedicated HR application origin, so
   // the root domain never needs to expose the authenticated HR API.
   if (window.location.hostname === "hr.greatsellai.net") {
-    if (["/login", "/register", "/forgot-password"].includes(normalizedPath)) {
+    if (["/login", "/register", "/forgot-password", "/reset-password"].includes(normalizedPath)) {
       return normalizedPath;
     }
     return `${HR_WORKSPACE_BASE_PATH}${normalizedPath}` || HR_WORKSPACE_BASE_PATH;
@@ -1259,6 +1260,7 @@ function authRouteFromPath(pathname: string): AuthRoute | null {
   if (normalized === "/login") return "login";
   if (normalized === "/register") return "register";
   if (normalized === "/forgot-password") return "forgot-password";
+  if (normalized === "/reset-password") return "reset-password";
   if (normalized === "/verify-email") return "verify-email";
   return null;
 }
@@ -1427,6 +1429,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       login: "登录｜GreatSell AI 招聘工具",
       register: "免费试用｜GreatSell AI 招聘工具",
       "forgot-password": "找回密码｜GreatSell AI 招聘工具",
+      "reset-password": "设置新密码｜GreatSell AI 招聘工具",
       "verify-email": "验证邮箱｜GreatSell AI 招聘工具",
     };
     document.title = authRoute ? titles[authRoute] : "招聘工作台｜GreatSell AI";
@@ -2130,6 +2133,20 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     }
   };
 
+  const completePasswordReset = async (token: string, password: string) => {
+    setAuthError(null);
+    setAuthLoading(true);
+    try {
+      await api.completePasswordReset({ token, password });
+      return true;
+    } catch (error) {
+      setAuthError(humanizeError(error));
+      return false;
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   const completeEmailVerification = async (token: string) => {
     setAuthError(null);
     setAuthLoading(true);
@@ -2177,6 +2194,19 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   if (authState !== "authenticated" && !authRoute) {
     return <ExternalRedirect href={workspaceHref("/login")} />;
+  }
+
+  // A recovery link may be opened in a browser that still has an unrelated
+  // workspace session.  It must remain usable instead of silently dropping
+  // the recipient into that workspace.
+  if (authRoute === "reset-password") {
+    return (
+      <ResetPasswordPage
+        error={authError}
+        loading={authLoading}
+        onComplete={completePasswordReset}
+      />
+    );
   }
 
   if (authRoute === "verify-email" || authSession?.email_verification_required) {
@@ -2706,6 +2736,102 @@ function ForgotPasswordPage({
             {loading ? <><i className="spinner" />正在提交</> : "获取重置指引"}
           </button>
           <p className="auth-footer-copy"><a href={workspaceHref("/login")}>返回登录</a></p>
+        </form>
+      )}
+    </AuthPageLayout>
+  );
+}
+
+function ResetPasswordPage({
+  error,
+  loading,
+  onComplete,
+}: {
+  error: string | null;
+  loading: boolean;
+  onComplete: (token: string, password: string) => Promise<boolean>;
+}) {
+  const token = new URLSearchParams(window.location.search).get("token") ?? "";
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [completed, setCompleted] = useState(false);
+
+  const submit = async () => {
+    setFormError(null);
+    if (!token) {
+      setFormError("缺少重置链接。请重新申请一封重置邮件。");
+      return;
+    }
+    if (password !== confirmation) {
+      setFormError("两次输入的密码不一致，请重新确认。");
+      return;
+    }
+    if (await onComplete(token, password)) {
+      setCompleted(true);
+    }
+  };
+
+  return (
+    <AuthPageLayout
+      description="设置新密码后，旧密码将立即失效。为安全起见，重置链接只能使用一次。"
+      eyebrow="账户协助"
+      title="设置新的登录密码"
+    >
+      {completed ? (
+        <div aria-live="polite" className="auth-success-state">
+          <span className="auth-success-icon"><Icon name="check" size={20} /></span>
+          <h2>新密码已设置</h2>
+          <p>请使用新密码登录你的招聘工作台。</p>
+          <a className="button button-primary auth-submit" href={workspaceHref("/login")}>前往登录</a>
+        </div>
+      ) : (
+        <form
+          className="auth-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+        >
+          <div className="field-stack">
+            <label className="field-label" htmlFor="reset-password">新密码</label>
+            <input
+              autoComplete="new-password"
+              className="field"
+              id="reset-password"
+              minLength={8}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="至少 8 个字符"
+              required
+              type="password"
+              value={password}
+            />
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="reset-password-confirmation">再次输入新密码</label>
+            <input
+              aria-describedby={formError || error ? "reset-password-error" : undefined}
+              aria-invalid={Boolean(formError || error)}
+              autoComplete="new-password"
+              className="field"
+              id="reset-password-confirmation"
+              minLength={8}
+              onChange={(event) => setConfirmation(event.target.value)}
+              placeholder="请再次输入"
+              required
+              type="password"
+              value={confirmation}
+            />
+          </div>
+          {(formError || error) && <p className="auth-error" id="reset-password-error" role="alert">{formError || error}</p>}
+          <button
+            className="button button-primary auth-submit"
+            disabled={loading || !token || password.length < 8 || !confirmation}
+            type="submit"
+          >
+            {loading ? <><i className="spinner" />正在保存</> : "保存新密码"}
+          </button>
+          <p className="auth-footer-copy"><a href={workspaceHref("/forgot-password")}>重新申请重置链接</a></p>
         </form>
       )}
     </AuthPageLayout>

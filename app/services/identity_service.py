@@ -750,22 +750,59 @@ def accept_invitation(
     )
 
 
-def issue_password_reset(session: Session, *, email_value: str) -> str | None:
-    """Issue a token for a mail adapter; callers must never return it to HTTP."""
+def issue_password_reset(
+    session: Session,
+    *,
+    email_value: str,
+    ttl_seconds: int = 60 * 60,
+) -> str | None:
+    """Issue exactly one usable reset token for an active account.
+
+    The raw value is returned only to the delivery adapter and must never be
+    serialized through the HTTP response.  A new request invalidates every
+    older unused link, including an expired-but-uncollected row, so the
+    partial unique index remains a durable concurrency safeguard.
+    """
 
     try:
         _, email_key = normalize_email(email_value)
     except IdentityServiceError:
         return None
-    user = session.scalar(select(UserAccount).where(UserAccount.email_key == email_key, UserAccount.is_active.is_(True)))
+    user = session.scalar(
+        select(UserAccount)
+        .where(
+            UserAccount.email_key == email_key,
+            UserAccount.is_active.is_(True),
+        )
+        .with_for_update()
+    )
     if user is None:
         return None
+
+    now = utcnow()
+    active_resets = session.scalars(
+        select(PasswordResetToken)
+        .where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+            PasswordResetToken.invalidated_at.is_(None),
+        )
+        .with_for_update()
+    ).all()
+    for active_reset in active_resets:
+        active_reset.invalidated_at = now
+    # Flush the invalidations before inserting the replacement.  PostgreSQL
+    # otherwise has to reconcile a partial unique index with both states in
+    # the same unit of work.
+    if active_resets:
+        session.flush()
+
     token = secrets.token_urlsafe(32)
     session.add(
         PasswordResetToken(
             user_id=user.id,
             token_digest=digest_token(token),
-            expires_at=utcnow() + timedelta(hours=1),
+            expires_at=now + timedelta(seconds=ttl_seconds),
         )
     )
     return token
@@ -776,8 +813,14 @@ def complete_password_reset(session: Session, *, token: str, password: str) -> N
         select(PasswordResetToken)
         .options(joinedload(PasswordResetToken.user))
         .where(PasswordResetToken.token_digest == digest_token(token))
+        .with_for_update()
     )
-    if reset is None or reset.used_at is not None or _aware(reset.expires_at) <= utcnow():
+    if (
+        reset is None
+        or reset.used_at is not None
+        or reset.invalidated_at is not None
+        or _aware(reset.expires_at) <= utcnow()
+    ):
         raise IdentityServiceError("password_reset_invalid_or_expired")
     if not reset.user.is_active:
         raise IdentityServiceError("password_reset_invalid_or_expired")

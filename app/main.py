@@ -173,11 +173,13 @@ from app.services.identity_service import (
     update_product_plan,
 )
 from app.services.transactional_email import (
+    PasswordResetDelivery,
     TransactionalEmailError,
     TransactionalEmailProvider,
     VerificationDelivery,
     build_transactional_email_provider,
     email_verification_url,
+    password_reset_url,
 )
 from app.services.registration_rate_limit import (
     RegistrationRateLimitError,
@@ -680,6 +682,35 @@ def _deliver_email_verification(
     except HTTPException:
         logger.warning("email_verification_delivery_state_not_recorded")
     return True
+
+
+def _deliver_password_reset(
+    *,
+    settings: AppSettings,
+    provider: TransactionalEmailProvider,
+    recipient: str,
+    token: str,
+) -> None:
+    """Best-effort recovery delivery that never changes the public outcome.
+
+    The request endpoint intentionally returns the same accepted response for
+    registered and unknown addresses.  Provider failure must not become an
+    account-existence oracle, and raw reset links must never enter logs or
+    database delivery state.
+    """
+
+    try:
+        provider.send_password_reset(
+            PasswordResetDelivery(
+                recipient=recipient,
+                reset_url=password_reset_url(settings, token=token),
+                expires_minutes=max(1, settings.password_reset_ttl_seconds // 60),
+            )
+        )
+    except TransactionalEmailError:
+        logger.warning("password_reset_delivery_failed")
+    except Exception:
+        logger.warning("password_reset_delivery_failed")
 
 
 def _registration_client_identifier(request: Request, settings: AppSettings) -> str:
@@ -1232,14 +1263,32 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     @app.post("/v1/auth/password-reset/request", response_model=PasswordResetRequestResult)
     async def post_password_reset_request(
         payload: PasswordResetRequest,
+        request: Request,
         session: Session = Depends(get_session),
     ) -> PasswordResetRequestResult:
-        # The token is digest-only in the database and never appears in the
-        # response.  A mail-delivery adapter can be connected later without
-        # changing this enumeration-safe public contract.
-        issue_password_reset(session, email_value=payload.email)
-        _commit_or_raise(session)
-        return PasswordResetRequestResult(accepted=True, delivery_available=False)
+        provider: TransactionalEmailProvider = request.app.state.transactional_email_provider
+        settings: AppSettings = request.app.state.settings
+        # Keep both the HTTP body and status identical for registered and
+        # unknown addresses.  The raw token exists only long enough to build
+        # the provider message, while its database row stores a digest.
+        if provider.password_reset_configured:
+            token = issue_password_reset(
+                session,
+                email_value=payload.email,
+                ttl_seconds=settings.password_reset_ttl_seconds,
+            )
+            _commit_or_raise(session)
+            if token is not None:
+                _deliver_password_reset(
+                    settings=settings,
+                    provider=provider,
+                    recipient=payload.email.strip(),
+                    token=token,
+                )
+        return PasswordResetRequestResult(
+            accepted=True,
+            delivery_available=provider.password_reset_configured,
+        )
 
     @app.post("/v1/auth/password-reset/complete", status_code=status.HTTP_204_NO_CONTENT)
     async def post_password_reset_complete(

@@ -126,6 +126,11 @@ export interface PasswordResetRequestResult {
   delivery_available: boolean;
 }
 
+export interface PasswordResetCompleteInput {
+  token: string;
+  password: string;
+}
+
 export interface CandidateCreateInput {
   display_name?: string | null;
 }

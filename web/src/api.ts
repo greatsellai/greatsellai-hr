@@ -46,6 +46,7 @@ import type {
   MailboxRetentionUpdate,
   EmailVerificationResendResult,
   OriginalJobPublishInput,
+  PasswordResetCompleteInput,
   PasswordResetRequestResult,
   RegistrationOffer,
   ResumeActivateRequest,
@@ -293,6 +294,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return request<PasswordResetRequestResult>("/auth/password-reset/request", {
         method: "POST",
         body: { email },
+      });
+    },
+
+    completePasswordReset(input: PasswordResetCompleteInput): Promise<void> {
+      return request<void>("/auth/password-reset/complete", {
+        method: "POST",
+        body: input,
       });
     },
 

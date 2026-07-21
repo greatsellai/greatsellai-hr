@@ -55,6 +55,22 @@ class AppSettings:
     # mail body/attachment cache entries. Candidate resume originals are not
     # part of this cleanup path.
     mailbox_retention_cleanup_interval_seconds: float = 3600.0
+    # Candidate data has a deliberately separate lifecycle from transient
+    # mailbox replicas.  Defaults are conservative and do not enable any
+    # automatic deletion until a workspace administrator opts in.
+    candidate_data_recovery_days: int = 7
+    candidate_data_file_access_ttl_seconds: int = 300
+    candidate_data_export_ttl_seconds: int = 24 * 60 * 60
+    candidate_data_lifecycle_cleanup_interval_seconds: float = 3600.0
+    candidate_data_purge_lease_seconds: int = 180
+    candidate_data_export_lease_seconds: int = 300
+    candidate_data_export_max_items: int = 1000
+    candidate_data_export_max_original_bytes: int = 200 * 1024 * 1024
+    # A dedicated server secret for privacy-preserving mailbox tombstones.
+    # It is intentionally distinct from an attachment SHA-256 and is never
+    # persisted or returned.  Deployments that ingest from mailboxes must set
+    # it before deleting a mailbox-derived resume.
+    candidate_data_tombstone_secret: str | None = field(default=None, repr=False)
     # This is a per-run message batch, not an unbounded mailbox scan. Each
     # following run resumes older unseen message UIDs after newer ones are
     # recorded, so the worker remains responsive on large mailboxes.
@@ -180,6 +196,31 @@ class AppSettings:
             mailbox_retention_cleanup_interval_seconds=float(
                 os.getenv("RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS", "3600")
             ),
+            candidate_data_recovery_days=int(
+                os.getenv("RESUME_V3_CANDIDATE_DATA_RECOVERY_DAYS", "7")
+            ),
+            candidate_data_file_access_ttl_seconds=int(
+                os.getenv("RESUME_V3_CANDIDATE_DATA_FILE_ACCESS_TTL_SECONDS", "300")
+            ),
+            candidate_data_export_ttl_seconds=int(
+                os.getenv("RESUME_V3_CANDIDATE_DATA_EXPORT_TTL_SECONDS", str(24 * 60 * 60))
+            ),
+            candidate_data_lifecycle_cleanup_interval_seconds=float(
+                os.getenv("RESUME_V3_CANDIDATE_DATA_LIFECYCLE_CLEANUP_INTERVAL_SECONDS", "3600")
+            ),
+            candidate_data_purge_lease_seconds=int(
+                os.getenv("RESUME_V3_CANDIDATE_DATA_PURGE_LEASE_SECONDS", "180")
+            ),
+            candidate_data_export_lease_seconds=int(
+                os.getenv("RESUME_V3_CANDIDATE_DATA_EXPORT_LEASE_SECONDS", "300")
+            ),
+            candidate_data_export_max_items=int(
+                os.getenv("RESUME_V3_CANDIDATE_DATA_EXPORT_MAX_ITEMS", "1000")
+            ),
+            candidate_data_export_max_original_bytes=int(
+                os.getenv("RESUME_V3_CANDIDATE_DATA_EXPORT_MAX_ORIGINAL_BYTES", str(200 * 1024 * 1024))
+            ),
+            candidate_data_tombstone_secret=os.getenv("RESUME_V3_CANDIDATE_DATA_TOMBSTONE_SECRET") or None,
             mailbox_sync_attachment_limit=int(
                 os.getenv("RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT", "20")
             ),
@@ -322,6 +363,36 @@ class AppSettings:
         if self.mailbox_retention_cleanup_interval_seconds < 60:
             raise ValueError(
                 "RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS must be at least 60"
+            )
+        if not 1 <= self.candidate_data_recovery_days <= 90:
+            raise ValueError("RESUME_V3_CANDIDATE_DATA_RECOVERY_DAYS must be between 1 and 90")
+        if not 30 <= self.candidate_data_file_access_ttl_seconds <= 3600:
+            raise ValueError(
+                "RESUME_V3_CANDIDATE_DATA_FILE_ACCESS_TTL_SECONDS must be between 30 and 3600"
+            )
+        if not 60 <= self.candidate_data_export_ttl_seconds <= 7 * 24 * 60 * 60:
+            raise ValueError(
+                "RESUME_V3_CANDIDATE_DATA_EXPORT_TTL_SECONDS must be between 60 and 604800"
+            )
+        if self.candidate_data_lifecycle_cleanup_interval_seconds < 60:
+            raise ValueError(
+                "RESUME_V3_CANDIDATE_DATA_LIFECYCLE_CLEANUP_INTERVAL_SECONDS must be at least 60"
+            )
+        if not 30 <= self.candidate_data_purge_lease_seconds <= 3600:
+            raise ValueError(
+                "RESUME_V3_CANDIDATE_DATA_PURGE_LEASE_SECONDS must be between 30 and 3600"
+            )
+        if not 30 <= self.candidate_data_export_lease_seconds <= 3600:
+            raise ValueError(
+                "RESUME_V3_CANDIDATE_DATA_EXPORT_LEASE_SECONDS must be between 30 and 3600"
+            )
+        if not 1 <= self.candidate_data_export_max_items <= 10000:
+            raise ValueError(
+                "RESUME_V3_CANDIDATE_DATA_EXPORT_MAX_ITEMS must be between 1 and 10000"
+            )
+        if self.candidate_data_export_max_original_bytes < self.max_upload_bytes:
+            raise ValueError(
+                "RESUME_V3_CANDIDATE_DATA_EXPORT_MAX_ORIGINAL_BYTES must cover one upload"
             )
         if self.ai_extraction_job_lease_seconds < self.deepseek_timeout_seconds + 30:
             raise ValueError(

@@ -988,6 +988,183 @@ class MailboxRetentionCleanupRunHistoryResponse(ApiModel):
     total: int
 
 
+class CandidateDataFileAccessRequest(ApiModel):
+    """An explicit user intent, so preview and download audit separately."""
+
+    purpose: Literal["view", "download"]
+
+
+class CandidateDataFileAccessResponse(ApiModel):
+    access_url: str
+    expires_at: datetime
+
+
+CandidateDataDeletionReason = Literal[
+    "candidate_request",
+    "recruitment_closed",
+    "duplicate",
+    "retention_expired",
+    "other",
+]
+
+
+class CandidateDataDeletionRequest(ApiModel):
+    reason: CandidateDataDeletionReason
+    other_note: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_other_note(self) -> "CandidateDataDeletionRequest":
+        if self.reason == "other" and not self.other_note:
+            raise ValueError("other_note is required when reason is other")
+        if self.reason != "other" and self.other_note is not None:
+            raise ValueError("other_note is only allowed when reason is other")
+        return self
+
+
+class CandidateDataDeletionResponse(ApiModel):
+    deletion_batch_id: str
+    recovery_deadline_at: datetime
+    purge_after_at: datetime
+    affected_candidate_count: int
+    affected_resume_count: int
+
+
+class CandidateDataRestoreResponse(ApiModel):
+    deletion_batch_id: str
+    restored_candidate_count: int
+    restored_resume_count: int
+    restored_at: datetime
+
+
+class CandidateDataDeletionBatchResponse(ApiModel):
+    """Metadata-only recovery item; it never exposes candidate content."""
+
+    deletion_batch_id: str
+    trigger_type: str
+    reason: CandidateDataDeletionReason
+    status: str
+    recovery_deadline_at: datetime
+    purge_after_at: datetime
+    affected_candidate_count: int
+    affected_resume_count: int
+    restorable: bool
+    restored_at: datetime | None = None
+    purged_at: datetime | None = None
+
+
+class CandidateDataDeletionBatchListResponse(ApiModel):
+    items: list[CandidateDataDeletionBatchResponse]
+    total: int
+
+
+class CandidateDataRetentionPolicyUpdate(ApiModel):
+    mode: Literal["manual", "automatic"]
+    retention_days: int | None = Field(default=None, ge=30, le=3650)
+    preview_token: str | None = Field(default=None, min_length=32, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_retention_fields(self) -> "CandidateDataRetentionPolicyUpdate":
+        if self.mode == "automatic" and self.retention_days is None:
+            raise ValueError("retention_days is required for automatic mode")
+        if self.mode == "manual" and self.retention_days is not None:
+            raise ValueError("retention_days must be omitted for manual mode")
+        if self.mode == "automatic" and not self.preview_token:
+            raise ValueError("preview_token is required for automatic mode")
+        return self
+
+
+class CandidateDataRetentionPolicyResponse(ApiModel):
+    mode: Literal["manual", "automatic"]
+    retention_days: int | None = None
+    version: int
+    updated_at: datetime
+
+
+class CandidateDataRetentionPreviewRequest(ApiModel):
+    retention_days: int = Field(ge=30, le=3650)
+
+
+class CandidateDataRetentionPreviewResponse(ApiModel):
+    preview_token: str
+    policy_version: int
+    retention_days: int
+    eligible_candidate_count: int
+    eligible_resume_count: int
+    held_candidate_count: int
+    already_deleted_count: int
+    calculated_at: datetime
+
+
+class CandidateDataRetentionCleanupRunResponse(ApiModel):
+    run_id: str
+    trigger_type: Literal["manual", "scheduled"]
+    status: str
+    policy_version: int
+    retention_days: int | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    scanned_count: int = 0
+    queued_count: int = 0
+    skipped_hold_count: int = 0
+    failed_count: int = 0
+    error_code: str | None = None
+
+
+class CandidateDataRetentionCleanupRunHistoryResponse(ApiModel):
+    items: list[CandidateDataRetentionCleanupRunResponse]
+    total: int
+
+
+class CandidateDataRetentionHoldUpdate(ApiModel):
+    retention_hold: bool
+
+
+class CandidateDataExportCreate(ApiModel):
+    candidate_ids: list[str] = Field(min_length=1, max_length=1000)
+    include_originals: bool = False
+
+    @field_validator("candidate_ids")
+    @classmethod
+    def unique_candidate_ids(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("candidate_ids must be non-empty and unique")
+        return normalized
+
+
+class CandidateDataExportResponse(ApiModel):
+    export_id: str
+    status: str
+    item_count: int
+    include_originals: bool
+    requested_at: datetime
+    completed_at: datetime | None = None
+    expires_at: datetime | None = None
+    error_code: str | None = None
+
+
+class CandidateDataExportListResponse(ApiModel):
+    items: list[CandidateDataExportResponse]
+    total: int
+
+
+class CandidateDataAuditEventResponse(ApiModel):
+    event_id: str
+    actor_user_id: str | None = None
+    actor_kind: str
+    action: str
+    target_type: str
+    target_id: str
+    result: str
+    reason_code: str | None = None
+    created_at: datetime
+
+
+class CandidateDataAuditEventListResponse(ApiModel):
+    items: list[CandidateDataAuditEventResponse]
+    total: int
+
+
 class RecruitingAgentRequest(ApiModel):
     """One bounded recruiting-assistant turn.
 
@@ -1086,6 +1263,7 @@ class ResumeDetail(ApiModel):
     ai_extraction_status: str
     ai_extraction_error: str | None
     is_active: bool
+    retention_hold: bool
     is_985_211: bool | None
     highest_degree: DegreeLevel | None
     employment_months: int

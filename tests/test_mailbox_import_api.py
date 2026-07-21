@@ -655,7 +655,11 @@ def test_forwarded_duplicate_adopts_a_successful_import_created_before_identity_
             source_uidvalidity=9,
             attempt_completed=False,
         )
-        claim = mailbox_import_service._claim_attachment_content(session, record=forwarded)
+        claim = mailbox_import_service._claim_attachment_content(
+            session,
+            record=forwarded,
+            settings=client.app.state.settings,
+        )
         assert claim.outcome == "duplicate"
         assert claim.canonical_import_id == historical_id
         assert claim.canonical_resume_id == resume_id
@@ -1402,6 +1406,7 @@ def test_waiting_forward_does_not_count_as_duplicate_when_owner_later_fails(
         owner_claim = mailbox_import_service._claim_attachment_content(
             session,
             record=owner,
+            settings=client.app.state.settings,
         )
         assert owner_claim.outcome == "owner"
         session.commit()
@@ -1493,6 +1498,7 @@ def test_expired_content_claim_cannot_complete_after_a_forwarded_copy_takes_over
         first_claim = mailbox_import_service._claim_attachment_content(
             session,
             record=first_record,
+            settings=client.app.state.settings,
         )
         assert first_claim.outcome == "owner"
         session.commit()
@@ -1519,6 +1525,7 @@ def test_expired_content_claim_cannot_complete_after_a_forwarded_copy_takes_over
         second_claim = mailbox_import_service._claim_attachment_content(
             session,
             record=second_record,
+            settings=client.app.state.settings,
         )
         assert second_claim.outcome == "owner"
         assert second_claim.claim_token != first_claim.claim_token
@@ -1604,7 +1611,11 @@ def test_expired_content_claim_is_recovered_to_retryable_mail_audits(client) -> 
         )
         session.commit()
 
-        claim = mailbox_import_service._claim_attachment_content(session, record=owner)
+        claim = mailbox_import_service._claim_attachment_content(
+            session,
+            record=owner,
+            settings=client.app.state.settings,
+        )
         assert claim.outcome == "owner"
         session.commit()
 

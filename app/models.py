@@ -50,6 +50,55 @@ class OrganizationScoped:
     )
 
 
+class CandidateDataLifecycle:
+    """Lifecycle state shared by candidate roots and resume originals.
+
+    A logical delete is deliberately stored only on the two privacy roots.
+    Derived records remain intact during the recovery window, but normal ORM
+    reads automatically hide them through their deleted parent.  The purge
+    worker is the only code path that is allowed to inspect these rows with
+    the explicit lifecycle visibility bypass.
+    """
+
+    __abstract__ = True
+
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    deleted_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    deletion_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("candidate_data_deletion_batches.id"),
+        nullable=True,
+        index=True,
+    )
+    purge_after_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    retention_hold: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        index=True,
+    )
+    # Every logical delete advances this value.  Original-file grants carry
+    # the value they observed, so a grant created in a racing transaction can
+    # never become valid again after delete -> restore.
+    lifecycle_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
+
+
 class ProductPlan(Base):
     """A platform-managed, configurable product tier.
 
@@ -361,10 +410,16 @@ class RegistrationRateLimitBucket(Base):
     )
 
 
-class Candidate(OrganizationScoped, Base):
+class Candidate(OrganizationScoped, CandidateDataLifecycle, Base):
     __tablename__ = "candidates"
     __table_args__ = (
         Index("ix_candidates_organization_created", "organization_id", "created_at"),
+        Index(
+            "ix_candidates_organization_lifecycle",
+            "organization_id",
+            "deleted_at",
+            "purge_after_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -377,18 +432,24 @@ class Candidate(OrganizationScoped, Base):
     )
 
 
-class Resume(OrganizationScoped, Base):
+class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
     __tablename__ = "resumes"
     __table_args__ = (
         Index(
             "uq_active_resume_per_candidate",
             "candidate_id",
             unique=True,
-            sqlite_where=text("is_active = 1"),
-            postgresql_where=text("is_active = true"),
+            sqlite_where=text("is_active = 1 AND deleted_at IS NULL"),
+            postgresql_where=text("is_active = true AND deleted_at IS NULL"),
         ),
         Index("ix_resumes_organization_created", "organization_id", "created_at"),
         Index("ix_resumes_organization_candidate", "organization_id", "candidate_id"),
+        Index(
+            "ix_resumes_organization_lifecycle",
+            "organization_id",
+            "deleted_at",
+            "purge_after_at",
+        ),
         Index(
             "ix_resumes_organization_source_mailbox",
             "organization_id",
@@ -501,6 +562,376 @@ class Resume(OrganizationScoped, Base):
         back_populates="ingested_resumes",
         foreign_keys=[source_mailbox_config_id],
     )
+
+
+class CandidateDataDeletionBatch(OrganizationScoped, Base):
+    """One reversible request to remove candidate data from a workspace."""
+
+    __tablename__ = "candidate_data_deletion_batches"
+    __table_args__ = (
+        Index(
+            "ix_candidate_data_deletion_batches_organization_created",
+            "organization_id",
+            "created_at",
+        ),
+        Index(
+            "ix_candidate_data_deletion_batches_organization_recovery",
+            "organization_id",
+            "status",
+            "recovery_deadline_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    requested_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    # ``manual_resume``, ``manual_candidate`` and ``retention`` are
+    # application-validated values.  They remain portable strings so the
+    # same migration works on SQLite and PostgreSQL.
+    trigger_type: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str] = mapped_column(String(32))
+    # Kept only for migration compatibility.  New lifecycle requests never
+    # persist free-form notes: a user-entered explanation can itself contain
+    # candidate personal data and must not outlive the candidate record.
+    private_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="deleted", index=True)
+    recovery_deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    purge_after_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    restored_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+    )
+    purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    items: Mapped[list["CandidateDataDeletionBatchItem"]] = relationship(
+        back_populates="deletion_batch",
+        cascade="all, delete-orphan",
+    )
+    purge_job: Mapped["CandidateDataPurgeJob | None"] = relationship(
+        back_populates="deletion_batch",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class CandidateDataDeletionBatchItem(OrganizationScoped, Base):
+    """Opaque targets affected by one deletion batch.
+
+    Target IDs intentionally do not carry foreign-key constraints.  Batch
+    history remains available as a privacy-safe tombstone after physical
+    purge, while ordinary business APIs never expose it.
+    """
+
+    __tablename__ = "candidate_data_deletion_batch_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "deletion_batch_id",
+            "resume_id",
+            name="uq_candidate_data_deletion_batch_item_resume",
+        ),
+        Index(
+            "ix_candidate_data_deletion_batch_items_organization_batch",
+            "organization_id",
+            "deletion_batch_id",
+        ),
+        Index(
+            "ix_candidate_data_deletion_batch_items_organization_candidate",
+            "organization_id",
+            "candidate_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    deletion_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("candidate_data_deletion_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    candidate_id: Mapped[str] = mapped_column(String(36), index=True)
+    resume_id: Mapped[str] = mapped_column(String(36), index=True)
+    was_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    deletion_batch: Mapped[CandidateDataDeletionBatch] = relationship(
+        back_populates="items"
+    )
+
+
+class CandidateDataPurgeJob(OrganizationScoped, Base):
+    """Lease-protected physical cleanup work for one deletion batch."""
+
+    __tablename__ = "candidate_data_purge_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "deletion_batch_id",
+            name="uq_candidate_data_purge_job_batch",
+        ),
+        Index(
+            "ix_candidate_data_purge_jobs_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_candidate_data_purge_jobs_organization_lease",
+            "organization_id",
+            "status",
+            "lease_expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    deletion_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("candidate_data_deletion_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=20)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(128))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    deletion_batch: Mapped[CandidateDataDeletionBatch] = relationship(
+        back_populates="purge_job"
+    )
+
+
+class CandidateDataAuditEvent(OrganizationScoped, Base):
+    """Append-only, workspace-private audit without candidate content."""
+
+    __tablename__ = "candidate_data_audit_events"
+    __table_args__ = (
+        Index(
+            "ix_candidate_data_audit_events_organization_created",
+            "organization_id",
+            "created_at",
+        ),
+        Index(
+            "ix_candidate_data_audit_events_organization_action_created",
+            "organization_id",
+            "action",
+            "created_at",
+        ),
+        Index(
+            "ix_candidate_data_audit_events_target_created",
+            "target_type",
+            "target_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    actor_kind: Mapped[str] = mapped_column(String(32), default="user")
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    target_type: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(128), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    resume_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    source_kind: Mapped[str] = mapped_column(String(32), default="web")
+    result: Mapped[str] = mapped_column(String(32), default="authorized")
+    reason_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CandidateDataFileAccessGrant(OrganizationScoped, Base):
+    """Opaque, short-lived access to one original or completed export."""
+
+    __tablename__ = "candidate_data_file_access_grants"
+    __table_args__ = (
+        UniqueConstraint("token_digest", name="uq_candidate_data_file_access_grant_token"),
+        Index(
+            "ix_candidate_data_file_access_grants_organization_resource",
+            "organization_id",
+            "resource_type",
+            "resource_id",
+        ),
+        Index(
+            "ix_candidate_data_file_access_grants_expiry",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    resource_type: Mapped[str] = mapped_column(String(32), index=True)
+    resource_id: Mapped[str] = mapped_column(String(36), index=True)
+    purpose: Mapped[str] = mapped_column(String(32))
+    token_digest: Mapped[str] = mapped_column(String(64))
+    session_nonce_digest: Mapped[str] = mapped_column(String(64))
+    # ``resume_original`` grants are fenced to the Resume lifecycle version.
+    # Export grants intentionally leave this null because their own durable
+    # revoke/expiry state is the fence.
+    resource_lifecycle_version: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CandidateDataRetentionPolicy(OrganizationScoped, Base):
+    """One opt-in candidate data retention policy per workspace."""
+
+    __tablename__ = "candidate_data_retention_policies"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            name="uq_candidate_data_retention_policy_organization",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    mode: Mapped[str] = mapped_column(String(32), default="manual")
+    retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class CandidateDataRetentionCleanupRun(OrganizationScoped, Base):
+    """Privacy-safe counts for one retention evaluation or enqueue run."""
+
+    __tablename__ = "candidate_data_retention_cleanup_runs"
+    __table_args__ = (
+        Index(
+            "ix_candidate_data_retention_cleanup_runs_organization_started",
+            "organization_id",
+            "started_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    trigger_type: Mapped[str] = mapped_column(String(32))
+    policy_version: Mapped[int] = mapped_column(Integer)
+    retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    scanned_count: Mapped[int] = mapped_column(Integer, default=0)
+    queued_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_hold_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CandidateDataExport(OrganizationScoped, Base):
+    """A workspace-scoped asynchronous snapshot export.
+
+    ``snapshot_json`` has only opaque candidate/resume/fact-version IDs and
+    fixed options.  It deliberately never stores raw source text, original
+    filenames, email metadata, model prompts, or model responses.
+    """
+
+    __tablename__ = "candidate_data_exports"
+    __table_args__ = (
+        Index(
+            "ix_candidate_data_exports_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_candidate_data_exports_organization_created",
+            "organization_id",
+            "created_at",
+        ),
+        Index("ix_candidate_data_exports_expiry", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    requested_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    snapshot_json: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    include_originals: Mapped[bool] = mapped_column(Boolean, default=False)
+    output_storage_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    output_content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    output_size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    item_count: Mapped[int] = mapped_column(Integer, default=0)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(128))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class MailboxDeletedAttachmentTombstone(OrganizationScoped, Base):
+    """HMAC-only mailbox de-dup marker for a physically deleted resume."""
+
+    __tablename__ = "mailbox_deleted_attachment_tombstones"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "digest",
+            "key_version",
+            name="uq_mailbox_deleted_attachment_tombstone_digest",
+        ),
+        Index(
+            "ix_mailbox_deleted_attachment_tombstones_organization_expiry",
+            "organization_id",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    digest: Mapped[str] = mapped_column(String(64), index=True)
+    key_version: Mapped[str] = mapped_column(String(32), default="v1")
+    deletion_batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ResumeUploadIdempotencyKey(OrganizationScoped, Base):

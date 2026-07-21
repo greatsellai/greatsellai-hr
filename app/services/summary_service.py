@@ -54,7 +54,14 @@ def _ready_resume_snapshot(
     *,
     resume_id: str,
 ) -> tuple[Resume, ResumeFactSnapshot, dict[str, object]]:
-    resume = session.get(Resume, resume_id)
+    # A summary call may take long enough for another request to delete the
+    # resume or save newer reviewed facts.  Always force a scoped database
+    # read instead of accepting a stale identity-map instance.
+    resume = session.scalar(
+        select(Resume)
+        .where(Resume.id == resume_id)
+        .execution_options(populate_existing=True)
+    )
     if resume is None:
         raise SummaryServiceError("resume_not_found")
     if resume.extraction_status != "ready" or not resume.is_active:
@@ -68,6 +75,7 @@ def _ready_resume_snapshot(
             ResumeFactSnapshot.organization_id == resume.organization_id,
         )
         .order_by(ResumeFactSnapshot.facts_version.desc())
+        .execution_options(populate_existing=True)
     )
     if snapshot is None or snapshot.facts_version != resume.facts_version:
         raise SummaryServiceError("resume_fact_snapshot_not_current")
@@ -78,6 +86,30 @@ def _ready_resume_snapshot(
     if not isinstance(payload, dict):
         raise SummaryServiceError("resume_fact_snapshot_invalid")
     return resume, snapshot, payload
+
+
+def _require_unchanged_resume_snapshot(
+    session: Session,
+    *,
+    resume_id: str,
+    expected_snapshot_id: str,
+    expected_facts_version: int,
+) -> tuple[Resume, ResumeFactSnapshot]:
+    """Reject an AI result if its candidate root changed while it was running."""
+
+    session.flush()
+    session.expire_all()
+    try:
+        resume, snapshot, _ = _ready_resume_snapshot(session, resume_id=resume_id)
+    except SummaryServiceError as exc:
+        raise SummaryServiceError("resume_changed_before_summary_completed") from exc
+    if (
+        snapshot.id != expected_snapshot_id
+        or snapshot.facts_version != expected_facts_version
+        or resume.facts_version != expected_facts_version
+    ):
+        raise SummaryServiceError("resume_changed_before_summary_completed")
+    return resume, snapshot
 
 
 def _set_current(
@@ -109,6 +141,8 @@ def generate_resume_summary(
     if not ai_gateway_credentials_configured(settings):
         raise SummaryServiceError("deepseek_api_key_not_configured")
     resume, snapshot, fact_snapshot = _ready_resume_snapshot(session, resume_id=resume_id)
+    expected_snapshot_id = snapshot.id
+    expected_facts_version = snapshot.facts_version
     compatibility_api_key, compatibility_model, compatibility_timeout_seconds = (
         gateway_prompt_transport_arguments(settings)
     )
@@ -133,6 +167,12 @@ def generate_resume_summary(
             )
     except AiGatewayError as exc:
         raise SummaryServiceError(str(exc)) from exc
+    resume, snapshot = _require_unchanged_resume_snapshot(
+        session,
+        resume_id=resume_id,
+        expected_snapshot_id=expected_snapshot_id,
+        expected_facts_version=expected_facts_version,
+    )
     _set_current(
         session,
         resume_id=resume.id,
@@ -156,7 +196,11 @@ def generate_resume_summary(
 
 
 def get_resume_summary(session: Session, *, summary_id: str) -> ResumeSummaryResponse:
-    summary = session.get(ResumeSummary, summary_id)
+    summary = session.scalar(
+        select(ResumeSummary)
+        .join(Resume, Resume.id == ResumeSummary.resume_id)
+        .where(ResumeSummary.id == summary_id)
+    )
     if summary is None:
         raise ResumeSummaryNotFoundError("resume_summary_not_found")
     return _response(summary)
@@ -174,6 +218,7 @@ def list_resume_summaries(
         raise SummaryServiceError("resume_not_found")
     summaries = session.scalars(
         select(ResumeSummary)
+        .join(Resume, Resume.id == ResumeSummary.resume_id)
         .where(ResumeSummary.resume_id == resume_id)
         .order_by(ResumeSummary.created_at.desc(), ResumeSummary.id.desc())
     ).all()
@@ -186,7 +231,11 @@ def create_manual_summary_version(
     summary_id: str,
     payload: ResumeSummaryManualCreate,
 ) -> ResumeSummaryResponse:
-    prior_summary = session.get(ResumeSummary, summary_id)
+    prior_summary = session.scalar(
+        select(ResumeSummary)
+        .join(Resume, Resume.id == ResumeSummary.resume_id)
+        .where(ResumeSummary.id == summary_id)
+    )
     if prior_summary is None:
         raise ResumeSummaryNotFoundError("resume_summary_not_found")
     _, current_snapshot, _ = _ready_resume_snapshot(

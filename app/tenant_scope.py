@@ -102,7 +102,7 @@ def install_tenant_scope() -> None:
 
     # Imported lazily so ``app.models`` can call this function at the end of
     # its module without an import cycle.
-    from app.models import OrganizationScoped
+    from app.models import CandidateDataLifecycle, OrganizationScoped
 
     @event.listens_for(Session, "do_orm_execute")
     def _apply_organization_criteria(execute_state: object) -> None:
@@ -128,6 +128,21 @@ def install_tenant_scope() -> None:
                 track_closure_variables=False,
             )
         )
+        # Candidate and Resume are the privacy roots.  Their derived records
+        # stay in the database during a recovery window, but every ordinary
+        # request must behave as if the deleted roots no longer exist.  The
+        # narrow ``include_deleted_candidate_data`` option is reserved for
+        # lifecycle restore/purge services; it is never set by an HTTP
+        # request parameter.
+        if not execution_options.get("include_deleted_candidate_data"):
+            execute_state.statement = execute_state.statement.options(
+                with_loader_criteria(
+                    CandidateDataLifecycle,
+                    lambda entity: entity.deleted_at.is_(None),
+                    include_aliases=True,
+                    propagate_to_loaders=True,
+                )
+            )
 
     @event.listens_for(Session, "before_flush")
     def _enforce_organization_writes(session: Session, *_: object) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import secrets
 from datetime import datetime
 from ipaddress import ip_address, ip_network
 import logging
@@ -85,6 +86,23 @@ from app.schemas import (
     MailboxRetentionSummaryResponse,
     CandidateCreate,
     CandidateCreated,
+    CandidateDataAuditEventListResponse,
+    CandidateDataDeletionBatchListResponse,
+    CandidateDataDeletionRequest,
+    CandidateDataDeletionResponse,
+    CandidateDataExportCreate,
+    CandidateDataExportListResponse,
+    CandidateDataExportResponse,
+    CandidateDataFileAccessRequest,
+    CandidateDataFileAccessResponse,
+    CandidateDataRestoreResponse,
+    CandidateDataRetentionCleanupRunHistoryResponse,
+    CandidateDataRetentionCleanupRunResponse,
+    CandidateDataRetentionHoldUpdate,
+    CandidateDataRetentionPolicyResponse,
+    CandidateDataRetentionPolicyUpdate,
+    CandidateDataRetentionPreviewRequest,
+    CandidateDataRetentionPreviewResponse,
     CandidateSearchRequest,
     CandidateSearchResponse,
     JobCreate,
@@ -322,6 +340,30 @@ from app.services.mailbox_retention_service import (
     preview_mailbox_retention_cleanup,
     update_mailbox_retention_policy,
 )
+from app.services.candidate_data_lifecycle_service import (
+    CandidateDataLifecycleError,
+    authorize_resume_original_access,
+    delete_candidate,
+    delete_resume,
+    list_candidate_data_deletions,
+    list_candidate_data_audit_events,
+    list_retention_cleanup_runs,
+    preview_retention_policy,
+    resolve_resume_original_access,
+    restore_deletion_batch,
+    retention_policy_response,
+    run_retention_cleanup,
+    set_candidate_retention_hold,
+    update_retention_policy,
+)
+from app.services.candidate_data_export_service import (
+    authorize_candidate_data_export_download,
+    cancel_candidate_data_export,
+    create_candidate_data_export,
+    get_candidate_data_export,
+    list_candidate_data_exports,
+    resolve_candidate_data_export_download,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -337,6 +379,7 @@ def _resume_detail(resume: object) -> ResumeDetail:
         ai_extraction_status=ai_extraction_status,
         ai_extraction_error=ai_extraction_error,
         is_active=resume.is_active,
+        retention_hold=resume.retention_hold,
         is_985_211=resume.is_985_211,
         highest_degree=resume.highest_degree,
         employment_months=resume.employment_months,
@@ -482,6 +525,75 @@ def _mailbox_retention_error_http_exception(exc: MailboxRetentionError) -> HTTPE
     else:
         response_status = status.HTTP_409_CONFLICT
     return HTTPException(status_code=response_status, detail=code)
+
+
+def _candidate_data_error_http_exception(exc: CandidateDataLifecycleError) -> HTTPException:
+    """Translate lifecycle failures without disclosing another workspace."""
+
+    code = str(exc)
+    if code in {
+        "resume_not_found",
+        "candidate_not_found",
+        "candidate_data_file_access_not_found",
+        "resume_original_file_not_found",
+        "candidate_data_deletion_batch_not_found",
+        "candidate_data_export_not_found",
+        "candidate_data_export_candidate_not_found",
+        "candidate_data_export_download_not_found",
+        "candidate_data_export_output_not_found",
+    }:
+        response_status = status.HTTP_404_NOT_FOUND
+    elif code in {
+        "candidate_data_tombstone_secret_not_configured",
+    }:
+        response_status = status.HTTP_503_SERVICE_UNAVAILABLE
+    elif code in {
+        "candidate_data_deletion_batch_not_restorable",
+        "candidate_data_recovery_window_closed",
+        "candidate_data_retention_preview_stale",
+        "candidate_data_export_not_cancellable",
+    }:
+        response_status = status.HTTP_409_CONFLICT
+    else:
+        response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+    return HTTPException(status_code=response_status, detail=code)
+
+
+def _private_file_response_headers() -> dict[str, str]:
+    """Prevent candidate originals and exports from landing in shared caches."""
+
+    return {
+        "Cache-Control": "no-store, private",
+        "Pragma": "no-cache",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+    }
+
+
+def _candidate_data_session_nonce(request: Request) -> str:
+    """Get a per-login opaque nonce for server-side file grants.
+
+    Legacy local sessions may predate the nonce field.  Issuing one in the
+    signed session preserves the compatibility path without binding a grant to
+    every browser session of the same legacy identity.
+    """
+
+    nonce = request.session.get("resume_v3_session_nonce")
+    if isinstance(nonce, str) and 32 <= len(nonce) <= 512:
+        return nonce
+    nonce = secrets.token_urlsafe(32)
+    request.session["resume_v3_session_nonce"] = nonce
+    return nonce
+
+
+def _candidate_data_request_id(request: Request) -> str | None:
+    value = request.headers.get("x-request-id")
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > 128:
+        return None
+    return normalized
 
 
 def _deliver_email_verification(
@@ -2622,6 +2734,71 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         return _resume_review_detail(resume)
 
+    @app.post(
+        "/v1/resumes/{resume_id}/file-access",
+        response_model=CandidateDataFileAccessResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    def post_resume_original_file_access(
+        resume_id: str,
+        payload: CandidateDataFileAccessRequest,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataFileAccessResponse:
+        try:
+            access = authorize_resume_original_access(
+                session,
+                settings=settings,
+                resume_id=resume_id,
+                actor_user_id=principal.user.id,
+                session_nonce=_candidate_data_session_nonce(request),
+                purpose=payload.purpose,
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+        return CandidateDataFileAccessResponse(
+            access_url=f"/v1/file-access/{access.token}",
+            expires_at=access.expires_at,
+        )
+
+    @app.get(
+        "/v1/file-access/{opaque_token}",
+        response_class=FileResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    def get_authorized_candidate_file(
+        opaque_token: str,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> FileResponse:
+        try:
+            access = resolve_resume_original_access(
+                session,
+                settings=settings,
+                opaque_token=opaque_token,
+                actor_user_id=principal.user.id,
+                session_nonce=_candidate_data_session_nonce(request),
+            )
+        except CandidateDataLifecycleError as exc:
+            raise _candidate_data_error_http_exception(exc) from exc
+        return FileResponse(
+            path=access.path,
+            media_type=(
+                mimetypes.guess_type(access.original_filename)[0]
+                or "application/octet-stream"
+            ),
+            filename=access.original_filename,
+            content_disposition_type=(
+                "attachment" if access.purpose == "download" else "inline"
+            ),
+            headers=_private_file_response_headers(),
+        )
+
     @app.get(
         "/v1/resumes/{resume_id}/original-file",
         response_class=FileResponse,
@@ -2629,26 +2806,408 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     )
     def get_resume_original_file(
         resume_id: str,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_single_admin),
         session: Session = Depends(get_session),
     ) -> FileResponse:
         try:
-            resume = get_resume(session, resume_id)
-        except NotFoundError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-        source_path = _resume_original_file_path(
-            settings=settings,
-            storage_key=resume.storage_key,
-            organization_id=organization_context_id(session),
-        )
+            # Compatibility route: legacy clients still receive an inline
+            # response, but no longer bypass the same explicit audit and
+            # session-bound authorization rules as the new UI.
+            granted = authorize_resume_original_access(
+                session,
+                settings=settings,
+                resume_id=resume_id,
+                actor_user_id=principal.user.id,
+                session_nonce=_candidate_data_session_nonce(request),
+                purpose="view",
+                request_id=_candidate_data_request_id(request),
+                source_kind="compatibility",
+            )
+            _commit_or_raise(session)
+            access = resolve_resume_original_access(
+                session,
+                settings=settings,
+                opaque_token=granted.token,
+                actor_user_id=principal.user.id,
+                session_nonce=_candidate_data_session_nonce(request),
+            )
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
         return FileResponse(
-            path=source_path,
+            path=access.path,
             media_type=(
-                mimetypes.guess_type(resume.original_filename)[0]
+                mimetypes.guess_type(access.original_filename)[0]
                 or "application/octet-stream"
             ),
-            filename=resume.original_filename,
+            filename=access.original_filename,
             content_disposition_type="inline",
+            headers=_private_file_response_headers(),
+        )
+
+    @app.delete(
+        "/v1/resumes/{resume_id}",
+        response_model=CandidateDataDeletionResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def delete_resume_candidate_data(
+        resume_id: str,
+        payload: CandidateDataDeletionRequest,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataDeletionResponse:
+        try:
+            response = delete_resume(
+                session,
+                settings=settings,
+                resume_id=resume_id,
+                actor_user_id=principal.user.id,
+                reason=payload.reason,
+                private_note=payload.other_note,
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+            return response
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.delete(
+        "/v1/candidates/{candidate_id}",
+        response_model=CandidateDataDeletionResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def delete_candidate_data(
+        candidate_id: str,
+        payload: CandidateDataDeletionRequest,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataDeletionResponse:
+        try:
+            response = delete_candidate(
+                session,
+                settings=settings,
+                candidate_id=candidate_id,
+                actor_user_id=principal.user.id,
+                reason=payload.reason,
+                private_note=payload.other_note,
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+            return response
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/candidate-data/deletions/{deletion_batch_id}/restore",
+        response_model=CandidateDataRestoreResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def post_restore_candidate_data_deletion(
+        deletion_batch_id: str,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataRestoreResponse:
+        try:
+            response = restore_deletion_batch(
+                session,
+                deletion_batch_id=deletion_batch_id,
+                actor_user_id=principal.user.id,
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+            return response
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/candidate-data/deletions",
+        response_model=CandidateDataDeletionBatchListResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def get_candidate_data_deletions(
+        limit: int = Query(default=50, ge=1, le=100),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataDeletionBatchListResponse:
+        """Recovery console data, deliberately limited to opaque metadata."""
+
+        return list_candidate_data_deletions(session, limit=limit)
+
+    @app.put(
+        "/v1/candidates/{candidate_id}/retention-hold",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def put_candidate_retention_hold(
+        candidate_id: str,
+        payload: CandidateDataRetentionHoldUpdate,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> None:
+        try:
+            set_candidate_retention_hold(
+                session,
+                candidate_id=candidate_id,
+                retention_hold=payload.retention_hold,
+                actor_user_id=principal.user.id,
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/candidate-data/retention",
+        response_model=CandidateDataRetentionPolicyResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def get_candidate_data_retention_policy(
+        session: Session = Depends(get_session),
+    ) -> CandidateDataRetentionPolicyResponse:
+        response = retention_policy_response(session)
+        _commit_or_raise(session)
+        return response
+
+    @app.post(
+        "/v1/candidate-data/retention/preview",
+        response_model=CandidateDataRetentionPreviewResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def post_candidate_data_retention_preview(
+        payload: CandidateDataRetentionPreviewRequest,
+        session: Session = Depends(get_session),
+    ) -> CandidateDataRetentionPreviewResponse:
+        try:
+            response = preview_retention_policy(
+                session,
+                settings=settings,
+                retention_days=payload.retention_days,
+            )
+            _commit_or_raise(session)
+            return response
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.put(
+        "/v1/candidate-data/retention",
+        response_model=CandidateDataRetentionPolicyResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def put_candidate_data_retention_policy(
+        payload: CandidateDataRetentionPolicyUpdate,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataRetentionPolicyResponse:
+        try:
+            response = update_retention_policy(
+                session,
+                settings=settings,
+                mode=payload.mode,
+                retention_days=payload.retention_days,
+                preview_token=payload.preview_token,
+                actor_user_id=principal.user.id,
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+            return response
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/candidate-data/retention/cleanup",
+        response_model=CandidateDataRetentionCleanupRunResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def post_candidate_data_retention_cleanup(
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataRetentionCleanupRunResponse:
+        try:
+            response = run_retention_cleanup(
+                session,
+                settings=settings,
+                trigger_type="manual",
+                actor_user_id=principal.user.id,
+            )
+            _commit_or_raise(session)
+            return response
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/candidate-data/retention/runs",
+        response_model=CandidateDataRetentionCleanupRunHistoryResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def get_candidate_data_retention_cleanup_runs(
+        limit: int = Query(default=20, ge=1, le=100),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataRetentionCleanupRunHistoryResponse:
+        return list_retention_cleanup_runs(session, limit=limit)
+
+    @app.get(
+        "/v1/candidate-data/audit-events",
+        response_model=CandidateDataAuditEventListResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def get_candidate_data_audit_events(
+        limit: int = Query(default=100, ge=1, le=200),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataAuditEventListResponse:
+        return list_candidate_data_audit_events(session, limit=limit)
+
+    @app.post(
+        "/v1/candidate-data-exports",
+        response_model=CandidateDataExportResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def post_candidate_data_export(
+        payload: CandidateDataExportCreate,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataExportResponse:
+        """Queue a privacy-safe, asynchronous workspace export."""
+
+        try:
+            response = create_candidate_data_export(
+                session,
+                settings=settings,
+                candidate_ids=payload.candidate_ids,
+                include_originals=payload.include_originals,
+                actor_user_id=principal.user.id,
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+            return response
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/candidate-data-exports",
+        response_model=CandidateDataExportListResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def get_candidate_data_exports(
+        limit: int = Query(default=50, ge=1, le=100),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataExportListResponse:
+        return list_candidate_data_exports(session, limit=limit)
+
+    @app.get(
+        "/v1/candidate-data-exports/{export_id}",
+        response_model=CandidateDataExportResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def get_candidate_data_export_status(
+        export_id: str,
+        session: Session = Depends(get_session),
+    ) -> CandidateDataExportResponse:
+        try:
+            return get_candidate_data_export(session, export_id=export_id)
+        except CandidateDataLifecycleError as exc:
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.delete(
+        "/v1/candidate-data-exports/{export_id}",
+        response_model=CandidateDataExportResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def delete_candidate_data_export(
+        export_id: str,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataExportResponse:
+        try:
+            response = cancel_candidate_data_export(
+                session,
+                export_id=export_id,
+                actor_user_id=principal.user.id,
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+            return response
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/candidate-data-exports/{export_id}/download-access",
+        response_model=CandidateDataFileAccessResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def post_candidate_data_export_download_access(
+        export_id: str,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateDataFileAccessResponse:
+        try:
+            access = authorize_candidate_data_export_download(
+                session,
+                settings=settings,
+                export_id=export_id,
+                actor_user_id=principal.user.id,
+                session_nonce=_candidate_data_session_nonce(request),
+                request_id=_candidate_data_request_id(request),
+            )
+            _commit_or_raise(session)
+            return CandidateDataFileAccessResponse(
+                access_url=(
+                    f"/v1/candidate-data-export-file-access/{access.token}"
+                ),
+                expires_at=access.expires_at,
+            )
+        except CandidateDataLifecycleError as exc:
+            session.rollback()
+            raise _candidate_data_error_http_exception(exc) from exc
+
+    @app.get(
+        "/v1/candidate-data-export-file-access/{opaque_token}",
+        response_class=FileResponse,
+        dependencies=[Depends(require_organization_admin)],
+    )
+    def get_authorized_candidate_data_export(
+        opaque_token: str,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> FileResponse:
+        try:
+            access = resolve_candidate_data_export_download(
+                session,
+                settings=settings,
+                opaque_token=opaque_token,
+                actor_user_id=principal.user.id,
+                session_nonce=_candidate_data_session_nonce(request),
+            )
+        except CandidateDataLifecycleError as exc:
+            raise _candidate_data_error_http_exception(exc) from exc
+        return FileResponse(
+            path=access.path,
+            media_type="application/zip",
+            filename=access.filename,
+            content_disposition_type="attachment",
+            headers=_private_file_response_headers(),
         )
 
     @app.put(

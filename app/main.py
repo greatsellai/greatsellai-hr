@@ -570,6 +570,30 @@ def _private_file_response_headers() -> dict[str, str]:
     }
 
 
+_FORCE_DOWNLOAD_ORIGINAL_SUFFIXES = frozenset({".htm", ".html"})
+
+
+def _original_file_response_options(
+    *,
+    original_filename: str,
+    requested_purpose: Literal["view", "download"],
+) -> tuple[str, Literal["inline", "attachment"]]:
+    """Return a browser-safe response policy for an untrusted original.
+
+    HTML resumes are accepted only as source documents for text extraction.
+    They must never render in the authenticated HR origin: a same-origin
+    ``text/html`` response could execute candidate-controlled script with the
+    viewer's session.  All HTML originals therefore download as opaque bytes,
+    including the legacy compatibility endpoint that otherwise supports PDF
+    inline preview.
+    """
+
+    if Path(original_filename).suffix.casefold() in _FORCE_DOWNLOAD_ORIGINAL_SUFFIXES:
+        return "application/octet-stream", "attachment"
+    media_type = mimetypes.guess_type(original_filename)[0] or "application/octet-stream"
+    return media_type, "attachment" if requested_purpose == "download" else "inline"
+
+
 def _candidate_data_session_nonce(request: Request) -> str:
     """Get a per-login opaque nonce for server-side file grants.
 
@@ -2792,16 +2816,15 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             )
         except CandidateDataLifecycleError as exc:
             raise _candidate_data_error_http_exception(exc) from exc
+        media_type, content_disposition_type = _original_file_response_options(
+            original_filename=access.original_filename,
+            requested_purpose=access.purpose,
+        )
         return FileResponse(
             path=access.path,
-            media_type=(
-                mimetypes.guess_type(access.original_filename)[0]
-                or "application/octet-stream"
-            ),
+            media_type=media_type,
             filename=access.original_filename,
-            content_disposition_type=(
-                "attachment" if access.purpose == "download" else "inline"
-            ),
+            content_disposition_type=content_disposition_type,
             headers=_private_file_response_headers(),
         )
 
@@ -2841,14 +2864,15 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         except CandidateDataLifecycleError as exc:
             session.rollback()
             raise _candidate_data_error_http_exception(exc) from exc
+        media_type, content_disposition_type = _original_file_response_options(
+            original_filename=access.original_filename,
+            requested_purpose="view",
+        )
         return FileResponse(
             path=access.path,
-            media_type=(
-                mimetypes.guess_type(access.original_filename)[0]
-                or "application/octet-stream"
-            ),
+            media_type=media_type,
             filename=access.original_filename,
-            content_disposition_type="inline",
+            content_disposition_type=content_disposition_type,
             headers=_private_file_response_headers(),
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -251,6 +252,46 @@ def test_named_mailbox_sync_authorization_does_not_guess_overlapping_name() -> N
     )
 
 
+@pytest.mark.parametrize(
+    ("message", "short_name", "long_name"),
+    [
+        ("同步校招邮箱！", "校招邮箱", "校招邮箱！"),
+        ("sync campus mailbox.", "campus mailbox", "campus mailbox."),
+    ],
+)
+def test_mailbox_literal_target_resolution_prefers_unique_longest_name(
+    message: str,
+    short_name: str,
+    long_name: str,
+) -> None:
+    short = SimpleNamespace(mailbox_id="short", display_name=short_name)
+    long = SimpleNamespace(mailbox_id="long", display_name=long_name)
+    configs = [short, long]
+
+    assert recruiting_agent_service._mailbox_configs_named_in_message(
+        message,
+        configs,
+    ) == [long, short]
+    assert recruiting_agent_service._unique_longest_mailbox_literal_match(
+        message,
+        configs,
+    ) is long
+    assert recruiting_agent_service._explicitly_requests_disambiguated_named_mailbox_sync(
+        message,
+        long_name,
+    )
+
+
+def test_mailbox_literal_target_resolution_rejects_equal_length_tie() -> None:
+    campus = SimpleNamespace(mailbox_id="campus", display_name="校招邮箱")
+    social = SimpleNamespace(mailbox_id="social", display_name="社招邮箱")
+
+    assert recruiting_agent_service._unique_longest_mailbox_literal_match(
+        "同步校招邮箱和社招邮箱",
+        [campus, social],
+    ) is None
+
+
 @pytest.mark.parametrize("mailbox_name", ["历史邮箱", "状态邮箱", "异常邮箱"])
 def test_named_mailbox_sync_authorization_does_not_reject_words_inside_name(
     mailbox_name: str,
@@ -402,6 +443,175 @@ def test_agent_queues_named_mailbox_sync_without_opening_imap(
     assert tasks.json()["total"] == 1
     assert tasks.json()["items"][0]["status"] == "queued"
     assert tasks.json()["items"][0]["job_kind"] == "sync"
+
+
+def test_agent_rejects_shorter_mailbox_tool_target_when_longer_name_matches(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    _create_mailbox(
+        ai_client,
+        monkeypatch,
+        label="校招邮箱",
+        host="imap.agent-short-target.test",
+        email_address="short-target@example.test",
+    )
+    _create_mailbox(
+        ai_client,
+        monkeypatch,
+        label="校招邮箱！",
+        host="imap.agent-long-target.test",
+        email_address="long-target@example.test",
+    )
+    calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal calls
+        del settings
+        calls += 1
+        if calls == 1:
+            return {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "wrong-short-target",
+                        "type": "function",
+                        "function": {
+                            "name": "enqueue_named_mailbox_sync",
+                            "arguments": json.dumps({"mailbox_name": "校招邮箱"}),
+                        },
+                    }
+                ],
+            }
+        assert "唯一收件通道名称" in messages[-1]["content"]
+        return {"content": "目标名称存在重叠，我没有创建同步任务。"}
+
+    monkeypatch.setattr(recruiting_agent_service, "_model_completion", fake_completion)
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "同步校招邮箱！"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tool_trace"] == [
+        {
+            "tool": "收件邮箱同步",
+            "summary": "请明确复述要同步的唯一收件通道名称，未创建同步任务。",
+        }
+    ]
+    tasks = ai_client.get("/v1/mailbox/tasks")
+    assert tasks.status_code == 200, tasks.text
+    assert tasks.json()["total"] == 0
+
+
+def test_agent_rejects_sync_all_when_message_matches_a_config_name(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    _create_mailbox(
+        ai_client,
+        monkeypatch,
+        label="所有邮箱！",
+        host="imap.agent-all-name-collision.test",
+        email_address="all-name-collision@example.test",
+    )
+    calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal calls
+        del settings
+        calls += 1
+        if calls == 1:
+            return {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "ambiguous-all-target",
+                        "type": "function",
+                        "function": {
+                            "name": "enqueue_all_mailbox_syncs",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            }
+        assert "全部邮箱指令有歧义" in messages[-1]["content"]
+        return {"content": "名称与全量指令有歧义，我没有创建同步任务。"}
+
+    monkeypatch.setattr(recruiting_agent_service, "_model_completion", fake_completion)
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "同步所有邮箱！"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tool_trace"] == [
+        {
+            "tool": "全部收件邮箱同步",
+            "summary": (
+                "检测到收件通道名称与全部邮箱指令有歧义，"
+                "请明确复述要同步全部邮箱还是指定邮箱，未创建同步任务。"
+            ),
+        }
+    ]
+    tasks = ai_client.get("/v1/mailbox/tasks")
+    assert tasks.status_code == 200, tasks.text
+    assert tasks.json()["total"] == 0
+
+
+def test_agent_rejects_named_sync_when_config_name_looks_like_sync_all(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    _create_mailbox(
+        ai_client,
+        monkeypatch,
+        label="所有邮箱！",
+        host="imap.agent-named-all-collision.test",
+        email_address="named-all-collision@example.test",
+    )
+    calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal calls
+        del settings
+        calls += 1
+        if calls == 1:
+            return {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "ambiguous-named-all-target",
+                        "type": "function",
+                        "function": {
+                            "name": "enqueue_named_mailbox_sync",
+                            "arguments": json.dumps({"mailbox_name": "所有邮箱！"}),
+                        },
+                    }
+                ],
+            }
+        assert "全部邮箱指令有歧义" in messages[-1]["content"]
+        return {"content": "名称同时像全量指令，我没有创建同步任务。"}
+
+    monkeypatch.setattr(recruiting_agent_service, "_model_completion", fake_completion)
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "同步所有邮箱！"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tool_trace"] == [
+        {
+            "tool": "收件邮箱同步",
+            "summary": (
+                "检测到指定收件通道名称与全部邮箱指令有歧义，"
+                "请明确复述要同步全部邮箱还是指定邮箱，未创建同步任务。"
+            ),
+        }
+    ]
+    tasks = ai_client.get("/v1/mailbox/tasks")
+    assert tasks.status_code == 200, tasks.text
+    assert tasks.json()["total"] == 0
 
 
 def test_agent_queries_recent_import_aggregate_without_attachment_metadata(

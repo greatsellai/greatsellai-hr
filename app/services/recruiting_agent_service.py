@@ -633,6 +633,7 @@ _TARGET_EXCLUSION_PATTERN = re.compile(
 _SAFE_SYNC_FOLLOWUP_PATTERN = re.compile(
     r"^(?:完成后(?:告诉我(?:结果)?|通知我(?:结果)?))$"
 )
+_SYNC_TARGET_SENTINEL = "\ue000agent_mailbox_target\ue001"
 _ALL_MAILBOX_TARGET_PATTERN = (
     r"(?:(?:全部|所有|全量)(?:已启用的|启用的)?"
     r"(?:收件邮箱|邮箱|收件箱|收件通道|邮箱通道|通道)"
@@ -741,6 +742,30 @@ def _explicitly_requests_named_mailbox_sync(message: str, mailbox_name: str) -> 
     )
 
 
+def _explicitly_requests_disambiguated_named_mailbox_sync(
+    message: str,
+    mailbox_name: str,
+) -> bool:
+    """Authorize a literal target after workspace-level name disambiguation."""
+
+    normalized_message = _normalized_mailbox_name(message)
+    normalized_name = _normalized_mailbox_name(mailbox_name)
+    if (
+        not normalized_name
+        or normalized_name not in normalized_message
+        or _SYNC_TARGET_SENTINEL in normalized_message
+    ):
+        return False
+    protected_message = normalized_message.replace(
+        normalized_name,
+        _SYNC_TARGET_SENTINEL,
+    )
+    return _explicitly_requests_target_sync(
+        protected_message,
+        target_regex=re.escape(_SYNC_TARGET_SENTINEL),
+    )
+
+
 def _explicitly_requests_all_mailbox_sync(message: str) -> bool:
     normalized_message = _normalized_mailbox_name(message)
     if _ALL_MAILBOX_EXCLUSION_PATTERN.search(normalized_message):
@@ -797,6 +822,43 @@ def _agent_mailbox_by_name(
         ),
         None,
     )
+
+
+def _mailbox_configs_named_in_message(
+    message: str,
+    configs: list[Any],
+) -> list[Any]:
+    """Return workspace configs whose normalized display name occurs literally."""
+
+    normalized_message = _normalized_mailbox_name(message)
+    matches: list[tuple[int, Any]] = []
+    for config in configs:
+        display_name = getattr(config, "display_name", None)
+        if not isinstance(display_name, str):
+            continue
+        normalized_name = _normalized_mailbox_name(display_name)
+        if normalized_name and normalized_name in normalized_message:
+            matches.append((len(normalized_name), config))
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return [config for _, config in matches]
+
+
+def _unique_longest_mailbox_literal_match(
+    message: str,
+    configs: list[Any],
+) -> Any | None:
+    """Resolve one unique longest literal config name, or fail closed."""
+
+    matches = _mailbox_configs_named_in_message(message, configs)
+    if not matches:
+        return None
+    longest_length = len(_normalized_mailbox_name(matches[0].display_name))
+    longest_matches = [
+        config
+        for config in matches
+        if len(_normalized_mailbox_name(config.display_name)) == longest_length
+    ]
+    return longest_matches[0] if len(longest_matches) == 1 else None
 
 
 def _safe_sync_job_payload(job: Any | None) -> dict[str, object] | None:
@@ -1057,7 +1119,33 @@ def _enqueue_named_mailbox_sync(
                 tool="收件邮箱同步",
                 message="未找到该收件通道，未创建同步任务。",
             )
-        if not _explicitly_requests_named_mailbox_sync(user_message, config.display_name):
+        literal_matches = _mailbox_configs_named_in_message(user_message, configs)
+        if not literal_matches:
+            return _mailbox_tool_error(
+                intent="sync_mailbox",
+                tool="收件邮箱同步",
+                message="请明确指定要同步的收件通道，未创建同步任务。",
+            )
+        literal_target = _unique_longest_mailbox_literal_match(user_message, configs)
+        if literal_target is None or literal_target.mailbox_id != config.mailbox_id:
+            return _mailbox_tool_error(
+                intent="sync_mailbox",
+                tool="收件邮箱同步",
+                message="请明确复述要同步的唯一收件通道名称，未创建同步任务。",
+            )
+        if _explicitly_requests_all_mailbox_sync(user_message):
+            return _mailbox_tool_error(
+                intent="sync_mailbox",
+                tool="收件邮箱同步",
+                message=(
+                    "检测到指定收件通道名称与全部邮箱指令有歧义，"
+                    "请明确复述要同步全部邮箱还是指定邮箱，未创建同步任务。"
+                ),
+            )
+        if not _explicitly_requests_disambiguated_named_mailbox_sync(
+            user_message,
+            config.display_name,
+        ):
             return _mailbox_tool_error(
                 intent="sync_mailbox",
                 tool="收件邮箱同步",
@@ -1098,9 +1186,29 @@ def _enqueue_named_mailbox_sync(
     )
 
 
-def _enqueue_all_mailbox_syncs(session: Session, *, settings: AppSettings) -> ToolRun:
+def _enqueue_all_mailbox_syncs(
+    session: Session,
+    *,
+    settings: AppSettings,
+    user_message: str,
+) -> ToolRun:
     try:
         configs = list_mailbox_configs(session).items
+        if not _explicitly_requests_all_mailbox_sync(user_message):
+            return _mailbox_tool_error(
+                intent="sync_mailbox",
+                tool="全部收件邮箱同步",
+                message="请明确说明要同步全部收件邮箱，未创建同步任务。",
+            )
+        if _mailbox_configs_named_in_message(user_message, configs):
+            return _mailbox_tool_error(
+                intent="sync_mailbox",
+                tool="全部收件邮箱同步",
+                message=(
+                    "检测到收件通道名称与全部邮箱指令有歧义，"
+                    "请明确复述要同步全部邮箱还是指定邮箱，未创建同步任务。"
+                ),
+            )
         enabled_count = sum(item.enabled for item in configs)
         jobs = enqueue_all_mailbox_sync_jobs(session, settings=settings)
     except MailboxImportError as exc:
@@ -1511,12 +1619,12 @@ def _execute_tool(
         )
     if name == "enqueue_all_mailbox_syncs":
         return (
-            _enqueue_all_mailbox_syncs(session, settings=settings)
-            if (
-                not arguments
-                and mailbox_tools_available
-                and _explicitly_requests_all_mailbox_sync(user_message)
+            _enqueue_all_mailbox_syncs(
+                session,
+                settings=settings,
+                user_message=user_message,
             )
+            if not arguments and mailbox_tools_available
             else (
                 _mailbox_tools_unavailable(intent="sync_mailbox")
                 if not mailbox_tools_available

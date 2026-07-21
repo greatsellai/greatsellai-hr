@@ -2199,6 +2199,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     )
     def post_recruiting_agent_turn(
         payload: RecruitingAgentRequest,
+        principal: AuthPrincipal = Depends(require_single_admin),
         session: Session = Depends(get_session),
     ) -> RecruitingAgentResponse:
         """Run one bounded, tool-backed recruiter assistant turn."""
@@ -2208,6 +2209,13 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 session,
                 payload=payload,
                 settings=settings,
+                # Core recruiting tools remain available to an active
+                # recruiter. Mailbox operations use the same entitlement and
+                # organization-admin boundary as the dedicated mailbox APIs.
+                mailbox_tools_available=(
+                    principal.role == "admin"
+                    and require_feature(principal, "mailbox_import")
+                ),
             )
             _commit_or_raise(session)
         except RecruitingAgentServiceError as exc:

@@ -309,6 +309,9 @@ export type RecruitingAgentIntent =
   | "show_job_ranking"
   | "explain_candidate"
   | "score_current_candidate"
+  | "show_mailbox_status"
+  | "show_mailbox_imports"
+  | "sync_mailbox"
   | "help";
 
 export interface RecruitingAgentTurnInput {
@@ -326,7 +329,7 @@ export interface RecruitingAgentCandidate {
 }
 
 export interface RecruitingAgentAction {
-  action: "open_resume" | "open_match_workspace";
+  action: "open_resume" | "open_match_workspace" | "open_mailbox_workspace";
   label: string;
   resume_id: string | null;
 }

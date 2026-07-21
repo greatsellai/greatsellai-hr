@@ -1886,11 +1886,19 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       />
       <RecruitingAgentDrawer
         isOpen={agentOpen}
+        mailboxToolsAvailable={
+          authSession?.role === "admin" &&
+          authSession?.plan?.feature_flags.mailbox_import === true
+        }
         selectedResume={selectedResume}
         onClose={() => setAgentOpen(false)}
         onOpenMatchWorkspace={() => {
           setAgentOpen(false);
           setView("match");
+        }}
+        onOpenMailboxWorkspace={() => {
+          setAgentOpen(false);
+          setView("inbox");
         }}
         onOpenResume={openAgentResume}
       />
@@ -2503,15 +2511,19 @@ function AgentMarkdown({ content }: { content: string }) {
 
 function RecruitingAgentDrawer({
   isOpen,
+  mailboxToolsAvailable,
   selectedResume,
   onClose,
   onOpenMatchWorkspace,
+  onOpenMailboxWorkspace,
   onOpenResume,
 }: {
   isOpen: boolean;
+  mailboxToolsAvailable: boolean;
   selectedResume: SelectedResume | null;
   onClose: () => void;
   onOpenMatchWorkspace: () => void;
+  onOpenMailboxWorkspace: () => void;
   onOpenResume: (candidate: RecruitingAgentCandidate) => void;
 }) {
   const [input, setInput] = useState("");
@@ -2523,7 +2535,7 @@ function RecruitingAgentDrawer({
       id: 1,
       role: "assistant",
       content:
-        "我是招聘助手。可以按条件筛选简历、为已确认 JD 启动批量匹配，或解释当前候选人的匹配分数。",
+        "我是招聘助手。可以筛选简历、处理 JD 匹配和评分；已开通邮箱入库的工作区也可以查询收件状态，并按你的指令发起后台同步。",
     },
   ]);
 
@@ -2694,6 +2706,12 @@ function RecruitingAgentDrawer({
                 打开 JD 匹配工作区
               </button>
             )}
+            {item.actions?.some((action) => action.action === "open_mailbox_workspace") && (
+              <button className="button button-ghost agent-workspace-button" onClick={onOpenMailboxWorkspace} type="button">
+                <Icon name="inbox" size={15} />
+                打开邮箱附件入库
+              </button>
+            )}
           </article>
         ))}
         {loading && (
@@ -2704,7 +2722,13 @@ function RecruitingAgentDrawer({
       </div>
       <div className="agent-composer">
         <div className="agent-suggestions" aria-label="常用提问">
-          {["找 985/211、3 年以上的候选人", "为当前 JD 批量匹配", "查看当前 JD 排行榜", "解释当前候选人的分数"].map((prompt) => (
+          {[
+            "找 985/211、3 年以上的候选人",
+            "为当前 JD 批量匹配",
+            "查看当前 JD 排行榜",
+            "解释当前候选人的分数",
+            ...(mailboxToolsAvailable ? ["查看收件邮箱状态", "同步全部收件邮箱"] : []),
+          ].map((prompt) => (
             <button disabled={loading} key={prompt} onClick={() => void send(prompt)} type="button">
               {prompt}
             </button>

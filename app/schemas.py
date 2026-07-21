@@ -961,7 +961,7 @@ class RecruitingAgentCandidate(ApiModel):
 
 
 class RecruitingAgentAction(ApiModel):
-    action: Literal["open_resume", "open_match_workspace"]
+    action: Literal["open_resume", "open_match_workspace", "open_mailbox_workspace"]
     label: str
     resume_id: str | None = None
 
@@ -979,6 +979,9 @@ class RecruitingAgentResponse(ApiModel):
         "show_job_ranking",
         "explain_candidate",
         "score_current_candidate",
+        "show_mailbox_status",
+        "show_mailbox_imports",
+        "sync_mailbox",
         "help",
     ]
     job_version_id: str | None = None

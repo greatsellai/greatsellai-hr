@@ -854,9 +854,10 @@ button {
 .results-header {
   display: flex;
   min-height: 4rem;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-sm);
-  padding: 0 var(--space-lg);
+  padding: 0.625rem var(--space-lg);
   border-bottom: 1px solid var(--line);
 }
 
@@ -886,6 +887,82 @@ button {
   align-items: center;
 }
 
+.institution-quick-filters {
+  display: flex;
+  min-width: 0;
+  flex: 1 0 100%;
+  gap: 0.625rem;
+  align-items: center;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.institution-quick-filters-label {
+  flex: 0 0 auto;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.institution-quick-filter-options {
+  display: flex;
+  min-width: 0;
+  gap: 0.375rem;
+  align-items: center;
+  overflow-x: auto;
+  padding: 0.125rem 0;
+  scrollbar-width: thin;
+}
+
+.institution-quick-filter {
+  display: inline-flex;
+  min-height: 1.875rem;
+  flex: 0 0 auto;
+  gap: 0.375rem;
+  align-items: center;
+  padding: 0.1875rem 0.5rem;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  transition: color 160ms var(--ease-out), background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
+}
+
+.institution-quick-filter:hover {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.institution-quick-filter:has(input:checked) {
+  color: var(--red-pressed);
+  background: var(--red-tint);
+  border-color: rgb(215 22 24 / 0.3);
+}
+
+.institution-quick-filter:focus-within {
+  border-color: var(--red);
+  box-shadow: 0 0 0 0.1875rem rgb(215 22 24 / 0.12);
+}
+
+.institution-quick-filter input {
+  width: 0.875rem;
+  height: 0.875rem;
+  margin: 0;
+  accent-color: var(--red);
+}
+
+.institution-quick-filter-status {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
 .table-scroll {
   min-width: 0;
   overflow: auto;
@@ -893,7 +970,7 @@ button {
 
 .candidate-table {
   width: 100%;
-  min-width: 49rem;
+  min-width: 52rem;
   border-collapse: collapse;
   text-align: left;
 }
@@ -1249,13 +1326,17 @@ button {
   border-radius: 999px;
 }
 
-.school-mark {
-  display: inline-flex;
-  align-items: center;
+.institution-classification-tags {
+  display: flex;
+  max-width: 11rem;
+  flex-wrap: wrap;
   gap: 0.25rem;
-  color: var(--red-pressed);
-  font-size: 0.75rem;
-  font-weight: 650;
+}
+
+.institution-classification-tags .tag {
+  min-height: 1.5rem;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.6875rem;
 }
 
 .match-tags {

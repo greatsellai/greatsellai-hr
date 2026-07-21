@@ -1111,22 +1111,45 @@ def _enqueue_named_mailbox_sync(
             message="指定邮箱同步参数无效，未创建同步任务。",
         )
     try:
-        configs = list_mailbox_configs(session).items
-        config = _agent_mailbox_by_name(configs, arguments.get("mailbox_name"))
+        active_configs = list_mailbox_configs(session).items
+        authorization_configs = list_mailbox_configs(
+            session,
+            include_archived=True,
+        ).items
+        config = _agent_mailbox_by_name(
+            active_configs,
+            arguments.get("mailbox_name"),
+        )
+        authorization_config = _agent_mailbox_by_name(
+            authorization_configs,
+            arguments.get("mailbox_name"),
+        )
+        if config is None and authorization_config is not None:
+            return _mailbox_tool_error(
+                intent="sync_mailbox",
+                tool="收件邮箱同步",
+                message="该收件通道已归档，未创建同步任务。",
+            )
         if config is None or not config.mailbox_id or not config.display_name:
             return _mailbox_tool_error(
                 intent="sync_mailbox",
                 tool="收件邮箱同步",
                 message="未找到该收件通道，未创建同步任务。",
             )
-        literal_matches = _mailbox_configs_named_in_message(user_message, configs)
+        literal_matches = _mailbox_configs_named_in_message(
+            user_message,
+            authorization_configs,
+        )
         if not literal_matches:
             return _mailbox_tool_error(
                 intent="sync_mailbox",
                 tool="收件邮箱同步",
                 message="请明确指定要同步的收件通道，未创建同步任务。",
             )
-        literal_target = _unique_longest_mailbox_literal_match(user_message, configs)
+        literal_target = _unique_longest_mailbox_literal_match(
+            user_message,
+            authorization_configs,
+        )
         if literal_target is None or literal_target.mailbox_id != config.mailbox_id:
             return _mailbox_tool_error(
                 intent="sync_mailbox",
@@ -1193,14 +1216,21 @@ def _enqueue_all_mailbox_syncs(
     user_message: str,
 ) -> ToolRun:
     try:
-        configs = list_mailbox_configs(session).items
+        active_configs = list_mailbox_configs(session).items
+        authorization_configs = list_mailbox_configs(
+            session,
+            include_archived=True,
+        ).items
         if not _explicitly_requests_all_mailbox_sync(user_message):
             return _mailbox_tool_error(
                 intent="sync_mailbox",
                 tool="全部收件邮箱同步",
                 message="请明确说明要同步全部收件邮箱，未创建同步任务。",
             )
-        if _mailbox_configs_named_in_message(user_message, configs):
+        if _mailbox_configs_named_in_message(
+            user_message,
+            authorization_configs,
+        ):
             return _mailbox_tool_error(
                 intent="sync_mailbox",
                 tool="全部收件邮箱同步",
@@ -1209,7 +1239,7 @@ def _enqueue_all_mailbox_syncs(
                     "请明确复述要同步全部邮箱还是指定邮箱，未创建同步任务。"
                 ),
             )
-        enabled_count = sum(item.enabled for item in configs)
+        enabled_count = sum(item.enabled for item in active_configs)
         jobs = enqueue_all_mailbox_sync_jobs(session, settings=settings)
     except MailboxImportError as exc:
         return _mailbox_tool_error(

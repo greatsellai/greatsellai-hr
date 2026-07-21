@@ -614,6 +614,130 @@ def test_agent_rejects_named_sync_when_config_name_looks_like_sync_all(
     assert tasks.json()["total"] == 0
 
 
+@pytest.mark.parametrize(
+    ("case_id", "archived_name", "active_name", "message", "tool_name"),
+    [
+        (
+            "zh-named",
+            "所有邮箱！",
+            "日常招聘",
+            "同步所有邮箱！",
+            "enqueue_named_mailbox_sync",
+        ),
+        (
+            "zh-all",
+            "所有邮箱！",
+            "日常招聘",
+            "同步所有邮箱！",
+            "enqueue_all_mailbox_syncs",
+        ),
+        (
+            "en-named",
+            "all mailboxes.",
+            "daily recruiting",
+            "sync all mailboxes.",
+            "enqueue_named_mailbox_sync",
+        ),
+        (
+            "en-all",
+            "all mailboxes.",
+            "daily recruiting",
+            "sync all mailboxes.",
+            "enqueue_all_mailbox_syncs",
+        ),
+    ],
+)
+def test_agent_archived_all_like_name_blocks_named_and_all_syncs(
+    ai_client: TestClient,
+    monkeypatch,
+    *,
+    case_id: str,
+    archived_name: str,
+    active_name: str,
+    message: str,
+    tool_name: str,
+) -> None:
+    archived = _create_mailbox(
+        ai_client,
+        monkeypatch,
+        label=archived_name,
+        host=f"imap.agent-archived-{case_id}.test",
+        email_address=f"archived-{case_id}@example.test",
+    )
+    active = _create_mailbox(
+        ai_client,
+        monkeypatch,
+        label=active_name,
+        host=f"imap.agent-active-{case_id}.test",
+        email_address=f"active-{case_id}@example.test",
+    )
+    archive = ai_client.post(f"/v1/mailboxes/{archived['mailbox_id']}/archive")
+    assert archive.status_code == 200, archive.text
+    assert archive.json()["archived_at"] is not None
+    assert archive.json()["enabled"] is False
+
+    calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal calls
+        del settings
+        calls += 1
+        if calls == 1:
+            arguments = (
+                json.dumps({"mailbox_name": archived_name})
+                if tool_name == "enqueue_named_mailbox_sync"
+                else "{}"
+            )
+            return {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": f"archived-all-like-{case_id}",
+                        "type": "function",
+                        "function": {"name": tool_name, "arguments": arguments},
+                    }
+                ],
+            }
+        expected = (
+            "已归档"
+            if tool_name == "enqueue_named_mailbox_sync"
+            else "全部邮箱指令有歧义"
+        )
+        assert expected in messages[-1]["content"]
+        return {"content": "归档名称仍参与鉴权，我没有创建同步任务。"}
+
+    monkeypatch.setattr(recruiting_agent_service, "_model_completion", fake_completion)
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": message},
+    )
+
+    assert response.status_code == 200, response.text
+    trace = response.json()["tool_trace"]
+    assert len(trace) == 1
+    if tool_name == "enqueue_named_mailbox_sync":
+        assert trace[0] == {
+            "tool": "收件邮箱同步",
+            "summary": "该收件通道已归档，未创建同步任务。",
+        }
+    else:
+        assert trace[0] == {
+            "tool": "全部收件邮箱同步",
+            "summary": (
+                "检测到收件通道名称与全部邮箱指令有歧义，"
+                "请明确复述要同步全部邮箱还是指定邮箱，未创建同步任务。"
+            ),
+        }
+    tasks = ai_client.get("/v1/mailbox/tasks")
+    assert tasks.status_code == 200, tasks.text
+    assert tasks.json()["total"] == 0
+    active_configs = ai_client.get("/v1/mailboxes")
+    assert active_configs.status_code == 200, active_configs.text
+    assert [item["mailbox_id"] for item in active_configs.json()["items"]] == [
+        active["mailbox_id"]
+    ]
+
+
 def test_agent_queries_recent_import_aggregate_without_attachment_metadata(
     ai_client: TestClient,
     monkeypatch,

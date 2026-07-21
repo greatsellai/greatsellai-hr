@@ -119,6 +119,15 @@ class AppSettings:
     email_verification_resend_cooldown_seconds: int = 60
     email_verification_daily_limit: int = 5
     password_reset_ttl_seconds: int = 60 * 60
+    # Public password recovery is intentionally throttled independently from
+    # registration.  The persisted buckets use global, client and opaque
+    # email dimensions; no raw address or IP is stored.
+    password_reset_rate_limit_global_limit: int = 60
+    password_reset_rate_limit_global_window_seconds: int = 60 * 60
+    password_reset_rate_limit_client_limit: int = 5
+    password_reset_rate_limit_client_window_seconds: int = 15 * 60
+    password_reset_rate_limit_email_limit: int = 3
+    password_reset_rate_limit_email_window_seconds: int = 24 * 60 * 60
     # Public self-registration has separate global, client, and email limits.
     # The limits are persisted in the database so multiple API replicas share
     # the same budget.  Forwarded client headers are accepted only when the
@@ -296,6 +305,33 @@ class AppSettings:
             ),
             password_reset_ttl_seconds=int(
                 os.getenv("RESUME_V3_PASSWORD_RESET_TTL_SECONDS", str(60 * 60))
+            ),
+            password_reset_rate_limit_global_limit=int(
+                os.getenv("RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_LIMIT", "60")
+            ),
+            password_reset_rate_limit_global_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
+                    str(60 * 60),
+                )
+            ),
+            password_reset_rate_limit_client_limit=int(
+                os.getenv("RESUME_V3_PASSWORD_RESET_RATE_LIMIT_CLIENT_LIMIT", "5")
+            ),
+            password_reset_rate_limit_client_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_CLIENT_WINDOW_SECONDS",
+                    str(15 * 60),
+                )
+            ),
+            password_reset_rate_limit_email_limit=int(
+                os.getenv("RESUME_V3_PASSWORD_RESET_RATE_LIMIT_EMAIL_LIMIT", "3")
+            ),
+            password_reset_rate_limit_email_window_seconds=int(
+                os.getenv(
+                    "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
+                    str(24 * 60 * 60),
+                )
             ),
             registration_rate_limit_global_limit=int(
                 os.getenv("RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_LIMIT", "20")
@@ -504,6 +540,38 @@ class AppSettings:
             raise ValueError("RESUME_V3_EMAIL_VERIFICATION_DAILY_LIMIT must be at least 1")
         if self.password_reset_ttl_seconds < 5 * 60:
             raise ValueError("RESUME_V3_PASSWORD_RESET_TTL_SECONDS must be at least 300")
+        for name, value in (
+            (
+                "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_LIMIT",
+                self.password_reset_rate_limit_global_limit,
+            ),
+            (
+                "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_CLIENT_LIMIT",
+                self.password_reset_rate_limit_client_limit,
+            ),
+            (
+                "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_EMAIL_LIMIT",
+                self.password_reset_rate_limit_email_limit,
+            ),
+        ):
+            if value < 1:
+                raise ValueError(f"{name} must be at least 1")
+        for name, value in (
+            (
+                "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_GLOBAL_WINDOW_SECONDS",
+                self.password_reset_rate_limit_global_window_seconds,
+            ),
+            (
+                "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_CLIENT_WINDOW_SECONDS",
+                self.password_reset_rate_limit_client_window_seconds,
+            ),
+            (
+                "RESUME_V3_PASSWORD_RESET_RATE_LIMIT_EMAIL_WINDOW_SECONDS",
+                self.password_reset_rate_limit_email_window_seconds,
+            ),
+        ):
+            if value < 60:
+                raise ValueError(f"{name} must be at least 60")
         for name, value in (
             ("RESUME_V3_REGISTRATION_RATE_LIMIT_GLOBAL_LIMIT", self.registration_rate_limit_global_limit),
             ("RESUME_V3_REGISTRATION_RATE_LIMIT_CLIENT_LIMIT", self.registration_rate_limit_client_limit),

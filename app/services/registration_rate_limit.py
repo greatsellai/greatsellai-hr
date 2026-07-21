@@ -1,4 +1,11 @@
-"""Durable, privacy-preserving protection for public self-registration."""
+"""Durable, privacy-preserving throttles for public account endpoints.
+
+The database model keeps its original ``RegistrationRateLimitBucket`` name
+for migration compatibility, but it intentionally stores counters for more
+than registration.  Each endpoint gets a separate, namespaced scope so a
+password-reset request can never spend a registration allowance (or vice
+versa).
+"""
 from __future__ import annotations
 
 import hashlib
@@ -13,12 +20,26 @@ from sqlalchemy.orm import Session
 from app.models import RegistrationRateLimitBucket
 
 
-class RegistrationRateLimitError(RuntimeError):
+class PublicRateLimitError(RuntimeError):
+    """Base class for a stable, endpoint-specific public throttle response."""
+
+    code = "public_rate_limit_exceeded"
+
+
+class RegistrationRateLimitError(PublicRateLimitError):
     """Stable public registration throttle response."""
+
+    code = "registration_rate_limit_exceeded"
+
+
+class PasswordResetRateLimitError(PublicRateLimitError):
+    """Stable public password-reset throttle response."""
+
+    code = "password_reset_rate_limit_exceeded"
 
 
 @dataclass(frozen=True)
-class RegistrationRateLimitRule:
+class PublicRateLimitRule:
     scope: str
     value: str
     limit: int
@@ -39,7 +60,95 @@ def enforce_registration_rate_limit(
     email_window_seconds: int,
     now: datetime | None = None,
 ) -> None:
-    """Consume one registration allowance or fail before account creation.
+    """Consume one registration allowance or fail before account creation."""
+
+    _enforce_public_rate_limit(
+        session,
+        secret=secret,
+        rules=(
+            PublicRateLimitRule(
+                scope="registration_global",
+                value="global",
+                limit=global_limit,
+                window_seconds=global_window_seconds,
+            ),
+            PublicRateLimitRule(
+                scope="registration_client",
+                value=client_identifier,
+                limit=client_limit,
+                window_seconds=client_window_seconds,
+            ),
+            PublicRateLimitRule(
+                scope="registration_email",
+                value=email_key,
+                limit=email_limit,
+                window_seconds=email_window_seconds,
+            ),
+        ),
+        error_type=RegistrationRateLimitError,
+        now=now,
+    )
+
+
+def enforce_password_reset_rate_limit(
+    session: Session,
+    *,
+    secret: str,
+    client_identifier: str,
+    email_key: str,
+    global_limit: int,
+    global_window_seconds: int,
+    client_limit: int,
+    client_window_seconds: int,
+    email_limit: int,
+    email_window_seconds: int,
+    now: datetime | None = None,
+) -> None:
+    """Consume one password-reset request allowance before issuing a token.
+
+    The email key is an opaque normalized-or-invalid-input namespace that is
+    HMACed before persistence.  This function is deliberately called before
+    ``issue_password_reset``: a rejected request must not invalidate an
+    already-delivered, still-valid recovery link.
+    """
+
+    _enforce_public_rate_limit(
+        session,
+        secret=secret,
+        rules=(
+            PublicRateLimitRule(
+                scope="password_reset_global",
+                value="global",
+                limit=global_limit,
+                window_seconds=global_window_seconds,
+            ),
+            PublicRateLimitRule(
+                scope="password_reset_client",
+                value=client_identifier,
+                limit=client_limit,
+                window_seconds=client_window_seconds,
+            ),
+            PublicRateLimitRule(
+                scope="password_reset_email",
+                value=email_key,
+                limit=email_limit,
+                window_seconds=email_window_seconds,
+            ),
+        ),
+        error_type=PasswordResetRateLimitError,
+        now=now,
+    )
+
+
+def _enforce_public_rate_limit(
+    session: Session,
+    *,
+    secret: str,
+    rules: tuple[PublicRateLimitRule, ...],
+    error_type: type[PublicRateLimitError],
+    now: datetime | None,
+) -> None:
+    """Persist a namespaced set of public API counters.
 
     Every API replica uses the same database buckets.  PostgreSQL row locks
     serialize updates to existing buckets; the unique window key handles the
@@ -47,26 +156,6 @@ def enforce_registration_rate_limit(
     """
 
     current_time = _aware(now) or datetime.now(timezone.utc)
-    rules = (
-        RegistrationRateLimitRule(
-            scope="registration_global",
-            value="global",
-            limit=global_limit,
-            window_seconds=global_window_seconds,
-        ),
-        RegistrationRateLimitRule(
-            scope="registration_client",
-            value=client_identifier,
-            limit=client_limit,
-            window_seconds=client_window_seconds,
-        ),
-        RegistrationRateLimitRule(
-            scope="registration_email",
-            value=email_key,
-            limit=email_limit,
-            window_seconds=email_window_seconds,
-        ),
-    )
     # Buckets are security counters, not an event log.  Retain only the
     # longest active window so unbounded unique-email traffic cannot grow the
     # table forever.
@@ -78,18 +167,25 @@ def enforce_registration_rate_limit(
             RegistrationRateLimitBucket.window_started_at < retention_cutoff
         )
     )
-    # Fixed lock order avoids a deadlock when separate signup requests share
-    # only some of their buckets.
+    # Fixed lock order avoids a deadlock when concurrent public-account
+    # requests share only some of their buckets.
     for rule in rules:
-        _consume_bucket(session, secret=secret, rule=rule, now=current_time)
+        _consume_bucket(
+            session,
+            secret=secret,
+            rule=rule,
+            now=current_time,
+            error_type=error_type,
+        )
 
 
 def _consume_bucket(
     session: Session,
     *,
     secret: str,
-    rule: RegistrationRateLimitRule,
+    rule: PublicRateLimitRule,
     now: datetime,
+    error_type: type[PublicRateLimitError],
 ) -> None:
     window_started_at = _window_started_at(now, rule.window_seconds)
     key_digest = _rate_limit_digest(secret, scope=rule.scope, value=rule.value)
@@ -123,7 +219,7 @@ def _consume_bucket(
                 raise
 
     if bucket.request_count >= rule.limit:
-        raise RegistrationRateLimitError("registration_rate_limit_exceeded")
+        raise error_type(error_type.code)
     bucket.request_count += 1
 
 

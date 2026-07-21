@@ -183,7 +183,9 @@ from app.services.transactional_email import (
     password_reset_url,
 )
 from app.services.registration_rate_limit import (
+    PasswordResetRateLimitError,
     RegistrationRateLimitError,
+    enforce_password_reset_rate_limit,
     enforce_registration_rate_limit,
 )
 from app.tenant_scope import organization_context_id, set_organization_context
@@ -715,7 +717,12 @@ def _deliver_password_reset(
 
 
 def _registration_client_identifier(request: Request, settings: AppSettings) -> str:
-    """Return a safe signup throttle key without trusting spoofable headers."""
+    """Return a safe public-auth throttle key without trusting spoofed headers.
+
+    Registration and password reset intentionally share this trusted-proxy
+    resolver.  It only accepts Caddy's appended final X-Forwarded-For value
+    when the direct ASGI peer is an explicitly configured proxy network.
+    """
 
     direct_peer = request.client.host if request.client is not None else "unknown"
     if not _is_trusted_proxy(direct_peer, settings.trusted_proxy_cidrs):
@@ -741,6 +748,23 @@ def _is_trusted_proxy(host: str, cidrs: tuple[str, ...]) -> bool:
     except ValueError:
         return False
     return any(address in ip_network(cidr, strict=False) for cidr in cidrs)
+
+
+def _password_reset_rate_limit_email_key(value: str) -> str:
+    """Return an opaque namespace value for the password-reset email bucket.
+
+    Valid addresses use the same normalized key as identity lookup. Invalid
+    address-shaped input still receives a deterministic HMAC-only bucket so
+    recovery requests retain their non-enumerating public behavior. The raw
+    value never reaches the database: the rate-limit service hashes it with a
+    server secret before persistence.
+    """
+
+    try:
+        _, email_key = normalize_email(value)
+    except IdentityServiceError:
+        return f"invalid:{value.strip().casefold()}"
+    return f"email:{email_key}"
 
 
 def _raise_job_service_error(exc: JobServiceError) -> None:
@@ -1266,6 +1290,34 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     ) -> PasswordResetRequestResult:
         provider: TransactionalEmailProvider = request.app.state.transactional_email_provider
         settings: AppSettings = request.app.state.settings
+        try:
+            # Persist abuse accounting before looking up the account or
+            # issuing a token.  In particular, a rejected request must never
+            # reach issue_password_reset(), because that method intentionally
+            # invalidates an older active recovery link when it replaces it.
+            enforce_password_reset_rate_limit(
+                session,
+                secret=(
+                    settings.session_secret
+                    or settings.admin_token
+                    or "resume-v3-development-password-reset-rate-limit"
+                ),
+                client_identifier=_registration_client_identifier(request, settings),
+                email_key=_password_reset_rate_limit_email_key(payload.email),
+                global_limit=settings.password_reset_rate_limit_global_limit,
+                global_window_seconds=settings.password_reset_rate_limit_global_window_seconds,
+                client_limit=settings.password_reset_rate_limit_client_limit,
+                client_window_seconds=settings.password_reset_rate_limit_client_window_seconds,
+                email_limit=settings.password_reset_rate_limit_email_limit,
+                email_window_seconds=settings.password_reset_rate_limit_email_window_seconds,
+            )
+            _commit_or_raise(session)
+        except PasswordResetRateLimitError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="password_reset_rate_limit_exceeded",
+            ) from exc
         # Keep both the HTTP body and status identical for registered and
         # unknown addresses.  The raw token exists only long enough to build
         # the provider message, while its database row stores a digest.

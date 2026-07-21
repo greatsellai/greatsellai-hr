@@ -17,6 +17,7 @@ import tempfile
 import time
 from datetime import timedelta
 from pathlib import Path
+from uuid import uuid4
 
 
 PROJECT_ROOT = Path("/app")
@@ -236,8 +237,215 @@ def _settings(database_url: str, uploads_dir: Path) -> object:
     )
 
 
+def _seed_pre_0028_password_reset_rows(database_url: str) -> str:
+    """Insert an account with the historical (pre-0028) table shape.
+
+    ``PasswordResetToken`` in the current ORM knows about ``invalidated_at``,
+    but that column deliberately does not exist at revision 0027.  Raw SQL is
+    therefore intentional here: it proves that a populated database which
+    issued multiple valid reset links before 0028 can really be upgraded.
+    """
+
+    from datetime import datetime, timezone
+
+    from sqlalchemy import create_engine, text
+
+    now = datetime.now(timezone.utc)
+    user_id = str(uuid4())
+    token_rows = []
+    for position in (1, 2):
+        token_rows.append(
+            {
+                "id": str(uuid4()),
+                "user_id": user_id,
+                "token_digest": hashlib.sha256(
+                    f"release-regression-legacy-reset-{position}".encode("utf-8")
+                ).hexdigest(),
+                "expires_at": now + timedelta(hours=24),
+                "requested_at": now - timedelta(minutes=position),
+            }
+        )
+
+    engine = create_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO user_accounts (
+                        id, email, email_key, full_name, password_hash,
+                        is_active, is_platform_admin, email_verified_at,
+                        last_login_at, created_at, updated_at
+                    ) VALUES (
+                        :id, :email, :email_key, :full_name, :password_hash,
+                        :is_active, :is_platform_admin, :email_verified_at,
+                        :last_login_at, :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "id": user_id,
+                    "email": "release-regression-legacy-reset@invalid.test",
+                    "email_key": "release-regression-legacy-reset@invalid.test",
+                    "full_name": "Synthetic legacy reset account",
+                    "password_hash": "!synthetic-release-regression-password!",
+                    "is_active": True,
+                    "is_platform_admin": False,
+                    "email_verified_at": now,
+                    "last_login_at": None,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            # At 0027 this is the complete table shape: no ``invalidated_at``
+            # column exists yet, and multiple unused rows are permitted.
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO password_reset_tokens (
+                        id, user_id, token_digest, expires_at, used_at, requested_at
+                    ) VALUES (
+                        :id, :user_id, :token_digest, :expires_at, NULL, :requested_at
+                    )
+                    """
+                ),
+                token_rows,
+            )
+    finally:
+        engine.dispose()
+
+    return user_id
+
+
+def _assert_0028_password_reset_upgrade(database_url: str, *, user_id: str) -> None:
+    """Prove 0028 invalidates legacy links and enforces one active link.
+
+    This runs against PostgreSQL, rather than a mock or SQLite approximation:
+    the second active insert must fail with the exact PostgreSQL partial-index
+    name introduced by revision 0028.
+    """
+
+    from datetime import datetime, timezone
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import IntegrityError
+
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            legacy_rows = connection.execute(
+                text(
+                    """
+                    SELECT id, used_at, invalidated_at
+                    FROM password_reset_tokens
+                    WHERE user_id = :user_id
+                    ORDER BY requested_at ASC
+                    """
+                ),
+                {"user_id": user_id},
+            ).mappings().all()
+            session_version = connection.scalar(
+                text(
+                    "SELECT auth_session_version FROM user_accounts WHERE id = :user_id"
+                ),
+                {"user_id": user_id},
+            )
+
+        _assert(len(legacy_rows) == 2, "legacy_password_reset_rows_missing")
+        _assert(
+            all(row["used_at"] is None for row in legacy_rows),
+            "legacy_password_reset_rows_unexpectedly_used",
+        )
+        _assert(
+            all(row["invalidated_at"] is not None for row in legacy_rows),
+            "legacy_password_reset_rows_not_invalidated",
+        )
+        # Revision 0029 must also preserve the historical account while
+        # adding its browser-session revocation counter.
+        _assert(session_version == 1, "legacy_account_session_version_missing")
+
+        now = datetime.now(timezone.utc)
+        active_row = {
+            "id": str(uuid4()),
+            "user_id": user_id,
+            "token_digest": hashlib.sha256(
+                b"release-regression-post-upgrade-active-reset"
+            ).hexdigest(),
+            "expires_at": now + timedelta(hours=24),
+            "requested_at": now,
+        }
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO password_reset_tokens (
+                        id, user_id, token_digest, expires_at, used_at,
+                        invalidated_at, requested_at
+                    ) VALUES (
+                        :id, :user_id, :token_digest, :expires_at, NULL,
+                        NULL, :requested_at
+                    )
+                    """
+                ),
+                active_row,
+            )
+
+        duplicate_row = {
+            **active_row,
+            "id": str(uuid4()),
+            "token_digest": hashlib.sha256(
+                b"release-regression-post-upgrade-duplicate-reset"
+            ).hexdigest(),
+            "requested_at": now + timedelta(seconds=1),
+        }
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO password_reset_tokens (
+                            id, user_id, token_digest, expires_at, used_at,
+                            invalidated_at, requested_at
+                        ) VALUES (
+                            :id, :user_id, :token_digest, :expires_at, NULL,
+                            NULL, :requested_at
+                        )
+                        """
+                    ),
+                    duplicate_row,
+                )
+        except IntegrityError as exc:
+            diagnostics = getattr(getattr(exc, "orig", None), "diag", None)
+            constraint_name = getattr(diagnostics, "constraint_name", None)
+            _assert(
+                constraint_name == "uq_active_password_reset_per_user",
+                "password_reset_partial_unique_index_not_enforced",
+            )
+        else:
+            raise RuntimeError("password_reset_second_active_token_was_accepted")
+
+        with engine.connect() as connection:
+            active_count = connection.scalar(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM password_reset_tokens
+                    WHERE user_id = :user_id
+                      AND used_at IS NULL
+                      AND invalidated_at IS NULL
+                    """
+                ),
+                {"user_id": user_id},
+            )
+        _assert(active_count == 1, "password_reset_active_token_count_mismatch")
+    finally:
+        engine.dispose()
+
+    print("runtime-postgres-legacy-password-reset-migration: passed")
+
+
 def run_database_seed() -> None:
-    """Migrate from the first revision and write synthetic backup material."""
+    """Exercise both historical upgrade phases and write synthetic backup material."""
 
     from datetime import datetime, timezone
 
@@ -262,10 +470,22 @@ def run_database_seed() -> None:
     finally:
         database.dispose()
 
+    # Stage one explicitly proves the full historical chain through the last
+    # revision before the password-reset security migration.  Stage two below
+    # starts from a database that genuinely contains the old multi-link data.
+    _run_alembic("upgrade", "20260721_0027")
+    database = Database(database_url)
+    try:
+        _assert_current_head(database, "20260721_0027")
+    finally:
+        database.dispose()
+    legacy_reset_user_id = _seed_pre_0028_password_reset_rows(database_url)
+
     _run_alembic("upgrade", "head")
     database = Database(database_url)
     expected_head = _expected_alembic_head()
     _assert_current_head(database, expected_head)
+    _assert_0028_password_reset_upgrade(database_url, user_id=legacy_reset_user_id)
 
     payload = b"GreatSell synthetic recovery original. No candidate data.\n"
     digest = hashlib.sha256(payload).hexdigest()

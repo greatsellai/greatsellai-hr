@@ -197,6 +197,8 @@ export interface AiProviderProfile {
   driver: string;
   endpoint_url: string;
   credential_ref: string;
+  /** Non-secret runtime readiness for this exact reference. */
+  credential_configured: boolean;
   request_defaults: Record<string, unknown>;
   is_enabled: boolean;
   created_at: string;

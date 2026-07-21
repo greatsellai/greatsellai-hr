@@ -111,7 +111,7 @@ request_defaults_json, enabled, created_at, updated_at
 ```
 
 - `driver` 是协议类型，例如 `openai_compatible`、`anthropic_native`、`ocr_native`、`batch_native`，不是某个模型名。
-- `credential_ref` 只保存服务端密钥标识，例如环境变量或密钥管理系统中的引用；不保存明文 Key。
+- `credential_ref` 只保存服务端密钥标识，例如环境变量或密钥管理系统中的引用；不保存明文 Key。Docker 运行时通过 `RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON` 将引用映射同时注入 API 与 worker，控制台只读取单个引用是否可解析的布尔状态。
 - 修改连接信息应创建新的 Profile 或显式版本，不覆盖已产生调用账本的历史含义。
 
 ### 6.2 Model Profile

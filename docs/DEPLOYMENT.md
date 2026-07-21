@@ -36,9 +36,14 @@
 
 ## AI 提取 worker
 
-`compose.yml` 的 `worker` 服务负责执行已经持久化的 AI 简历提取任务；上传 API 本身不等待模型调用。部署前在 `.env.production` 设置服务端 `DEEPSEEK_API_KEY`，worker 与 API 会读取同一份环境变量，密钥绝不出现在浏览器、前端构建产物或请求体中。
+`compose.yml` 的 `worker` 服务负责执行已经持久化的 AI 简历提取任务；上传 API 本身不等待模型调用。共享运行环境会同时传给 API 和 worker，因此两个进程必须使用同一组模型凭据。
 
-未配置密钥时，新任务会显示为 `unavailable` 而不会调用模型；配置密钥并重启 `worker` 后会安全地重新进入队列。任务状态、租约、重试上限和本地启动方式见 [AI 提取后台任务](AI_EXTRACTION_WORKER.md)。
+- 旧 DeepSeek 兼容路径使用 `.env.production` 中的 `DEEPSEEK_API_KEY`。
+- 平台控制台创建的 Provider 只保存非秘密的 `credential_ref`。在 `.env.production` 中用 `RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON` 提供 JSON 对象，键必须与该 `credential_ref` 完全一致，值才是实际服务端密钥。例如：`{"provider-primary":"<仅服务器保存的密钥>"}`。
+
+该映射不会被写入数据库、审计事件、前端构建产物、请求体或应用日志。修改后需要按受控发布流程重建并重启 API 与 worker，不能只重启其中一个进程。平台控制台的“运行时凭据已配置”仅表示当前 API 进程能解析该引用，不是对上游连通性或额度的保证。
+
+未配置所选路由的凭据时，系统不会向上游发起请求；新路由发布会被拒绝，已排队任务会显示为不可用或安全失败，直到部署负责人补齐环境映射并完成受控发布。任务状态、租约、重试上限和本地启动方式见 [AI 提取后台任务](AI_EXTRACTION_WORKER.md)。
 
 ## 受控更新、发布标签与回滚
 

@@ -12,6 +12,11 @@ x-app-environment: &app-environment
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
   DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
   DEEPSEEK_TIMEOUT_SECONDS: ${DEEPSEEK_TIMEOUT_SECONDS:-90}
+  # Platform Provider records store only a credential reference. The actual
+  # reference-to-secret map stays in the ignored deployment environment file
+  # and must be identical for API and worker execution.
+  RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON: "${RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON:-}"
+  RESUME_V3_LEGACY_OPENAI_COMPATIBLE_ENDPOINT: "${RESUME_V3_LEGACY_OPENAI_COMPATIBLE_ENDPOINT:-https://api.deepseek.com/beta/chat/completions}"
   TENCENT_SECRET_ID: ${TENCENT_SECRET_ID:-}
   TENCENT_SECRET_KEY: ${TENCENT_SECRET_KEY:-}
   TENCENT_OCR_REGION: ${TENCENT_OCR_REGION:-ap-guangzhou}

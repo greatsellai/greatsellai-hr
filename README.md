@@ -17,7 +17,7 @@ python -m pip install -e ".[dev]"
 uvicorn app.main:app --reload
 ```
 
-需要自动 AI 提取时，在另一个终端启动持久 worker（密钥只放在服务端 `DEEPSEEK_API_KEY`）：
+需要自动 AI 提取时，在另一个终端启动持久 worker。模型凭据只保留在服务端：旧 DeepSeek 兼容路径使用 `DEEPSEEK_API_KEY`，平台 Provider 使用 `RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON` 中与 `credential_ref` 对应的引用：
 
 ```powershell
 python -m app.ai_extraction_worker
@@ -105,4 +105,4 @@ git pull --ff-only origin main
 - 总结：生成结构化 AI 总结；事实重存后旧总结会自动标记为历史，不能误作当前总结。
 - JD：创建版本化 JD、AI 提取后人工确认需求、按确认版匹配，并返回 JD 条款与简历 fact 证据。
 
-需要模型的接口只读取服务端的 `DEEPSEEK_API_KEY`；浏览器和请求体都不传递密钥。接口文档在本地启动后访问 `/docs`。
+需要模型的接口只读取服务端凭据：旧 DeepSeek 兼容路径读取 `DEEPSEEK_API_KEY`，平台 Provider 路由按 `credential_ref` 从 `RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON` 解析。浏览器、请求体、数据库和审计日志都不传递或保存密钥。接口文档在本地启动后访问 `/docs`。

@@ -155,6 +155,21 @@ def ai_gateway_credentials_configured(settings: AppSettings) -> bool:
     return bool(settings.deepseek_api_key or settings.ai_provider_credentials)
 
 
+def ai_provider_credential_configured(
+    settings: AppSettings,
+    credential_ref: str | None,
+) -> bool:
+    """Whether this process can resolve one non-secret provider reference.
+
+    The platform control plane may expose this boolean to platform operators,
+    but never the credential value or the full environment map.  Keeping the
+    same resolver as actual Gateway execution prevents the UI from claiming a
+    route is ready when API/worker calls would fail later.
+    """
+
+    return bool(_resolve_credential(settings, credential_ref))
+
+
 def gateway_prompt_transport_arguments(settings: AppSettings) -> tuple[str, str, int]:
     """Return inert arguments required by pre-gateway prompt helpers.
 
@@ -808,7 +823,7 @@ def _resolve_route_target(
     ):
         raise AiGatewayError("ai_route_output_limit_exceeded")
     credential = _resolve_credential(settings, provider.credential_ref)
-    if credential is None:
+    if not credential:
         raise AiGatewayError("ai_route_credential_not_configured")
     request_defaults = provider.request_defaults_json
     if not isinstance(request_defaults, Mapping):
@@ -1128,6 +1143,7 @@ __all__ = [
     "LEGACY_RUNTIME_CREDENTIAL_REF",
     "SUPPORTED_AI_FEATURES",
     "active_legacy_payload_executor",
+    "ai_provider_credential_configured",
     "ai_gateway_credentials_configured",
     "ai_gateway_execution",
     "gateway_prompt_transport_arguments",

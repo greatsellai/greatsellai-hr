@@ -1677,6 +1677,33 @@
   border-radius: var(--radius-xs);
 }
 
+.admin-ai-provider-runtime {
+  display: grid;
+  gap: 0.625rem;
+  padding-top: 0.875rem;
+  border-top: 1px solid var(--line);
+}
+
+.admin-ai-provider-runtime > div {
+  display: grid;
+  gap: 0.125rem;
+}
+
+.admin-ai-provider-runtime > div > strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+}
+
+.admin-ai-provider-runtime > div > p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+}
+
+.admin-ai-provider-runtime .admin-simple-list li {
+  min-height: 3.25rem;
+}
+
 .admin-ai-field-wide {
   grid-column: 1 / -1;
 }

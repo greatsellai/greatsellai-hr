@@ -520,6 +520,10 @@ class AiProviderProfileResponse(ApiModel):
     driver: str
     endpoint_url: str
     credential_ref: str
+    # This is intentionally only a boolean. Platform operators can see whether
+    # the current process has the referenced secret, but never the value or
+    # any other reference in the deployment map.
+    credential_configured: bool
     request_defaults: dict[str, object] = Field(default_factory=dict)
     is_enabled: bool
     created_at: datetime

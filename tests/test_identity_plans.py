@@ -24,6 +24,9 @@ def identity_client(tmp_path: Path) -> Iterator[TestClient]:
         admin_token="legacy-platform-test-token",
         session_secret="identity-plan-test-session-secret",
         allow_unauthenticated=False,
+        ai_provider_credentials={
+            "test-provider-credential": "test-only-configured-credential",
+        },
         transactional_email_provider="test",
         public_app_url="http://testserver",
     )
@@ -193,6 +196,8 @@ def test_platform_admin_alone_can_publish_ai_model_route(
     )
     assert provider.status_code == 201, provider.text
     assert provider.json()["credential_ref"] == "test-provider-credential"
+    assert provider.json()["credential_configured"] is True
+    assert "test-only-configured-credential" not in provider.text
 
     model = identity_client.post(
         "/v1/platform/ai/models",
@@ -269,3 +274,74 @@ def test_platform_admin_alone_can_publish_ai_model_route(
     assert "credential_ref" not in serialized_audits
     assert "test-provider-credential" not in serialized_audits
     assert "prompt_revision" not in serialized_audits
+
+
+def test_platform_ai_route_cannot_publish_with_unconfigured_provider_credential(
+    identity_client: TestClient,
+) -> None:
+    legacy_login = identity_client.post(
+        "/v1/auth/login",
+        json={"password": "legacy-platform-test-token"},
+    )
+    assert legacy_login.status_code == 200, legacy_login.text
+
+    provider = identity_client.post(
+        "/v1/platform/ai/providers",
+        json={
+            "slug": "unconfigured-provider",
+            "display_name": "Unconfigured provider",
+            "driver": "openai_compatible",
+            "endpoint_url": "https://api.example.test/v1/chat/completions",
+            "credential_ref": "missing-provider-credential",
+        },
+    )
+    assert provider.status_code == 201, provider.text
+    assert provider.json()["credential_ref"] == "missing-provider-credential"
+    assert provider.json()["credential_configured"] is False
+    assert "test-only-configured-credential" not in provider.text
+
+    listed_providers = identity_client.get("/v1/platform/ai/providers")
+    assert listed_providers.status_code == 200, listed_providers.text
+    listed_provider = next(
+        item
+        for item in listed_providers.json()
+        if item["slug"] == "unconfigured-provider"
+    )
+    assert listed_provider["credential_configured"] is False
+    assert "test-only-configured-credential" not in listed_providers.text
+
+    model = identity_client.post(
+        "/v1/platform/ai/models",
+        json={
+            "slug": "unconfigured-model",
+            "provider_slug": "unconfigured-provider",
+            "display_name": "Unconfigured model",
+            "provider_model_id": "provider-side-model-id",
+            "capabilities": ["chat"],
+        },
+    )
+    assert model.status_code == 201, model.text
+
+    published = identity_client.put(
+        "/v1/platform/ai/routes/resume_summary",
+        json={
+            "display_name": "Unconfigured route",
+            "description": "Must not become a runtime failure.",
+            "targets": [{"model_slug": "unconfigured-model"}],
+            "prompt_revision": "resume-summary.prompt.v1",
+        },
+    )
+    assert published.status_code == 422, published.text
+    assert published.json()["detail"] == "ai_route_credential_not_configured"
+
+    routes = identity_client.get("/v1/platform/ai/routes")
+    assert routes.status_code == 200, routes.text
+    assert all(item["feature"] != "resume_summary" for item in routes.json())
+
+    versions = identity_client.get("/v1/platform/ai/routes/resume_summary/versions")
+    assert versions.status_code == 404, versions.text
+    assert versions.json()["detail"] == "ai_route_policy_not_found"
+
+    audits = identity_client.get("/v1/platform/audit-events")
+    assert audits.status_code == 200, audits.text
+    assert "ai_route.published" not in {event["action"] for event in audits.json()["items"]}

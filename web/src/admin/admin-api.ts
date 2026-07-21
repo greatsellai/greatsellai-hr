@@ -203,6 +203,7 @@ export function adminErrorMessage(error: unknown) {
       ai_route_model_not_found: "路由中有模型不存在，请刷新后重试。",
       ai_route_model_unavailable: "路由中的模型未启用或能力不满足当前功能。",
       ai_route_provider_unavailable: "路由中的 Provider 未启用或尚未就绪。",
+      ai_route_credential_not_configured: "路由中的 Provider 尚未配置运行时凭据；请完成部署配置并刷新状态后再发布。",
       unsupported_ai_feature: "这个 AI 功能暂不支持发布路由。",
       ai_gateway_configuration_conflict: "配置与当前数据冲突，请刷新后重新发布。",
       invalid_ai_config_slug: "配置标识仅支持小写字母、数字、点、下划线和连字符，且长度至少为 2 位。",

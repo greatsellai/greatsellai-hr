@@ -1415,7 +1415,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         _: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
     ) -> list[AiProviderProfileResponse]:
-        return list_provider_profiles(session)
+        return list_provider_profiles(session, settings=settings)
 
     @app.post(
         "/v1/platform/ai/providers",
@@ -1429,7 +1429,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiProviderProfileResponse:
         try:
-            response = create_provider_profile(session, payload=payload)
+            response = create_provider_profile(
+                session,
+                payload=payload,
+                settings=settings,
+            )
             record_platform_audit_event(
                 session,
                 actor_user_id=principal.user.id,
@@ -1615,6 +1619,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 feature=feature,
                 payload=payload,
                 published_by_user_id=principal.user.id,
+                settings=settings,
             )
             record_platform_audit_event(
                 session,

@@ -236,6 +236,10 @@ export function AdminAiConfigurationPanel({
   const [notice, setNotice] = useState("");
 
   const enabledProviders = useMemo(() => providers.filter((provider) => provider.is_enabled), [providers]);
+  const routableProviderCount = useMemo(
+    () => providers.filter((provider) => provider.is_enabled && provider.credential_configured).length,
+    [providers],
+  );
 
   const [providerDraft, setProviderDraft] = useState({
     display_name: "",
@@ -278,7 +282,11 @@ export function AdminAiConfigurationPanel({
   const routeCapabilities = useMemo(() => routeCapabilityRequirements(routeFeature), [routeFeature]);
   const routeModels = useMemo(() => models.filter((model) => (
     model.is_enabled
-    && providers.some((provider) => provider.slug === model.provider_slug && provider.is_enabled)
+    && providers.some((provider) => (
+      provider.slug === model.provider_slug
+      && provider.is_enabled
+      && provider.credential_configured
+    ))
     && supportsRouteCapabilities(model, routeCapabilities)
   )), [models, providers, routeCapabilities]);
   const [routeDraft, setRouteDraft] = useState<RouteDraft>({
@@ -558,7 +566,11 @@ export function AdminAiConfigurationPanel({
     const nextCapabilities = routeCapabilityRequirements(nextFeature);
     const nextModel = models.find((model) => (
       model.is_enabled
-      && providers.some((provider) => provider.slug === model.provider_slug && provider.is_enabled)
+      && providers.some((provider) => (
+        provider.slug === model.provider_slug
+        && provider.is_enabled
+        && provider.credential_configured
+      ))
       && supportsRouteCapabilities(model, nextCapabilities)
     ));
     setRouteDraft({
@@ -617,6 +629,7 @@ export function AdminAiConfigurationPanel({
         <p>不会在浏览器中录入、保存或回显 API Key。请先在服务器环境中配置对应的凭据引用。</p>
         <dl>
           <div><dt>Provider</dt><dd>{providers.length} 个</dd></div>
+          <div><dt>可路由 Provider</dt><dd>{routableProviderCount} / {providers.length}</dd></div>
           <div><dt>模型</dt><dd>{models.length} 个</dd></div>
           <div><dt>有效价格</dt><dd>{activePriceCount} 个</dd></div>
           <div><dt>已发布路由</dt><dd>{routes.length} 项</dd></div>
@@ -647,12 +660,29 @@ export function AdminAiConfigurationPanel({
           <fieldset className="admin-toggle-group"><legend>Provider 状态</legend><label><input checked={providerDraft.is_enabled} onChange={(event) => setProviderDraft({ ...providerDraft, is_enabled: event.target.checked })} type="checkbox" /><span><strong>创建后立即启用</strong><small>启用后才可以被模型和路由使用。</small></span></label></fieldset>
           <label className="admin-reason-field"><span>变更原因</span><textarea className="textarea-field" maxLength={500} onChange={(event) => setProviderDraft({ ...providerDraft, reason: event.target.value })} placeholder="例如：新增备用模型服务商" required rows={3} value={providerDraft.reason} /></label>
           <p className="admin-form-warning">高级请求参数暂不在浏览器配置，避免把鉴权或运行参数误写入持久化配置。</p>
+          {!!providers.length && <section className="admin-ai-provider-runtime" aria-label="Provider 运行时凭据状态">
+            <div>
+              <strong>已登记 Provider</strong>
+              <p>此状态只校验当前 API 进程能否解析引用，不显示密钥，也不替代上游连通性测试。</p>
+            </div>
+            <ul className="admin-simple-list">
+              {providers.map((provider) => (
+                <li key={provider.provider_id}>
+                  <span><strong>{provider.display_name}</strong><small>{provider.slug} · {provider.credential_ref}</small></span>
+                  <AdminStatus
+                    status={provider.credential_configured ? "verified" : "warning"}
+                    label={provider.credential_configured ? "运行时凭据已配置" : "运行时凭据未配置"}
+                  />
+                </li>
+              ))}
+            </ul>
+          </section>}
           {error && <p className="admin-form-error" role="alert">{error}</p>}{notice && <p className="admin-form-success" role="status">{notice}</p>}
           <div className="admin-form-actions"><button className="button button-primary" disabled={saving === "provider"} type="submit">{saving === "provider" ? <><i className="spinner" />正在创建</> : <><Icon name="plus" size={16} />创建 Provider</>}</button></div>
         </form>}
 
         {section === "model" && <form className="admin-management-form admin-ai-config-form" onSubmit={submitModel}>
-          <div className="admin-ai-form-heading"><div><h3>配置模型</h3><p>模型归属于一个已启用的 Provider，并声明当前路由可以依赖的能力。</p></div><span className="admin-ai-step-count">{enabledProviders.length} 个可用 Provider</span></div>
+          <div className="admin-ai-form-heading"><div><h3>配置模型</h3><p>模型归属于一个已启用的 Provider，并声明当前路由可以依赖的能力。</p></div><span className="admin-ai-step-count">{enabledProviders.length} 个已启用 Provider</span></div>
           {!enabledProviders.length && <p className="admin-form-warning">请先创建并启用至少一个 Provider，才能配置模型。</p>}
           <div className="admin-form-grid">
             <label><span>所属 Provider</span><select className="select-field" disabled={!enabledProviders.length} onChange={(event) => setModelDraft({ ...modelDraft, provider_slug: event.target.value })} required value={modelDraft.provider_slug}>{!enabledProviders.length && <option value="">暂无可用 Provider</option>}{enabledProviders.map((provider) => <option key={provider.provider_id} value={provider.slug}>{provider.display_name} · {provider.slug}</option>)}</select></label>
@@ -702,7 +732,7 @@ export function AdminAiConfigurationPanel({
           {routeVersionsState === "error" && <div className="admin-ai-route-load-error" role="alert"><span>当前路由版本加载失败：{routeVersionsError}</span><button className="button" onClick={() => void loadRouteVersions()} type="button">重新加载</button></div>}
 
           {!routeReview && <>
-            {!routeModels.length && <p className="admin-form-warning">当前功能需要 {routeCapabilitiesLabel} 能力。请先创建并启用兼容模型，且确保对应 Provider 已启用，才能发布路由。</p>}
+            {!routeModels.length && <p className="admin-form-warning">当前功能需要 {routeCapabilitiesLabel} 能力。请先创建并启用兼容模型，并让对应 Provider 的运行时凭据显示为“已配置”，才能发布路由。</p>}
             <div className="admin-form-grid">
               <label><span>AI 功能</span><select className="select-field" onChange={(event) => selectRouteFeature(event.target.value as RouteFeature)} value={routeFeature}>{routeFeatures.map((feature) => <option key={feature.value} value={feature.value}>{feature.label}</option>)}</select><small>{selectedRouteFeature.detail}</small></label>
               <label><span>路由显示名称</span><input className="field" maxLength={120} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, display_name: event.target.value }))} required value={routeDraft.display_name} /></label>
@@ -714,7 +744,7 @@ export function AdminAiConfigurationPanel({
               {routeDraft.targets.map((target, index) => <div className="admin-ai-route-target" key={`route-target-${index}`}>
                 <div className="admin-ai-route-target-heading"><strong>{index === 0 ? "主模型" : `回退模型 ${index}`}</strong>{routeDraft.targets.length > 1 && <button className="button button-ghost" onClick={() => updateRouteDraft((draft) => ({ ...draft, targets: draft.targets.filter((_, targetIndex) => targetIndex !== index) }))} type="button">移除</button>}</div>
                 <div className="admin-form-grid">
-                  <label><span>模型</span><select className="select-field" disabled={!routeModels.length} onChange={(event) => updateRouteTarget(index, { model_slug: event.target.value })} required value={target.model_slug}>{!routeModels.length && <option value="">暂无兼容模型</option>}{target.model_slug && !routeModels.some((model) => model.slug === target.model_slug) && <option value={target.model_slug}>{target.model_slug} · 当前不可用</option>}{routeModels.map((model) => <option key={model.model_id} value={model.slug}>{model.display_name} · {model.slug}</option>)}</select><small>仅显示具备 {routeCapabilitiesLabel} 能力且已启用的模型。</small></label>
+                  <label><span>模型</span><select className="select-field" disabled={!routeModels.length} onChange={(event) => updateRouteTarget(index, { model_slug: event.target.value })} required value={target.model_slug}>{!routeModels.length && <option value="">暂无兼容模型</option>}{target.model_slug && !routeModels.some((model) => model.slug === target.model_slug) && <option value={target.model_slug}>{target.model_slug} · 当前不可用</option>}{routeModels.map((model) => <option key={model.model_id} value={model.slug}>{model.display_name} · {model.slug}</option>)}</select><small>仅显示具备 {routeCapabilitiesLabel} 能力、已启用且运行时凭据已配置的模型。</small></label>
                   <label><span>最大尝试次数</span><select className="select-field" onChange={(event) => updateRouteTarget(index, { max_attempts: Number(event.target.value) })} value={target.max_attempts}><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option></select></label>
                 </div>
                 {index < routeDraft.targets.length - 1 && <fieldset className="admin-ai-fallback-options"><legend>允许回退的原因</legend>{fallbackCategories.map((category) => <label key={category.value}><input checked={target.allow_fallback_on.includes(category.value)} onChange={(event) => toggleFallbackCategory(index, category.value, event.target.checked)} type="checkbox" /><span>{category.label}</span></label>)}</fieldset>}

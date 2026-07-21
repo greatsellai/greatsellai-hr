@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import AppSettings
 from app.models import (
     AiModelPriceVersion,
     AiModelProfile,
@@ -29,22 +30,30 @@ from app.schemas import (
     AiRoutePolicyVersionResponse,
     AiRouteTargetInput,
 )
-from app.services.ai_gateway_service import SUPPORTED_AI_FEATURES
+from app.services.ai_gateway_service import (
+    SUPPORTED_AI_FEATURES,
+    ai_provider_credential_configured,
+)
 
 
 class AiGatewayConfigurationError(RuntimeError):
     """Stable control-plane failures, safe for platform API responses."""
 
 
-def list_provider_profiles(session: Session) -> list[AiProviderProfileResponse]:
+def list_provider_profiles(
+    session: Session,
+    *,
+    settings: AppSettings,
+) -> list[AiProviderProfileResponse]:
     profiles = list(session.scalars(select(AiProviderProfile).order_by(AiProviderProfile.slug)))
-    return [_provider_response(profile) for profile in profiles]
+    return [_provider_response(profile, settings=settings) for profile in profiles]
 
 
 def create_provider_profile(
     session: Session,
     *,
     payload: AiProviderProfileCreate,
+    settings: AppSettings,
 ) -> AiProviderProfileResponse:
     if session.scalar(select(AiProviderProfile.id).where(AiProviderProfile.slug == payload.slug)):
         raise AiGatewayConfigurationError("ai_provider_slug_exists")
@@ -59,7 +68,7 @@ def create_provider_profile(
     )
     session.add(profile)
     session.flush()
-    return _provider_response(profile)
+    return _provider_response(profile, settings=settings)
 
 
 def list_model_profiles(session: Session) -> list[AiModelProfileResponse]:
@@ -173,10 +182,11 @@ def publish_route_policy(
     feature: str,
     payload: AiRoutePolicyPublish,
     published_by_user_id: str,
+    settings: AppSettings,
 ) -> AiRoutePolicyVersionResponse:
     if feature not in SUPPORTED_AI_FEATURES:
         raise AiGatewayConfigurationError("unsupported_ai_feature")
-    models = _models_for_route_targets(session, payload.targets)
+    models = _models_for_route_targets(session, payload.targets, settings=settings)
     policy = session.scalar(select(AiRoutePolicy).where(AiRoutePolicy.feature == feature))
     if policy is None:
         policy = AiRoutePolicy(
@@ -225,6 +235,8 @@ def publish_route_policy(
 def _models_for_route_targets(
     session: Session,
     targets: Iterable[AiRouteTargetInput],
+    *,
+    settings: AppSettings,
 ) -> list[AiModelProfile]:
     models: list[AiModelProfile] = []
     for target in targets:
@@ -236,11 +248,17 @@ def _models_for_route_targets(
         provider = session.get(AiProviderProfile, model.provider_profile_id)
         if provider is None or not provider.enabled or provider.retired_at is not None:
             raise AiGatewayConfigurationError("ai_route_provider_unavailable")
+        if not ai_provider_credential_configured(settings, provider.credential_ref):
+            raise AiGatewayConfigurationError("ai_route_credential_not_configured")
         models.append(model)
     return models
 
 
-def _provider_response(profile: AiProviderProfile) -> AiProviderProfileResponse:
+def _provider_response(
+    profile: AiProviderProfile,
+    *,
+    settings: AppSettings,
+) -> AiProviderProfileResponse:
     return AiProviderProfileResponse(
         provider_id=profile.id,
         slug=profile.slug,
@@ -248,6 +266,10 @@ def _provider_response(profile: AiProviderProfile) -> AiProviderProfileResponse:
         driver=profile.driver,
         endpoint_url=profile.base_url or "",
         credential_ref=profile.credential_ref or "",
+        credential_configured=ai_provider_credential_configured(
+            settings,
+            profile.credential_ref,
+        ),
         request_defaults=dict(profile.request_defaults_json or {}),
         is_enabled=profile.enabled,
         created_at=profile.created_at,

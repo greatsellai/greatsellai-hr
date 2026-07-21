@@ -419,6 +419,11 @@ export interface ResumeSourceBlock {
 export interface ResumeEducation {
   school_name_raw: string;
   school_match_state: string;
+  /**
+   * Mutually exclusive, recruiter-facing school classification. It is kept
+   * separate from `degree`, which describes the candidate's qualification.
+   */
+  institution_classification: InstitutionClassification | null;
   degree: DegreeLevel;
   major_raw: string | null;
   start_month: string | null;
@@ -545,6 +550,11 @@ export interface EducationFilter {
   degree_in?: DegreeLevel[];
   school_name_contains?: string[];
   major_contains?: string[];
+  institution_classifications_any_of?: InstitutionClassification[];
+  /**
+   * Legacy V2 field. New UI writes `institution_classifications_any_of`.
+   * It remains typed only so saved historical filters can be handled safely.
+   */
   institution_tiers_any_of?: InstitutionTier[];
   min_average_score?: number | null;
   min_gpa_percent?: number | null;
@@ -567,6 +577,18 @@ export type InstitutionTier =
   | "211" | "985" | "double_first_class" | "key_undergraduate"
   | "first_tier" | "second_tier" | "regular_undergraduate"
   | "private_undergraduate" | "higher_vocational" | "overseas";
+
+/**
+ * Stable, mutually exclusive labels used by the recruiter-facing table and
+ * its quick filters. In particular, `211` means 211-only, not 985 + 211.
+ */
+export type InstitutionClassification =
+  | "985"
+  | "211"
+  | "undergraduate"
+  | "associate"
+  | "secondary_vocational"
+  | "overseas";
 
 export type LanguageCredentialCode =
   | "cet4" | "cet6" | "ielts" | "toefl"
@@ -596,6 +618,8 @@ export interface FilterOption<T extends string = string> {
 export interface FilterOptions {
   schema_version: string;
   degrees: Array<FilterOption<DegreeLevel>>;
+  institution_classifications: Array<FilterOption<InstitutionClassification>>;
+  /** Legacy data kept for historical filter compatibility only. */
   institution_tiers: Array<FilterOption<InstitutionTier>>;
   experience_types: Array<FilterOption<ExperienceType>>;
   skill_categories: Array<FilterOption<string>>;
@@ -652,6 +676,7 @@ export interface CandidateSearchItem {
   resume_id: string;
   original_filename: string;
   is_985_211: boolean;
+  institution_classifications: InstitutionClassification[];
   highest_degree: DegreeLevel | null;
   employment_months: number;
   employment_or_internship_months: number;

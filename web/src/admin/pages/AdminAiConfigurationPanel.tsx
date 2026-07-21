@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Icon } from "../../icons";
 import { AdminApiError, adminApi, adminErrorMessage } from "../admin-api";
 import {
@@ -48,6 +48,8 @@ const routeFeatures = [
   { value: "resume_ocr_page", label: "简历 OCR", detail: "识别扫描件或图片简历页面" },
 ] as const;
 
+type RouteFeature = (typeof routeFeatures)[number]["value"];
+
 const fallbackCategories: Array<{ value: AiRouteFallbackCategory; label: string }> = [
   { value: "rate_limited", label: "限流" },
   { value: "quota_exhausted", label: "额度耗尽" },
@@ -55,6 +57,27 @@ const fallbackCategories: Array<{ value: AiRouteFallbackCategory; label: string 
   { value: "network", label: "网络异常" },
   { value: "provider_5xx", label: "服务端 5xx" },
 ];
+
+const fallbackCategoryValues = new Set<AiRouteFallbackCategory>(
+  fallbackCategories.map((category) => category.value),
+);
+
+type RouteTargetSummary = {
+  model_slug: string;
+  max_attempts: number;
+  allow_fallback_on: string[];
+};
+
+type RoutePublicationReview = {
+  feature: RouteFeature;
+  featureLabel: string;
+  currentPolicy: AiRoutePolicy | null;
+  currentVersion: AiRoutePolicyVersion | null;
+  currentVersionNumber: number | null;
+  nextVersion: number;
+  payload: AiRoutePolicyPublishInput;
+  changes: string[];
+};
 
 const structuredRouteFeatures = new Set([
   "resume_extract_rich",
@@ -115,6 +138,85 @@ function initialRouteTarget(modelSlug = ""): RouteTargetDraft {
   return { model_slug: modelSlug, max_attempts: 1, allow_fallback_on: [] };
 }
 
+function latestRouteVersion(versions: AiRoutePolicyVersion[]) {
+  return versions.reduce<AiRoutePolicyVersion | null>((latest, version) => (
+    !latest || version.version > latest.version ? version : latest
+  ), null);
+}
+
+function routeDraftFromPublishedConfiguration(
+  featureLabel: string,
+  policy: AiRoutePolicy | null,
+  version: AiRoutePolicyVersion | null,
+  defaultModelSlug: string,
+): RouteDraft {
+  const targets = version?.targets.length
+    ? version.targets.map((target) => ({
+        model_slug: target.model_slug,
+        max_attempts: Math.min(3, Math.max(1, target.max_attempts)),
+        allow_fallback_on: target.allow_fallback_on.filter(
+          (category): category is AiRouteFallbackCategory => fallbackCategoryValues.has(category as AiRouteFallbackCategory),
+        ),
+      }))
+    : [initialRouteTarget(defaultModelSlug)];
+  return {
+    display_name: policy?.display_name ?? featureLabel,
+    description: policy?.description ?? "",
+    prompt_revision: version?.prompt_revision ?? "",
+    reason: "",
+    targets,
+  };
+}
+
+function routeModelChain(targets: RouteTargetSummary[]) {
+  return targets.length ? targets.map((target) => target.model_slug).join(" → ") : "未配置";
+}
+
+function routeRetrySummary(targets: RouteTargetSummary[]) {
+  return targets.length
+    ? targets.map((target) => `${target.model_slug}：${target.max_attempts} 次`).join("；")
+    : "未配置";
+}
+
+function routeFallbackSummary(targets: RouteTargetSummary[]) {
+  const summaries = targets.flatMap((target) => {
+    if (!target.allow_fallback_on.length) return [];
+    const labels = target.allow_fallback_on.map((category) => (
+      fallbackCategories.find((item) => item.value === category)?.label ?? category
+    ));
+    return [`${target.model_slug}：${labels.join("、")}`];
+  });
+  return summaries.length ? summaries.join("；") : "不回退";
+}
+
+function normalizedTargetFingerprint(targets: RouteTargetSummary[], field: "max_attempts" | "allow_fallback_on") {
+  return JSON.stringify(targets.map((target) => (
+    field === "max_attempts"
+      ? [target.model_slug, target.max_attempts]
+      : [target.model_slug, [...target.allow_fallback_on].sort()]
+  )));
+}
+
+function routePublicationChanges(
+  policy: AiRoutePolicy | null,
+  version: AiRoutePolicyVersion | null,
+  payload: AiRoutePolicyPublishInput,
+) {
+  if (!version) return ["这是该功能的首个路由版本，发布后新任务将开始使用这套配置。"];
+  const changes: string[] = [];
+  if ((policy?.display_name ?? "") !== payload.display_name) changes.push("路由显示名称已修改。");
+  if ((policy?.description ?? "") !== (payload.description ?? "")) changes.push("用途说明已修改。");
+  if (routeModelChain(version.targets) !== routeModelChain(payload.targets)) changes.push("模型调用链将发生变化。");
+  if (normalizedTargetFingerprint(version.targets, "max_attempts") !== normalizedTargetFingerprint(payload.targets, "max_attempts")) {
+    changes.push("至少一个模型的最大尝试次数将发生变化。");
+  }
+  if (normalizedTargetFingerprint(version.targets, "allow_fallback_on") !== normalizedTargetFingerprint(payload.targets, "allow_fallback_on")) {
+    changes.push("失败回退条件将发生变化。");
+  }
+  if ((version.prompt_revision ?? "") !== (payload.prompt_revision ?? "")) changes.push("提示词版本将发生变化。");
+  return changes.length ? changes : ["配置内容与当前版本一致，确认后仍会生成一个新的不可变版本。"];
+}
+
 export function AdminAiConfigurationPanel({
   providers,
   models,
@@ -172,7 +274,7 @@ export function AdminAiConfigurationPanel({
     is_active: true,
     reason: "",
   });
-  const [routeFeature, setRouteFeature] = useState<(typeof routeFeatures)[number]["value"]>("resume_extract_rich");
+  const [routeFeature, setRouteFeature] = useState<RouteFeature>("resume_extract_rich");
   const routeCapabilities = useMemo(() => routeCapabilityRequirements(routeFeature), [routeFeature]);
   const routeModels = useMemo(() => models.filter((model) => (
     model.is_enabled
@@ -189,9 +291,16 @@ export function AdminAiConfigurationPanel({
   const [routeVersions, setRouteVersions] = useState<AiRoutePolicyVersion[]>([]);
   const [routeVersionsState, setRouteVersionsState] = useState<"idle" | "loading" | "error" | "ready">("idle");
   const [routeVersionsError, setRouteVersionsError] = useState("");
+  const [routeReview, setRouteReview] = useState<RoutePublicationReview | null>(null);
+  const routeDraftDirtyRef = useRef(false);
+  const routePublishingRef = useRef(false);
+  const routeVersionRequestRef = useRef(0);
+  const routeReviewHeadingRef = useRef<HTMLHeadingElement>(null);
+  const routeImpactButtonRef = useRef<HTMLButtonElement>(null);
 
   const selectedRouteFeature = routeFeatures.find((feature) => feature.value === routeFeature) ?? routeFeatures[0];
   const currentRoute = routes.find((route) => route.feature === routeFeature) ?? null;
+  const activeRouteVersion = latestRouteVersion(routeVersions);
   const activePriceCount = prices.filter((price) => price.is_active).length;
   const routeCapabilitiesLabel = routeCapabilities.join("、");
 
@@ -207,37 +316,47 @@ export function AdminAiConfigurationPanel({
     }
   }, [models, priceDraft.model_slug]);
 
-  useEffect(() => {
-    if (!routeModels.length) return;
-    setRouteDraft((draft) => ({
-      ...draft,
-      targets: draft.targets.map((target) => target.model_slug ? target : { ...target, model_slug: routeModels[0].slug }),
-    }));
-  }, [routeModels]);
-
-  useEffect(() => {
+  const loadRouteVersions = useCallback(async () => {
     if (section !== "route") return;
-    let active = true;
+    const requestId = ++routeVersionRequestRef.current;
     setRouteVersionsState("loading");
     setRouteVersionsError("");
-    void adminApi.listAiRouteVersions(routeFeature)
-      .then((versions) => {
-        if (!active) return;
-        setRouteVersions(versions);
-        setRouteVersionsState("ready");
-      })
-      .catch((requestError) => {
-        if (!active) return;
+    try {
+      let versions: AiRoutePolicyVersion[];
+      try {
+        versions = await adminApi.listAiRouteVersions(routeFeature);
+      } catch (requestError) {
         if (requestError instanceof AdminApiError && requestError.code === "ai_route_policy_not_found") {
-          setRouteVersions([]);
-          setRouteVersionsState("ready");
-          return;
+          versions = [];
+        } else {
+          throw requestError;
         }
-        setRouteVersionsError(adminErrorMessage(requestError));
-        setRouteVersionsState("error");
-      });
-    return () => { active = false; };
-  }, [routeFeature, section]);
+      }
+      if (requestId !== routeVersionRequestRef.current) return;
+      setRouteVersions(versions);
+      if (!routeDraftDirtyRef.current) {
+        const policy = routes.find((route) => route.feature === routeFeature) ?? null;
+        const version = latestRouteVersion(versions);
+        const featureLabel = routeFeatures.find((feature) => feature.value === routeFeature)?.label ?? routeFeature;
+        setRouteDraft(routeDraftFromPublishedConfiguration(featureLabel, policy, version, routeModels[0]?.slug ?? ""));
+      }
+      setRouteVersionsState("ready");
+    } catch (requestError) {
+      if (requestId !== routeVersionRequestRef.current) return;
+      setRouteVersionsError(adminErrorMessage(requestError));
+      setRouteVersionsState("error");
+    }
+  }, [routeFeature, routeModels, routes, section]);
+
+  useEffect(() => {
+    if (section !== "route") return undefined;
+    void loadRouteVersions();
+    return () => { routeVersionRequestRef.current += 1; };
+  }, [loadRouteVersions, section]);
+
+  useEffect(() => {
+    if (routeReview) routeReviewHeadingRef.current?.focus();
+  }, [routeReview]);
 
   const beginSubmission = (nextSection: ConfigurationSection) => {
     setSaving(nextSection);
@@ -247,11 +366,12 @@ export function AdminAiConfigurationPanel({
 
   const finishSubmission = async (message: string) => {
     setNotice(message);
-    setSaving(null);
     try {
       await onChanged();
     } catch (refreshError) {
       setError(`配置已保存，但资源列表刷新失败：${adminErrorMessage(refreshError)}`);
+    } finally {
+      setSaving(null);
     }
   };
 
@@ -353,14 +473,22 @@ export function AdminAiConfigurationPanel({
     }
   };
 
-  const submitRoute = async (event: FormEvent) => {
+  const prepareRouteReview = (event: FormEvent) => {
     event.preventDefault();
-    beginSubmission("route");
+    setError("");
+    setNotice("");
     try {
+      if (routeVersionsState !== "ready") throw new Error("当前路由版本尚未加载完成，请稍后再检查发布影响。");
       if (routeDraft.targets.some((target) => !target.model_slug)) throw new Error("请为每个路由目标选择一个模型。");
       if (new Set(routeDraft.targets.map((target) => target.model_slug)).size !== routeDraft.targets.length) throw new Error("同一个模型只能在路由中出现一次。");
+      const availableModelSlugs = new Set(routeModels.map((model) => model.slug));
+      if (routeDraft.targets.some((target) => !availableModelSlugs.has(target.model_slug))) {
+        throw new Error("当前草稿包含已停用或能力不匹配的模型，请重新选择后再发布。");
+      }
+      const displayName = routeDraft.display_name.trim();
+      if (!displayName) throw new Error("请填写路由显示名称。");
       const payload: AiRoutePolicyPublishInput = {
-        display_name: routeDraft.display_name.trim(),
+        display_name: displayName,
         ...(routeDraft.description.trim() ? { description: routeDraft.description.trim() } : {}),
         ...(routeDraft.prompt_revision.trim() ? { prompt_revision: routeDraft.prompt_revision.trim() } : {}),
         targets: routeDraft.targets.map((target) => ({
@@ -370,16 +498,62 @@ export function AdminAiConfigurationPanel({
         })),
         reason: reasonValue(routeDraft.reason),
       };
-      const published = await adminApi.publishAiRoute(routeFeature, payload);
-      setRouteVersions((versions) => [published, ...versions.filter((item) => item.route_policy_version_id !== published.route_policy_version_id)]);
-      setRouteDraft((draft) => ({ ...draft, reason: "" }));
-      await finishSubmission(`已发布「${selectedRouteFeature.label}」路由版本 v${published.version}。`);
+      const latestVersionNumber = Math.max(
+        currentRoute?.current_version ?? 0,
+        ...routeVersions.map((version) => version.version),
+      );
+      setRouteReview({
+        feature: routeFeature,
+        featureLabel: selectedRouteFeature.label,
+        currentPolicy: currentRoute,
+        currentVersion: activeRouteVersion,
+        currentVersionNumber: activeRouteVersion?.version ?? currentRoute?.current_version ?? null,
+        nextVersion: latestVersionNumber + 1,
+        payload,
+        changes: routePublicationChanges(currentRoute, activeRouteVersion, payload),
+      });
     } catch (submissionError) {
-      failSubmission(submissionError);
+      setError(adminErrorMessage(submissionError));
     }
   };
 
-  const selectRouteFeature = (nextFeature: (typeof routeFeatures)[number]["value"]) => {
+  const confirmRoutePublication = async () => {
+    if (!routeReview || routePublishingRef.current) return;
+    const liveVersionNumber = activeRouteVersion?.version ?? currentRoute?.current_version ?? null;
+    if (
+      routeVersionsState !== "ready"
+      || routeReview.feature !== routeFeature
+      || routeReview.currentVersionNumber !== liveVersionNumber
+    ) {
+      setRouteReview(null);
+      setError("当前路由版本已发生变化，请重新检查发布影响后再确认。");
+      return;
+    }
+    routePublishingRef.current = true;
+    beginSubmission("route");
+    try {
+      const published = await adminApi.publishAiRoute(routeReview.feature, routeReview.payload);
+      setRouteVersions((versions) => [published, ...versions.filter((item) => item.route_policy_version_id !== published.route_policy_version_id)]);
+      setRouteDraft((draft) => ({ ...draft, reason: "" }));
+      routeDraftDirtyRef.current = false;
+      setRouteReview(null);
+      await finishSubmission(`已发布「${routeReview.featureLabel}」路由版本 v${published.version}。`);
+    } catch (submissionError) {
+      failSubmission(submissionError);
+    } finally {
+      routePublishingRef.current = false;
+    }
+  };
+
+  const updateRouteDraft = (updater: (draft: RouteDraft) => RouteDraft) => {
+    routeDraftDirtyRef.current = true;
+    setRouteReview(null);
+    setRouteDraft(updater);
+    setError("");
+    setNotice("");
+  };
+
+  const selectRouteFeature = (nextFeature: RouteFeature) => {
     const nextLabel = routeFeatures.find((feature) => feature.value === nextFeature)?.label ?? "";
     const nextCapabilities = routeCapabilityRequirements(nextFeature);
     const nextModel = models.find((model) => (
@@ -394,13 +568,19 @@ export function AdminAiConfigurationPanel({
       reason: "",
       targets: [initialRouteTarget(nextModel?.slug ?? "")],
     });
+    routeDraftDirtyRef.current = false;
+    routeVersionRequestRef.current += 1;
+    setRouteVersions([]);
+    setRouteVersionsState("loading");
+    setRouteVersionsError("");
+    setRouteReview(null);
     setRouteFeature(nextFeature);
     setError("");
     setNotice("");
   };
 
   const updateRouteTarget = (index: number, update: Partial<RouteTargetDraft>) => {
-    setRouteDraft((draft) => ({
+    updateRouteDraft((draft) => ({
       ...draft,
       targets: draft.targets.map((target, targetIndex) => targetIndex === index ? { ...target, ...update } : target),
     }));
@@ -416,7 +596,12 @@ export function AdminAiConfigurationPanel({
   const addRouteTarget = () => {
     const used = new Set(routeDraft.targets.map((target) => target.model_slug));
     const nextModel = routeModels.find((model) => !used.has(model.slug))?.slug ?? "";
-    setRouteDraft((draft) => ({ ...draft, targets: [...draft.targets, initialRouteTarget(nextModel)] }));
+    updateRouteDraft((draft) => ({ ...draft, targets: [...draft.targets, initialRouteTarget(nextModel)] }));
+  };
+
+  const returnToRouteDraft = () => {
+    setRouteReview(null);
+    window.requestAnimationFrame(() => routeImpactButtonRef.current?.focus());
   };
 
   return (
@@ -511,34 +696,67 @@ export function AdminAiConfigurationPanel({
           <div className="admin-form-actions"><button className="button button-primary" disabled={saving === "price" || !models.length} type="submit">{saving === "price" ? <><i className="spinner" />正在创建</> : <><Icon name="plus" size={16} />创建价格版本</>}</button></div>
         </form>}
 
-        {section === "route" && <form className="admin-management-form admin-ai-config-form" onSubmit={submitRoute}>
-          <div className="admin-ai-form-heading"><div><h3>发布功能路由</h3><p>按顺序设置主模型与失败回退。每次发布都会生成不可变的新版本，不会静默改写旧版本。</p></div>{currentRoute && <AdminStatus status={currentRoute.is_enabled ? "enabled" : "disabled"} label={`当前 v${currentRoute.current_version ?? "—"}`} />}</div>
-          {!routeModels.length && <p className="admin-form-warning">当前功能需要 {routeCapabilitiesLabel} 能力。请先创建并启用兼容模型，且确保对应 Provider 已启用，才能发布路由。</p>}
-          <div className="admin-form-grid">
-            <label><span>AI 功能</span><select className="select-field" onChange={(event) => selectRouteFeature(event.target.value as (typeof routeFeatures)[number]["value"])} value={routeFeature}>{routeFeatures.map((feature) => <option key={feature.value} value={feature.value}>{feature.label}</option>)}</select><small>{selectedRouteFeature.detail}</small></label>
-            <label><span>路由显示名称</span><input className="field" maxLength={120} onChange={(event) => setRouteDraft({ ...routeDraft, display_name: event.target.value })} required value={routeDraft.display_name} /></label>
-            <label className="admin-ai-field-wide"><span>用途说明（可选）</span><textarea className="textarea-field" maxLength={1000} onChange={(event) => setRouteDraft({ ...routeDraft, description: event.target.value })} placeholder="说明该路由的质量、速度或成本取舍" rows={3} value={routeDraft.description} /></label>
-            <label><span>提示词版本（可选）</span><input className="field" maxLength={120} onChange={(event) => setRouteDraft({ ...routeDraft, prompt_revision: event.target.value })} placeholder="例如：resume-extract-v3" value={routeDraft.prompt_revision} /></label>
-          </div>
-          <fieldset className="admin-ai-route-targets"><legend>路由目标</legend>
-            <p>首个目标是主模型；仅在勾选的错误类型出现时，才按顺序尝试后续模型。</p>
-            {routeDraft.targets.map((target, index) => <div className="admin-ai-route-target" key={`${index}-${target.model_slug || "empty"}`}>
-              <div className="admin-ai-route-target-heading"><strong>{index === 0 ? "主模型" : `回退模型 ${index}`}</strong>{routeDraft.targets.length > 1 && <button className="button button-ghost" onClick={() => setRouteDraft((draft) => ({ ...draft, targets: draft.targets.filter((_, targetIndex) => targetIndex !== index) }))} type="button">移除</button>}</div>
-              <div className="admin-form-grid">
-                <label><span>模型</span><select className="select-field" disabled={!routeModels.length} onChange={(event) => updateRouteTarget(index, { model_slug: event.target.value })} required value={target.model_slug}>{!routeModels.length && <option value="">暂无兼容模型</option>}{routeModels.map((model) => <option key={model.model_id} value={model.slug}>{model.display_name} · {model.slug}</option>)}</select><small>仅显示具备 {routeCapabilitiesLabel} 能力且已启用的模型。</small></label>
-                <label><span>最大尝试次数</span><select className="select-field" onChange={(event) => updateRouteTarget(index, { max_attempts: Number(event.target.value) })} value={target.max_attempts}><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option></select></label>
-              </div>
-              {index < routeDraft.targets.length - 1 && <fieldset className="admin-ai-fallback-options"><legend>允许回退的原因</legend>{fallbackCategories.map((category) => <label key={category.value}><input checked={target.allow_fallback_on.includes(category.value)} onChange={(event) => toggleFallbackCategory(index, category.value, event.target.checked)} type="checkbox" /><span>{category.label}</span></label>)}</fieldset>}
-            </div>)}
-            <div className="admin-ai-route-target-actions"><button className="button" disabled={routeDraft.targets.length >= 4 || routeModels.length <= routeDraft.targets.length} onClick={addRouteTarget} type="button"><Icon name="plus" size={16} />添加回退模型</button><small>最多 4 个目标；同一模型不可重复。</small></div>
-          </fieldset>
-          <label className="admin-reason-field"><span>发布原因</span><textarea className="textarea-field" maxLength={500} onChange={(event) => setRouteDraft({ ...routeDraft, reason: event.target.value })} placeholder="例如：主模型升级，保留原模型应对限流与超时" required rows={3} value={routeDraft.reason} /></label>
+        {section === "route" && <form aria-busy={routeVersionsState === "loading" || saving === "route"} className="admin-management-form admin-ai-config-form" onSubmit={prepareRouteReview}>
+          <div className="admin-ai-form-heading"><div><h3>发布功能路由</h3><p>按顺序设置主模型与失败回退。每次发布都会生成不可变的新版本，不会静默改写旧版本。</p></div>{currentRoute && <AdminStatus status={currentRoute.is_enabled ? "enabled" : "disabled"} label={`当前 v${activeRouteVersion?.version ?? currentRoute.current_version ?? "—"}`} />}</div>
+          {(routeVersionsState === "idle" || routeVersionsState === "loading") && <p className="admin-ai-route-load-state" role="status"><i aria-hidden="true" className="spinner" />正在加载当前路由版本，加载完成前不能发布。</p>}
+          {routeVersionsState === "error" && <div className="admin-ai-route-load-error" role="alert"><span>当前路由版本加载失败：{routeVersionsError}</span><button className="button" onClick={() => void loadRouteVersions()} type="button">重新加载</button></div>}
+
+          {!routeReview && <>
+            {!routeModels.length && <p className="admin-form-warning">当前功能需要 {routeCapabilitiesLabel} 能力。请先创建并启用兼容模型，且确保对应 Provider 已启用，才能发布路由。</p>}
+            <div className="admin-form-grid">
+              <label><span>AI 功能</span><select className="select-field" onChange={(event) => selectRouteFeature(event.target.value as RouteFeature)} value={routeFeature}>{routeFeatures.map((feature) => <option key={feature.value} value={feature.value}>{feature.label}</option>)}</select><small>{selectedRouteFeature.detail}</small></label>
+              <label><span>路由显示名称</span><input className="field" maxLength={120} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, display_name: event.target.value }))} required value={routeDraft.display_name} /></label>
+              <label className="admin-ai-field-wide"><span>用途说明（可选）</span><textarea className="textarea-field" maxLength={1000} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, description: event.target.value }))} placeholder="说明该路由的质量、速度或成本取舍" rows={3} value={routeDraft.description} /></label>
+              <label><span>提示词版本（可选）</span><input className="field" maxLength={120} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, prompt_revision: event.target.value }))} placeholder="例如：resume-extract-v3" value={routeDraft.prompt_revision} /></label>
+            </div>
+            <fieldset className="admin-ai-route-targets"><legend>路由目标</legend>
+              <p>首个目标是主模型；仅在勾选的错误类型出现时，才按顺序尝试后续模型。</p>
+              {routeDraft.targets.map((target, index) => <div className="admin-ai-route-target" key={`route-target-${index}`}>
+                <div className="admin-ai-route-target-heading"><strong>{index === 0 ? "主模型" : `回退模型 ${index}`}</strong>{routeDraft.targets.length > 1 && <button className="button button-ghost" onClick={() => updateRouteDraft((draft) => ({ ...draft, targets: draft.targets.filter((_, targetIndex) => targetIndex !== index) }))} type="button">移除</button>}</div>
+                <div className="admin-form-grid">
+                  <label><span>模型</span><select className="select-field" disabled={!routeModels.length} onChange={(event) => updateRouteTarget(index, { model_slug: event.target.value })} required value={target.model_slug}>{!routeModels.length && <option value="">暂无兼容模型</option>}{target.model_slug && !routeModels.some((model) => model.slug === target.model_slug) && <option value={target.model_slug}>{target.model_slug} · 当前不可用</option>}{routeModels.map((model) => <option key={model.model_id} value={model.slug}>{model.display_name} · {model.slug}</option>)}</select><small>仅显示具备 {routeCapabilitiesLabel} 能力且已启用的模型。</small></label>
+                  <label><span>最大尝试次数</span><select className="select-field" onChange={(event) => updateRouteTarget(index, { max_attempts: Number(event.target.value) })} value={target.max_attempts}><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option></select></label>
+                </div>
+                {index < routeDraft.targets.length - 1 && <fieldset className="admin-ai-fallback-options"><legend>允许回退的原因</legend>{fallbackCategories.map((category) => <label key={category.value}><input checked={target.allow_fallback_on.includes(category.value)} onChange={(event) => toggleFallbackCategory(index, category.value, event.target.checked)} type="checkbox" /><span>{category.label}</span></label>)}</fieldset>}
+              </div>)}
+              <div className="admin-ai-route-target-actions"><button className="button" disabled={routeDraft.targets.length >= 4 || routeModels.length <= routeDraft.targets.length} onClick={addRouteTarget} type="button"><Icon name="plus" size={16} />添加回退模型</button><small>最多 4 个目标；同一模型不可重复。</small></div>
+            </fieldset>
+            <label className="admin-reason-field"><span>发布原因</span><textarea className="textarea-field" maxLength={500} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, reason: event.target.value }))} placeholder="例如：主模型升级，保留原模型应对限流与超时" required rows={3} value={routeDraft.reason} /></label>
+          </>}
+
+          {routeReview && <section aria-labelledby="admin-ai-route-review-title" className="admin-ai-route-review">
+            <header>
+              <div><span>发布前检查</span><h4 id="admin-ai-route-review-title" ref={routeReviewHeadingRef} tabIndex={-1}>确认「{routeReview.featureLabel}」新版本</h4></div>
+              <p>下列内容是本次发布的固定快照。确认后将生成新版本，并将其设为当前发布版本。</p>
+            </header>
+            <div className="admin-ai-route-review-table-wrap">
+              <table className="admin-ai-route-review-table">
+                <thead><tr><th scope="col">检查项</th><th scope="col">当前版本</th><th scope="col">新版本</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">版本</th><td>{routeReview.currentVersionNumber === null ? "未发布" : `v${routeReview.currentVersionNumber}`}</td><td><strong>v{routeReview.nextVersion}</strong></td></tr>
+                  <tr><th scope="row">显示名称</th><td>{routeReview.currentPolicy?.display_name ?? "未设置"}</td><td>{routeReview.payload.display_name}</td></tr>
+                  <tr><th scope="row">用途说明</th><td>{routeReview.currentPolicy?.description || "未设置"}</td><td>{routeReview.payload.description || "未设置"}</td></tr>
+                  <tr><th scope="row">模型链</th><td>{routeReview.currentVersion ? routeModelChain(routeReview.currentVersion.targets) : "未配置"}</td><td><strong>{routeModelChain(routeReview.payload.targets)}</strong></td></tr>
+                  <tr><th scope="row">最大尝试</th><td>{routeReview.currentVersion ? routeRetrySummary(routeReview.currentVersion.targets) : "未配置"}</td><td>{routeRetrySummary(routeReview.payload.targets)}</td></tr>
+                  <tr><th scope="row">回退条件</th><td>{routeReview.currentVersion ? routeFallbackSummary(routeReview.currentVersion.targets) : "未配置"}</td><td>{routeFallbackSummary(routeReview.payload.targets)}</td></tr>
+                  <tr><th scope="row">提示词版本</th><td>{routeReview.currentVersion?.prompt_revision || "未设置"}</td><td>{routeReview.payload.prompt_revision || "未设置"}</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <dl className="admin-ai-route-review-reason"><div><dt>发布原因</dt><dd>{routeReview.payload.reason}</dd></div></dl>
+            <section aria-labelledby="admin-ai-route-change-title" className="admin-ai-route-change-warning">
+              <h5 id="admin-ai-route-change-title">变化警示</h5>
+              <ul>{routeReview.changes.map((change) => <li key={change}>{change}</li>)}</ul>
+              <p>已发布的历史版本不会被改写。请确认模型顺序、重试和回退条件与变更原因一致。</p>
+            </section>
+          </section>}
+
           {error && <p className="admin-form-error" role="alert">{error}</p>}{notice && <p className="admin-form-success" role="status">{notice}</p>}
-          <div className="admin-form-actions"><button className="button button-primary" disabled={saving === "route" || !routeModels.length} type="submit">{saving === "route" ? <><i className="spinner" />正在发布</> : <><Icon name="spark" size={16} />发布新路由版本</>}</button></div>
+          {!routeReview && <div className="admin-form-actions"><button className="button button-primary" disabled={saving === "route" || !routeModels.length || routeVersionsState !== "ready"} ref={routeImpactButtonRef} type="submit"><Icon name="spark" size={16} />检查发布影响</button></div>}
+          {routeReview && <div className="admin-form-actions"><button className="button" disabled={saving === "route"} onClick={returnToRouteDraft} type="button">返回修改</button><button className="button button-primary" disabled={saving === "route" || routeVersionsState !== "ready"} onClick={() => void confirmRoutePublication()} type="button">{saving === "route" ? <><i className="spinner" />正在发布</> : <><Icon name="spark" size={16} />确认发布新版本</>}</button></div>}
 
           <section className="admin-ai-route-history" aria-live="polite">
-            <div><h4>「{selectedRouteFeature.label}」发布历史</h4><p>{routeVersionsState === "loading" ? "正在读取版本历史…" : "仅展示版本和路由目标，不展示任何候选人内容。"}</p></div>
-            {routeVersionsState === "error" && <p className="admin-form-error" role="alert">{routeVersionsError}</p>}
+            <div><h4>「{selectedRouteFeature.label}」发布历史</h4><p>{routeVersionsState === "idle" || routeVersionsState === "loading" ? "正在读取版本历史…" : routeVersionsState === "error" ? "版本历史暂不可用，请重新加载。" : "仅展示版本和路由目标，不展示任何候选人内容。"}</p></div>
             {routeVersionsState === "ready" && !routeVersions.length && <p className="admin-field-help">尚未发布过这个功能的路由。</p>}
             {routeVersionsState === "ready" && !!routeVersions.length && <ol>{routeVersions.map((version) => <li key={version.route_policy_version_id}><span><strong>v{version.version}</strong><small>{version.targets.map((target) => target.model_slug).join(" → ")}</small></span><time dateTime={version.published_at}>{formatDate(version.published_at, true)}</time></li>)}</ol>}
           </section>

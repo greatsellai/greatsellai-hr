@@ -1780,6 +1780,186 @@
   font-size: 0.75rem;
 }
 
+.admin-ai-route-load-state,
+.admin-ai-route-load-error {
+  display: flex;
+  min-height: 2.75rem;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.625rem 0.75rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-route-load-state {
+  color: var(--ink-soft);
+  background: var(--surface-muted);
+}
+
+.admin-ai-route-load-error {
+  justify-content: space-between;
+  color: var(--red-pressed);
+  background: var(--red-tint);
+  border-color: rgb(215 22 24 / 0.2);
+}
+
+.admin-ai-route-load-error .button {
+  flex: 0 0 auto;
+  min-height: 2rem;
+  padding: 0.3rem 0.625rem;
+  font-size: 0.75rem;
+}
+
+.admin-ai-route-review {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+}
+
+.admin-ai-route-review > header {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.admin-ai-route-review > header div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.admin-ai-route-review > header span {
+  color: var(--red-pressed);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.admin-ai-route-review h4,
+.admin-ai-route-change-warning h5 {
+  margin: 0;
+  color: var(--ink-strong);
+}
+
+.admin-ai-route-review h4 {
+  font-size: 1rem;
+  letter-spacing: -0.02em;
+}
+
+.admin-ai-route-review > header p,
+.admin-ai-route-change-warning p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.admin-ai-route-review-table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-route-review-table {
+  width: 100%;
+  min-width: 42rem;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.admin-ai-route-review-table th,
+.admin-ai-route-review-table td {
+  padding: 0.625rem 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.admin-ai-route-review-table thead th {
+  color: var(--ink-soft);
+  font-weight: 650;
+  background: var(--surface-muted);
+}
+
+.admin-ai-route-review-table tbody th {
+  width: 7.5rem;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.admin-ai-route-review-table td {
+  width: calc((100% - 7.5rem) / 2);
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.admin-ai-route-review-table td strong {
+  color: var(--ink);
+}
+
+.admin-ai-route-review-table tbody tr:last-child th,
+.admin-ai-route-review-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.admin-ai-route-review-reason {
+  padding: 0;
+  margin: 0;
+}
+
+.admin-ai-route-review-reason div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.admin-ai-route-review-reason dt {
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.admin-ai-route-review-reason dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.admin-ai-route-change-warning {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  color: #7d410b;
+  background: var(--amber-tint);
+  border: 1px solid #f1d7bb;
+  border-radius: var(--radius-xs);
+}
+
+.admin-ai-route-change-warning h5 {
+  color: #6b3508;
+  font-size: 0.8125rem;
+}
+
+.admin-ai-route-change-warning ul {
+  display: grid;
+  gap: 0.25rem;
+  padding-left: 1.1rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.admin-ai-route-change-warning p {
+  color: #6b3508;
+}
+
 .admin-ai-route-history {
   display: grid;
   gap: 0.625rem;
@@ -2268,12 +2448,14 @@
   }
 
   .admin-ai-form-heading,
+  .admin-ai-route-load-error,
   .admin-ai-route-history > div,
   .admin-ai-route-target-actions {
     align-items: flex-start;
     flex-direction: column;
   }
 
+  .admin-ai-route-load-error .button,
   .admin-ai-route-target-actions .button {
     width: 100%;
   }

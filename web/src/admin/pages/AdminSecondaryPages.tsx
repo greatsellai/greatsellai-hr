@@ -420,7 +420,11 @@ function TokenUsageCell({
 }
 
 const DEFAULT_TOKEN_USAGE_RANGE_DAYS = 30;
-const MAX_TOKEN_TREND_RANGE_DAYS = 90;
+const DEFAULT_TOKEN_TREND_GRANULARITY: AiUsageTrendGranularity = "day";
+const MAX_TOKEN_TREND_RANGE_DAYS: Record<AiUsageTrendGranularity, number> = {
+  hour: 31,
+  day: 90,
+};
 
 function localDateInputValue(date: Date) {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
@@ -460,14 +464,6 @@ function parseModelScope(value: string): ModelScope | null {
   return { providerSlug, modelSlug };
 }
 
-function trendGranularity(start: string, end: string): AiUsageTrendGranularity {
-  if (!start || !end) return "day";
-  const startTime = new Date(`${start}T00:00:00`).getTime();
-  const endTime = new Date(`${end}T23:59:59.999`).getTime();
-  if (Number.isNaN(startTime) || Number.isNaN(endTime)) return "day";
-  return endTime - startTime < 3 * 24 * 60 * 60 * 1_000 ? "hour" : "day";
-}
-
 function usageRangeDays(start: string, end: string) {
   const startTime = new Date(`${start}T00:00:00`).getTime();
   const endTime = new Date(`${end}T23:59:59.999`).getTime();
@@ -494,11 +490,13 @@ export function AdminAiPage() {
   const [featureDraft, setFeatureDraft] = useState("");
   const [usageStartDraft, setUsageStartDraft] = useState(initialUsageRange.start);
   const [usageEndDraft, setUsageEndDraft] = useState(initialUsageRange.end);
+  const [usageTrendGranularityDraft, setUsageTrendGranularityDraft] = useState<AiUsageTrendGranularity>(DEFAULT_TOKEN_TREND_GRANULARITY);
   const [modelScopeDraft, setModelScopeDraft] = useState("");
   const [organizationId, setOrganizationId] = useState("");
   const [feature, setFeature] = useState("");
   const [usageStart, setUsageStart] = useState(initialUsageRange.start);
   const [usageEnd, setUsageEnd] = useState(initialUsageRange.end);
+  const [usageTrendGranularity, setUsageTrendGranularity] = useState<AiUsageTrendGranularity>(DEFAULT_TOKEN_TREND_GRANULARITY);
   const [modelScope, setModelScope] = useState("");
   const [runs, setRuns] = useState<AiRunUsage[]>([]);
   const [usage, setUsage] = useState<AiUsageAggregate[]>([]);
@@ -550,7 +548,7 @@ export function AdminAiPage() {
         model_slug: selectedModelScope?.modelSlug,
         started_at_from: localDayBoundaryIso(usageStart, "start"),
         started_at_to: localDayBoundaryIso(usageEnd, "end"),
-        granularity: trendGranularity(usageStart, usageEnd),
+        granularity: usageTrendGranularity,
         time_zone: timeZone,
       });
       setUsageTrend(nextUsageTrend);
@@ -560,7 +558,7 @@ export function AdminAiPage() {
       setUsageTrendError(adminErrorMessage(trendError));
       setUsageTrendState("error");
     }
-  }, [feature, modelScope, organizationId, timeZone, usageEnd, usageStart]);
+  }, [feature, modelScope, organizationId, timeZone, usageEnd, usageStart, usageTrendGranularity]);
 
   const load = useCallback(async () => {
     setState("loading");
@@ -630,10 +628,9 @@ export function AdminAiPage() {
   const hasActiveFilters = Boolean(
     organizationId
     || feature
-    || (tab === "usage" && (modelScope || !isDefaultUsageRange)),
+    || (tab === "usage" && (modelScope || !isDefaultUsageRange || usageTrendGranularity !== DEFAULT_TOKEN_TREND_GRANULARITY)),
   );
   const usageRange = tokenUsageRangeLabel(usageStart, usageEnd);
-  const usageTrendGranularity = trendGranularity(usageStart, usageEnd);
 
   const apply = (event: FormEvent) => {
     event.preventDefault();
@@ -645,8 +642,9 @@ export function AdminAiPage() {
       setFilterError("结束日期不能早于开始日期。");
       return;
     }
-    if (tab === "usage" && usageRangeDays(usageStartDraft, usageEndDraft) > MAX_TOKEN_TREND_RANGE_DAYS) {
-      setFilterError(`趋势图最多支持 ${MAX_TOKEN_TREND_RANGE_DAYS} 天，请缩小日期范围。`);
+    const maxTrendRangeDays = MAX_TOKEN_TREND_RANGE_DAYS[usageTrendGranularityDraft];
+    if (tab === "usage" && usageRangeDays(usageStartDraft, usageEndDraft) > maxTrendRangeDays) {
+      setFilterError(`按${usageTrendGranularityDraft === "hour" ? "小时" : "天"}最多支持 ${maxTrendRangeDays} 天，请缩小日期范围或切换粒度。`);
       return;
     }
     setFilterError("");
@@ -654,6 +652,7 @@ export function AdminAiPage() {
     setFeature(featureDraft.trim());
     setUsageStart(usageStartDraft);
     setUsageEnd(usageEndDraft);
+    setUsageTrendGranularity(usageTrendGranularityDraft);
     setModelScope(modelScopeDraft);
   };
 
@@ -663,11 +662,13 @@ export function AdminAiPage() {
     setFeatureDraft("");
     setUsageStartDraft(initialUsageRange.start);
     setUsageEndDraft(initialUsageRange.end);
+    setUsageTrendGranularityDraft(DEFAULT_TOKEN_TREND_GRANULARITY);
     setModelScopeDraft("");
     setOrganizationId("");
     setFeature("");
     setUsageStart(initialUsageRange.start);
     setUsageEnd(initialUsageRange.end);
+    setUsageTrendGranularity(DEFAULT_TOKEN_TREND_GRANULARITY);
     setModelScope("");
   };
 
@@ -690,6 +691,14 @@ export function AdminAiPage() {
           {tab === "usage" && <>
             <label className="admin-date-field"><span>开始日期</span><input className="field" onChange={(event) => { setUsageStartDraft(event.target.value); setFilterError(""); }} type="date" value={usageStartDraft} /></label>
             <label className="admin-date-field"><span>结束日期</span><input className="field" onChange={(event) => { setUsageEndDraft(event.target.value); setFilterError(""); }} type="date" value={usageEndDraft} /></label>
+            <fieldset aria-describedby="admin-token-trend-granularity-note" className="admin-token-trend-granularity">
+              <legend>趋势粒度</legend>
+              <div aria-label="趋势粒度" className="admin-segmented" role="group">
+                <button aria-pressed={usageTrendGranularityDraft === "hour"} onClick={() => { setUsageTrendGranularityDraft("hour"); setFilterError(""); }} type="button">按小时</button>
+                <button aria-pressed={usageTrendGranularityDraft === "day"} onClick={() => { setUsageTrendGranularityDraft("day"); setFilterError(""); }} type="button">按天</button>
+              </div>
+              <small id="admin-token-trend-granularity-note">按小时最多 31 天，按天最多 90 天。</small>
+            </fieldset>
             <label className="admin-model-scope-field"><span>Provider / 模型</span><select className="select-field" onChange={(event) => setModelScopeDraft(event.target.value)} value={modelScopeDraft}><option value="">全部 Provider / 模型</option>{modelScopeDraft && !modelScopeOptions.some((model) => `${model.provider_slug}${MODEL_SCOPE_SEPARATOR}${model.slug}` === modelScopeDraft) && <option value={modelScopeDraft}>已归档的模型范围</option>}{modelScopeOptions.map((model) => <option key={model.model_id} value={`${model.provider_slug}${MODEL_SCOPE_SEPARATOR}${model.slug}`}>{providerNames.get(model.provider_slug) ?? model.provider_slug} / {model.display_name} · {model.slug}</option>)}</select></label>
           </>}
           <button className="button button-primary" type="submit">{tab === "usage" ? "查看 Token" : "筛选记录"}</button>

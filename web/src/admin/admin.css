@@ -727,6 +727,35 @@
   min-height: 2.625rem;
 }
 
+.admin-token-trend-granularity {
+  display: grid;
+  min-width: 12.25rem;
+  gap: 0.25rem;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.admin-token-trend-granularity legend,
+.admin-token-trend-granularity small {
+  padding: 0;
+  color: var(--ink-soft);
+  font-size: 0.6875rem;
+  line-height: 1.4;
+}
+
+.admin-token-trend-granularity legend {
+  font-weight: 650;
+}
+
+.admin-token-trend-granularity .admin-segmented {
+  width: fit-content;
+}
+
+.admin-token-trend-granularity .admin-segmented button {
+  min-height: 2.625rem;
+}
+
 .admin-model-scope-field {
   display: grid;
   min-width: 15rem;
@@ -2684,6 +2713,7 @@
 
   .admin-search-field,
   .admin-filter-bar > label:not(.admin-search-field),
+  .admin-filter-bar > .admin-token-trend-granularity,
   .admin-filter-bar .button {
     width: 100%;
     flex-basis: 100%;

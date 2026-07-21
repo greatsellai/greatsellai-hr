@@ -1653,6 +1653,18 @@
   border-radius: var(--radius-xs);
 }
 
+.admin-token-chart-fallback {
+  display: flex;
+  min-height: 18rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1rem;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
 .admin-token-trend-empty {
   display: flex;
   min-height: 13rem;
@@ -2692,6 +2704,10 @@
 
   .admin-token-chart-canvas {
     height: 16.5rem;
+  }
+
+  .admin-token-chart-fallback {
+    min-height: 16.5rem;
   }
 
   .admin-attention-list button {

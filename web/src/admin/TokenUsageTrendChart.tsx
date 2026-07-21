@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import type { EChartsOption } from "echarts";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ECharts, EChartsOption } from "echarts";
 import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
 import {
@@ -9,7 +9,6 @@ import {
   TooltipComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import ReactEChartsCore from "echarts-for-react/lib/core";
 import { Icon } from "../icons";
 import type { AiUsageTrendBucket, AiUsageTrendGranularity } from "./admin-types";
 import { numberFormat } from "./AdminComponents";
@@ -122,9 +121,10 @@ function chartSeriesData(points: TrendPoint[], key: TrendSeriesKey, granularity:
   const expectedBucketMs = granularity === "hour" ? 60 * 60 * 1_000 : DAY_MS;
   return points.flatMap((point, index) => {
     const timestamp = new Date(point.bucketStartedAt).getTime();
+    if (!Number.isFinite(timestamp)) return [];
     const previous = points[index - 1];
     const previousTimestamp = previous ? new Date(previous.bucketStartedAt).getTime() : null;
-    const hasGap = previousTimestamp !== null && timestamp - previousTimestamp > expectedBucketMs * 1.5;
+    const hasGap = previousTimestamp !== null && Number.isFinite(previousTimestamp) && timestamp - previousTimestamp > expectedBucketMs * 1.5;
     if (hasGap) {
       return [
         [previousTimestamp + expectedBucketMs, null] as [number, number | null],
@@ -137,6 +137,67 @@ function chartSeriesData(points: TrendPoint[], key: TrendSeriesKey, granularity:
 
 function Metric({ label, value, description }: { label: string; value: string; description: string }) {
   return <div className="admin-token-trend-metric"><dt>{label}</dt><dd>{value}</dd><small>{description}</small></div>;
+}
+
+function EChartsTrendCanvas({ description, option }: { description: string; option: EChartsOption }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<ECharts | null>(null);
+  const [renderFailed, setRenderFailed] = useState(false);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return undefined;
+
+    let chart: ECharts | null = null;
+    let observer: ResizeObserver | null = null;
+    const resize = () => {
+      try {
+        chart?.resize();
+      } catch {
+        // The page and trend-detail table remain usable if a browser rejects a resize.
+      }
+    };
+
+    try {
+      chart = echarts.init(container, undefined, { renderer: "canvas" });
+      chart.setOption(option, { lazyUpdate: true, notMerge: true });
+      chartRef.current = chart;
+      if (typeof ResizeObserver !== "undefined") {
+        observer = new ResizeObserver(resize);
+        observer.observe(container);
+      } else {
+        window.addEventListener("resize", resize);
+      }
+    } catch {
+      chart?.dispose();
+      chartRef.current = null;
+      setRenderFailed(true);
+    }
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", resize);
+      chart?.dispose();
+      if (chartRef.current === chart) chartRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    try {
+      chart.setOption(option, { lazyUpdate: true, notMerge: true });
+      setRenderFailed(false);
+    } catch {
+      setRenderFailed(true);
+    }
+  }, [option]);
+
+  if (renderFailed) {
+    return <div className="admin-token-chart-fallback" role="status"><Icon name="activity" size={18} /><span>图表暂时无法渲染，请查看下方趋势明细。</span></div>;
+  }
+
+  return <div aria-label={description} className="admin-token-chart-canvas" ref={containerRef} role="img" />;
 }
 
 export function TokenUsageTrendChart({
@@ -311,15 +372,7 @@ export function TokenUsageTrendChart({
 
       {hasReportedUsage ? (
         <div aria-label="Token 使用趋势图" className="admin-token-chart-frame">
-          <ReactEChartsCore
-            autoResize
-            className="admin-token-chart-canvas"
-            echarts={echarts}
-            lazyUpdate
-            notMerge
-            option={chartOption}
-            opts={{ renderer: "canvas" }}
-          />
+          <EChartsTrendCanvas description={chartDescription} option={chartOption} />
         </div>
       ) : <div className="admin-token-trend-empty"><Icon name="activity" size={18} /><span>{summary.invocationCount ? `当前范围内有 ${numberFormat(summary.invocationCount)} 次调用，但模型未返回 Token usage。` : "当前范围内没有模型调用。调整日期或模型后再查看趋势。"}</span></div>}
 

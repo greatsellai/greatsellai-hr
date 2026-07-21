@@ -14,17 +14,42 @@ used by tenant-facing routes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+import re
+from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
-from app.models import AiModelProfile, AiProviderProfile, AiRun, ApiInvocation
+from app.models import AiModelProfile, AiProviderProfile, AiRun, ApiInvocation, utcnow
 
 
 class AiUsageReportingError(ValueError):
     """A safe validation error for platform reporting filters."""
+
+
+TrendGranularity = Literal["hour", "day"]
+
+_DEFAULT_TREND_RANGE = timedelta(days=30)
+_MAX_TREND_RANGE_BY_GRANULARITY: dict[TrendGranularity, timedelta] = {
+    # Hourly series are intentionally capped more tightly: a platform-wide
+    # report can fan out into one row per hour and Provider/model combination.
+    "hour": timedelta(days=31),
+    # Daily reporting remains useful for a quarter without letting the
+    # endpoint become an unbounded historical export.
+    "day": timedelta(days=90),
+}
+
+# ``ZoneInfo`` accepts IANA keys, but validating the key before resolving it
+# keeps this public query parameter constrained to a safe, portable subset.
+# The accepted form includes ordinary region names (``Asia/Shanghai``), UTC,
+# and the ``Etc/GMT+8`` style identifiers that appear in the IANA database.
+_IANA_TIME_ZONE_PATTERN = re.compile(
+    r"^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,23 +59,37 @@ class AiUsageQuery:
     ``started_at_from`` and ``started_at_to`` are inclusive.  Run-list queries
     apply them to the durable run start time; model-level usage aggregation
     applies them to the actual provider invocation start time, which is when
-    the measured Token usage occurred.  ``organization_id=None`` intentionally
-    means all workspaces, which is why this query is only valid after
-    platform-admin authorization at the API boundary.
+    the measured Token usage occurred.  ``provider_slug`` and ``model_slug``
+    apply only to the model-level aggregation, because the run-list endpoint
+    intentionally remains a model-agnostic operational view.
+    ``organization_id=None`` intentionally means all workspaces, which is why
+    this query is only valid after platform-admin authorization at the API
+    boundary.
     """
 
     organization_id: str | None = None
     feature: str | None = None
+    provider_slug: str | None = None
+    model_slug: str | None = None
     started_at_from: datetime | None = None
     started_at_to: datetime | None = None
     limit: int = 100
     offset: int = 0
 
     def __post_init__(self) -> None:
-        if self.organization_id is not None and not self.organization_id.strip():
-            raise AiUsageReportingError("ai_usage_organization_id_invalid")
-        if self.feature is not None and not self.feature.strip():
-            raise AiUsageReportingError("ai_usage_feature_invalid")
+        _validate_optional_filter(
+            self.organization_id,
+            code="ai_usage_organization_id_invalid",
+        )
+        _validate_optional_filter(self.feature, code="ai_usage_feature_invalid")
+        _validate_optional_filter(
+            self.provider_slug,
+            code="ai_usage_provider_slug_invalid",
+        )
+        _validate_optional_filter(
+            self.model_slug,
+            code="ai_usage_model_slug_invalid",
+        )
         if self.started_at_from and self.started_at_to:
             if self.started_at_from > self.started_at_to:
                 raise AiUsageReportingError("ai_usage_date_range_invalid")
@@ -58,6 +97,85 @@ class AiUsageQuery:
             raise AiUsageReportingError("ai_usage_limit_invalid")
         if self.offset < 0:
             raise AiUsageReportingError("ai_usage_offset_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AiUsageTrendQuery:
+    """Validated, bounded filters for a platform Token usage trend.
+
+    The trend is intentionally an operational chart rather than a ledger
+    export.  It uses ``ApiInvocation.started_at`` exclusively, so each Token
+    is counted in the interval in which the provider call happened.  When no
+    range is supplied it returns the latest 30 days; callers must provide both
+    endpoints for a custom interval and the permitted span depends on the
+    selected bucket size.
+    """
+
+    organization_id: str | None = None
+    feature: str | None = None
+    provider_slug: str | None = None
+    model_slug: str | None = None
+    started_at_from: datetime | None = None
+    started_at_to: datetime | None = None
+    granularity: TrendGranularity = "day"
+    # The query boundaries remain absolute instants.  This IANA zone controls
+    # only the civil calendar used to build chart buckets and is echoed in
+    # each result so clients do not accidentally render a UTC day as a local
+    # day.  UTC remains the backwards-compatible default for callers that
+    # have not yet supplied their browser zone.
+    time_zone: str = "UTC"
+    _bucket_time_zone: ZoneInfo = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _validate_optional_filter(
+            self.organization_id,
+            code="ai_usage_organization_id_invalid",
+        )
+        _validate_optional_filter(self.feature, code="ai_usage_feature_invalid")
+        _validate_optional_filter(
+            self.provider_slug,
+            code="ai_usage_provider_slug_invalid",
+        )
+        _validate_optional_filter(
+            self.model_slug,
+            code="ai_usage_model_slug_invalid",
+        )
+        if self.granularity not in _MAX_TREND_RANGE_BY_GRANULARITY:
+            raise AiUsageReportingError("ai_usage_trend_granularity_invalid")
+
+        bucket_time_zone = _resolve_trend_time_zone(self.time_zone)
+
+        started_at_from = _as_utc(self.started_at_from)
+        started_at_to = _as_utc(self.started_at_to)
+        if started_at_from is None and started_at_to is None:
+            started_at_to = utcnow()
+            started_at_from = started_at_to - _DEFAULT_TREND_RANGE
+        elif started_at_from is None or started_at_to is None:
+            raise AiUsageReportingError("ai_usage_trend_date_range_incomplete")
+
+        assert started_at_from is not None
+        assert started_at_to is not None
+        if started_at_from > started_at_to:
+            raise AiUsageReportingError("ai_usage_date_range_invalid")
+        if (
+            started_at_to - started_at_from
+            > _MAX_TREND_RANGE_BY_GRANULARITY[self.granularity]
+        ):
+            raise AiUsageReportingError("ai_usage_trend_date_range_too_large")
+
+        # Store the resolved, UTC-normalized interval back on the immutable
+        # value object.  This keeps SQL comparison semantics stable across
+        # SQLite tests and PostgreSQL production deployments.
+        object.__setattr__(self, "started_at_from", started_at_from)
+        object.__setattr__(self, "started_at_to", started_at_to)
+        object.__setattr__(self, "time_zone", bucket_time_zone.key)
+        object.__setattr__(self, "_bucket_time_zone", bucket_time_zone)
+
+    @property
+    def bucket_time_zone(self) -> ZoneInfo:
+        """The validated IANA zone used for calendar bucketing."""
+
+        return self._bucket_time_zone
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +231,32 @@ class AiUsageAggregate:
     known_run_count: int
     partial_run_count: int
     unavailable_run_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AiUsageTrendBucket:
+    """One Provider/model Token bucket for a platform usage chart.
+
+    This deliberately contains no price, cost, business reference, prompt,
+    candidate, or source-document field.  A bucket has data only when at
+    least one external invocation exists; clients may render missing periods
+    as zero without treating them as provider-reported usage.
+    """
+
+    # The UTC instant at which the requested timezone's local civil bucket
+    # begins.  Clients can safely pass it to a normal ``Date`` formatter.
+    bucket_started_at: datetime
+    time_zone: str
+    provider_slug: str
+    model_slug: str
+    invocation_count: int
+    token_usage_invocation_count: int
+    input_tokens: int
+    cached_read_input_tokens: int
+    cached_write_input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    total_tokens: int
 
 
 def _has_provider_usage() -> object:
@@ -394,7 +538,7 @@ def summarize_platform_ai_usage(
         # Platform-only read path.  See module-level security boundary.
         .execution_options(skip_organization_scope=True)
     )
-    statement = _apply_usage_summary_filters(statement, query)
+    statement = _apply_model_usage_filters(statement, query)
     rows = session.execute(statement).mappings()
     return [
         AiUsageAggregate(
@@ -430,6 +574,376 @@ def summarize_platform_ai_usage(
     ]
 
 
+def summarize_platform_ai_usage_trend(
+    session: Session,
+    *,
+    query: AiUsageTrendQuery,
+) -> list[AiUsageTrendBucket]:
+    """Return bounded Provider/model Token totals grouped into time buckets.
+
+    This is deliberately separate from the general summary endpoint: a chart
+    needs a calendar bucket, but it must preserve the same per-Provider/model
+    identity as the summary table.  All time filtering and grouping use the
+    immutable provider invocation start time, never the enclosing business run
+    start time.
+
+    The query interval is made of UTC-normalized instants, while bucket
+    boundaries are made in the caller's explicit IANA ``time_zone``.  This is
+    intentionally not left to the database connection's session timezone:
+    platform reports must not move a candidate day merely because a worker or
+    database server runs in a different locale.
+
+    PostgreSQL performs the bounded aggregation in SQL with ``timezone`` and
+    ``date_trunc``.  SQLite has no IANA timezone database, so the test/local
+    path streams the minimal metering columns and groups them in Python.  Both
+    paths share the same civil-time semantics, including non-whole-hour zones
+    such as ``Asia/Kathmandu``.
+    """
+
+    if _database_dialect_name(session) == "postgresql":
+        return _summarize_platform_ai_usage_trend_postgresql(session, query=query)
+    return _summarize_platform_ai_usage_trend_in_python(session, query=query)
+
+
+def _summarize_platform_ai_usage_trend_postgresql(
+    session: Session,
+    *,
+    query: AiUsageTrendQuery,
+) -> list[AiUsageTrendBucket]:
+    """Use PostgreSQL's IANA timezone data for the production aggregation."""
+
+    rows = session.execute(
+        _postgresql_trend_statement(query)
+    ).mappings()
+    buckets: list[AiUsageTrendBucket] = []
+    for row in rows:
+        database_bucket = row["bucket_started_at"]
+        if not isinstance(database_bucket, datetime):
+            raise RuntimeError("ai_usage_trend_bucket_timestamp_invalid")
+        # ``timezone(text, timestamptz)`` yields a local timestamp without a
+        # tzinfo.  Reattaching the validated IANA zone lets us return the UTC
+        # instant of the local civil bucket's start, which is safe for normal
+        # browser ``Date`` formatting and does not depend on server locale.
+        bucket_started_at = database_bucket.replace(
+            tzinfo=query.bucket_time_zone
+        ).astimezone(timezone.utc)
+        buckets.append(
+            _trend_bucket_from_aggregate_row(
+                row,
+                bucket_started_at=bucket_started_at,
+                time_zone=query.time_zone,
+            )
+        )
+    return buckets
+
+
+def _summarize_platform_ai_usage_trend_in_python(
+    session: Session,
+    *,
+    query: AiUsageTrendQuery,
+) -> list[AiUsageTrendBucket]:
+    """Use a streaming, timezone-correct fallback for SQLite and local tests.
+
+    SQLite deliberately ships without the IANA rule database, so attempting
+    to translate named zones in SQL would silently produce server-local or
+    UTC buckets.  The result set contains only metering fields and is streamed
+    to keep the bounded fallback from materializing invocation history.
+    """
+
+    statement = (
+        select(
+            ApiInvocation.started_at.label("started_at"),
+            AiProviderProfile.slug.label("provider_slug"),
+            AiModelProfile.slug.label("model_slug"),
+            ApiInvocation.usage_source,
+            ApiInvocation.input_tokens,
+            ApiInvocation.cached_read_input_tokens,
+            ApiInvocation.cached_write_input_tokens,
+            ApiInvocation.output_tokens,
+            ApiInvocation.reasoning_tokens,
+        )
+        .select_from(ApiInvocation)
+        .join(
+            AiRun,
+            and_(
+                AiRun.id == ApiInvocation.ai_run_id,
+                AiRun.organization_id == ApiInvocation.organization_id,
+            ),
+        )
+        .join(AiModelProfile, AiModelProfile.id == ApiInvocation.model_profile_id)
+        .join(
+            AiProviderProfile,
+            AiProviderProfile.id == ApiInvocation.provider_profile_id,
+        )
+        .order_by(
+            ApiInvocation.started_at,
+            AiProviderProfile.slug,
+            AiModelProfile.slug,
+        )
+        # Platform-only read path.  See module-level security boundary.
+        .execution_options(skip_organization_scope=True, stream_results=True)
+    )
+    statement = _apply_model_usage_filters(statement, query)
+    accumulators: dict[tuple[object, ...], _TrendBucketAccumulator] = {}
+    rows = session.execute(statement).mappings().yield_per(1_000)
+    for row in rows:
+        started_at = row["started_at"]
+        if not isinstance(started_at, datetime):
+            raise RuntimeError("ai_usage_trend_invocation_timestamp_invalid")
+        local_bucket_started_at = _local_trend_bucket_started_at(
+            started_at,
+            granularity=query.granularity,
+            bucket_time_zone=query.bucket_time_zone,
+        )
+        provider_slug = str(row["provider_slug"])
+        model_slug = str(row["model_slug"])
+        key = _trend_bucket_key(
+            local_bucket_started_at,
+            granularity=query.granularity,
+            provider_slug=provider_slug,
+            model_slug=model_slug,
+        )
+        accumulator = accumulators.get(key)
+        if accumulator is None:
+            accumulator = _TrendBucketAccumulator(
+                bucket_started_at=local_bucket_started_at.astimezone(timezone.utc),
+                time_zone=query.time_zone,
+                provider_slug=provider_slug,
+                model_slug=model_slug,
+            )
+            accumulators[key] = accumulator
+        accumulator.add_invocation(row)
+
+    return [
+        accumulator.as_bucket()
+        for accumulator in sorted(
+            accumulators.values(),
+            key=lambda value: (
+                value.bucket_started_at,
+                value.provider_slug,
+                value.model_slug,
+            ),
+        )
+    ]
+
+
+@dataclass(slots=True)
+class _TrendBucketAccumulator:
+    """Mutable metering-only accumulator for the SQLite fallback."""
+
+    bucket_started_at: datetime
+    time_zone: str
+    provider_slug: str
+    model_slug: str
+    invocation_count: int = 0
+    token_usage_invocation_count: int = 0
+    input_tokens: int = 0
+    cached_read_input_tokens: int = 0
+    cached_write_input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+
+    def add_invocation(self, row: Mapping[str, object]) -> None:
+        self.invocation_count += 1
+        if row["usage_source"] != "provider":
+            return
+
+        self.token_usage_invocation_count += 1
+        input_tokens = _token_value(row["input_tokens"])
+        cached_read_input_tokens = _token_value(row["cached_read_input_tokens"])
+        cached_write_input_tokens = _token_value(row["cached_write_input_tokens"])
+        output_tokens = _token_value(row["output_tokens"])
+        reasoning_tokens = _token_value(row["reasoning_tokens"])
+        self.input_tokens += input_tokens
+        self.cached_read_input_tokens += cached_read_input_tokens
+        self.cached_write_input_tokens += cached_write_input_tokens
+        self.output_tokens += output_tokens
+        self.reasoning_tokens += reasoning_tokens
+        self.total_tokens += (
+            input_tokens
+            + cached_read_input_tokens
+            + cached_write_input_tokens
+            + output_tokens
+            + reasoning_tokens
+        )
+
+    def as_bucket(self) -> AiUsageTrendBucket:
+        return AiUsageTrendBucket(
+            bucket_started_at=self.bucket_started_at,
+            time_zone=self.time_zone,
+            provider_slug=self.provider_slug,
+            model_slug=self.model_slug,
+            invocation_count=self.invocation_count,
+            token_usage_invocation_count=self.token_usage_invocation_count,
+            input_tokens=self.input_tokens,
+            cached_read_input_tokens=self.cached_read_input_tokens,
+            cached_write_input_tokens=self.cached_write_input_tokens,
+            output_tokens=self.output_tokens,
+            reasoning_tokens=self.reasoning_tokens,
+            total_tokens=self.total_tokens,
+        )
+
+
+def _postgresql_trend_statement(query: AiUsageTrendQuery) -> object:
+    """Build a PostgreSQL-only statement with parameterized IANA conversion."""
+
+    # PostgreSQL's ``timezone`` resolves DST rules from its IANA database.  The
+    # zone is a validated, bound value (never an interpolated SQL fragment).
+    local_started_at = func.timezone(query.time_zone, ApiInvocation.started_at)
+    bucket_started_at = func.date_trunc(
+        query.granularity,
+        local_started_at,
+    ).label("bucket_started_at")
+    token_usage_invocation_count = _provider_usage_invocation_count()
+    input_tokens = _sum_provider_token_bucket(
+        ApiInvocation.input_tokens,
+        label="input_tokens",
+    )
+    cached_read_input_tokens = _sum_provider_token_bucket(
+        ApiInvocation.cached_read_input_tokens,
+        label="cached_read_input_tokens",
+    )
+    cached_write_input_tokens = _sum_provider_token_bucket(
+        ApiInvocation.cached_write_input_tokens,
+        label="cached_write_input_tokens",
+    )
+    output_tokens = _sum_provider_token_bucket(
+        ApiInvocation.output_tokens,
+        label="output_tokens",
+    )
+    reasoning_tokens = _sum_provider_token_bucket(
+        ApiInvocation.reasoning_tokens,
+        label="reasoning_tokens",
+    )
+    total_tokens = _sum_provider_total_tokens()
+
+    statement = (
+        select(
+            bucket_started_at,
+            AiProviderProfile.slug.label("provider_slug"),
+            AiModelProfile.slug.label("model_slug"),
+            func.count(ApiInvocation.id).label("invocation_count"),
+            token_usage_invocation_count,
+            input_tokens,
+            cached_read_input_tokens,
+            cached_write_input_tokens,
+            output_tokens,
+            reasoning_tokens,
+            total_tokens,
+        )
+        .select_from(ApiInvocation)
+        .join(
+            AiRun,
+            and_(
+                AiRun.id == ApiInvocation.ai_run_id,
+                AiRun.organization_id == ApiInvocation.organization_id,
+            ),
+        )
+        .join(AiModelProfile, AiModelProfile.id == ApiInvocation.model_profile_id)
+        .join(
+            AiProviderProfile,
+            AiProviderProfile.id == ApiInvocation.provider_profile_id,
+        )
+        .group_by(
+            bucket_started_at,
+            AiProviderProfile.slug,
+            AiModelProfile.slug,
+        )
+        .order_by(
+            bucket_started_at,
+            AiProviderProfile.slug,
+            AiModelProfile.slug,
+        )
+        # Platform-only read path.  See module-level security boundary.
+        .execution_options(skip_organization_scope=True)
+    )
+    return _apply_model_usage_filters(statement, query)
+
+
+def _trend_bucket_from_aggregate_row(
+    row: Mapping[str, object],
+    *,
+    bucket_started_at: datetime,
+    time_zone: str,
+) -> AiUsageTrendBucket:
+    return AiUsageTrendBucket(
+        bucket_started_at=bucket_started_at,
+        time_zone=time_zone,
+        provider_slug=str(row["provider_slug"]),
+        model_slug=str(row["model_slug"]),
+        invocation_count=int(row["invocation_count"] or 0),
+        token_usage_invocation_count=int(row["token_usage_invocation_count"] or 0),
+        input_tokens=int(row["input_tokens"] or 0),
+        cached_read_input_tokens=int(row["cached_read_input_tokens"] or 0),
+        cached_write_input_tokens=int(row["cached_write_input_tokens"] or 0),
+        output_tokens=int(row["output_tokens"] or 0),
+        reasoning_tokens=int(row["reasoning_tokens"] or 0),
+        total_tokens=int(row["total_tokens"] or 0),
+    )
+
+
+def _local_trend_bucket_started_at(
+    started_at: datetime,
+    *,
+    granularity: TrendGranularity,
+    bucket_time_zone: ZoneInfo,
+) -> datetime:
+    """Floor an invocation instant to its local civil chart bucket."""
+
+    local_started_at = _as_utc(started_at).astimezone(bucket_time_zone)
+    if granularity == "day":
+        return datetime(
+            local_started_at.year,
+            local_started_at.month,
+            local_started_at.day,
+            tzinfo=bucket_time_zone,
+        )
+    return datetime(
+        local_started_at.year,
+        local_started_at.month,
+        local_started_at.day,
+        local_started_at.hour,
+        tzinfo=bucket_time_zone,
+    )
+
+
+def _trend_bucket_key(
+    bucket_started_at: datetime,
+    *,
+    granularity: TrendGranularity,
+    provider_slug: str,
+    model_slug: str,
+) -> tuple[object, ...]:
+    """Key a local civil bucket in the same way as PostgreSQL ``date_trunc``.
+
+    On the autumn DST transition two absolute hours can share one local clock
+    hour.  They intentionally aggregate into that one civil-hour chart point,
+    matching the PostgreSQL path and avoiding duplicate, visually ambiguous
+    01:00 labels.
+    """
+
+    calendar_parts: tuple[int, ...]
+    if granularity == "hour":
+        calendar_parts = (
+            bucket_started_at.year,
+            bucket_started_at.month,
+            bucket_started_at.day,
+            bucket_started_at.hour,
+        )
+    else:
+        calendar_parts = (
+            bucket_started_at.year,
+            bucket_started_at.month,
+            bucket_started_at.day,
+        )
+    return (*calendar_parts, provider_slug, model_slug)
+
+
+def _database_dialect_name(session: Session) -> str:
+    return session.get_bind().dialect.name
+
+
 def _apply_run_filters(statement: object, query: AiUsageQuery) -> object:
     """Apply the common safe run filters without exposing business fields."""
 
@@ -446,7 +960,10 @@ def _apply_run_filters(statement: object, query: AiUsageQuery) -> object:
     return statement
 
 
-def _apply_usage_summary_filters(statement: object, query: AiUsageQuery) -> object:
+def _apply_model_usage_filters(
+    statement: object,
+    query: AiUsageQuery | AiUsageTrendQuery,
+) -> object:
     """Apply platform filters to model usage without blurring time semantics.
 
     Workspace and feature remain properties of the durable AI run.  The date
@@ -459,11 +976,49 @@ def _apply_usage_summary_filters(statement: object, query: AiUsageQuery) -> obje
         statement = statement.where(AiRun.organization_id == query.organization_id)
     if query.feature is not None:
         statement = statement.where(AiRun.feature == query.feature)
+    if query.provider_slug is not None:
+        statement = statement.where(AiProviderProfile.slug == query.provider_slug)
+    if query.model_slug is not None:
+        statement = statement.where(AiModelProfile.slug == query.model_slug)
     if query.started_at_from is not None:
         statement = statement.where(ApiInvocation.started_at >= query.started_at_from)
     if query.started_at_to is not None:
         statement = statement.where(ApiInvocation.started_at <= query.started_at_to)
     return statement
+
+
+def _validate_optional_filter(value: str | None, *, code: str) -> None:
+    if value is not None and not value.strip():
+        raise AiUsageReportingError(code)
+
+
+def _resolve_trend_time_zone(value: str) -> ZoneInfo:
+    """Resolve one safe IANA timezone key for a trend query."""
+
+    if (
+        not value
+        or len(value) > 64
+        or value != value.strip()
+        or _IANA_TIME_ZONE_PATTERN.fullmatch(value) is None
+        or any(part in {".", ".."} for part in value.split("/"))
+    ):
+        raise AiUsageReportingError("ai_usage_trend_time_zone_invalid")
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError as exc:
+        raise AiUsageReportingError("ai_usage_trend_time_zone_invalid") from exc
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _token_value(value: object) -> int:
+    return int(value or 0)
 
 
 def _optional_int(value: object) -> int | None:

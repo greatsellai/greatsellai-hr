@@ -8,7 +8,7 @@ import logging
 import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import (
     Depends,
@@ -46,6 +46,7 @@ from app.schemas import (
     AiRoutePolicyVersionResponse,
     AiRunUsageSummaryResponse,
     AiUsageAggregateResponse,
+    AiUsageTrendBucketResponse,
     EmailVerificationComplete,
     EmailVerificationResendResult,
     OrganizationInvitationAccept,
@@ -184,8 +185,10 @@ from app.services.ai_gateway_configuration_service import (
 from app.services.ai_usage_reporting_service import (
     AiUsageQuery,
     AiUsageReportingError,
+    AiUsageTrendQuery,
     list_platform_ai_run_summaries,
     summarize_platform_ai_usage,
+    summarize_platform_ai_usage_trend,
 )
 from app.services.platform_admin_service import (
     PlatformAdminServiceError,
@@ -1718,6 +1721,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     def get_platform_ai_usage_summary(
         organization_id: str | None = Query(default=None, min_length=1, max_length=64),
         feature: str | None = Query(default=None, min_length=1, max_length=64),
+        provider_slug: str | None = Query(default=None, min_length=1, max_length=64),
+        model_slug: str | None = Query(default=None, min_length=1, max_length=128),
         started_at_from: datetime | None = Query(default=None),
         started_at_to: datetime | None = Query(default=None),
         _: AuthPrincipal = Depends(require_platform_admin),
@@ -1731,6 +1736,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 query=AiUsageQuery(
                     organization_id=organization_id,
                     feature=feature,
+                    provider_slug=provider_slug,
+                    model_slug=model_slug,
                     started_at_from=started_at_from,
                     started_at_to=started_at_to,
                     # Aggregation is not paginated; it has one bounded group
@@ -1766,6 +1773,73 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 known_run_count=row.known_run_count,
                 partial_run_count=row.partial_run_count,
                 unavailable_run_count=row.unavailable_run_count,
+            )
+            for row in rows
+        ]
+
+    @app.get(
+        "/v1/platform/ai/usage/trend",
+        response_model=list[AiUsageTrendBucketResponse],
+    )
+    def get_platform_ai_usage_trend(
+        organization_id: str | None = Query(default=None, min_length=1, max_length=64),
+        feature: str | None = Query(default=None, min_length=1, max_length=64),
+        provider_slug: str | None = Query(default=None, min_length=1, max_length=64),
+        model_slug: str | None = Query(default=None, min_length=1, max_length=128),
+        started_at_from: datetime | None = Query(default=None),
+        started_at_to: datetime | None = Query(default=None),
+        granularity: Literal["hour", "day"] = Query(default="day"),
+        time_zone: str = Query(
+            default="UTC",
+            min_length=1,
+            max_length=64,
+            description="IANA timezone used for calendar buckets, for example Asia/Shanghai.",
+        ),
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> list[AiUsageTrendBucketResponse]:
+        """Return bounded, model-scoped Token buckets for the platform chart.
+
+        The interval is applied to actual provider invocation start times.  A
+        missing interval defaults to the latest 30 days; hourly requests are
+        capped at 31 days and daily requests at 90 days.  Boundaries are
+        absolute timestamps; ``time_zone`` controls only the calendar bucket
+        labels and defaults to UTC for backwards compatibility.
+        """
+
+        try:
+            rows = summarize_platform_ai_usage_trend(
+                session,
+                query=AiUsageTrendQuery(
+                    organization_id=organization_id,
+                    feature=feature,
+                    provider_slug=provider_slug,
+                    model_slug=model_slug,
+                    started_at_from=started_at_from,
+                    started_at_to=started_at_to,
+                    granularity=granularity,
+                    time_zone=time_zone,
+                ),
+            )
+        except AiUsageReportingError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        return [
+            AiUsageTrendBucketResponse(
+                bucket_started_at=row.bucket_started_at,
+                time_zone=row.time_zone,
+                provider_slug=row.provider_slug,
+                model_slug=row.model_slug,
+                invocation_count=row.invocation_count,
+                token_usage_invocation_count=row.token_usage_invocation_count,
+                input_tokens=row.input_tokens,
+                cached_read_input_tokens=row.cached_read_input_tokens,
+                cached_write_input_tokens=row.cached_write_input_tokens,
+                output_tokens=row.output_tokens,
+                reasoning_tokens=row.reasoning_tokens,
+                total_tokens=row.total_tokens,
             )
             for row in rows
         ]

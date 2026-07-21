@@ -330,8 +330,32 @@ export interface AiUsageAggregate {
 export interface AiUsageQuery {
   organization_id?: string;
   feature?: string;
+  provider_slug?: string;
+  model_slug?: string;
   started_at_from?: string;
   started_at_to?: string;
   limit?: number;
   offset?: number;
+}
+
+export type AiUsageTrendGranularity = "hour" | "day";
+
+export interface AiUsageTrendQuery extends AiUsageQuery {
+  granularity?: AiUsageTrendGranularity;
+  time_zone?: string;
+}
+
+export interface AiUsageTrendBucket {
+  bucket_started_at: string;
+  time_zone: string;
+  provider_slug: string;
+  model_slug: string;
+  invocation_count: number;
+  token_usage_invocation_count: number;
+  input_tokens: number;
+  cached_read_input_tokens: number;
+  cached_write_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
 }

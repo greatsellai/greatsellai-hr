@@ -10,6 +10,8 @@ import type {
   AiRunUsage,
   AiUsageAggregate,
   AiUsageQuery,
+  AiUsageTrendBucket,
+  AiUsageTrendQuery,
   AuditQuery,
   OrganizationQuery,
   PlatformAuditPage,
@@ -161,6 +163,8 @@ export const adminApi = {
     request<AiRunUsage[]>(`/platform/ai/usage/runs${queryString(query)}`),
   listAiUsage: (query: AiUsageQuery = {}) =>
     request<AiUsageAggregate[]>(`/platform/ai/usage/summary${queryString(query)}`),
+  listAiUsageTrend: (query: AiUsageTrendQuery = {}) =>
+    request<AiUsageTrendBucket[]>(`/platform/ai/usage/trend${queryString(query)}`),
   listAiProviders: () => request<AiProviderProfile[]>("/platform/ai/providers"),
   createAiProvider: (payload: AiProviderProfileCreateInput) =>
     request<AiProviderProfile>("/platform/ai/providers", { method: "POST", body: body(payload) }),

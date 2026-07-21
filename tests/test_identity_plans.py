@@ -142,6 +142,9 @@ def test_platform_admin_alone_can_publish_ai_model_route(
     usage_denied = identity_client.get("/v1/platform/ai/usage/runs")
     assert usage_denied.status_code == 403, usage_denied.text
     assert usage_denied.json()["detail"] == "platform_admin_required"
+    usage_trend_denied = identity_client.get("/v1/platform/ai/usage/trend")
+    assert usage_trend_denied.status_code == 403, usage_trend_denied.text
+    assert usage_trend_denied.json()["detail"] == "platform_admin_required"
 
     legacy_login = identity_client.post(
         "/v1/auth/login",
@@ -155,6 +158,9 @@ def test_platform_admin_alone_can_publish_ai_model_route(
     usage_summary = identity_client.get("/v1/platform/ai/usage/summary")
     assert usage_summary.status_code == 200, usage_summary.text
     assert usage_summary.json() == []
+    usage_trend = identity_client.get("/v1/platform/ai/usage/trend")
+    assert usage_trend.status_code == 200, usage_trend.text
+    assert usage_trend.json() == []
 
     insecure_provider = identity_client.post(
         "/v1/platform/ai/providers",

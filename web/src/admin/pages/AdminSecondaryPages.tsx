@@ -7,6 +7,8 @@ import type {
   AiRoutePolicy,
   AiRunUsage,
   AiUsageAggregate,
+  AiUsageTrendBucket,
+  AiUsageTrendGranularity,
   PlatformAuditEvent,
   PlatformUserDetail,
   PlatformUserSummary,
@@ -25,6 +27,7 @@ import {
   shortId,
 } from "../AdminComponents";
 import { AdminAiConfigurationPanel } from "./AdminAiConfigurationPanel";
+import { TokenUsageTrendChart } from "../TokenUsageTrendChart";
 
 const PAGE_SIZE = 30;
 
@@ -399,6 +402,7 @@ function TokenUsageCell({
 }
 
 const DEFAULT_TOKEN_USAGE_RANGE_DAYS = 30;
+const MAX_TOKEN_TREND_RANGE_DAYS = 90;
 
 function localDateInputValue(date: Date) {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
@@ -424,8 +428,46 @@ function tokenUsageRangeLabel(start: string, end: string) {
   return `${start || "最早记录"} 至 ${end || "今天"}`;
 }
 
+type ModelScope = {
+  providerSlug: string;
+  modelSlug: string;
+};
+
+const MODEL_SCOPE_SEPARATOR = "::";
+
+function parseModelScope(value: string): ModelScope | null {
+  if (!value) return null;
+  const [providerSlug, modelSlug, extra] = value.split(MODEL_SCOPE_SEPARATOR);
+  if (!providerSlug || !modelSlug || extra !== undefined) return null;
+  return { providerSlug, modelSlug };
+}
+
+function trendGranularity(start: string, end: string): AiUsageTrendGranularity {
+  if (!start || !end) return "day";
+  const startTime = new Date(`${start}T00:00:00`).getTime();
+  const endTime = new Date(`${end}T23:59:59.999`).getTime();
+  if (Number.isNaN(startTime) || Number.isNaN(endTime)) return "day";
+  return endTime - startTime < 3 * 24 * 60 * 60 * 1_000 ? "hour" : "day";
+}
+
+function usageRangeDays(start: string, end: string) {
+  const startTime = new Date(`${start}T00:00:00`).getTime();
+  const endTime = new Date(`${end}T23:59:59.999`).getTime();
+  if (Number.isNaN(startTime) || Number.isNaN(endTime)) return 0;
+  return Math.floor((endTime - startTime) / (24 * 60 * 60 * 1_000)) + 1;
+}
+
+function browserTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
 export function AdminAiPage() {
   const initialUsageRange = useMemo(() => defaultTokenUsageRange(), []);
+  const timeZone = useMemo(() => browserTimeZone(), []);
   const [state, setState] = useState<RequestState>("loading");
   const [error, setError] = useState("");
   const [filterError, setFilterError] = useState("");
@@ -434,17 +476,23 @@ export function AdminAiPage() {
   const [featureDraft, setFeatureDraft] = useState("");
   const [usageStartDraft, setUsageStartDraft] = useState(initialUsageRange.start);
   const [usageEndDraft, setUsageEndDraft] = useState(initialUsageRange.end);
+  const [modelScopeDraft, setModelScopeDraft] = useState("");
   const [organizationId, setOrganizationId] = useState("");
   const [feature, setFeature] = useState("");
   const [usageStart, setUsageStart] = useState(initialUsageRange.start);
   const [usageEnd, setUsageEnd] = useState(initialUsageRange.end);
+  const [modelScope, setModelScope] = useState("");
   const [runs, setRuns] = useState<AiRunUsage[]>([]);
   const [usage, setUsage] = useState<AiUsageAggregate[]>([]);
+  const [usageTrend, setUsageTrend] = useState<AiUsageTrendBucket[]>([]);
+  const [usageTrendState, setUsageTrendState] = useState<RequestState>("loading");
+  const [usageTrendError, setUsageTrendError] = useState("");
   const [providers, setProviders] = useState<AiProviderProfile[]>([]);
   const [models, setModels] = useState<AiModelProfile[]>([]);
   const [routes, setRoutes] = useState<AiRoutePolicy[]>([]);
 
   const refreshData = useCallback(async () => {
+    const selectedModelScope = parseModelScope(modelScope);
     const baseQuery = {
       organization_id: organizationId || undefined,
       feature: feature || undefined,
@@ -453,6 +501,8 @@ export function AdminAiPage() {
     };
     const usageQuery = {
       ...baseQuery,
+      provider_slug: selectedModelScope?.providerSlug,
+      model_slug: selectedModelScope?.modelSlug,
       started_at_from: localDayBoundaryIso(usageStart, "start"),
       started_at_to: localDayBoundaryIso(usageEnd, "end"),
     };
@@ -468,19 +518,44 @@ export function AdminAiPage() {
     setProviders(nextProviders);
     setModels(nextModels);
     setRoutes(nextRoutes);
-  }, [feature, organizationId, usageEnd, usageStart]);
+  }, [feature, modelScope, organizationId, usageEnd, usageStart]);
+
+  const refreshUsageTrend = useCallback(async () => {
+    const selectedModelScope = parseModelScope(modelScope);
+    setUsageTrendState("loading");
+    setUsageTrendError("");
+    try {
+      const nextUsageTrend = await adminApi.listAiUsageTrend({
+        organization_id: organizationId || undefined,
+        feature: feature || undefined,
+        provider_slug: selectedModelScope?.providerSlug,
+        model_slug: selectedModelScope?.modelSlug,
+        started_at_from: localDayBoundaryIso(usageStart, "start"),
+        started_at_to: localDayBoundaryIso(usageEnd, "end"),
+        granularity: trendGranularity(usageStart, usageEnd),
+        time_zone: timeZone,
+      });
+      setUsageTrend(nextUsageTrend);
+      setUsageTrendState("ready");
+    } catch (trendError) {
+      setUsageTrend([]);
+      setUsageTrendError(adminErrorMessage(trendError));
+      setUsageTrendState("error");
+    }
+  }, [feature, modelScope, organizationId, timeZone, usageEnd, usageStart]);
 
   const load = useCallback(async () => {
     setState("loading");
     setError("");
     try {
       await refreshData();
+      if (tab === "usage") await refreshUsageTrend();
       setState("ready");
     } catch (loadError) {
       setError(adminErrorMessage(loadError));
       setState("error");
     }
-  }, [refreshData]);
+  }, [refreshData, refreshUsageTrend, tab]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -492,16 +567,37 @@ export function AdminAiPage() {
     () => new Map(models.map((model) => [model.slug, model.display_name])),
     [models],
   );
+  const selectedModelScope = useMemo(() => parseModelScope(modelScope), [modelScope]);
+  const selectedModel = useMemo(() => {
+    if (!selectedModelScope) return null;
+    return models.find((model) => (
+      model.provider_slug === selectedModelScope.providerSlug
+      && model.slug === selectedModelScope.modelSlug
+    )) ?? null;
+  }, [models, selectedModelScope]);
+  const modelScopeOptions = useMemo(() => [...models].sort((left, right) => (
+    `${left.provider_slug}/${left.display_name}`.localeCompare(`${right.provider_slug}/${right.display_name}`, "zh-CN")
+  )), [models]);
+  const tokenUsageScopeLabel = selectedModelScope
+    ? selectedModel
+      ? `${providerNames.get(selectedModelScope.providerSlug) ?? selectedModelScope.providerSlug} / ${selectedModel.display_name} · ${selectedModel.slug}`
+      : `${selectedModelScope.providerSlug} / 已归档模型 · ${selectedModelScope.modelSlug}`
+    : "全部 Provider / 模型合计";
+  const tokenUsageCoverageLabel = `${organizationId ? `工作区 ${shortId(organizationId)}` : "全部工作区"} · ${feature ? `功能 ${featureName(feature)}` : "全部功能"}`;
   const tokenSummary = useMemo(() => usage.reduce((summary, item) => ({
     invocationCount: summary.invocationCount + item.invocation_count,
     tokenUsageInvocationCount: summary.tokenUsageInvocationCount + item.token_usage_invocation_count,
-    inputTokens: summary.inputTokens + item.input_tokens + item.cached_read_input_tokens + item.cached_write_input_tokens,
+    inputTokens: summary.inputTokens + item.input_tokens,
+    cachedReadTokens: summary.cachedReadTokens + item.cached_read_input_tokens,
+    cachedWriteTokens: summary.cachedWriteTokens + item.cached_write_input_tokens,
     outputTokens: summary.outputTokens + item.output_tokens + item.reasoning_tokens,
     totalTokens: summary.totalTokens + item.total_tokens,
   }), {
     invocationCount: 0,
     tokenUsageInvocationCount: 0,
     inputTokens: 0,
+    cachedReadTokens: 0,
+    cachedWriteTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
   }), [usage]);
@@ -509,17 +605,30 @@ export function AdminAiPage() {
     () => new Set(usage.map((item) => `${item.provider_slug}/${item.model_slug}`)).size,
     [usage],
   );
+  const isDefaultUsageRange = (
+    usageStart === initialUsageRange.start
+    && usageEnd === initialUsageRange.end
+  );
   const hasActiveFilters = Boolean(
     organizationId
     || feature
-    || (tab === "usage" && (usageStart || usageEnd)),
+    || (tab === "usage" && (modelScope || !isDefaultUsageRange)),
   );
   const usageRange = tokenUsageRangeLabel(usageStart, usageEnd);
+  const usageTrendGranularity = trendGranularity(usageStart, usageEnd);
 
   const apply = (event: FormEvent) => {
     event.preventDefault();
+    if (tab === "usage" && (!usageStartDraft || !usageEndDraft)) {
+      setFilterError("趋势图需要同时选择开始和结束日期。");
+      return;
+    }
     if (usageStartDraft && usageEndDraft && usageStartDraft > usageEndDraft) {
       setFilterError("结束日期不能早于开始日期。");
+      return;
+    }
+    if (tab === "usage" && usageRangeDays(usageStartDraft, usageEndDraft) > MAX_TOKEN_TREND_RANGE_DAYS) {
+      setFilterError(`趋势图最多支持 ${MAX_TOKEN_TREND_RANGE_DAYS} 天，请缩小日期范围。`);
       return;
     }
     setFilterError("");
@@ -527,18 +636,21 @@ export function AdminAiPage() {
     setFeature(featureDraft.trim());
     setUsageStart(usageStartDraft);
     setUsageEnd(usageEndDraft);
+    setModelScope(modelScopeDraft);
   };
 
   const clearFilters = () => {
     setFilterError("");
     setOrganizationDraft("");
     setFeatureDraft("");
-    setUsageStartDraft("");
-    setUsageEndDraft("");
+    setUsageStartDraft(initialUsageRange.start);
+    setUsageEndDraft(initialUsageRange.end);
+    setModelScopeDraft("");
     setOrganizationId("");
     setFeature("");
-    setUsageStart("");
-    setUsageEnd("");
+    setUsageStart(initialUsageRange.start);
+    setUsageEnd(initialUsageRange.end);
+    setModelScope("");
   };
 
   return (
@@ -560,6 +672,7 @@ export function AdminAiPage() {
           {tab === "usage" && <>
             <label className="admin-date-field"><span>开始日期</span><input className="field" onChange={(event) => { setUsageStartDraft(event.target.value); setFilterError(""); }} type="date" value={usageStartDraft} /></label>
             <label className="admin-date-field"><span>结束日期</span><input className="field" onChange={(event) => { setUsageEndDraft(event.target.value); setFilterError(""); }} type="date" value={usageEndDraft} /></label>
+            <label className="admin-model-scope-field"><span>Provider / 模型</span><select className="select-field" onChange={(event) => setModelScopeDraft(event.target.value)} value={modelScopeDraft}><option value="">全部 Provider / 模型</option>{modelScopeDraft && !modelScopeOptions.some((model) => `${model.provider_slug}${MODEL_SCOPE_SEPARATOR}${model.slug}` === modelScopeDraft) && <option value={modelScopeDraft}>已归档的模型范围</option>}{modelScopeOptions.map((model) => <option key={model.model_id} value={`${model.provider_slug}${MODEL_SCOPE_SEPARATOR}${model.slug}`}>{providerNames.get(model.provider_slug) ?? model.provider_slug} / {model.display_name} · {model.slug}</option>)}</select></label>
           </>}
           <button className="button button-primary" type="submit">{tab === "usage" ? "查看 Token" : "筛选记录"}</button>
           {hasActiveFilters && <button className="button button-ghost" onClick={clearFilters} type="button">清除条件</button>}
@@ -577,10 +690,13 @@ export function AdminAiPage() {
       {state === "ready" && tab === "usage" && (
         <>
           <section aria-label="当前 Token 统计区间" className="admin-token-summary">
-            <div><span>统计区间</span><strong>{usageRange}</strong><small>按模型调用开始时间统计，日期使用当前浏览器时区。</small></div>
-            <div><span>全部模型合计</span><strong>{numberFormat(tokenSummary.totalTokens)} Token</strong><small>输入 {numberFormat(tokenSummary.inputTokens)} · 输出及推理 {numberFormat(tokenSummary.outputTokens)}</small></div>
-            <div><span>已返回用量的调用</span><strong>{numberFormat(tokenSummary.tokenUsageInvocationCount)} / {numberFormat(tokenSummary.invocationCount)} 次</strong><small>{numberFormat(modelCount)} 个 Provider / 模型组合；未返回 usage 不按 0 Token 处理。</small></div>
+            <div><span>统计区间</span><strong>{usageRange}</strong><small>按模型调用开始时间统计，日期使用当前浏览器时区（{timeZone}）。</small></div>
+            <div><span>{selectedModelScope ? "已选模型合计" : "全部模型合计"}</span><strong>{numberFormat(tokenSummary.totalTokens)} Token</strong><small>{selectedModelScope ? tokenUsageScopeLabel : `输入 ${numberFormat(tokenSummary.inputTokens)} · 输出及推理 ${numberFormat(tokenSummary.outputTokens)} · 缓存 ${numberFormat(tokenSummary.cachedReadTokens + tokenSummary.cachedWriteTokens)}`}</small></div>
+            <div><span>已返回用量的调用</span><strong>{numberFormat(tokenSummary.tokenUsageInvocationCount)} / {numberFormat(tokenSummary.invocationCount)} 次</strong><small>{selectedModelScope ? "仅统计所选 Provider / 模型；未返回 usage 不按 0 Token 处理。" : `${numberFormat(modelCount)} 个 Provider / 模型组合；未返回 usage 不按 0 Token 处理。`}</small></div>
           </section>
+          {usageTrendState === "loading" && <section className="admin-token-trend-panel"><AdminLoading label="正在汇总 Token 趋势…" /></section>}
+          {usageTrendState === "error" && <section className="admin-token-trend-panel"><AdminError message={usageTrendError} onRetry={() => void refreshUsageTrend()} /></section>}
+          {usageTrendState === "ready" && <TokenUsageTrendChart buckets={usageTrend} coverageLabel={tokenUsageCoverageLabel} granularity={usageTrendGranularity} isCrossModelAggregate={!selectedModelScope} rangeEnd={usageEnd} rangeLabel={usageRange} rangeStart={usageStart} scopeLabel={tokenUsageScopeLabel} timeZone={timeZone} />}
           <div className="admin-table-panel">
             <div className="admin-table-note"><span>按工作区、功能、Provider 与模型拆分</span><small>每一行的 Token 仅属于该行左侧 Provider 和模型，不做金额估算。</small></div>
             {usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table admin-token-usage-table"><thead><tr><th>工作区</th><th>功能</th><th>Provider</th><th>模型</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th></tr></thead><tbody>{usage.map((item, index) => <tr key={`${item.organization_id}-${item.feature}-${item.provider_slug}-${item.model_slug}-${index}`}><td title={item.organization_id}>{shortId(item.organization_id)}</td><td>{featureName(item.feature)}</td><td><strong>{providerNames.get(item.provider_slug) ?? item.provider_slug}</strong><small>{item.provider_slug}</small></td><td><strong>{modelNames.get(item.model_slug) ?? item.model_slug}</strong><small>{item.model_slug}</small></td><td>{numberFormat(item.invocation_count)}</td><td><TokenUsageCell cachedReadInputTokens={item.cached_read_input_tokens} cachedWriteInputTokens={item.cached_write_input_tokens} inputTokens={item.input_tokens} invocationCount={item.invocation_count} outputTokens={item.output_tokens} reasoningTokens={item.reasoning_tokens} tokenUsageInvocationCount={item.token_usage_invocation_count} totalTokens={item.total_tokens} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前时间区间内没有可汇总的模型 Token 用量。" />}

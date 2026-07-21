@@ -145,11 +145,32 @@ def test_v2_filters_match_same_grounded_facts_and_school_alias(client) -> None:
     )
     assert response.status_code == 200, response.text
     assert [item["resume_id"] for item in response.json()["items"]] == [resume_id]
-    assert response.json()["items"][0]["institution_classifications"] == ["985"]
+    item = response.json()["items"][0]
+    assert item["institution_classifications"] == ["985"]
     evidence_types = {
-        match["fact_type"] for match in response.json()["items"][0]["matched_evidence"]
+        match["fact_type"] for match in item["matched_evidence"]
     }
     assert {"education", "skill", "language", "scholarship", "experience"} <= evidence_types
+    display_fields = {
+        field["key"]: field["values"] for field in item["display_fields"]
+    }
+    assert display_fields["highest_degree"] == ["bachelor"]
+    assert display_fields["institution_classifications"] == ["985"]
+    assert display_fields["school"] == ["\u5317\u4eac\u5927\u5b66"]
+    assert display_fields["major"] == ["\u8ba1\u7b97\u673a"]
+    assert display_fields["academic_performance"] == [
+        "\u5e73\u5747\u5206 92",
+        "GPA 3.8/4 (95%)",
+        "\u6392\u540d 5/100",
+        "\u6392\u540d\u524d 5%",
+    ]
+    assert display_fields["skills"] == ["Python"]
+    assert display_fields["language"][-1].endswith("520")
+    assert display_fields["scholarship"] == ["\u56fd\u5bb6\u5956\u5b66\u91d1"]
+    assert display_fields["competition"] == [
+        "\u5168\u56fd\u5927\u5b66\u751f\u6280\u80fd\u7ade\u8d5b | \u4e00\u7b49\u5956"
+    ]
+    assert display_fields["leadership"] == ["\u7ec4\u957f"]
 
     # A 985 education is no longer silently included by the exact 211 filter.
     exact_211 = client.post(
@@ -205,6 +226,195 @@ def test_exact_211_filter_matches_only_a_211_only_school(client) -> None:
     assert response.status_code == 200, response.text
     assert [item["resume_id"] for item in response.json()["items"]] == [resume_id]
     assert response.json()["items"][0]["institution_classifications"] == ["211"]
+
+
+def test_search_display_fields_keep_matching_experience_values_structured(client) -> None:
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(
+        client,
+        resume_id,
+        "教育经历 清华大学 计算机科学 本科，2018-09 至 2022-06。"
+        "工作经历 GreatSell 智能招聘平台，担任后端工程师，2022-07 至 2024-06。"
+        "获得全国技术创新赛一等奖。技能 Python。",
+    )
+    saved = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "education": [
+                    {
+                        "school_name_raw": "清华大学",
+                        "degree": "bachelor",
+                        "major_raw": "计算机科学",
+                        "start_month": "2018-09",
+                        "end_month": "2022-06",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+                "experiences": [
+                    {
+                        "experience_type": "employment",
+                        "experience_name_raw": "智能招聘平台",
+                        "organization_name_raw": "GreatSell",
+                        "title_raw": "后端工程师",
+                        "start_month": "2022-07",
+                        "end_month": "2024-06",
+                        "award_level": "national",
+                        "award_result_raw": "一等奖",
+                        "classification_evidence_block_ids": ["page-001"],
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+                "skills": [
+                    {
+                        "skill_display": "Python",
+                        "skill_category": "software",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+            }
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={
+            "experience_any_of": [
+                {
+                    "experience_types": ["employment"],
+                    "experience_name_contains": ["招聘平台"],
+                    "organization_name_contains": ["greatsell"],
+                    "title_contains": ["后端"],
+                    "award_levels_any_of": ["national"],
+                    "award_result_contains": ["一等奖"],
+                }
+            ],
+            "skills_all_of": ["Python"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert [item["resume_id"] for item in response.json()["items"]] == [resume_id]
+    display_fields = {
+        field["key"]: field["values"]
+        for field in response.json()["items"][0]["display_fields"]
+    }
+    assert display_fields["experience_type"] == ["employment"]
+    assert display_fields["experience_name"] == ["智能招聘平台"]
+    assert display_fields["organization"] == ["GreatSell"]
+    assert display_fields["title"] == ["后端工程师"]
+    assert display_fields["experience_award"] == ["一等奖", "国家级"]
+    assert display_fields["skills"] == ["Python"]
+
+
+def test_search_display_fields_preserve_custom_language_name(client) -> None:
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(
+        client,
+        resume_id,
+        "教育经历 清华大学 本科。获得 CATTI 三级口译证书，成绩 60。",
+    )
+    saved = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "education": [
+                    {
+                        "school_name_raw": "清华大学",
+                        "degree": "bachelor",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+                "language_credentials": [
+                    {
+                        "credential_code": "custom",
+                        "credential_name_raw": "CATTI 三级口译证书",
+                        "score": 60,
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+            }
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={
+            "language_credentials_any_of": [
+                {
+                    "credential_code": "custom",
+                    "custom_name_contains": "CATTI",
+                    "min_score": 60,
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    display_fields = {
+        field["key"]: field["values"]
+        for field in response.json()["items"][0]["display_fields"]
+    }
+    assert display_fields["language"] == ["CATTI 三级口译证书 60"]
+
+
+def test_search_display_fields_do_not_mix_values_from_or_filter_groups(client) -> None:
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(
+        client,
+        resume_id,
+        "教育经历 清华大学 物理学 本科，2018-09 至 2022-06。"
+        "教育经历 复旦大学 数学 本科，2022-09 至 2026-06。",
+    )
+    saved = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "education": [
+                    {
+                        "school_name_raw": "清华大学",
+                        "degree": "bachelor",
+                        "major_raw": "物理学",
+                        "start_month": "2018-09",
+                        "end_month": "2022-06",
+                        "evidence_block_ids": ["page-001"],
+                    },
+                    {
+                        "school_name_raw": "复旦大学",
+                        "degree": "bachelor",
+                        "major_raw": "数学",
+                        "start_month": "2022-09",
+                        "end_month": "2026-06",
+                        "evidence_block_ids": ["page-001"],
+                    },
+                ],
+            }
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={
+            "education_any_of": [
+                {"school_name_contains": ["清华大学"]},
+                {"major_contains": ["数学"]},
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    display_fields = {
+        field["key"]: field["values"]
+        for field in response.json()["items"][0]["display_fields"]
+    }
+    assert display_fields["school"] == ["清华大学"]
+    assert display_fields["major"] == ["数学"]
 
 
 def test_english_aliases_are_or_for_broad_keywords_but_precise_stays_literal(client) -> None:

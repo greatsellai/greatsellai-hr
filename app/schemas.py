@@ -1561,6 +1561,45 @@ class CandidateSearchRequest(ApiModel):
         return self
 
 
+SearchDisplayFieldKey = Literal[
+    "institution_classifications",
+    "highest_degree",
+    "education_degree",
+    "graduation",
+    "employment_months",
+    "employment_or_internship_months",
+    "school",
+    "major",
+    "academic_performance",
+    "experience_type",
+    "experience_name",
+    "organization",
+    "title",
+    "experience_award",
+    "skills",
+    "language",
+    "scholarship",
+    "competition",
+    "leadership",
+    "keywords",
+]
+
+
+class CandidateSearchDisplayField(ApiModel):
+    """One normalized value group for the active result-table columns.
+
+    The client chooses which groups become visible columns from the successful
+    filter snapshot.  Keeping the values structured avoids trying to split a
+    human-readable evidence sentence back into school, major, company, title,
+    or score values on the client. Evidence ids are supplied for source-backed
+    values; aggregate counts and query terms intentionally have none.
+    """
+
+    key: SearchDisplayFieldKey
+    values: list[str] = Field(default_factory=list)
+    evidence_block_ids: list[str] = Field(default_factory=list)
+
+
 class CandidateSearchItem(ApiModel):
     candidate_id: str
     display_name: str | None
@@ -1576,6 +1615,7 @@ class CandidateSearchItem(ApiModel):
     summary_preview: str | None = None
     score_total: float | None = None
     score_template_name: str | None = None
+    display_fields: list[CandidateSearchDisplayField] = Field(default_factory=list)
     matched_filters: list[str]
     matched_evidence: list["CandidateSearchMatch"] = Field(default_factory=list)
 

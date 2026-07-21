@@ -968,6 +968,11 @@ button {
   overflow: auto;
 }
 
+.results-pane > .table-scroll:focus-visible {
+  outline: 0.1875rem solid rgb(215 22 24 / 0.35);
+  outline-offset: -0.1875rem;
+}
+
 .candidate-table {
   width: 100%;
   min-width: 52rem;
@@ -995,6 +1000,39 @@ button {
   color: var(--ink-soft);
   font-size: 0.875rem;
   border-bottom: 1px solid var(--line);
+}
+
+.candidate-table.has-active-filter-columns {
+  width: max-content;
+  min-width: 68rem;
+}
+
+.candidate-table.has-active-filter-columns .candidate-result-cell {
+  position: sticky;
+  z-index: 1;
+  left: 0;
+  min-width: 13.5rem;
+  background: var(--surface);
+  box-shadow: 0.75rem 0 0.875rem -0.875rem rgb(24 20 18 / 0.22);
+}
+
+.candidate-table.has-active-filter-columns th:first-child {
+  z-index: 3;
+  left: 0;
+  min-width: 13.5rem;
+  box-shadow: 0.75rem 0 0.875rem -0.875rem rgb(24 20 18 / 0.22);
+}
+
+.candidate-table.has-active-filter-columns tbody tr:hover .candidate-result-cell {
+  background: #fcf8f7;
+}
+
+.candidate-table.has-active-filter-columns tbody tr.is-selected .candidate-result-cell {
+  background: var(--surface-selected);
+}
+
+.candidate-table.has-active-filter-columns tbody tr.has-source-quality-issue:not(.is-selected) .candidate-result-cell {
+  background: #fff9f4;
 }
 
 .candidate-table tr {
@@ -1304,6 +1342,55 @@ button {
 }
 
 .candidate-meta {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+}
+
+.result-column-heading {
+  display: inline-flex;
+  gap: 0.3125rem;
+  align-items: center;
+}
+
+.result-filter-indicator {
+  display: inline-flex;
+  min-height: 1.125rem;
+  align-items: center;
+  padding: 0 0.25rem;
+  color: var(--red-pressed);
+  font-size: 0.625rem;
+  font-weight: 700;
+  line-height: 1;
+  background: var(--red-tint);
+  border: 1px solid rgb(215 22 24 / 0.18);
+  border-radius: 999px;
+}
+
+.result-display-column,
+.result-display-cell {
+  min-width: 10.25rem;
+  max-width: 15rem;
+}
+
+.result-display-values {
+  display: grid;
+  min-width: 8rem;
+  max-width: 13.5rem;
+  gap: 0.1875rem;
+}
+
+.result-display-value {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ink-soft);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.result-display-more,
+.result-display-empty {
   color: var(--ink-muted);
   font-size: 0.75rem;
 }

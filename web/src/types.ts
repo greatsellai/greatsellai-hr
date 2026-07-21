@@ -673,6 +673,34 @@ export interface CandidateSearchMatch {
   evidence_block_ids: string[];
 }
 
+export type CandidateSearchDisplayFieldKey =
+  | "institution_classifications"
+  | "highest_degree"
+  | "education_degree"
+  | "graduation"
+  | "employment_months"
+  | "employment_or_internship_months"
+  | "school"
+  | "major"
+  | "academic_performance"
+  | "experience_type"
+  | "experience_name"
+  | "organization"
+  | "title"
+  | "experience_award"
+  | "skills"
+  | "language"
+  | "scholarship"
+  | "competition"
+  | "leadership"
+  | "keywords";
+
+export interface CandidateSearchDisplayField {
+  key: CandidateSearchDisplayFieldKey;
+  values: string[];
+  evidence_block_ids: string[];
+}
+
 export interface CandidateSearchItem {
   candidate_id: string;
   display_name: string | null;
@@ -686,6 +714,7 @@ export interface CandidateSearchItem {
   summary_preview: string | null;
   score_total: number | null;
   score_template_name: string | null;
+  display_fields: CandidateSearchDisplayField[];
   matched_filters: string[];
   matched_evidence: CandidateSearchMatch[];
 }

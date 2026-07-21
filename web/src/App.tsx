@@ -26,6 +26,7 @@ import type {
   AuthLoginInput,
   AuthRegistrationInput,
   AuthSession,
+  CandidateSearchDisplayFieldKey,
   CandidateSearchItem,
   CandidateSearchRequest,
   CandidateSearchResponse,
@@ -514,6 +515,30 @@ function freshDefaultFilter(): FilterDraft {
     leadershipContexts: [],
     leadershipRoles: [],
     keywords: [],
+  };
+}
+
+/**
+ * The result table must describe the request that produced the rows, rather
+ * than the controls a recruiter may be editing for their next search.  Keep a
+ * shallow object copy plus copies of every mutable collection so the applied
+ * request remains stable while the left-hand form changes.
+ */
+function snapshotFilterDraft(draft: FilterDraft): FilterDraft {
+  return {
+    ...draft,
+    degrees: [...draft.degrees],
+    institutionClassifications: [...draft.institutionClassifications],
+    experienceTypes: [...draft.experienceTypes],
+    experienceAwardLevels: [...draft.experienceAwardLevels],
+    skills: [...draft.skills],
+    skillCategories: [...draft.skillCategories],
+    languageCredentials: [...draft.languageCredentials],
+    languageScores: { ...draft.languageScores },
+    scholarshipLevels: [...draft.scholarshipLevels],
+    leadershipContexts: [...draft.leadershipContexts],
+    leadershipRoles: [...draft.leadershipRoles],
+    keywords: [...draft.keywords],
   };
 }
 
@@ -1310,6 +1335,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [view, setView] = useState<View>("library");
   const [filterDraft, setFilterDraft] =
     useState<FilterDraft>(freshDefaultFilter);
+  const [appliedFilter, setAppliedFilter] =
+    useState<FilterDraft>(freshDefaultFilter);
   const [filterOptions, setFilterOptions] = useState<FilterOptions>(
     fallbackFilterOptions,
   );
@@ -1341,6 +1368,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const filterDraftRef = useRef(filterDraft);
+  const appliedFilterRef = useRef(appliedFilter);
   const searchRequestRef = useRef(0);
   const reviewRequestRef = useRef(0);
   const summaryRequestRef = useRef(0);
@@ -1348,6 +1376,12 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const replaceFilterDraft = useCallback((next: FilterDraft) => {
     filterDraftRef.current = next;
     setFilterDraft(next);
+  }, []);
+
+  const replaceAppliedFilter = useCallback((next: FilterDraft) => {
+    const snapshot = snapshotFilterDraft(next);
+    appliedFilterRef.current = snapshot;
+    setAppliedFilter(snapshot);
   }, []);
 
   const selectedResumeId = selectedResume?.resumeId ?? null;
@@ -1401,6 +1435,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             ? [...current.items, ...response.items]
             : response.items,
         }));
+        if (!append) replaceAppliedFilter(draft);
       } catch (error) {
         if (requestId === searchRequestRef.current) {
           notify("error", humanizeError(error));
@@ -1409,7 +1444,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         if (requestId === searchRequestRef.current) setSearching(false);
       }
     },
-    [notify],
+    [notify, replaceAppliedFilter],
   );
 
   const refreshReview = useCallback(
@@ -2016,6 +2051,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           )}
           {view === "filter" && (
             <FilterWorkspace
+              appliedDraft={appliedFilter}
               draft={filterDraft}
               filterOptions={filterOptions}
               onDraftChange={replaceFilterDraft}
@@ -2031,7 +2067,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
               onOpenCandidate={openCandidate}
               onToggleInstitutionClassification={toggleInstitutionClassification}
               onLoadMore={() =>
-                void runSearch(filterDraftRef.current, true, search.next_cursor)
+                void runSearch(appliedFilterRef.current, true, search.next_cursor)
               }
               onUpload={() => setView("upload")}
             />
@@ -2966,6 +3002,7 @@ function RecruitingAgentDrawer({
 }
 
 function FilterWorkspace({
+  appliedDraft,
   draft,
   filterOptions,
   onDraftChange,
@@ -2983,6 +3020,7 @@ function FilterWorkspace({
   onLoadMore,
   onUpload,
 }: {
+  appliedDraft: FilterDraft;
   draft: FilterDraft;
   filterOptions: FilterOptions;
   onDraftChange: (draft: FilterDraft) => void;
@@ -3018,6 +3056,7 @@ function FilterWorkspace({
         savedFilters={savedFilters}
       />
       <ResultsPane
+        appliedDraft={appliedDraft}
         institutionClassifications={draft.institutionClassifications}
         institutionClassificationOptions={classifications}
         onLoadMore={onLoadMore}
@@ -3810,7 +3849,170 @@ function InstitutionClassificationTags({
   );
 }
 
+interface ResultDisplayColumn {
+  key: CandidateSearchDisplayFieldKey;
+  label: string;
+}
+
+function activeResultDisplayColumns(draft: FilterDraft): ResultDisplayColumn[] {
+  const columns: ResultDisplayColumn[] = [];
+  const add = (key: CandidateSearchDisplayFieldKey, label: string) => {
+    if (!columns.some((column) => column.key === key)) {
+      columns.push({ key, label });
+    }
+  };
+
+  if (draft.graduationStatus !== "any") add("graduation", "毕业时间");
+  if (draft.minEmploymentOrInternshipMonths > 0) {
+    add("employment_or_internship_months", "工作 + 实习年限");
+  }
+
+  if (draft.schoolName.trim()) add("school", "学校");
+  if (draft.major.trim()) add("major", "专业");
+  if (
+    draft.minAverageScore ||
+    draft.minGpaPercent ||
+    draft.maxRankPosition ||
+    draft.maxRankPercent
+  ) {
+    add("academic_performance", "学业表现");
+  }
+
+  if (draft.experienceTypes.length) add("experience_type", "经历类型");
+  if (draft.experienceName.trim()) add("experience_name", "经历名称");
+  if (draft.company.trim()) add("organization", "公司 / 组织");
+  if (draft.title.trim()) add("title", "职位");
+  if (
+    draft.experienceAwardLevels.length ||
+    draft.experienceAwardResult.trim()
+  ) {
+    add("experience_award", "经历获奖");
+  }
+
+  if (draft.skills.length || draft.skillCategories.length) add("skills", "技能");
+  if (
+    draft.languageCredentials.some(
+      (credential) =>
+        credential !== "custom" || Boolean(draft.customLanguageName.trim()),
+    )
+  ) {
+    add("language", "语言证书");
+  }
+  if (
+    draft.scholarshipStatus !== "any" ||
+    draft.scholarshipName.trim() ||
+    draft.scholarshipLevels.length
+  ) {
+    add("scholarship", "奖学金");
+  }
+  if (
+    draft.competitionStatus !== "any" ||
+    draft.competitionAwardStatus !== "any"
+  ) {
+    add("competition", "竞赛");
+  }
+  if (draft.leadershipContexts.length || draft.leadershipRoles.length) {
+    add("leadership", "领导经历");
+  }
+  if (draft.keywords.length) add("keywords", "关键词命中");
+
+  return columns;
+}
+
+function resultDisplayValueLabel(
+  key: CandidateSearchDisplayFieldKey,
+  value: string,
+): string {
+  const normalized = value.trim();
+  if (!normalized) return "";
+
+  if (key === "institution_classifications") {
+    return (
+      institutionClassificationLabels[
+        normalized as InstitutionClassification
+      ] ?? normalized
+    );
+  }
+  if (key === "highest_degree" || key === "education_degree") {
+    return degreeLabels[normalized as DegreeLevel] ?? normalized;
+  }
+  if (key === "experience_type") {
+    return (
+      experienceTypeOptions.find((option) => option.value === normalized)
+        ?.label ?? normalized
+    );
+  }
+  if (
+    key === "employment_months" ||
+    key === "employment_or_internship_months"
+  ) {
+    const months = Number(normalized);
+    return Number.isFinite(months) ? formatMonths(months) : normalized;
+  }
+  return normalized;
+}
+
+function resultDisplayValues(
+  item: CandidateSearchItem,
+  key: CandidateSearchDisplayFieldKey,
+): string[] {
+  const values = (item.display_fields ?? [])
+    .filter((field) => field.key === key)
+    .flatMap((field) => field.values)
+    .map((value) => resultDisplayValueLabel(key, value))
+    .filter(Boolean);
+  return [...new Set(values)];
+}
+
+function ResultDisplayValues({
+  item,
+  fieldKey,
+  label,
+}: {
+  item: CandidateSearchItem;
+  fieldKey: CandidateSearchDisplayFieldKey;
+  label?: string;
+}) {
+  const values = resultDisplayValues(item, fieldKey);
+  if (!values.length) {
+    return <span className="candidate-meta result-display-empty">—</span>;
+  }
+
+  return (
+    <div
+      aria-label={`${label ?? "筛选字段"}：${values.join("；")}`}
+      className="result-display-values"
+      title={values.join("；")}
+    >
+      {values.slice(0, 2).map((value) => (
+        <span className="result-display-value" key={value}>
+          {value}
+        </span>
+      ))}
+      {values.length > 2 && (
+        <span className="result-display-more">+{values.length - 2} 项</span>
+      )}
+    </div>
+  );
+}
+
+function ResultColumnHeader({
+  children,
+  active = false,
+}: {
+  children: ReactNode;
+  active?: boolean;
+}) {
+  return (
+    <span className="result-column-heading">
+      {children}
+      {active && <span className="result-filter-indicator">已筛</span>}
+    </span>
+  );
+}
+
 function ResultsPane({
+  appliedDraft,
   institutionClassifications,
   institutionClassificationOptions,
   search,
@@ -3821,6 +4023,7 @@ function ResultsPane({
   onLoadMore,
   onUpload,
 }: {
+  appliedDraft: FilterDraft;
   institutionClassifications: InstitutionClassification[];
   institutionClassificationOptions: Array<{
     value: InstitutionClassification;
@@ -3836,6 +4039,9 @@ function ResultsPane({
   onLoadMore: () => void;
   onUpload: () => void;
 }) {
+  const displayColumns = activeResultDisplayColumns(appliedDraft);
+  const hasAppliedDisplayColumns = displayColumns.length > 0;
+
   return (
     <section className="results-pane" aria-label="候选人结果">
       <header className="results-header">
@@ -3883,20 +4089,48 @@ function ResultsPane({
           )}
         </div>
       </header>
-      <div className="table-scroll">
+      <div
+        aria-label="候选人结果，可横向滚动查看筛选字段"
+        className="table-scroll"
+        role="region"
+        tabIndex={0}
+      >
         {searching && !search.items.length ? (
           <TableSkeleton />
         ) : search.items.length ? (
-          <table className="candidate-table">
+          <table
+            className={`candidate-table${
+              hasAppliedDisplayColumns ? " has-active-filter-columns" : ""
+            }`}
+          >
             <thead>
               <tr>
                 <th scope="col">候选人</th>
-                <th scope="col">院校类型</th>
-                <th scope="col">最高学历</th>
-                <th scope="col">正式工作年限</th>
-                <th scope="col">AI 总结</th>
+                <th scope="col">
+                  <ResultColumnHeader
+                    active={appliedDraft.institutionClassifications.length > 0}
+                  >
+                    院校类型
+                  </ResultColumnHeader>
+                </th>
+                <th scope="col">
+                  <ResultColumnHeader active={appliedDraft.degrees.length > 0}>
+                    最高学历
+                  </ResultColumnHeader>
+                </th>
+                <th scope="col">
+                  <ResultColumnHeader
+                    active={appliedDraft.minEmploymentMonths > 0}
+                  >
+                    正式工作年限
+                  </ResultColumnHeader>
+                </th>
+                {displayColumns.map((column) => (
+                  <th className="result-display-column" key={column.key} scope="col">
+                    <ResultColumnHeader active>{column.label}</ResultColumnHeader>
+                  </th>
+                ))}
                 <th scope="col">最近评分</th>
-                <th scope="col">命中证据</th>
                 <th scope="col">原件</th>
                 <th scope="col" aria-label="查看详情" />
               </tr>
@@ -3918,7 +4152,7 @@ function ResultsPane({
                   }}
                   tabIndex={0}
                 >
-                  <td>
+                  <td className="candidate-result-cell">
                     <div className="candidate-person">
                       <span className="candidate-name">
                         {item.display_name?.trim() || "未命名候选人"}
@@ -3929,9 +4163,17 @@ function ResultsPane({
                     </div>
                   </td>
                   <td>
-                    <InstitutionClassificationTags
-                      classifications={item.institution_classifications}
-                    />
+                    {appliedDraft.institutionClassifications.length ? (
+                      <ResultDisplayValues
+                        fieldKey="institution_classifications"
+                        item={item}
+                        label="院校类型"
+                      />
+                    ) : (
+                      <InstitutionClassificationTags
+                        classifications={item.institution_classifications}
+                      />
+                    )}
                   </td>
                   <td>
                     <span className="degree-label">
@@ -3941,18 +4183,15 @@ function ResultsPane({
                     </span>
                   </td>
                   <td>{formatMonths(item.employment_months)}</td>
-                  <td className="library-summary-cell">
-                    {item.summary_preview ? (
-                      <p
-                        className="library-summary-preview"
-                        title={item.summary_preview}
-                      >
-                        {item.summary_preview}
-                      </p>
-                    ) : (
-                      <span className="library-empty-copy">尚未生成</span>
-                    )}
-                  </td>
+                  {displayColumns.map((column) => (
+                    <td className="result-display-cell" key={column.key}>
+                      <ResultDisplayValues
+                        fieldKey={column.key}
+                        item={item}
+                        label={column.label}
+                      />
+                    </td>
+                  ))}
                   <td>
                     {item.score_total !== null ? (
                       <div
@@ -3968,25 +4207,6 @@ function ResultsPane({
                     ) : (
                       <span className="library-empty-copy">尚未评分</span>
                     )}
-                  </td>
-                  <td>
-                    <div className="match-tags">
-                      {item.matched_evidence.length ? (
-                        item.matched_evidence
-                          .slice(0, 3)
-                          .map((evidence, index) => (
-                            <span
-                              className="tag"
-                              key={`${evidence.filter_key}-${index}`}
-                              title={evidence.label}
-                            >
-                              {evidence.label}
-                            </span>
-                          ))
-                      ) : (
-                        <span className="candidate-meta">无附加条件</span>
-                      )}
-                    </div>
                   </td>
                   <td>
                     <button

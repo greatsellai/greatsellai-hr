@@ -10,11 +10,19 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.filter_options import (
+    AWARD_LEVEL_OPTIONS,
     language_credential_label,
     normalize_language_credential,
 )
-from app.models import Candidate, Resume, ResumeScore, ResumeSummary
+from app.models import (
+    Candidate,
+    Resume,
+    ResumeLanguageCredential,
+    ResumeScore,
+    ResumeSummary,
+)
 from app.schemas import (
+    CandidateSearchDisplayField,
     CandidateSearchItem,
     CandidateSearchMatch,
     CandidateSearchRequest,
@@ -37,6 +45,28 @@ from app.services.resume_eligibility import is_resume_screening_eligible
 # score exists at all.
 _CURRENT_SCORE_STATUSES = {"succeeded", "needs_review", "overridden"}
 _SUMMARY_PREVIEW_MAX_CHARS = 180
+_DISPLAY_FIELD_ORDER = (
+    "institution_classifications",
+    "highest_degree",
+    "education_degree",
+    "graduation",
+    "employment_months",
+    "employment_or_internship_months",
+    "school",
+    "major",
+    "academic_performance",
+    "experience_type",
+    "experience_name",
+    "organization",
+    "title",
+    "experience_award",
+    "skills",
+    "language",
+    "scholarship",
+    "competition",
+    "leadership",
+    "keywords",
+)
 
 
 def _summary_preview(summary: ResumeSummary | None) -> str | None:
@@ -83,6 +113,66 @@ def _latest_score(resume: Resume) -> ResumeScore | None:
         and score.status in _CURRENT_SCORE_STATUSES
     ]
     return max(candidates, key=lambda item: (item.created_at, item.id), default=None)
+
+
+@dataclass
+class _DisplayFieldValues:
+    values: list[str]
+    evidence_block_ids: list[str]
+
+
+def _add_display_field(
+    fields: dict[str, _DisplayFieldValues],
+    *,
+    key: str,
+    values: list[str | None],
+    evidence_block_ids: list[str] | None,
+) -> None:
+    """Accumulate compact table values without losing their source blocks."""
+
+    field = fields.setdefault(key, _DisplayFieldValues([], []))
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        normalized = " ".join(value.split())
+        if normalized and normalized not in field.values:
+            field.values.append(normalized)
+    for block_id in evidence_block_ids or []:
+        if block_id and block_id not in field.evidence_block_ids:
+            field.evidence_block_ids.append(block_id)
+
+
+def _display_fields(
+    fields: dict[str, _DisplayFieldValues],
+) -> list[CandidateSearchDisplayField]:
+    return [
+        CandidateSearchDisplayField(
+            key=key,
+            values=fields[key].values,
+            evidence_block_ids=fields[key].evidence_block_ids,
+        )
+        for key in _DISPLAY_FIELD_ORDER
+        if key in fields
+    ]
+
+
+def _award_level_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    return next(
+        (item["label"] for item in AWARD_LEVEL_OPTIONS if item["value"] == value),
+        value,
+    )
+
+
+def _language_display_label(credential: ResumeLanguageCredential) -> str:
+    """Prefer the actual source name for an explicitly custom credential."""
+
+    if credential.credential_code == "custom":
+        custom_name = (credential.credential_name_raw or "").strip()
+        if custom_name:
+            return custom_name
+    return language_credential_label(credential.credential_code)
 
 
 def _matches_any_text(value: str | None, expected_values: list[str]) -> bool:
@@ -173,6 +263,15 @@ def _resume_institution_classifications(resume: Resume) -> list[str]:
         for classification in INSTITUTION_CLASSIFICATION_ORDER
         if classification in known
     ]
+
+
+def _education_institution_classifications(education: object) -> list[str]:
+    """Return only the new exact classification, never legacy tier aliases."""
+
+    classification = getattr(education, "institution_classification", None)
+    if classification in INSTITUTION_CLASSIFICATION_ORDER:
+        return [classification]
+    return []
 
 
 def _matches_experience(filter_item: ExperienceFilter, experience: object) -> bool:
@@ -431,6 +530,7 @@ def search_candidates(
             continue
         matched_filters: list[str] = []
         matched_evidence: list[CandidateSearchMatch] = []
+        display_field_values: dict[str, _DisplayFieldValues] = {}
 
         if not _matches_graduation_status(resume, request):
             continue
@@ -438,21 +538,33 @@ def search_candidates(
         if request.highest_degree_in:
             matched_filters.append("highest_degree_in")
             highest_education = _highest_education(resume)
+            highest_education_block_ids = (
+                highest_education.evidence_block_ids
+                if highest_education is not None
+                else []
+            )
             matched_evidence.append(
                 CandidateSearchMatch(
                     filter_key="highest_degree_in",
                     label=resume.highest_degree or "",
                     fact_type="education",
-                    evidence_block_ids=(
-                        highest_education.evidence_block_ids
-                        if highest_education is not None
-                        else []
-                    ),
+                    evidence_block_ids=highest_education_block_ids,
                 )
+            )
+            _add_display_field(
+                display_field_values,
+                key="highest_degree",
+                values=[resume.highest_degree],
+                evidence_block_ids=highest_education_block_ids,
             )
 
         if request.graduation_status != "any":
             highest_education = _highest_education(resume)
+            highest_education_block_ids = (
+                highest_education.evidence_block_ids
+                if highest_education is not None
+                else []
+            )
             matched_filters.append("graduation_status")
             matched_evidence.append(
                 CandidateSearchMatch(
@@ -462,12 +574,14 @@ def search_candidates(
                         f"{highest_education.end_month if highest_education else ''}"
                     ),
                     fact_type="education",
-                    evidence_block_ids=(
-                        highest_education.evidence_block_ids
-                        if highest_education is not None
-                        else []
-                    ),
+                    evidence_block_ids=highest_education_block_ids,
                 )
+            )
+            _add_display_field(
+                display_field_values,
+                key="graduation",
+                values=[highest_education.end_month if highest_education else None],
+                evidence_block_ids=highest_education_block_ids,
             )
 
         if request.is_985_211 is not None:
@@ -480,6 +594,12 @@ def search_candidates(
                     evidence_block_ids=[],
                 )
             )
+            _add_display_field(
+                display_field_values,
+                key="institution_classifications",
+                values=_resume_institution_classifications(resume),
+                evidence_block_ids=[],
+            )
         if request.min_employment_months is not None:
             matched_filters.append(
                 f"employment_months>={request.min_employment_months}"
@@ -491,6 +611,12 @@ def search_candidates(
                     fact_type="aggregate",
                     evidence_block_ids=[],
                 )
+            )
+            _add_display_field(
+                display_field_values,
+                key="employment_months",
+                values=[str(resume.employment_months)],
+                evidence_block_ids=[],
             )
         if request.min_employment_or_internship_months is not None:
             matched_filters.append(
@@ -508,17 +634,107 @@ def search_candidates(
                     evidence_block_ids=[],
                 )
             )
+            _add_display_field(
+                display_field_values,
+                key="employment_or_internship_months",
+                values=[str(resume.employment_or_internship_months)],
+                evidence_block_ids=[],
+            )
 
         if request.education_any_of:
-            matching_education = [
-                education
+            matching_education_pairs = [
+                (filter_item, education)
                 for filter_item in request.education_any_of
                 for education in resume.educations
                 if _matches_education(session, filter_item, education)
             ]
-            if not matching_education:
+            if not matching_education_pairs:
                 continue
+            matching_education = [
+                education for _, education in matching_education_pairs
+            ]
             matched_filters.append("education")
+            for filter_item, education in matching_education_pairs:
+                classification_block_ids = (
+                    education.classification_evidence_block_ids
+                    or education.evidence_block_ids
+                    or []
+                )
+                education_block_ids = education.evidence_block_ids or []
+                if filter_item.school_name_contains:
+                    _add_display_field(
+                        display_field_values,
+                        key="school",
+                        values=[education.school_name_raw],
+                        evidence_block_ids=education_block_ids,
+                    )
+                if filter_item.major_contains:
+                    _add_display_field(
+                        display_field_values,
+                        key="major",
+                        values=[education.major_raw],
+                        evidence_block_ids=education_block_ids,
+                    )
+                if (
+                    filter_item.institution_classifications_any_of
+                    or filter_item.institution_tiers_any_of
+                ):
+                    _add_display_field(
+                        display_field_values,
+                        key="institution_classifications",
+                        values=_education_institution_classifications(education),
+                        evidence_block_ids=classification_block_ids,
+                    )
+                if filter_item.degree_in:
+                    _add_display_field(
+                        display_field_values,
+                        key="education_degree",
+                        values=[education.degree],
+                        evidence_block_ids=education_block_ids,
+                    )
+                academic_values: list[str | None] = []
+                if (
+                    filter_item.min_average_score is not None
+                    and education.average_score is not None
+                ):
+                    academic_values.append(f"平均分 {education.average_score:g}")
+                if (
+                    filter_item.min_gpa_percent is not None
+                    and education.gpa_percent is not None
+                ):
+                    if education.gpa_value is not None and education.gpa_scale is not None:
+                        academic_values.append(
+                            "GPA "
+                            f"{education.gpa_value:g}/{education.gpa_scale:g} "
+                            f"({education.gpa_percent:g}%)"
+                        )
+                    else:
+                        academic_values.append(f"GPA {education.gpa_percent:g}%")
+                if (
+                    filter_item.max_rank_position is not None
+                    and education.rank_position is not None
+                ):
+                    academic_values.append(
+                        "排名 "
+                        f"{education.rank_position}"
+                        + (
+                            f"/{education.rank_total}"
+                            if education.rank_total is not None
+                            else ""
+                        )
+                    )
+                if (
+                    filter_item.max_rank_percent is not None
+                    and education.rank_percent is not None
+                ):
+                    academic_values.append(f"排名前 {education.rank_percent:g}%")
+                if academic_values:
+                    _add_display_field(
+                        display_field_values,
+                        key="academic_performance",
+                        values=academic_values,
+                        evidence_block_ids=education_block_ids,
+                    )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="education",
@@ -534,8 +750,8 @@ def search_candidates(
                     ),
                     fact_type="education",
                     evidence_block_ids=(
-                        education.classification_evidence_block_ids
-                        or education.evidence_block_ids
+                        education.evidence_block_ids
+                        or education.classification_evidence_block_ids
                         or []
                     ),
                 )
@@ -543,15 +759,66 @@ def search_candidates(
             )
 
         if request.experience_any_of:
-            matching_experience = [
-                experience
+            matching_experience_pairs = [
+                (filter_item, experience)
                 for filter_item in request.experience_any_of
                 for experience in resume.experiences
                 if _matches_experience(filter_item, experience)
             ]
-            if not matching_experience:
+            if not matching_experience_pairs:
                 continue
+            matching_experience = [
+                experience for _, experience in matching_experience_pairs
+            ]
             matched_filters.append("experience")
+            for filter_item, experience in matching_experience_pairs:
+                experience_block_ids = experience.evidence_block_ids or []
+                classification_block_ids = (
+                    experience.classification_evidence_block_ids
+                    or experience_block_ids
+                )
+                if filter_item.experience_types:
+                    _add_display_field(
+                        display_field_values,
+                        key="experience_type",
+                        values=[experience.experience_type],
+                        evidence_block_ids=classification_block_ids,
+                    )
+                if filter_item.experience_name_contains:
+                    _add_display_field(
+                        display_field_values,
+                        key="experience_name",
+                        values=[experience.experience_name_raw],
+                        evidence_block_ids=experience_block_ids,
+                    )
+                if filter_item.organization_name_contains:
+                    _add_display_field(
+                        display_field_values,
+                        key="organization",
+                        values=[experience.organization_name_raw],
+                        evidence_block_ids=experience_block_ids,
+                    )
+                if filter_item.title_contains:
+                    _add_display_field(
+                        display_field_values,
+                        key="title",
+                        values=[experience.title_raw],
+                        evidence_block_ids=experience_block_ids,
+                    )
+                if filter_item.award_result_contains:
+                    _add_display_field(
+                        display_field_values,
+                        key="experience_award",
+                        values=[experience.award_result_raw],
+                        evidence_block_ids=experience_block_ids,
+                    )
+                if filter_item.award_levels_any_of:
+                    _add_display_field(
+                        display_field_values,
+                        key="experience_award",
+                        values=[_award_level_label(experience.award_level)],
+                        evidence_block_ids=classification_block_ids,
+                    )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="experience",
@@ -579,6 +846,16 @@ def search_candidates(
             if not matching_category_skills:
                 continue
             matched_filters.append("skill_categories_any_of")
+            _add_display_field(
+                display_field_values,
+                key="skills",
+                values=[skill.skill_display for skill in matching_category_skills],
+                evidence_block_ids=[
+                    block_id
+                    for skill in matching_category_skills
+                    for block_id in (skill.evidence_block_ids or [])
+                ],
+            )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="skill_categories_any_of",
@@ -598,6 +875,21 @@ def search_candidates(
             continue
         if required_skill_keys:
             matched_filters.append("skills_all_of")
+            matching_required_skills = [
+                skill
+                for skill in resume.skills
+                if skill.skill_key in required_skill_keys
+            ]
+            _add_display_field(
+                display_field_values,
+                key="skills",
+                values=[skill.skill_display for skill in matching_required_skills],
+                evidence_block_ids=[
+                    block_id
+                    for skill in matching_required_skills
+                    for block_id in (skill.evidence_block_ids or [])
+                ],
+            )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="skills_all_of",
@@ -610,6 +902,21 @@ def search_candidates(
             )
         if optional_skill_keys:
             matched_filters.append("skills_any_of")
+            matching_optional_skills = [
+                skill
+                for skill in resume.skills
+                if skill.skill_key in optional_skill_keys
+            ]
+            _add_display_field(
+                display_field_values,
+                key="skills",
+                values=[skill.skill_display for skill in matching_optional_skills],
+                evidence_block_ids=[
+                    block_id
+                    for skill in matching_optional_skills
+                    for block_id in (skill.evidence_block_ids or [])
+                ],
+            )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="skills_any_of",
@@ -631,11 +938,29 @@ def search_candidates(
             if not matching_credentials:
                 continue
             matched_filters.append("language_credentials_any_of")
+            _add_display_field(
+                display_field_values,
+                key="language",
+                values=[
+                    _language_display_label(credential)
+                    + (
+                        f" {credential.score:g}"
+                        if credential.score is not None
+                        else ""
+                    )
+                    for credential in matching_credentials
+                ],
+                evidence_block_ids=[
+                    block_id
+                    for credential in matching_credentials
+                    for block_id in (credential.evidence_block_ids or [])
+                ],
+            )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="language_credentials_any_of",
                     label=(
-                        language_credential_label(credential.credential_code)
+                        _language_display_label(credential)
                         + (
                             f" {credential.score:g}"
                             if credential.score is not None
@@ -652,6 +977,12 @@ def search_candidates(
             if resume.scholarships:
                 continue
             matched_filters.append("scholarship_status=unknown")
+            _add_display_field(
+                display_field_values,
+                key="scholarship",
+                values=["未识别"],
+                evidence_block_ids=[],
+            )
         elif request.scholarship_status == "present" and not resume.scholarships:
             continue
         matching_scholarships = [
@@ -674,6 +1005,19 @@ def search_candidates(
             if not matching_scholarships:
                 continue
             matched_filters.append("scholarship")
+            _add_display_field(
+                display_field_values,
+                key="scholarship",
+                values=[
+                    scholarship.scholarship_name_raw
+                    for scholarship in matching_scholarships
+                ],
+                evidence_block_ids=[
+                    block_id
+                    for scholarship in matching_scholarships
+                    for block_id in (scholarship.evidence_block_ids or [])
+                ],
+            )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="scholarship",
@@ -704,6 +1048,35 @@ def search_candidates(
             continue
         if request.competition_status != "any" or request.competition_award_status != "any":
             matched_filters.append("competition")
+            matching_competitions = competition_awards or competition_experiences
+            if matching_competitions:
+                _add_display_field(
+                    display_field_values,
+                    key="competition",
+                    values=[
+                        " | ".join(
+                            value
+                            for value in (
+                                experience.experience_name_raw,
+                                experience.award_result_raw,
+                            )
+                            if value
+                        )
+                        for experience in matching_competitions
+                    ],
+                    evidence_block_ids=[
+                        block_id
+                        for experience in matching_competitions
+                        for block_id in (experience.evidence_block_ids or [])
+                    ],
+                )
+            else:
+                _add_display_field(
+                    display_field_values,
+                    key="competition",
+                    values=["未识别"],
+                    evidence_block_ids=[],
+                )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="competition",
@@ -731,6 +1104,19 @@ def search_candidates(
             if not matching_leadership:
                 continue
             matched_filters.append("leadership")
+            _add_display_field(
+                display_field_values,
+                key="leadership",
+                values=[
+                    experience.leadership_role
+                    for experience in matching_leadership
+                ],
+                evidence_block_ids=[
+                    block_id
+                    for experience in matching_leadership
+                    for block_id in (experience.evidence_block_ids or [])
+                ],
+            )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="leadership",
@@ -755,42 +1141,63 @@ def search_candidates(
             continue
         if request.keywords_all_of:
             matched_filters.append("keywords_all_of")
+            keyword_block_ids = _matching_keyword_block_ids(
+                resume,
+                request.keywords_all_of,
+            )
+            _add_display_field(
+                display_field_values,
+                key="keywords",
+                values=request.keywords_all_of,
+                evidence_block_ids=keyword_block_ids,
+            )
             matched_evidence.append(
                 CandidateSearchMatch(
                     filter_key="keywords_all_of",
                     label=", ".join(request.keywords_all_of),
                     fact_type="keyword",
-                    evidence_block_ids=_matching_keyword_block_ids(
-                        resume,
-                        request.keywords_all_of,
-                    ),
+                    evidence_block_ids=keyword_block_ids,
                 )
             )
         if request.keywords_any_of:
             matched_filters.append("keywords_any_of")
+            keyword_block_ids = _matching_keyword_block_ids(
+                resume,
+                request.keywords_any_of,
+            )
+            _add_display_field(
+                display_field_values,
+                key="keywords",
+                values=request.keywords_any_of,
+                evidence_block_ids=keyword_block_ids,
+            )
             matched_evidence.append(
                 CandidateSearchMatch(
                     filter_key="keywords_any_of",
                     label=", ".join(request.keywords_any_of),
                     fact_type="keyword",
-                    evidence_block_ids=_matching_keyword_block_ids(
-                        resume,
-                        request.keywords_any_of,
-                    ),
+                    evidence_block_ids=keyword_block_ids,
                 )
             )
         if request.keywords:
             matched_filters.append(f"keywords_{request.keyword_match_mode}")
+            keyword_block_ids = _matching_v2_keyword_block_ids(
+                resume,
+                keywords=request.keywords,
+                mode=request.keyword_match_mode,
+            )
+            _add_display_field(
+                display_field_values,
+                key="keywords",
+                values=request.keywords,
+                evidence_block_ids=keyword_block_ids,
+            )
             matched_evidence.append(
                 CandidateSearchMatch(
                     filter_key="keywords",
                     label=", ".join(request.keywords),
                     fact_type="keyword",
-                    evidence_block_ids=_matching_v2_keyword_block_ids(
-                        resume,
-                        keywords=request.keywords,
-                        mode=request.keyword_match_mode,
-                    ),
+                    evidence_block_ids=keyword_block_ids,
                 )
             )
 
@@ -812,6 +1219,7 @@ def search_candidates(
                 summary_preview=_summary_preview(summary),
                 score_total=score.total_score if score else None,
                 score_template_name=score.template.name if score and score.template else None,
+                display_fields=_display_fields(display_field_values),
                 matched_filters=matched_filters,
                 matched_evidence=matched_evidence,
                 ),

@@ -55,19 +55,25 @@ deploy() {
   fi
   "${compose[@]}" exec -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null >/dev/null
 
-  local domain session_body protected_status timestamp record schema_action
-  domain="$(sed -n 's/^RESUME_V3_DOMAIN=//p' "$project_dir/.env.production" | tail -n 1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
-  [[ -n "$domain" ]] || { echo "RESUME_V3_DOMAIN is not set." >&2; exit 1; }
+  local domain_addresses health_domain session_body protected_status timestamp record schema_action
+  domain_addresses="$(sed -n 's/^RESUME_V3_DOMAIN=//p' "$project_dir/.env.production" | tail -n 1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
+  [[ -n "$domain_addresses" ]] || { echo "RESUME_V3_DOMAIN is not set." >&2; exit 1; }
+  # Caddy accepts a comma-separated site-address list (for example, an apex
+  # domain plus www). The first address remains the canonical endpoint used by
+  # release health and authentication checks.
+  health_domain="${domain_addresses%%,*}"
+  health_domain="$(printf '%s' "$health_domain" | xargs)"
+  [[ -n "$health_domain" ]] || { echo "RESUME_V3_DOMAIN has no primary address." >&2; exit 1; }
   for attempt in $(seq 1 30); do
-    if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$domain/health" >/dev/null; then
+    if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$health_domain/health" >/dev/null; then
       break
     fi
     [[ "$attempt" -eq 30 ]] && { echo "HTTPS health check did not become ready." >&2; exit 1; }
     sleep 2
   done
-  session_body="$(curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$domain/v1/auth/session")"
+  session_body="$(curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$health_domain/v1/auth/session")"
   [[ "$session_body" == *'"authenticated":false'*'"login_required":true'* ]] || { echo "Unexpected unauthenticated session response." >&2; exit 1; }
-  protected_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 5 --max-time 15 "https://$domain/v1/resumes/00000000-0000-0000-0000-000000000000/original-file")"
+  protected_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 5 --max-time 15 "https://$health_domain/v1/resumes/00000000-0000-0000-0000-000000000000/original-file")"
   [[ "$protected_status" == "401" ]] || { echo "Protected PDF endpoint did not reject an unauthenticated request." >&2; exit 1; }
 
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"

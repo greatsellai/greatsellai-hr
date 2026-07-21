@@ -1,7 +1,27 @@
 import { useMemo } from "react";
+import type { EChartsOption } from "echarts";
+import * as echarts from "echarts/core";
+import { LineChart } from "echarts/charts";
+import {
+  AriaComponent,
+  GridComponent,
+  LegendComponent,
+  TooltipComponent,
+} from "echarts/components";
+import { CanvasRenderer } from "echarts/renderers";
+import ReactEChartsCore from "echarts-for-react/lib/core";
 import { Icon } from "../icons";
 import type { AiUsageTrendBucket, AiUsageTrendGranularity } from "./admin-types";
 import { numberFormat } from "./AdminComponents";
+
+echarts.use([
+  AriaComponent,
+  GridComponent,
+  LegendComponent,
+  LineChart,
+  TooltipComponent,
+  CanvasRenderer,
+]);
 
 type TrendPoint = {
   bucketStartedAt: string;
@@ -14,21 +34,22 @@ type TrendPoint = {
   totalTokens: number;
 };
 
+type TrendSeriesKey = "inputTokens" | "outputTokens" | "cachedReadTokens" | "cachedWriteTokens";
+
 type TrendSeries = {
-  key: "inputTokens" | "outputTokens" | "cachedReadTokens" | "cachedWriteTokens";
+  key: TrendSeriesKey;
   label: string;
+  color: string;
+  lineType: "solid" | "dashed";
 };
 
-const CHART_WIDTH = 960;
-const CHART_HEIGHT = 272;
-const CHART_MARGIN = { top: 18, right: 20, bottom: 38, left: 56 };
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
 const trendSeries: TrendSeries[] = [
-  { key: "inputTokens", label: "输入" },
-  { key: "outputTokens", label: "输出及推理" },
-  { key: "cachedReadTokens", label: "缓存命中" },
-  { key: "cachedWriteTokens", label: "缓存写入" },
+  { key: "inputTokens", label: "输入", color: "#2f6fed", lineType: "solid" },
+  { key: "outputTokens", label: "输出及推理", color: "#7656c7", lineType: "solid" },
+  { key: "cachedReadTokens", label: "缓存命中", color: "#16856b", lineType: "dashed" },
+  { key: "cachedWriteTokens", label: "缓存写入", color: "#a06b19", lineType: "dashed" },
 ];
 
 function safeNumber(value: number | null | undefined) {
@@ -41,9 +62,9 @@ function formatTokenVolume(value: number) {
   return numberFormat(value);
 }
 
-function formatBucketLabel(value: string, granularity: AiUsageTrendGranularity, includeYear = false) {
+function formatBucketLabel(value: string | number, granularity: AiUsageTrendGranularity, includeYear = false) {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat("zh-CN", granularity === "hour"
     ? {
       year: includeYear ? "numeric" : undefined,
@@ -97,72 +118,21 @@ function localRangeBoundaries(start: string, end: string) {
   return { startAt: now - DAY_MS, endAt: now };
 }
 
-function xForTimestamp(timestamp: number, startAt: number, endAt: number) {
-  const plotWidth = CHART_WIDTH - CHART_MARGIN.left - CHART_MARGIN.right;
-  if (endAt <= startAt) return CHART_MARGIN.left + plotWidth / 2;
-  const ratio = Math.max(0, Math.min(1, (timestamp - startAt) / (endAt - startAt)));
-  return CHART_MARGIN.left + ratio * plotWidth;
-}
-
-function pointX(point: TrendPoint, startAt: number, endAt: number) {
-  return xForTimestamp(new Date(point.bucketStartedAt).getTime(), startAt, endAt);
-}
-
-function pathFor(
-  points: TrendPoint[],
-  key: TrendSeries["key"],
-  maxValue: number,
-  startAt: number,
-  endAt: number,
-  granularity: AiUsageTrendGranularity,
-) {
-  const plotHeight = CHART_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
+function chartSeriesData(points: TrendPoint[], key: TrendSeriesKey, granularity: AiUsageTrendGranularity) {
   const expectedBucketMs = granularity === "hour" ? 60 * 60 * 1_000 : DAY_MS;
-  return points.map((point, index) => {
-    const x = pointX(point, startAt, endAt);
-    const y = CHART_MARGIN.top + plotHeight - ((point[key] / maxValue) * plotHeight);
+  return points.flatMap((point, index) => {
+    const timestamp = new Date(point.bucketStartedAt).getTime();
     const previous = points[index - 1];
-    const hasGap = previous && (
-      new Date(point.bucketStartedAt).getTime() - new Date(previous.bucketStartedAt).getTime()
-      > expectedBucketMs * 1.5
-    );
-    return `${index && !hasGap ? "L" : "M"}${x.toFixed(2)} ${y.toFixed(2)}`;
-  }).join(" ");
-}
-
-function pointY(value: number, maxValue: number) {
-  const plotHeight = CHART_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
-  return CHART_MARGIN.top + plotHeight - ((value / maxValue) * plotHeight);
-}
-
-function yAxisTicks(maxValue: number) {
-  if (maxValue <= 4) return Array.from({ length: Math.ceil(maxValue) + 1 }, (_, index) => index);
-  const rawStep = maxValue / 4;
-  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
-  const normalized = rawStep / magnitude;
-  const niceFraction = [1, 2, 2.5, 5, 10].find((candidate) => candidate >= normalized) ?? 10;
-  const step = niceFraction * magnitude;
-  const axisMax = Math.ceil(maxValue / step) * step;
-  return Array.from({ length: Math.round(axisMax / step) + 1 }, (_, index) => index * step);
-}
-
-function timeAxisTicks(startAt: number, endAt: number) {
-  const tickCount = 5;
-  if (endAt <= startAt) return [startAt];
-  return Array.from({ length: tickCount }, (_, index) => (
-    startAt + ((endAt - startAt) * index) / (tickCount - 1)
-  ));
-}
-
-function pointDescription(point: TrendPoint, granularity: AiUsageTrendGranularity) {
-  return [
-    formatBucketLabel(point.bucketStartedAt, granularity, true),
-    `输入 ${numberFormat(point.inputTokens)} Token`,
-    `输出及推理 ${numberFormat(point.outputTokens)} Token`,
-    `缓存命中 ${numberFormat(point.cachedReadTokens)} Token`,
-    `缓存写入 ${numberFormat(point.cachedWriteTokens)} Token`,
-    `总计 ${numberFormat(point.totalTokens)} Token`,
-  ].join("；");
+    const previousTimestamp = previous ? new Date(previous.bucketStartedAt).getTime() : null;
+    const hasGap = previousTimestamp !== null && timestamp - previousTimestamp > expectedBucketMs * 1.5;
+    if (hasGap) {
+      return [
+        [previousTimestamp + expectedBucketMs, null] as [number, number | null],
+        [timestamp, point[key]] as [number, number | null],
+      ];
+    }
+    return [[timestamp, point[key]] as [number, number | null]];
+  });
 }
 
 function Metric({ label, value, description }: { label: string; value: string; description: string }) {
@@ -209,24 +179,119 @@ export function TokenUsageTrendChart({
     totalTokens: 0,
   }), [points]);
   const { startAt, endAt } = useMemo(() => localRangeBoundaries(rangeStart, rangeEnd), [rangeEnd, rangeStart]);
-  const maxValue = Math.max(
-    1,
-    ...points.flatMap((point) => [
-      point.inputTokens,
-      point.outputTokens,
-      point.cachedReadTokens,
-      point.cachedWriteTokens,
-    ]),
-  );
-  const yTicks = yAxisTicks(maxValue);
-  const yAxisMax = yTicks.at(-1) ?? 1;
-  const xTicks = timeAxisTicks(startAt, endAt);
-  const plotBottom = CHART_HEIGHT - CHART_MARGIN.bottom;
-  const plotRight = CHART_WIDTH - CHART_MARGIN.right;
   const hasReportedUsage = summary.tokenUsageInvocationCount > 0;
-  const description = hasReportedUsage
-    ? `${scopeLabel}，${coverageLabel}，${rangeLabel}，共 ${numberFormat(summary.totalTokens)} Token。`
-    : `${scopeLabel}，${coverageLabel}，${rangeLabel}，没有模型返回的 Token 用量。`;
+  const includeYearInAxis = new Date(rangeStart).getFullYear() !== new Date(rangeEnd).getFullYear();
+  const chartDescription = hasReportedUsage
+    ? `${scopeLabel}，${coverageLabel}，${rangeLabel}。共 ${numberFormat(summary.totalTokens)} Token。`
+    : `${scopeLabel}，${coverageLabel}，${rangeLabel}。没有模型返回的 Token 用量。`;
+
+  const chartOption = useMemo<EChartsOption>(() => ({
+    animation: false,
+    aria: {
+      enabled: true,
+      description: chartDescription,
+    },
+    color: trendSeries.map((series) => series.color),
+    grid: {
+      top: 46,
+      right: 20,
+      bottom: 34,
+      left: 72,
+    },
+    legend: {
+      top: 6,
+      right: 12,
+      selectedMode: false,
+      icon: "roundRect",
+      itemWidth: 15,
+      itemHeight: 4,
+      itemGap: 14,
+      textStyle: {
+        color: "#74706d",
+        fontSize: 11,
+        fontFamily: "inherit",
+      },
+    },
+    textStyle: {
+      fontFamily: "inherit",
+    },
+    tooltip: {
+      trigger: "axis",
+      appendToBody: true,
+      backgroundColor: "#ffffff",
+      borderColor: "#dedad5",
+      borderWidth: 1,
+      confine: true,
+      padding: [9, 11],
+      textStyle: {
+        color: "#292522",
+        fontSize: 12,
+      },
+      axisPointer: {
+        type: "line",
+        lineStyle: {
+          color: "#b6b0aa",
+          type: "dashed",
+        },
+      },
+      valueFormatter: (value) => `${numberFormat(Number(value))} Token`,
+    },
+    xAxis: {
+      type: "time",
+      min: startAt,
+      max: endAt,
+      axisLine: {
+        lineStyle: { color: "#dcd7d1" },
+      },
+      axisTick: { show: false },
+      axisLabel: {
+        color: "#74706d",
+        fontSize: 11,
+        hideOverlap: true,
+        margin: 12,
+        formatter: (value: string | number) => formatBucketLabel(value, granularity, includeYearInAxis),
+      },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      min: 0,
+      splitNumber: 4,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: {
+        color: "#74706d",
+        fontSize: 11,
+        margin: 12,
+        formatter: (value: number) => formatTokenVolume(value),
+      },
+      splitLine: {
+        lineStyle: {
+          color: "#ebe7e2",
+          type: "dashed",
+        },
+      },
+    },
+    series: trendSeries.map((series, index) => ({
+      name: series.label,
+      type: "line" as const,
+      data: chartSeriesData(points, series.key, granularity),
+      showSymbol: false,
+      smooth: 0.22,
+      connectNulls: false,
+      lineStyle: {
+        width: series.lineType === "solid" ? 2.5 : 2,
+        type: series.lineType,
+      },
+      itemStyle: { color: series.color },
+      emphasis: {
+        focus: "series",
+        scale: true,
+        lineStyle: { width: 3.25 },
+      },
+      z: trendSeries.length - index,
+    })),
+  }), [chartDescription, endAt, granularity, includeYearInAxis, points, startAt]);
 
   return (
     <section aria-labelledby="admin-token-trend-title" className="admin-token-trend-panel">
@@ -244,39 +309,17 @@ export function TokenUsageTrendChart({
         </dl>
       </header>
 
-      <div className="admin-token-trend-legend" aria-label="趋势图图例">
-        {trendSeries.map((series) => <span key={series.key}><i aria-hidden="true" className={`is-${series.key}`} />{series.label}</span>)}
-      </div>
-
       {hasReportedUsage ? (
-        <div className="admin-token-chart-scroll">
-          <svg
-            aria-describedby="admin-token-trend-description"
-            aria-label="Token 使用趋势图"
-            className="admin-token-chart"
-            preserveAspectRatio="none"
-            role="img"
-            viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
-          >
-            <desc id="admin-token-trend-description">{description}</desc>
-            <g aria-hidden="true">
-              {yTicks.map((tick) => {
-                const y = pointY(tick, yAxisMax);
-                return <g key={tick}>
-                  <line x1={CHART_MARGIN.left} x2={plotRight} y1={y} y2={y} />
-                  <text textAnchor="end" x={CHART_MARGIN.left - 10} y={y + 4}>{formatTokenVolume(tick)}</text>
-                </g>;
-              })}
-              {xTicks.map((tick) => (
-                <text key={tick} textAnchor="middle" x={xForTimestamp(tick, startAt, endAt)} y={plotBottom + 24}>{formatBucketLabel(new Date(tick).toISOString(), granularity)}</text>
-              ))}
-            </g>
-            {trendSeries.map((series) => <path className={`admin-token-chart-series is-${series.key}`} d={pathFor(points, series.key, yAxisMax, startAt, endAt, granularity)} key={series.key} />)}
-            {points.map((point) => <g aria-hidden="true" key={point.bucketStartedAt}>
-              <title>{pointDescription(point, granularity)}</title>
-              {trendSeries.map((series) => <circle className={`admin-token-chart-point is-${series.key}`} cx={pointX(point, startAt, endAt)} cy={pointY(point[series.key], yAxisMax)} key={series.key} r="2.75" />)}
-            </g>)}
-          </svg>
+        <div aria-label="Token 使用趋势图" className="admin-token-chart-frame">
+          <ReactEChartsCore
+            autoResize
+            className="admin-token-chart-canvas"
+            echarts={echarts}
+            lazyUpdate
+            notMerge
+            option={chartOption}
+            opts={{ renderer: "canvas" }}
+          />
         </div>
       ) : <div className="admin-token-trend-empty"><Icon name="activity" size={18} /><span>{summary.invocationCount ? `当前范围内有 ${numberFormat(summary.invocationCount)} 次调用，但模型未返回 Token usage。` : "当前范围内没有模型调用。调整日期或模型后再查看趋势。"}</span></div>}
 

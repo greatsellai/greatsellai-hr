@@ -204,6 +204,8 @@ def test_pending_target_finalizer_is_specific_and_preserves_the_normal_pending_g
     assert "validate_pending_target_backup" in finalizer
     assert "Pending target paired backup" in helper
     assert 'docker network connect --ip "$api_proxy_ip"' in finalizer
+    assert 'docker inspect --format \'{{.Name}}\' "$api_container"' in finalizer
+    assert '{{$container.Name}}' in finalizer
     assert 'docker network rm' not in finalizer
     assert "Pending target migration did not complete successfully." in finalizer
     assert "verify_public_runtime" in finalizer
@@ -539,6 +541,7 @@ sudo() {{
         *NetworkSettings.Networks*) printf 172.30.0.2 ;;
         *State.Error*) printf 'failed to set up container networking: Address already in use' ;;
         *State.Health*) printf healthy ;;
+        *Name*) printf '/synthetic-api' ;;
         *State.Status*)
           if [[ "$container" == synthetic-caddy && "$caddy_recreated" == 0 ]]; then printf created
           elif [[ "$container" == synthetic-migrate ]]; then printf exited

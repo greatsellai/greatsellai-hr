@@ -593,7 +593,7 @@ finalize_pending_target_unlocked() {
   local pending_previous_commit pending_mode pending_backup_state pending_backup_id
   local pending_prepared_at pending_state pending_format current_state
   local api_container worker_container caddy_container migrate_container
-  local observed_proxy_address caddy_state caddy_error attached_containers
+  local api_container_name observed_proxy_address caddy_state caddy_error attached_containers
   local writers_started=0 caddy_started=0 public_runtime_verified=0 finalization_completed=0
 
   finalize_cleanup() {
@@ -672,12 +672,13 @@ finalize_pending_target_unlocked() {
     die "Pending target migration did not complete successfully."
 
   observed_proxy_address="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{.IPAddress}}{{end}}' "$api_container")"
+  api_container_name="$(sudo -n docker inspect --format '{{.Name}}' "$api_container" | sed 's#^/##')"
   caddy_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$caddy_container")"
   caddy_error="$(sudo -n docker inspect --format '{{.State.Error}}' "$caddy_container")"
-  attached_containers="$(sudo -n docker network inspect "$proxy_network_name" --format '{{range $id, $_ := .Containers}}{{$id}}{{"\\n"}}{{end}}' | sed '/^$/d')"
+  attached_containers="$(sudo -n docker network inspect "$proxy_network_name" --format '{{range $id, $container := .Containers}}{{$container.Name}}{{"\\n"}}{{end}}' | sed '/^$/d')"
   [[ "$observed_proxy_address" == "$caddy_proxy_ip" ]] || \
     die "Pending target does not have the known Caddy proxy-address collision."
-  [[ "$attached_containers" == "$api_container" ]] || \
+  [[ -n "$api_container_name" && "$attached_containers" == "$api_container_name" ]] || \
     die "Pending target proxy network has unexpected attached containers."
   [[ "$caddy_state" == "created" && "$caddy_error" == *"container networking"* && "$caddy_error" == *"Address already in use"* ]] || \
     die "Pending target Caddy failure is not the known static-address collision."

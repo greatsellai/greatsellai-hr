@@ -56,6 +56,21 @@ from app.tenant_scope import clear_organization_context, organization_context_id
 LEGACY_RUNTIME_CREDENTIAL_REF = "legacy-runtime-credential"
 LEGACY_RUNTIME_PROVIDER_SLUG = "legacy-runtime-openai-compatible"
 LEGACY_RUNTIME_MODEL_SLUG = "legacy-runtime-default"
+LEGACY_RUNTIME_PROVIDER_DISPLAY_NAME = "DeepSeek"
+LEGACY_RUNTIME_MODEL_DISPLAY_NAME = "DeepSeek 默认模型"
+
+_LEGACY_ROUTE_COPY: dict[str, tuple[str, str]] = {
+    "resume_extract_rich": ("简历深度提取", "提取完整的候选人结构化信息。"),
+    "resume_extract_core": ("简历核心信息提取", "提取筛选所需的核心字段。"),
+    "candidate_name_backfill": ("候选人姓名补全", "基于简历原文补全可核验的姓名。"),
+    "resume_score": ("简历评分", "根据岗位要求生成候选人评分。"),
+    "resume_summary": ("简历总结", "生成候选人经历与亮点摘要。"),
+    "jd_generate": ("JD 生成", "根据岗位需求生成职位描述。"),
+    "jd_requirements_extract": ("JD 要求提取", "将职位描述整理为评估要求。"),
+    "jd_match": ("JD 匹配", "分析候选人与岗位的匹配情况。"),
+    "recruiting_agent_turn": ("招聘助手对话", "为招聘助手生成下一轮回复。"),
+    "resume_ocr_page": ("简历 OCR 识别", "识别扫描件或图片简历页面。"),
+}
 
 # The set is deliberately small and server-owned.  Platform administrators can
 # publish different *routes* for these features, but a browser cannot invent an
@@ -400,7 +415,7 @@ def _get_or_create_legacy_provider(
         with session.begin_nested():
             provider = AiProviderProfile(
                 slug=LEGACY_RUNTIME_PROVIDER_SLUG,
-                display_name="Legacy runtime provider",
+                display_name=LEGACY_RUNTIME_PROVIDER_DISPLAY_NAME,
                 driver="openai_compatible",
                 base_url=settings.legacy_openai_compatible_endpoint,
                 credential_ref=LEGACY_RUNTIME_CREDENTIAL_REF,
@@ -437,7 +452,7 @@ def _get_or_create_legacy_model(
             model = AiModelProfile(
                 provider_profile_id=provider.id,
                 slug=LEGACY_RUNTIME_MODEL_SLUG,
-                display_name="Legacy runtime default model",
+                display_name=LEGACY_RUNTIME_MODEL_DISPLAY_NAME,
                 provider_model_id=settings.deepseek_model,
                 capabilities_json={"chat": True, "tools": True, "json_schema": True},
                 data_classification_json={"candidate_data_allowed": True},
@@ -466,12 +481,16 @@ def _get_or_create_legacy_policy(
     policy = lookup()
     if policy is not None:
         return policy
+    display_name, description = _LEGACY_ROUTE_COPY.get(
+        feature,
+        (feature, "为历史部署创建的兼容路由。"),
+    )
     try:
         with session.begin_nested():
             policy = AiRoutePolicy(
                 feature=feature,
-                display_name=feature,
-                description="Compatibility route created during AI gateway migration.",
+                display_name=display_name,
+                description=description,
                 enabled=True,
             )
             session.add(policy)

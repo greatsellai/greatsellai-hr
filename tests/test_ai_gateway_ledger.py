@@ -190,6 +190,42 @@ def _seed_two_target_route(
     session.commit()
 
 
+def test_legacy_bootstrap_uses_operator_facing_deepseek_and_route_labels(
+    ai_client,
+) -> None:
+    database = ai_client.app.state.database
+    settings = ai_client.app.state.settings
+
+    with database.session_factory() as session:
+        _bootstrap_legacy_route_if_available(
+            session,
+            settings=settings,
+            feature="resume_score",
+        )
+
+        provider = session.scalar(
+            select(AiProviderProfile).where(
+                AiProviderProfile.slug == "legacy-runtime-openai-compatible"
+            )
+        )
+        model = session.scalar(
+            select(AiModelProfile).where(
+                AiModelProfile.slug == "legacy-runtime-default"
+            )
+        )
+        policy = session.scalar(
+            select(AiRoutePolicy).where(AiRoutePolicy.feature == "resume_score")
+        )
+
+    assert provider is not None
+    assert provider.display_name == "DeepSeek"
+    assert model is not None
+    assert model.display_name == "DeepSeek 默认模型"
+    assert policy is not None
+    assert policy.display_name == "简历评分"
+    assert policy.description == "根据岗位要求生成候选人评分。"
+
+
 def test_gateway_writes_cost_ledger_without_persisting_prompt_or_output(
     ai_client,
     monkeypatch: pytest.MonkeyPatch,

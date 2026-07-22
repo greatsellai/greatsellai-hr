@@ -268,9 +268,6 @@ export function TokenUsageTrendChart({
   rangeLabel,
   rangeStart,
   scopeLabel,
-  coverageLabel,
-  isCrossModelAggregate,
-  timeZone,
 }: {
   buckets: AiUsageTrendBucket[];
   granularity: AiUsageTrendGranularity;
@@ -278,9 +275,6 @@ export function TokenUsageTrendChart({
   rangeLabel: string;
   rangeStart: string;
   scopeLabel: string;
-  coverageLabel: string;
-  isCrossModelAggregate: boolean;
-  timeZone: string;
 }) {
   const points = useMemo(() => completeTrendPoints(
     buildTrendPoints(buckets),
@@ -315,8 +309,8 @@ export function TokenUsageTrendChart({
   const hasReportedUsage = summary.tokenUsageInvocationCount > 0;
   const includeYearInAxis = new Date(rangeStart).getFullYear() !== new Date(rangeEnd).getFullYear();
   const chartDescription = hasReportedUsage
-    ? `${scopeLabel}，${coverageLabel}，${rangeLabel}。共 ${numberFormat(summary.totalTokens)} Token。`
-    : `${scopeLabel}，${coverageLabel}，${rangeLabel}。没有模型返回的 Token 用量。`;
+    ? `${scopeLabel}，${rangeLabel}。共 ${numberFormat(summary.totalTokens)} Token。`
+    : `${scopeLabel}，${rangeLabel}。没有模型返回的 Token 用量。`;
 
   const chartOption = useMemo<EChartsOption>(() => ({
     animation: false,
@@ -432,8 +426,7 @@ export function TokenUsageTrendChart({
       <header className="admin-token-trend-header">
         <div>
           <div className="admin-token-trend-title"><Icon name="activity" size={18} /><h2 id="admin-token-trend-title">Token 使用趋势</h2></div>
-          <p>{scopeLabel} · {coverageLabel} · {rangeLabel}</p>
-          <small className="admin-token-trend-scope-note">{isCrossModelAggregate ? `按 ${timeZone} 分桶；空闲时段按 0 Token 连续展示，当前为跨模型汇总，不用于模型间比较。` : `按 ${timeZone} 分桶；空闲时段按 0 Token 连续展示，所有 Token 均归属于所选 Provider / 模型。`}</small>
+          <p>{scopeLabel} · {rangeLabel}</p>
         </div>
         <dl className="admin-token-trend-metrics">
           <Metric label="输入" value={`${formatTokenVolume(summary.inputTokens)} Token`} description={numberFormat(summary.inputTokens)} />

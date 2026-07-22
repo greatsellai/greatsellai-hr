@@ -114,7 +114,10 @@ validate_upload_archive() {
 
 verify_public_runtime() {
   local environment_dir="$1" domain session_body protected_status
-  domain="$(sed -n 's/^RESUME_V3_DOMAIN=//p' "$environment_dir/.env.production" | tail -n 1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
+  # The ignored production environment file may be root-owned. Read only the
+  # public domain setting through the same non-interactive privilege boundary
+  # used by the release helper; never print the environment file itself.
+  domain="$(sudo -n sed -n 's/^RESUME_V3_DOMAIN=//p' "$environment_dir/.env.production" | tail -n 1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
   [[ -n "$domain" ]] || die "RESUME_V3_DOMAIN is not set."
   for attempt in $(seq 1 30); do
     if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$domain/health" >/dev/null; then

@@ -188,6 +188,20 @@ def test_any_active_pending_release_blocks_normal_release_until_audited_reconcil
     assert 'resolve_pending_release "$history_dir"' in restore
 
 
+def test_public_runtime_verification_can_read_a_root_owned_environment_file() -> None:
+    """Release health checks must not fail merely because the env file is private."""
+
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    verification = helper.split("verify_public_runtime()", maxsplit=1)[1].split(
+        "validate_pending_target_source()", maxsplit=1
+    )[0]
+
+    assert "sudo -n sed -n 's/^RESUME_V3_DOMAIN=//p'" in verification
+    assert 'cat "$environment_dir/.env.production"' not in verification
+
+
 def test_pending_target_finalizer_is_specific_and_preserves_the_normal_pending_gate() -> None:
     helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
         encoding="utf-8"

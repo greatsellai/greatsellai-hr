@@ -1179,13 +1179,14 @@ class CandidateDataAuditEventListResponse(ApiModel):
 class RecruitingAgentRequest(ApiModel):
     """One bounded recruiting-assistant turn.
 
-    The browser supplies only the user's current selection.  The assistant
-    never receives a PDF or unrestricted database access from the client.
+    The browser supplies the user's request and, optionally, the current JD.
+    The assistant always works across the authenticated workspace; it never
+    receives a candidate selection, a PDF, or unrestricted database access
+    from the client.
     """
 
     message: str = Field(min_length=1, max_length=2000)
     job_version_id: str | None = Field(default=None, max_length=64)
-    resume_id: str | None = Field(default=None, max_length=64)
 
 
 class RecruitingAgentCandidate(ApiModel):
@@ -1197,7 +1198,12 @@ class RecruitingAgentCandidate(ApiModel):
 
 
 class RecruitingAgentAction(ApiModel):
-    action: Literal["open_resume", "open_match_workspace", "open_mailbox_workspace"]
+    action: Literal[
+        "open_resume",
+        "open_match_workspace",
+        "open_score_workspace",
+        "open_mailbox_workspace",
+    ]
     label: str
     resume_id: str | None = None
 
@@ -1212,9 +1218,8 @@ class RecruitingAgentResponse(ApiModel):
     intent: Literal[
         "search_candidates",
         "run_job_matching",
+        "run_workspace_scoring",
         "show_job_ranking",
-        "explain_candidate",
-        "score_current_candidate",
         "show_mailbox_status",
         "show_mailbox_imports",
         "sync_mailbox",

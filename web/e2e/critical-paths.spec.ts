@@ -166,6 +166,51 @@ test.describe("招聘工作台关键路径", () => {
     await expect(trigger).toBeFocused();
   });
 
+  test("招聘助手始终检索当前工作区，不随已打开简历绑定候选人", async ({ page }) => {
+    await registerAndVerify(page, "agent-workspace-scope");
+    await seedWorkspaceFixture(page);
+    await page.reload();
+
+    await page
+      .getByRole("row", { name: "打开 E2E 推荐候选人 的 AI 总结和原始简历" })
+      .click();
+    await expect(
+      page.getByRole("dialog", { name: "E2E 推荐候选人 的简历详情" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "关闭简历详情" }).click();
+
+    let agentPayload: Record<string, unknown> | undefined;
+    await page.route("**/v1/recruiting-agent/turns", async (route) => {
+      agentPayload = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          message: "已按当前工作区检索。",
+          intent: "search_candidates",
+          job_version_id: null,
+          candidates: [],
+          actions: [],
+          tool_trace: [],
+          batch_id: null,
+        }),
+      });
+    });
+
+    await page.getByRole("button", { name: "招聘助手", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    await expect(dialog.getByText("检索范围：当前工作区简历库", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("当前候选人", { exact: false })).toHaveCount(0);
+    await expect(dialog.locator("[aria-label='常用提问']")).toHaveCount(0);
+
+    await dialog.locator("#agent-message").fill("找 Python 候选人");
+    await dialog.getByRole("button", { name: "发送提问" }).click();
+    await expect.poll(() => (agentPayload ? 1 : 0)).toBe(1);
+    if (!agentPayload) throw new Error("Expected recruiting agent request payload.");
+    expect(agentPayload).toMatchObject({ message: "找 Python 候选人" });
+    expect(agentPayload).not.toHaveProperty("resume_id");
+    await expect(dialog.getByText("已按当前工作区检索。", { exact: true })).toBeVisible();
+  });
+
   test("邮箱通道保存后同步请求只进入后台队列", async ({ page }) => {
     await registerAndVerify(page, "mailbox");
     await page.getByRole("button", { name: "邮箱入库", exact: true }).click();

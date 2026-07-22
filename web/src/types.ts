@@ -321,9 +321,8 @@ export interface MailboxRetentionRuns {
 export type RecruitingAgentIntent =
   | "search_candidates"
   | "run_job_matching"
+  | "run_workspace_scoring"
   | "show_job_ranking"
-  | "explain_candidate"
-  | "score_current_candidate"
   | "show_mailbox_status"
   | "show_mailbox_imports"
   | "sync_mailbox"
@@ -332,7 +331,6 @@ export type RecruitingAgentIntent =
 export interface RecruitingAgentTurnInput {
   message: string;
   job_version_id?: string | null;
-  resume_id?: string | null;
 }
 
 export interface RecruitingAgentCandidate {
@@ -344,7 +342,11 @@ export interface RecruitingAgentCandidate {
 }
 
 export interface RecruitingAgentAction {
-  action: "open_resume" | "open_match_workspace" | "open_mailbox_workspace";
+  action:
+    | "open_resume"
+    | "open_match_workspace"
+    | "open_score_workspace"
+    | "open_mailbox_workspace";
   label: string;
   resume_id: string | null;
 }

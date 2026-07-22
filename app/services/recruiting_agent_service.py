@@ -18,7 +18,6 @@ from app.schemas import (
     RecruitingAgentRequest,
     RecruitingAgentResponse,
     RecruitingAgentToolTrace,
-    ResumeScoreCreate,
 )
 from app.services.ai_gateway_service import (
     AiExecutionSpec,
@@ -34,7 +33,6 @@ from app.services.job_service import (
     get_job_version,
     get_latest_confirmed_job_version,
     list_job_version_matches,
-    list_resume_job_matches,
 )
 from app.services.mailbox_background_job_service import (
     enqueue_all_mailbox_sync_jobs,
@@ -46,13 +44,12 @@ from app.services.mailbox_import_service import (
     list_mailbox_configs,
     list_mailbox_imports,
 )
+from app.services.resume_score_batch_service import enqueue_resume_score_batch
 from app.services.search_service import search_candidates
 from app.services.score_service import (
-    DeepSeekProviderError as ScoreDeepSeekProviderError,
     ScoreServiceError,
     ScoreTemplateNotFoundError,
     list_score_templates,
-    run_resume_score,
 )
 
 
@@ -69,9 +66,8 @@ class ResolvedJob:
 AgentIntent = Literal[
     "search_candidates",
     "run_job_matching",
+    "run_workspace_scoring",
     "show_job_ranking",
-    "explain_candidate",
-    "score_current_candidate",
     "show_mailbox_status",
     "show_mailbox_imports",
     "sync_mailbox",
@@ -311,32 +307,12 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "get_current_job_ranking",
-            "description": "Read completed JD matching results for the currently selected confirmed JD.",
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}},
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "explain_current_candidate_match",
-            "description": "Read the saved JD match facts for the currently selected candidate and JD.",
-            "parameters": {"type": "object", "additionalProperties": False, "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "score_current_candidate",
+            "name": "start_workspace_score_batch",
             "description": (
-                "Run a new fact-grounded AI score for the currently selected candidate using one "
-                "of the existing score templates announced in current_score_templates. Use this "
-                "when the user asks to score, rate, or evaluate the current candidate. Never "
-                "invent a template ID or score a candidate that is not currently selected."
+                "Start a background AI scoring batch for all eligible resumes in the current "
+                "workspace using one existing score template from current_score_templates. Use "
+                "this only when the user explicitly asks to score all/current-workspace candidates. "
+                "Never select or score one individual candidate."
             ),
             "parameters": {
                 "type": "object",
@@ -349,6 +325,18 @@ _TOOLS: list[dict[str, Any]] = [
                     }
                 },
                 "required": ["template_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_job_ranking",
+            "description": "Read completed JD matching results for the currently selected confirmed JD.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}},
             },
         },
     },
@@ -535,21 +523,13 @@ def _resolve_job(session: Session, requested_job_version_id: str | None) -> Reso
 
 
 def _score_template_context(session: Session) -> list[dict[str, object]]:
-    """Expose only existing, server-owned templates to the Agent model."""
+    """Expose only existing, workspace-scoped templates to the Agent model."""
 
     return [
         {
             "template_id": template.template_id,
             "name": template.name,
             "version": template.version,
-            "dimensions": [
-                {
-                    "key": dimension.key,
-                    "label": dimension.label,
-                    "weight": dimension.weight,
-                }
-                for dimension in template.dimensions
-            ],
         }
         for template in list_score_templates(session)
     ]
@@ -1452,160 +1432,91 @@ def _ranking(session: Session, job: ResolvedJob | None, arguments: dict[str, Any
     )
 
 
-def _explain(session: Session, job: ResolvedJob | None, resume_id: str | None) -> ToolRun:
-    if not resume_id:
-        return ToolRun(payload={"error": "当前未选择候选人。"})
-    matches = list_resume_job_matches(session, resume_id=resume_id)
-    match = next((item for item in matches if job and item.job_version_id == job.job_version_id), None)
-    if match is None:
-        return ToolRun(payload={"error": "当前候选人没有所选 JD 的已完成匹配结果。"})
-    return ToolRun(
-        payload={
-            "candidate_name": match.candidate_display_name or "未命名候选人",
-            "job_title": job.title if job else None,
-            "total_score": match.total_score,
-            "hard_requirement_status": match.hard_requirement_status,
-            "requirements": [
-                {
-                    "requirement": item.requirement_text,
-                    "outcome": item.outcome,
-                    "reason": item.reason,
-                    "uncertainty": item.missing_or_uncertain,
-                }
-                for item in match.requirement_results
-            ],
-        },
-        traces=[RecruitingAgentToolTrace(tool="匹配解释", summary="已读取当前候选人的已保存 JD 匹配证据")],
-        intent="explain_candidate",
-    )
-
-
-def _score_current_candidate(
+def _start_workspace_score_batch(
     session: Session,
     *,
     arguments: dict[str, Any],
-    resume_id: str | None,
     settings: AppSettings,
 ) -> ToolRun:
-    """Run the existing score pipeline; the Agent never supplies score values."""
+    """Queue a workspace-wide score batch without binding a candidate selection."""
 
-    if not resume_id:
-        return ToolRun(
-            payload={"error": "当前未选择候选人，无法运行评分。"},
-            intent="score_current_candidate",
-        )
     if set(arguments) != {"template_id"}:
         return ToolRun(
-            payload={"error": "评分工具参数无效，未执行评分。"},
-            intent="score_current_candidate",
+            payload={"error": "评分工具参数无效，未创建评分任务。"},
+            intent="run_workspace_scoring",
         )
     template_id = arguments.get("template_id")
     if not isinstance(template_id, str) or not template_id.strip():
         return ToolRun(
-            payload={"error": "请选择已有评分模板后再运行评分。"},
-            intent="score_current_candidate",
+            payload={"error": "请选择已有评分规则后再运行全量评分。"},
+            intent="run_workspace_scoring",
         )
     template_id = template_id.strip()
     templates = {template.template_id: template for template in list_score_templates(session)}
     template = templates.get(template_id)
     if template is None:
         return ToolRun(
-            payload={"error": "所选评分模板不存在或已归档，未执行评分。"},
-            intent="score_current_candidate",
+            payload={"error": "所选评分规则不存在或已归档，未创建评分任务。"},
+            intent="run_workspace_scoring",
         )
     try:
-        score = run_resume_score(
+        batch = enqueue_resume_score_batch(
             session,
-            resume_id=resume_id,
-            payload=ResumeScoreCreate(template_id=template_id),
+            template_id=template_id,
             settings=settings,
         )
     except ScoreTemplateNotFoundError:
-        # A template can be archived between context construction and tool
-        # execution; do not turn that race into a raw agent failure.
         return ToolRun(
-            payload={"error": "所选评分模板已不可用，未执行评分。"},
-            intent="score_current_candidate",
-        )
-    except ScoreDeepSeekProviderError:
-        return ToolRun(
-            payload={"error": "评分模型暂时没有返回可用结果，请稍后重试。"},
-            intent="score_current_candidate",
+            payload={"error": "所选评分规则已不可用，未创建评分任务。"},
+            intent="run_workspace_scoring",
         )
     except ScoreServiceError as exc:
         error_messages = {
             "deepseek_api_key_not_configured": "评分模型尚未配置。",
-            "resume_not_found": "当前候选人不存在。",
-            "resume_must_be_active_and_ready_for_scoring": "当前候选人的简历尚未完成可评分解析。",
-            "resume_source_text_unreliable": "当前简历的原文文本待校正，暂不能用于 AI 评分。",
-            "resume_fact_snapshot_not_current": "当前候选人的事实版本尚未准备完成。",
-            "resume_fact_snapshot_invalid": "当前候选人的事实版本不可用于评分。",
+            "ai_route_not_configured": "评分模型尚未配置。",
+            "ai_route_disabled": "评分模型暂不可用。",
+            "ai_route_not_published": "评分模型暂不可用。",
+            "ai_route_credential_not_configured": "评分模型尚未配置。",
         }
         return ToolRun(
-            payload={"error": error_messages.get(str(exc), "当前无法运行评分，请稍后重试。")},
-            intent="score_current_candidate",
+            payload={
+                "error": error_messages.get(
+                    str(exc),
+                    "当前无法创建评分任务，请稍后重试。",
+                )
+            },
+            intent="run_workspace_scoring",
         )
-
-    dimensions = [
-        {
-            "label": dimension.label,
-            "weight": dimension.weight,
-            "ai_raw_score": dimension.ai_raw_score,
-            "final_raw_score": dimension.final_raw_score,
-            "rationale": dimension.rationale,
-            "evidence_state": dimension.evidence_state,
-            "fact_evidence": [
-                {"fact_type": fact.fact_type, "summary": fact.summary}
-                for fact in dimension.fact_evidence
-            ],
-            "uncertainties": dimension.uncertainties,
-        }
-        for dimension in score.dimension_scores
-    ]
     return ToolRun(
         payload={
-            "score_id": score.score_id,
-            "resume_id": score.resume_id,
+            "batch_id": batch.batch_id,
             "template": {
-                "template_id": score.template_id,
-                "name": score.template_name or template.name,
-                "version": score.template_version,
+                "template_id": batch.template_id,
+                "name": batch.template_name or template.name,
+                "version": batch.template_version,
             },
-            "facts_version": score.facts_version,
-            "total_score": score.total_score,
-            "ai_total_score": score.ai_total_score,
-            "status": score.status,
-            "needs_human_review": score.analysis.needs_human_review,
-            "overall_summary": score.analysis.overall_summary,
-            "risk_flags": [
-                {
-                    "message": risk.message,
-                    "fact_evidence": [
-                        {"fact_type": fact.fact_type, "summary": fact.summary}
-                        for fact in risk.fact_evidence
-                    ],
-                }
-                for risk in score.analysis.risk_flags
-            ],
-            "dimensions": dimensions,
+            "status": batch.status,
+            "total_count": batch.total_count,
+            "completed_count": batch.completed_count,
+            "cached_count": batch.cached_count,
         },
         actions=[
             RecruitingAgentAction(
-                action="open_resume",
-                label="打开候选人评分详情",
-                resume_id=resume_id,
+                action="open_score_workspace",
+                label="打开评分工作台",
             )
         ],
         traces=[
             RecruitingAgentToolTrace(
-                tool="候选人评分",
+                tool="全量评分",
                 summary=(
-                    f"已按“{score.template_name or template.name}”v{score.template_version} "
-                    f"为当前候选人生成 {score.total_score:.1f} 分评分"
+                    f"已按“{batch.template_name or template.name}”v{batch.template_version} "
+                    f"为当前工作区创建 {batch.total_count} 份简历的评分任务"
                 ),
             )
         ],
-        intent="score_current_candidate",
+        batch_id=batch.batch_id,
+        intent="run_workspace_scoring",
     )
 
 
@@ -1615,7 +1526,6 @@ def _execute_tool(
     arguments: dict[str, Any],
     session: Session,
     job: ResolvedJob | None,
-    resume_id: str | None,
     settings: AppSettings,
     mailbox_tools_available: bool,
     user_message: str,
@@ -1624,17 +1534,14 @@ def _execute_tool(
         return _search(session, arguments)
     if name == "start_current_job_match_batch":
         return _start_batch(session, job, settings=settings)
-    if name == "get_current_job_ranking":
-        return _ranking(session, job, arguments)
-    if name == "explain_current_candidate_match":
-        return _explain(session, job, resume_id)
-    if name == "score_current_candidate":
-        return _score_current_candidate(
+    if name == "start_workspace_score_batch":
+        return _start_workspace_score_batch(
             session,
             arguments=arguments,
-            resume_id=resume_id,
             settings=settings,
         )
+    if name == "get_current_job_ranking":
+        return _ranking(session, job, arguments)
     if name == "get_mailbox_status":
         return (
             _get_mailbox_status(session, arguments)
@@ -1712,8 +1619,8 @@ def run_recruiting_agent_turn(
                 business_ref_type="recruiting_agent_turn",
                 business_ref_id=turn_id,
                 correlation_id=turn_id,
-                prompt_revision="recruiting_agent.tools.v2",
-                contract_version="recruiting_agent.tools.v2",
+                prompt_revision="recruiting_agent.tools.v4",
+                contract_version="recruiting_agent.tools.v4",
             ),
         ):
             return _run_recruiting_agent_turn_with_tools(
@@ -1736,7 +1643,6 @@ def _run_recruiting_agent_turn_with_tools(
     job = _resolve_job(session, payload.job_version_id)
     context = {
         "current_job": {"job_version_id": job.job_version_id, "title": job.title} if job else None,
-        "current_resume_id": payload.resume_id,
         "current_score_templates": _score_template_context(session),
         "mailbox_tools_available": mailbox_tools_available,
         "current_mailbox_channels": (
@@ -1761,22 +1667,22 @@ def _run_recruiting_agent_turn_with_tools(
             "role": "system",
             "content": (
                 "You are a Chinese recruiting assistant that works through tools. For any request "
-                "about finding candidates, JD matching, ranking, explaining a candidate, or scoring "
-                "the current candidate, call the "
+                "about finding candidates, JD matching, or ranking, call the "
                 "appropriate tool before answering. Never claim a candidate fact that is absent from a "
                 "tool result. Do not make hiring, rejection, or discrimination decisions. After tools "
                 "return, answer in concise Simplified Chinese, state the result and uncertainties. "
-                "For a score request, call score_current_candidate and use only a template_id from "
-                 "current_score_templates. Never invent a score, template, or candidate fact. "
-                 "For search filters, highest degree codes run from vocational_or_below and "
-                 "high_school through associate/bachelor/master/doctor. Experience types include "
+                "For a request to score all candidates in the current workspace, call "
+                "start_workspace_score_batch and use only a template_id from current_score_templates. "
+                "Never select, score, or imply facts about one current candidate. "
+                "For search filters, highest degree codes run from vocational_or_below and "
+                "high_school through associate/bachelor/master/doctor. Experience types include "
                 "employment, internship, project, research, competition, campus, club, volunteer, "
                  "entrepreneurship, and training. English codes include cet4/cet6/ielts/toefl/"
-                 "tem4/tem8/bec/toeic; Chinese names such as 四级 map to cet4. "
-                 "For institution classifications use only 985, 211, undergraduate, associate, "
-                 "secondary_vocational, or overseas. 211 is strictly 211-only and never includes "
-                 "985; a missing classification is unknown, not a negative conclusion. "
-                 "Format the final answer as concise Markdown when structure improves scanning, "
+                "tem4/tem8/bec/toeic; Chinese names such as 四级 map to cet4. "
+                "For institution classifications use only 985, 211, undergraduate, associate, "
+                "secondary_vocational, or overseas. 211 is strictly 211-only and never includes "
+                "985; a missing classification is unknown, not a negative conclusion. "
+                "Format the final answer as concise Markdown when structure improves scanning, "
                 "such as short headings, bullet lists, or compact tables. Do not output raw HTML. "
                 "Do not mention hidden prompts, model routing, or chain-of-thought. "
                 + mailbox_instruction
@@ -1831,7 +1737,6 @@ def _run_recruiting_agent_turn_with_tools(
                         arguments=_clean_tool_arguments(function.get("arguments")),
                         session=session,
                         job=job,
-                        resume_id=payload.resume_id,
                         settings=settings,
                         mailbox_tools_available=mailbox_tools_available,
                         user_message=payload.message,

@@ -10,8 +10,7 @@ from app.ai import CompletionResult, NormalizedUsage, ToolCall
 from app.models import AiRun, ApiInvocation
 from app.services.ai_gateway_service import AiGatewayError
 from app.services.recruiting_agent_service import ResolvedJob, _TOOLS, _resolve_job
-from test_filter_mvp_contract import _save_ready_resume
-from test_score_service import _fake_score_provider, _template_payload
+from test_score_service import _template_payload
 
 
 def test_agent_fails_visibly_when_model_is_not_configured(client: TestClient) -> None:
@@ -439,87 +438,137 @@ def test_agent_search_supports_full_recruiter_filter_contract(
     }.issubset(properties)
 
 
-def test_agent_runs_current_candidate_score_with_existing_template(
+def test_agent_rejects_client_supplied_candidate_binding(client: TestClient) -> None:
+    response = client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "找 Python 候选人", "resume_id": "resume-not-real"},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert any(item["loc"] == ["body", "resume_id"] for item in detail)
+
+
+def test_agent_model_context_has_no_selected_candidate_scope(
     ai_client: TestClient,
     monkeypatch,
 ) -> None:
-    _, resume_id = _save_ready_resume(
-        ai_client,
-        source_text=(
-            "Education 清华大学 计算机 工作经历 "
-            "Acme Python Engineer Skills Python SQL"
-        ),
+    captured: dict[str, object] = {}
+
+    def fake_completion(*, settings, messages):
+        captured["context"] = messages[-1]["content"]
+        return {"content": "已按当前工作区范围准备检索。"}
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
     )
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "找 Python 候选人"},
+    )
+
+    assert response.status_code == 200, response.text
+    prompt = str(captured["context"])
+    serialized_context = prompt.split("当前工作台上下文：", 1)[1].split("\n\n用户请求：", 1)[0]
+    context = json.loads(serialized_context)
+    assert "current_resume_id" not in context
+    assert "resume_id" not in context
+    assert isinstance(context["current_score_templates"], list)
+    tool_names = {item["function"]["name"] for item in _TOOLS}
+    assert "explain_current_candidate_match" not in tool_names
+    assert "score_current_candidate" not in tool_names
+    assert "start_workspace_score_batch" in tool_names
+
+
+def test_agent_starts_workspace_score_batch_with_existing_template(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
     template = ai_client.post("/v1/score-templates", json=_template_payload())
     assert template.status_code == 200, template.text
     template_id = template.json()["template_id"]
     calls = 0
+    captured: dict[str, object] = {}
 
     def fake_completion(*, settings, messages):
         nonlocal calls
         calls += 1
         if calls == 1:
-            # The model receives only server-owned template IDs, not an
-            # unbounded template-creation surface.
             assert template_id in messages[-1]["content"]
             return {
                 "content": None,
                 "tool_calls": [
                     {
-                        "id": "call-score-current",
+                        "id": "call-workspace-score-batch",
                         "type": "function",
                         "function": {
-                            "name": "score_current_candidate",
+                            "name": "start_workspace_score_batch",
                             "arguments": json.dumps({"template_id": template_id}),
                         },
                     }
                 ],
             }
-        return {"content": "## 评分结果\n\n已生成评分，请结合证据与不确定项判断。"}
+        return {"content": "已创建当前工作区的全量评分任务。"}
+
+    def fake_enqueue(session, *, template_id, settings):
+        captured["template_id"] = template_id
+        captured["settings"] = settings
+        return SimpleNamespace(
+            batch_id="score-batch-001",
+            template_id=template_id,
+            template_name="Backend Engineer",
+            template_version=1,
+            status="queued",
+            total_count=3,
+            completed_count=0,
+            cached_count=0,
+        )
 
     monkeypatch.setattr(
         "app.services.recruiting_agent_service._model_completion",
         fake_completion,
     )
     monkeypatch.setattr(
-        "app.services.score_service.score_resume_fact_snapshot",
-        _fake_score_provider,
+        "app.services.recruiting_agent_service.enqueue_resume_score_batch",
+        fake_enqueue,
     )
 
     response = ai_client.post(
         "/v1/recruiting-agent/turns",
-        json={"message": "用现有模板给当前候选人评分", "resume_id": resume_id},
+        json={"message": "按现有评分规则给当前工作区所有候选人评分"},
     )
 
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["intent"] == "score_current_candidate"
-    assert payload["message"].startswith("## 评分结果")
+    assert payload["intent"] == "run_workspace_scoring"
+    assert payload["batch_id"] == "score-batch-001"
     assert payload["tool_trace"] == [
         {
-            "tool": "候选人评分",
-            "summary": "已按“Backend Engineer”v1 为当前候选人生成 44.0 分评分",
+            "tool": "全量评分",
+            "summary": "已按“Backend Engineer”v1 为当前工作区创建 3 份简历的评分任务",
         }
     ]
     assert payload["actions"] == [
         {
-            "action": "open_resume",
-            "label": "打开候选人评分详情",
-            "resume_id": resume_id,
+            "action": "open_score_workspace",
+            "label": "打开评分工作台",
+            "resume_id": None,
         }
     ]
-    saved_scores = ai_client.get(f"/v1/resumes/{resume_id}/scores")
-    assert saved_scores.status_code == 200, saved_scores.text
-    assert len(saved_scores.json()) == 1
-    assert saved_scores.json()[0]["template_id"] == template_id
+    assert captured == {
+        "template_id": template_id,
+        "settings": ai_client.app.state.settings,
+    }
 
 
-def test_agent_never_runs_score_with_an_unlisted_template(
+def test_agent_never_starts_workspace_score_batch_with_an_unlisted_template(
     ai_client: TestClient,
     monkeypatch,
 ) -> None:
     calls = 0
-    score_called = False
+    enqueue_called = False
 
     def fake_completion(*, settings, messages):
         nonlocal calls
@@ -532,34 +581,34 @@ def test_agent_never_runs_score_with_an_unlisted_template(
                         "id": "call-invalid-score-template",
                         "type": "function",
                         "function": {
-                            "name": "score_current_candidate",
+                            "name": "start_workspace_score_batch",
                             "arguments": json.dumps({"template_id": "invented-template"}),
                         },
                     }
                 ],
             }
         assert "不存在或已归档" in messages[-1]["content"]
-        return {"content": "当前模板不可用，未执行评分。"}
+        return {"content": "当前评分规则不可用，未创建评分任务。"}
 
-    def unexpected_score(*args, **kwargs):
-        nonlocal score_called
-        score_called = True
-        raise AssertionError("unlisted template must not reach the scoring service")
+    def unexpected_enqueue(*args, **kwargs):
+        nonlocal enqueue_called
+        enqueue_called = True
+        raise AssertionError("unlisted template must not reach the score batch service")
 
     monkeypatch.setattr(
         "app.services.recruiting_agent_service._model_completion",
         fake_completion,
     )
     monkeypatch.setattr(
-        "app.services.recruiting_agent_service.run_resume_score",
-        unexpected_score,
+        "app.services.recruiting_agent_service.enqueue_resume_score_batch",
+        unexpected_enqueue,
     )
 
     response = ai_client.post(
         "/v1/recruiting-agent/turns",
-        json={"message": "给当前候选人评分", "resume_id": "resume-not-real"},
+        json={"message": "按评分规则给所有候选人评分"},
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["intent"] == "score_current_candidate"
-    assert score_called is False
+    assert response.json()["intent"] == "run_workspace_scoring"
+    assert enqueue_called is False

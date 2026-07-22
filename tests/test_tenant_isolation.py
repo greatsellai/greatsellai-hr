@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from email.message import EmailMessage
 from io import BytesIO
+import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -18,6 +19,7 @@ from app.models import (
     Candidate,
     EmailAttachmentImport,
     Job,
+    JobRequirement,
     JobVersion,
     MailboxConfig,
     MailboxAttachmentContentIdentity,
@@ -78,6 +80,8 @@ def workspace_clients(tmp_path: Path) -> Iterator[tuple[TestClient, TestClient]]
         min_text_chars_per_page=20,
         transactional_email_provider="test",
         public_app_url="http://testserver",
+        deepseek_api_key="tenant-agent-test-key",
+        deepseek_model="tenant-agent-test-model",
         # This two-session integration fixture uses a deterministic IMAP
         # double for one provider name. Keep that test-only endpoint explicit
         # instead of weakening the production exact-host allowlist.
@@ -294,6 +298,19 @@ def _seed_workspace_b_private_resources(
             title=job.title,
             raw_text=job.jd_text,
             status="confirmed",
+            requirements=[
+                JobRequirement(
+                    requirement_key="tenant-agent-fixture",
+                    priority="must_have",
+                    category="skill",
+                    raw_requirement="Tenant agent fixture skill",
+                    normalized_value={},
+                    minimum_months=None,
+                    weight=100,
+                    clause_ids=[],
+                    sort_order=1,
+                )
+            ],
         )
         session.add(job_version)
         session.commit()
@@ -574,6 +591,81 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert foreign_task_history.status_code == 404, foreign_task_history.text
     assert a_task_history.status_code == 200, a_task_history.text
     assert task_id not in {item["job_id"] for item in a_task_history.json()["items"]}
+
+
+def test_recruiting_agent_scopes_search_and_current_jd_to_request_workspace(
+    workspace_clients: tuple[TestClient, TestClient],
+    monkeypatch,
+) -> None:
+    client_a, client_b = workspace_clients
+    _register_and_login(
+        client_a,
+        organization_name="Agent Workspace Alpha",
+        full_name="Alpha Admin",
+        email="agent-alpha@example.test",
+        password="tenant-test-password-a",
+    )
+    session_b = _register_and_login(
+        client_b,
+        organization_name="Agent Workspace Beta",
+        full_name="Beta Admin",
+        email="agent-beta@example.test",
+        password="tenant-test-password-b",
+    )
+    private = _seed_workspace_b_private_resources(
+        client_b,
+        organization_id=str(session_b["organization"]["organization_id"]),
+    )
+
+    def fake_completion(*, settings, messages):
+        if messages[-1].get("role") == "tool":
+            return {"content": "已按当前工作区完成检索。"}
+        return {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-search-workspace",
+                    "type": "function",
+                    "function": {
+                        "name": "search_candidates",
+                        "arguments": json.dumps({"limit": 20}),
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+
+    b_response = client_b.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "检索当前工作区候选人",
+            "job_version_id": private["job_version_id"],
+        },
+    )
+    assert b_response.status_code == 200, b_response.text
+    assert b_response.json()["job_version_id"] == private["job_version_id"]
+    assert private["search_resume_id"] in {
+        item["resume_id"] for item in b_response.json()["candidates"]
+    }
+
+    # Even when A submits B's opaque JD version ID, the Agent must neither
+    # resolve that JD nor return B's searchable candidate card.
+    a_response = client_a.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "检索当前工作区候选人",
+            "job_version_id": private["job_version_id"],
+        },
+    )
+    assert a_response.status_code == 200, a_response.text
+    assert a_response.json()["job_version_id"] is None
+    assert private["search_resume_id"] not in {
+        item["resume_id"] for item in a_response.json()["candidates"]
+    }
 
 
 def test_identical_mailbox_attachment_is_not_deduplicated_across_workspaces(

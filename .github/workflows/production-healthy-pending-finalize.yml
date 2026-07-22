@@ -88,7 +88,7 @@ jobs:
           : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
           : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
           : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
-          scripts/finalize-healthy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT" \
+          bash scripts/finalize-healthy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT" \
             --host "$PROD_DEPLOY_HOST" \
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \

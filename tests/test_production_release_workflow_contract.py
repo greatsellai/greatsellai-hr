@@ -82,7 +82,7 @@ def test_healthy_pending_finalization_is_manual_and_read_only_for_runtime_state(
     assert "group: greatsellai-hr-production" in workflow
     assert "environment:" in workflow and "name: production" in workflow
     assert "ref: main" in workflow
-    assert 'scripts/finalize-healthy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
+    assert 'bash scripts/finalize-healthy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
     assert "git merge-base --is-ancestor" in workflow
     assert "StrictHostKeyChecking=yes" in wrapper
     assert "does not build, migrate, stop, start, recreate, restore, remove" in wrapper

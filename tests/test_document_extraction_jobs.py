@@ -98,6 +98,15 @@ def test_upload_only_persists_original_and_document_job_before_worker_runs(
             )
         ).all() == []
 
+    premature_ai_request = ai_client.post(
+        f"/v1/resumes/{payload['resume_id']}/queue-ai-extraction"
+    )
+    assert premature_ai_request.status_code == 409, premature_ai_request.text
+    assert (
+        premature_ai_request.json()["detail"]
+        == "resume_document_extraction_in_progress"
+    )
+
 
 @pytest.mark.parametrize(
     ("filename", "content", "media_type"),

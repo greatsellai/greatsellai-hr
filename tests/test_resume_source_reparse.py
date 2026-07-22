@@ -27,10 +27,21 @@ def test_reparse_replaces_source_evidence_and_resets_inactive_job(
     candidate_id = create_candidate(client)
     resume_id = upload_text_resume(client, candidate_id)
     database = client.app.state.database
+    inline_parse_calls: list[object] = []
+    original_resolver = resume_service.resolve_uploaded_resume_path
+
+    def inline_parse_must_not_run(*_args: object, **_kwargs: object) -> None:
+        inline_parse_calls.append(True)
+        raise AssertionError("source reparse service must not open or parse the original")
 
     monkeypatch.setattr(
         resume_service,
-        "extract_pdf_text",
+        "resolve_uploaded_resume_path",
+        inline_parse_must_not_run,
+    )
+    monkeypatch.setattr(
+        document_extraction_job_service,
+        "extract_document_text",
         lambda *args, **kwargs: PdfExtractionResult(
             source_page_count=1,
             parsed_page_count=1,
@@ -55,6 +66,29 @@ def test_reparse_replaces_source_evidence_and_resets_inactive_job(
         )
         session.commit()
 
+        document_job = session.scalar(
+            select(ResumeDocumentExtractionJob).where(
+                ResumeDocumentExtractionJob.resume_id == resume_id
+            )
+        )
+        assert document_job is not None
+        assert document_job.status == "queued"
+
+    assert inline_parse_calls == []
+    monkeypatch.setattr(
+        resume_service,
+        "resolve_uploaded_resume_path",
+        original_resolver,
+    )
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        database,
+        settings=client.app.state.settings,
+        worker_id="inactive-reparse-document-worker",
+    )
+
+    with database.session_factory() as session:
+        resume = session.get(Resume, resume_id)
+        assert resume is not None
         block = session.scalar(
             select(ResumeSourceBlock).where(
                 ResumeSourceBlock.resume_id == resume_id,
@@ -152,7 +186,12 @@ def test_active_source_reparse_creates_isolated_new_resume_version(
         inline_parse_calls.append(True)
         raise AssertionError("reparse HTTP/service path must not parse the original")
 
-    monkeypatch.setattr(resume_service, "extract_document_text", inline_parse_must_not_run)
+    monkeypatch.setattr(
+        resume_service,
+        "extract_document_text",
+        inline_parse_must_not_run,
+        raising=False,
+    )
     monkeypatch.setattr(
         document_extraction_job_service,
         "extract_document_text",
@@ -302,6 +341,7 @@ def test_active_source_reparse_endpoint_creates_a_new_version(
         resume_service,
         "extract_document_text",
         inline_parse_must_not_run,
+        raising=False,
     )
     monkeypatch.setattr(
         document_extraction_job_service,

@@ -206,6 +206,11 @@ def request_resume_ai_extraction(
     """
 
     resume = get_resume(session, resume_id)
+    document_job = resume.document_extraction_job
+    if document_job is not None and document_job.status in {"queued", "running"}:
+        # Source blocks from a previous failed/reparse attempt must never be
+        # sent to the model while their replacement is still being normalized.
+        raise AiExtractionJobError("resume_document_extraction_in_progress")
     job = resume.ai_extraction_job
     if job is None:
         if not resume.source_blocks:

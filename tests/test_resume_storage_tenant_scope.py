@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from app.config import AppSettings
 from app.database import Database
 from app.models import Organization
-from app.services import resume_service
 from app.services.resume_service import (
     IdempotencyConflictError,
     NotFoundError,
@@ -24,7 +23,6 @@ from app.services.resume_service import (
     resolve_uploaded_resume_path,
     save_pdf_resume,
 )
-from app.services.text_extraction import ExtractedPage, PdfExtractionResult
 from app.tenant_scope import (
     LEGACY_ORGANIZATION_ID,
     clear_organization_context,
@@ -71,23 +69,6 @@ def _database_with_workspaces() -> Database:
     return database
 
 
-def _extraction_result() -> PdfExtractionResult:
-    return PdfExtractionResult(
-        source_page_count=1,
-        parsed_page_count=1,
-        pages=[
-            ExtractedPage(
-                page_no=1,
-                text="Python SQL experience",
-                non_whitespace_chars=21,
-            )
-        ],
-        raw_text="Python SQL experience",
-        quality_flags=[],
-        parser_version="tenant-storage-test",
-    )
-
-
 def _save_resume(
     session: Session,
     *,
@@ -109,15 +90,9 @@ def _save_resume(
 
 def test_new_upload_keys_and_files_are_workspaced(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = _database_with_workspaces()
     settings = _settings(tmp_path)
-    monkeypatch.setattr(
-        resume_service,
-        "extract_document_text",
-        lambda *_args, **_kwargs: _extraction_result(),
-    )
 
     with database.session_factory() as session:
         _, resume = _save_resume(
@@ -185,15 +160,9 @@ def test_flat_legacy_files_are_not_available_to_new_workspaces(tmp_path: Path) -
 
 def test_same_idempotency_key_is_independent_per_workspace(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = _database_with_workspaces()
     settings = _settings(tmp_path)
-    monkeypatch.setattr(
-        resume_service,
-        "extract_document_text",
-        lambda *_args, **_kwargs: _extraction_result(),
-    )
     key = "same-client-retry-key"
     content_hash = "a" * 64
 

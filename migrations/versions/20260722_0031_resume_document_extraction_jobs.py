@@ -1,7 +1,7 @@
 """Queue untrusted original-file parsing outside API requests.
 
-Revision ID: 20260722_0030
-Revises: 20260721_0029
+Revision ID: 20260722_0031
+Revises: 20260722_0030
 Create Date: 2026-07-22 10:00:00
 """
 from __future__ import annotations
@@ -12,8 +12,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260722_0030"
-down_revision: Union[str, Sequence[str], None] = "20260721_0029"
+revision: str = "20260722_0031"
+down_revision: Union[str, Sequence[str], None] = "20260722_0030"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

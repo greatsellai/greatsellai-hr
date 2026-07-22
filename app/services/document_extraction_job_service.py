@@ -100,6 +100,65 @@ def enqueue_uploaded_resume_document_extraction(
     return job
 
 
+def request_resume_document_extraction(
+    session: Session,
+    *,
+    resume_id: str,
+    settings: AppSettings,
+) -> Resume:
+    """Queue/requeue source normalization without parsing in the caller.
+
+    This is the inactive-version counterpart to the upload path.  It is kept
+    separate from ``enqueue_uploaded_resume_document_extraction`` because a
+    terminal job may be deliberately retried after a parser/OCR upgrade.  An
+    active or ready screening version remains immutable, and an in-flight AI
+    job is never allowed to race a replacement source document.
+    """
+
+    resume = session.scalar(select(Resume).where(Resume.id == resume_id))
+    if resume is None:
+        raise DocumentExtractionJobError("resume_not_found")
+    if resume.is_active or resume.extraction_status == "ready":
+        raise DocumentExtractionJobError("active_resume_cannot_be_reparsed")
+    ai_job = resume.ai_extraction_job
+    if ai_job is not None and ai_job.status in {"queued", "running"}:
+        raise DocumentExtractionJobError("resume_ai_extraction_already_running")
+
+    job = resume.document_extraction_job
+    if job is not None and job.status in {
+        DOCUMENT_EXTRACTION_QUEUED,
+        DOCUMENT_EXTRACTION_RUNNING,
+    }:
+        return resume
+
+    now = utcnow()
+    if job is None:
+        job = ResumeDocumentExtractionJob(
+            organization_id=resume.organization_id,
+            resume_id=resume.id,
+        )
+        session.add(job)
+        resume.document_extraction_job = job
+    job.status = DOCUMENT_EXTRACTION_QUEUED
+    job.attempt_count = 0
+    job.max_attempts = settings.document_extraction_job_max_attempts
+    job.next_attempt_at = now
+    job.lease_owner = None
+    job.lease_expires_at = None
+    job.last_error = None
+    job.requested_at = now
+    job.started_at = None
+    job.completed_at = None
+
+    # A reparse produces a new evidence version.  Existing source blocks stay
+    # transactionally intact until the worker has saved the replacement, but
+    # no model job may consume them while normalization is pending.
+    resume.facts_version += 1
+    resume.extraction_status = DOCUMENT_EXTRACTION_QUEUED
+    session.flush()
+    return resume
+
+
 def run_document_extraction_worker_once(
     database: Database,
     *,
@@ -531,26 +590,28 @@ def _save_completed_document_extraction(
                         text=page_text,
                     )
                 )
-            session.flush()
-            if has_source_text:
-                # Import lazily because the AI worker imports resume services
-                # for grounded fact persistence. A document job is complete
-                # only after the successor AI job is durably visible.
-                from app.services.ai_extraction_job_service import (
-                    enqueue_uploaded_resume_ai_extraction,
-                )
-
-                enqueue_uploaded_resume_ai_extraction(
-                    session,
-                    resume=resume,
-                    settings=settings,
-                )
             job.status = DOCUMENT_EXTRACTION_COMPLETED
             job.next_attempt_at = None
             job.lease_owner = None
             job.lease_expires_at = None
             job.last_error = None
             job.completed_at = utcnow()
+            session.flush()
+            if has_source_text:
+                # A reparse can have a terminal prior AI job.  Requeue it
+                # against the freshly incremented facts version rather than
+                # silently retaining that stale terminal state.  The document
+                # job is marked completed first, so the AI request is never
+                # blocked by an in-flight source-normalization guard.
+                from app.services.ai_extraction_job_service import (
+                    request_resume_ai_extraction,
+                )
+
+                request_resume_ai_extraction(
+                    session,
+                    resume_id=resume.id,
+                    settings=settings,
+                )
             session.commit()
 
 
@@ -671,5 +732,6 @@ __all__ = [
     "DocumentExtractionJobError",
     "document_extraction_state",
     "enqueue_uploaded_resume_document_extraction",
+    "request_resume_document_extraction",
     "run_document_extraction_worker_once",
 ]

@@ -7,6 +7,9 @@ x-app-environment: &app-environment
   RESUME_V3_DATABASE_URL: postgresql+psycopg://resume_v3:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}@db:5432/resume_v3
   RESUME_V3_DATA_DIR: /var/lib/resume-v3
   RESUME_V3_ADMIN_TOKEN: ${RESUME_V3_ADMIN_TOKEN:?set RESUME_V3_ADMIN_TOKEN in .env.production}
+  # Disabled by default. When explicitly enabled, preserves the historical
+  # password-only administrator entry for the legacy workspace.
+  RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED: ${RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED:-0}
   RESUME_V3_SESSION_SECRET: ${RESUME_V3_SESSION_SECRET:?set RESUME_V3_SESSION_SECRET in .env.production}
   RESUME_V3_SESSION_COOKIE_SECURE: ${RESUME_V3_SESSION_COOKIE_SECURE:-1}
   # The API accepts Caddy's final X-Forwarded-For value only when the direct

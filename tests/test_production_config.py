@@ -134,6 +134,27 @@ def test_compose_injects_generic_provider_credential_map_into_api_and_worker() -
         assert "    environment: *app-environment" in match.group("body")
 
 
+def test_compose_explicitly_wires_the_opt_in_legacy_admin_entry_flag() -> None:
+    """A configured compatibility login flag must reach the API process.
+
+    The identity service keeps this password-only entry disabled by default,
+    but an operator must be able to enable the documented compatibility path
+    without editing the Compose source on a production host.
+    """
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "compose.yml").read_text(encoding="utf-8")
+    production_example = (root / ".env.production.example").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED: "
+        "${RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED:-0}"
+    ) in compose
+    assert "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED=0" in production_example
+
+
 def test_compose_pins_the_only_trusted_proxy_to_caddy_private_address() -> None:
     """Rendered production config must not silently ignore Caddy forwarding.
 

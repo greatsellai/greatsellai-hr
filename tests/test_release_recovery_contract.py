@@ -272,6 +272,151 @@ def test_healthy_pending_finalizer_archives_only_an_already_healthy_target() -> 
     assert "does not build, migrate, stop, start, recreate, restore, remove" in wrapper
 
 
+def test_healthy_pending_finalizer_only_accepts_a_replayed_current_target(
+    tmp_path: Path,
+) -> None:
+    """Exercise the actual Bash guard for the one recoverable record shape."""
+
+    if os.name != "posix":
+        pytest.skip("the release helper is executed by Bash on the production host")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required for the release helper contract")
+
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    start = helper.index("archive_verified_healthy_pending_record()")
+    end = helper.index("\nrestore_unlocked()", start)
+    definitions = helper[start:end]
+    tag = "prod-20260722-aaaaaaaa"
+    commit = "a" * 40
+    source_dir = tmp_path / "history" / "release-sources" / commit
+
+    def run_case(*, pending_previous_tag: str, pending_previous_commit: str) -> subprocess.CompletedProcess[str]:
+        case_root = tmp_path / pending_previous_commit[:7]
+        history_dir = case_root / "history"
+        project_dir = case_root / "project"
+        source = history_dir / "release-sources" / commit
+        (history_dir / "releases").mkdir(parents=True)
+        project_dir.mkdir()
+        current = history_dir / "current-release.env"
+        pending = history_dir / "pending-release.env"
+        current.write_text(
+            "\n".join(
+                (
+                    "state=complete",
+                    f"tag={tag}",
+                    f"commit={commit}",
+                    f"source_dir={source}",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        pending.write_text(
+            "\n".join(
+                (
+                    "format_version=1",
+                    "state=prepared",
+                    f"tag={tag}",
+                    f"commit={commit}",
+                    f"source_dir={source}",
+                    f"previous_tag={pending_previous_tag}",
+                    f"previous_commit={pending_previous_commit}",
+                    "mode=deploy",
+                    "backup_state=complete",
+                    "backup_id=pre-synthetic",
+                    "prepared_at=2026-07-22T00:00:00Z",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        harness = case_root / "healthy-pending-finalize.sh"
+        harness.write_text(
+            definitions
+            + f"""
+set -Eeuo pipefail
+die() {{ echo "$*" >&2; exit 1; }}
+validate_environment_dir() {{ :; }}
+validate_history_dir() {{ :; }}
+require_release_reference() {{ :; }}
+record_value() {{ sed -n "s/^$2=//p" "$1" | tail -n 1; }}
+load_current_runtime() {{
+  current_tag="$(record_value "$2/current-release.env" tag)"
+  current_commit="$(record_value "$2/current-release.env" commit)"
+  current_source_dir="$(record_value "$2/current-release.env" source_dir)"
+}}
+validate_pending_target_source() {{ touch {str(case_root / 'source-validated')!r}; }}
+validate_pending_target_backup() {{ touch {str(case_root / 'backup-validated')!r}; }}
+compose_service_container_id() {{ printf 'synthetic-%s' "$4"; }}
+require_container_image() {{ :; }}
+require_container_state() {{ :; }}
+compose_run() {{ :; }}
+verify_public_runtime() {{ touch {str(case_root / 'public-verified')!r}; }}
+sudo() {{
+  [[ "${{1:-}}" == -n ]] && shift
+  [[ "${{1:-}}" == docker ]] || return 1
+  shift
+  case "${{1:-}}" in
+    inspect)
+      template="${{3:-}}"
+      container="${{@: -1}}"
+      case "$template" in
+        *State.ExitCode*) printf 0 ;;
+        *State.Health*) printf healthy ;;
+        *range\\ .Aliases*) printf api ;;
+        *NetworkSettings.Networks*)
+          if [[ "$container" == synthetic-api ]]; then printf 172.30.0.3; else printf 172.30.0.2; fi
+          ;;
+        *Name*) printf '/%s' "$container" ;;
+      esac
+      ;;
+    network)
+      [[ "${{2:-}}" == inspect ]] && printf 'synthetic-api\\nsynthetic-caddy\\n'
+      ;;
+  esac
+}}
+api_proxy_ip=172.30.0.3
+caddy_proxy_ip=172.30.0.2
+proxy_network_name=resume-screening-v3_proxy
+finalize_healthy_pending_target_unlocked \\
+  {str(project_dir)!r} \\
+  {str(history_dir)!r} \\
+  {tag!r} \\
+  {commit!r} \\
+  FINALIZE_HEALTHY_PENDING_RUNTIME \\
+  {'b' * 64}
+""",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [bash, str(harness)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    successful = run_case(pending_previous_tag=tag, pending_previous_commit=commit)
+    assert successful.returncode == 0, successful.stderr
+    successful_root = tmp_path / commit[:7]
+    assert not (successful_root / "history" / "pending-release.env").exists()
+    assert (successful_root / "source-validated").exists()
+    assert (successful_root / "backup-validated").exists()
+    assert (successful_root / "public-verified").exists()
+    assert list((successful_root / "history" / "releases").glob("finalized-healthy-*.env"))
+
+    rejected = run_case(
+        pending_previous_tag="prod-20260722-bbbbbbbb",
+        pending_previous_commit="b" * 40,
+    )
+    assert rejected.returncode != 0
+    rejected_root = tmp_path / "bbbbbbb"
+    assert (rejected_root / "history" / "pending-release.env").exists()
+    assert not list((rejected_root / "history" / "releases").glob("finalized-healthy-*.env"))
+
+
 def test_legacy_reconciliation_refuses_structured_pending_metadata() -> None:
     helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
         encoding="utf-8"

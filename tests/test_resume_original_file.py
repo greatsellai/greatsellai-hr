@@ -84,6 +84,7 @@ def test_original_pdf_keeps_the_existing_admin_authentication(tmp_path: Path) ->
         upload_dir=data_dir / "uploads",
         database_url="sqlite://",
         admin_token="test-admin-token",
+        legacy_admin_token_enabled=True,
         min_text_chars_per_page=20,
     )
     app = create_app(settings)
@@ -91,4 +92,4 @@ def test_original_pdf_keeps_the_existing_admin_authentication(tmp_path: Path) ->
         response = protected_client.get("/v1/resumes/not-a-real-resume/original-file")
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "invalid_admin_token"
+    assert response.json()["detail"] == "authentication_required"

@@ -228,19 +228,16 @@ def _organization_session(session: Session, organization_id: str) -> Iterator[No
 
 
 def _fernet(settings: AppSettings) -> Fernet:
-    """Use a dedicated key when present, otherwise derive from app session key."""
+    """Use a dedicated key in production; never derive from admin tokens."""
 
-    material = (
-        settings.email_credentials_key
-        or settings.session_secret
-        or settings.admin_token
-        or "resume-v3-development-session"
-    )
     if settings.email_credentials_key:
         try:
-            return Fernet(material.encode("utf-8"))
+            return Fernet(settings.email_credentials_key.encode("utf-8"))
         except (ValueError, TypeError) as exc:
             raise MailboxImportError("mailbox_credentials_key_invalid") from exc
+    if settings.environment in {"production", "prod"}:
+        raise MailboxImportError("mailbox_credentials_key_not_configured")
+    material = settings.session_signing_secret()
     derived = base64.urlsafe_b64encode(hashlib.sha256(material.encode("utf-8")).digest())
     return Fernet(derived)
 

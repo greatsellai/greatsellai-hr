@@ -105,6 +105,8 @@
 .landing-button-dark:hover { background: #202a2a; border-color: rgb(255 255 255 / 0.32); }
 .landing-button-outline { color: var(--gs-charcoal); background: #fff; border-color: var(--gs-border); }
 .landing-button-outline:hover { color: var(--gs-red); border-color: var(--gs-red); }
+.landing-button-disabled { color: #697171; background: #edf0f0; border-color: #d7dddd; cursor: not-allowed; }
+.landing-button-disabled:hover { transform: none; }
 .landing-promises { display: flex; flex-wrap: wrap; gap: 0.55rem 1.05rem; padding: 0; margin: 1.5rem 0 0; color: rgb(255 255 255 / 0.72); list-style: none; font-size: 0.78rem; font-weight: 700; }
 .landing-promises li { display: inline-flex; align-items: center; gap: 0.3rem; }
 .landing-promises svg { color: #ff6e70; }
@@ -188,7 +190,7 @@
 .landing-efficiency-change svg { color: rgb(255 255 255 / 0.36); }
 .landing-efficiency-change b { color: #fff; font-size: clamp(1.35rem, 2vw, 1.8rem); letter-spacing: -0.045em; }
 .landing-efficiency-description { padding-top: 1rem; margin-bottom: 0; color: rgb(255 255 255 / 0.56); border-top: 1px solid rgb(255 255 255 / 0.1); font-size: 0.74rem; line-height: 1.65; }
-.landing-efficiency-note { max-width: 70rem; margin: 1rem 0 0; color: rgb(255 255 255 / 0.4); font-size: 0.68rem; line-height: 1.7; }
+.landing-efficiency-note { max-width: 70rem; margin: 1rem 0 0; color: rgb(255 255 255 / 0.64); font-size: 0.68rem; line-height: 1.7; }
 
 .landing-capabilities-section { padding: clamp(3.6rem, 4.8vw, 4.5rem) 0; background: #fff; }
 .landing-capabilities-section .landing-section-heading { align-items: center; }
@@ -220,15 +222,19 @@
 .landing-pricing-grid article { position: relative; display: flex; min-height: 27rem; flex-direction: column; padding: 1.45rem; overflow: hidden; background: #fff; border: 1px solid var(--gs-border); border-radius: 0.8rem; transition: transform 220ms ease, border-color 220ms ease, box-shadow 220ms ease; }
 .landing-pricing-grid article:hover { border-color: rgb(212 24 26 / 0.4); box-shadow: 0 28px 80px rgb(46 56 56 / 0.14); transform: translateY(-6px); }
 .landing-pricing-grid article.is-featured { color: #fff; background: var(--gs-panel); border-color: var(--gs-panel); box-shadow: 0 24px 80px rgb(212 24 26 / 0.14); }
+.landing-pricing-grid article.is-coming-soon { background: #f2f4f4; border-color: #dfe4e4; }
+.landing-pricing-grid article.is-coming-soon:hover { border-color: #dfe4e4; box-shadow: none; transform: none; }
 .landing-pricing-grid article.is-featured::before { position: absolute; inset: 0; content: ""; background: linear-gradient(135deg, rgb(212 24 26 / 0.27), transparent 34%), linear-gradient(315deg, rgb(212 24 26 / 0.15), transparent 30%); pointer-events: none; }
 .landing-pricing-grid article > * { position: relative; z-index: 1; }
 .landing-plan-badge { position: absolute !important; top: 1.1rem; right: 1.1rem; padding: 0.3rem 0.58rem; color: #fff; background: var(--gs-red); border-radius: 99px; font-size: 0.69rem; font-weight: 850; }
+.landing-plan-badge-muted { color: #465050; background: #dce2e2; }
 .landing-plan-name { margin-bottom: 0.4rem; font-size: 1.28rem; font-weight: 900; }
 .landing-plan-eyebrow { min-height: 2.8rem; margin-bottom: 1.2rem; color: var(--gs-gray); font-size: 0.78rem; line-height: 1.55; }
 .is-featured .landing-plan-eyebrow { color: rgb(255 255 255 / 0.64); }
 .landing-plan-price { display: flex; align-items: end; gap: 0.4rem; padding-bottom: 1.2rem; margin-bottom: 1.2rem; border-bottom: 1px solid var(--gs-border); }
 .is-featured .landing-plan-price { border-color: rgb(255 255 255 / 0.16); }
 .landing-plan-price b { font-family: Inter, Arial, sans-serif; font-size: 2.55rem; line-height: 1; letter-spacing: -0.06em; }
+.is-coming-soon .landing-plan-price b { color: #465050; font-family: var(--gs-font); font-size: 1.5rem; letter-spacing: -0.025em; }
 .landing-plan-price span { padding-bottom: 0.25rem; color: var(--gs-gray); font-size: 0.86rem; }
 .is-featured .landing-plan-price span { color: rgb(255 255 255 / 0.62); }
 .landing-pricing-grid ul { display: grid; gap: 0.65rem; padding: 0; margin: 0 0 1.5rem; color: #4d5656; list-style: none; font-size: 0.82rem; }

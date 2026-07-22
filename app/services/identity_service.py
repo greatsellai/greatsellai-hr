@@ -61,6 +61,14 @@ PASSWORD_R = 8
 PASSWORD_P = 1
 PASSWORD_DKLEN = 64
 PASSWORD_MIN_LENGTH = 8
+# Public, fixed scrypt material used only to equalize unknown/inactive login
+# work with a normal invalid-password check. It is deliberately not a secret,
+# cannot authenticate any account, and uses the same cost parameters as a
+# freshly created password hash. Keep it valid when changing PASSWORD_*.
+_LOGIN_DUMMY_PASSWORD_HASH = (
+    "scrypt$16384$8$1$iZ7two2EVlo-4Kl43l_Opw$"
+    "hVfkGHScvqF9wGt_799n6z1zSe99k1yIYswlD0axbjzXNF-qYl8-3NGyOECXv_GpcNz8Def00AgWmaRiEhWccA"
+)
 
 
 class IdentityServiceError(RuntimeError):
@@ -94,6 +102,21 @@ class AuthPrincipal:
         # newly registered tenant, so it remains compatible without a real
         # deliverable email address.
         return self.legacy_compatibility or self.user.email_verified_at is not None
+
+
+@dataclass(frozen=True)
+class IssuedPasswordReset:
+    """One in-memory recovery secret paired with its durable token row.
+
+    The raw token is intentionally short-lived: callers must encrypt it into
+    the transactional outbox in the same database transaction and must never
+    serialize or log it. The outbox references the token by ID only.
+    """
+
+    token: str
+    password_reset_token_id: str
+    user_id: str
+    recipient: str
 
 
 def utcnow() -> datetime:
@@ -515,7 +538,14 @@ def authenticate_email_password(
 ) -> AuthPrincipal:
     _, email_key = normalize_email(email_value)
     user = session.scalar(select(UserAccount).where(UserAccount.email_key == email_key))
-    if user is None or not user.is_active or not verify_password(password, user.password_hash):
+    if user is None or not user.is_active:
+        # Do the same bounded scrypt work as a wrong password before returning
+        # the shared public error. Without this, unknown/inactive accounts
+        # would skip password verification and create an obvious remote timing
+        # enumeration signal.
+        verify_password(password, _LOGIN_DUMMY_PASSWORD_HASH)
+        raise IdentityServiceError("invalid_login_credentials")
+    if not verify_password(password, user.password_hash):
         raise IdentityServiceError("invalid_login_credentials")
 
     memberships = session.scalars(
@@ -796,7 +826,7 @@ def issue_password_reset(
     *,
     email_value: str,
     ttl_seconds: int = 60 * 60,
-) -> str | None:
+) -> IssuedPasswordReset | None:
     """Issue exactly one usable reset token for an active account.
 
     The raw value is returned only to the delivery adapter and must never be
@@ -839,14 +869,19 @@ def issue_password_reset(
         session.flush()
 
     token = secrets.token_urlsafe(32)
-    session.add(
-        PasswordResetToken(
-            user_id=user.id,
-            token_digest=digest_token(token),
-            expires_at=now + timedelta(seconds=ttl_seconds),
-        )
+    reset = PasswordResetToken(
+        user_id=user.id,
+        token_digest=digest_token(token),
+        expires_at=now + timedelta(seconds=ttl_seconds),
     )
-    return token
+    session.add(reset)
+    session.flush()
+    return IssuedPasswordReset(
+        token=token,
+        password_reset_token_id=reset.id,
+        user_id=user.id,
+        recipient=user.email,
+    )
 
 
 def complete_password_reset(session: Session, *, token: str, password: str) -> None:

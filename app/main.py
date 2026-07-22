@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import secrets
@@ -174,19 +175,31 @@ from app.services.identity_service import (
     update_product_plan,
 )
 from app.services.transactional_email import (
-    PasswordResetDelivery,
     TransactionalEmailError,
     TransactionalEmailProvider,
     VerificationDelivery,
     build_transactional_email_provider,
     email_verification_url,
-    password_reset_url,
 )
 from app.services.registration_rate_limit import (
+    LoginRateLimitError,
     PasswordResetRateLimitError,
     RegistrationRateLimitError,
+    clear_login_account_backpressure,
+    ensure_login_rate_limit_available,
     enforce_password_reset_rate_limit,
     enforce_registration_rate_limit,
+    login_account_backpressure_delay_seconds,
+    record_login_account_backpressure_failure,
+    record_login_failure,
+)
+from app.services.public_auth_timing import (
+    begin_password_reset_response,
+    enforce_password_reset_minimum_response_time,
+)
+from app.services.transactional_email_outbox_service import (
+    TransactionalEmailOutboxError,
+    enqueue_password_reset_delivery,
 )
 from app.tenant_scope import organization_context_id, set_organization_context
 from app.services.institution_service import (
@@ -687,41 +700,12 @@ def _deliver_email_verification(
     return True
 
 
-def _deliver_password_reset(
-    *,
-    settings: AppSettings,
-    provider: TransactionalEmailProvider,
-    recipient: str,
-    token: str,
-) -> None:
-    """Best-effort recovery delivery that never changes the public outcome.
-
-    The request endpoint intentionally returns the same accepted response for
-    registered and unknown addresses.  Provider failure must not become an
-    account-existence oracle, and raw reset links must never enter logs or
-    database delivery state.
-    """
-
-    try:
-        provider.send_password_reset(
-            PasswordResetDelivery(
-                recipient=recipient,
-                reset_url=password_reset_url(settings, token=token),
-                expires_minutes=max(1, settings.password_reset_ttl_seconds // 60),
-            )
-        )
-    except TransactionalEmailError:
-        logger.warning("password_reset_delivery_failed")
-    except Exception:
-        logger.warning("password_reset_delivery_failed")
-
-
 def _registration_client_identifier(request: Request, settings: AppSettings) -> str:
     """Return a safe public-auth throttle key without trusting spoofed headers.
 
-    Registration and password reset intentionally share this trusted-proxy
-    resolver.  It only accepts Caddy's appended final X-Forwarded-For value
-    when the direct ASGI peer is an explicitly configured proxy network.
+    Registration, login, and password reset intentionally share this
+    trusted-proxy resolver. It only accepts Caddy's appended final
+    X-Forwarded-For value when the direct ASGI peer is explicitly trusted.
     """
 
     direct_peer = request.client.host if request.client is not None else "unknown"
@@ -765,6 +749,26 @@ def _password_reset_rate_limit_email_key(value: str) -> str:
     except IdentityServiceError:
         return f"invalid:{value.strip().casefold()}"
     return f"email:{email_key}"
+
+
+def _login_rate_limit_email_key(value: str | None) -> str:
+    """Return a HMAC-only account namespace for failed-login buckets."""
+
+    if value is None or not value.strip():
+        # The optional no-email shape belongs only to an explicitly enabled
+        # legacy migration bridge. It still receives a durable budget.
+        return "legacy_static_token"
+    try:
+        _, email_key = normalize_email(value)
+    except IdentityServiceError:
+        return f"invalid:{value.strip().casefold()}"
+    return f"email:{email_key}"
+
+
+def _public_auth_rate_limit_secret(settings: AppSettings) -> str:
+    """Use the session key, never a static administrator token, for HMACs."""
+
+    return settings.session_signing_secret()
 
 
 def _raise_job_service_error(exc: JobServiceError) -> None:
@@ -928,6 +932,7 @@ async def require_authenticated_member(
             principal = legacy_principal_from_session(session, request.session)
         if (
             principal is None
+            and settings.legacy_admin_token_enabled
             and settings.admin_token
             and x_admin_token
             and hmac.compare_digest(x_admin_token, settings.admin_token)
@@ -936,7 +941,9 @@ async def require_authenticated_member(
     if principal is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=("invalid_admin_token" if settings.admin_token else "authentication_required"),
+            # Never reveal whether a legacy compatibility token exists or is
+            # enabled. New production access is always a named account.
+            detail="authentication_required",
         )
 
     set_organization_context(session, principal.organization_id)
@@ -1044,9 +1051,9 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     )
     app.add_middleware(
         SessionMiddleware,
-        # The fallback only serves explicitly unauthenticated local workspaces.
-        # Production validation requires an independently configured secret.
-        secret_key=settings.session_secret or settings.admin_token or "resume-v3-development-session",
+        # Production never falls back to a legacy admin token or source-code
+        # literal. The settings helper retains a local-development fallback.
+        secret_key=settings.session_signing_secret(),
         session_cookie="resume_v3_session",
         max_age=60 * 60 * 12,
         same_site="strict",
@@ -1080,6 +1087,39 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         request: Request,
         session: Session = Depends(get_session),
     ) -> AuthSession:
+        rate_limit_kwargs = {
+            "secret": _public_auth_rate_limit_secret(settings),
+            "client_identifier": _registration_client_identifier(request, settings),
+            "email_key": _login_rate_limit_email_key(payload.email),
+            "client_limit": settings.login_rate_limit_client_limit,
+            "client_window_seconds": settings.login_rate_limit_client_window_seconds,
+            "email_limit": settings.login_rate_limit_email_limit,
+            "email_window_seconds": settings.login_rate_limit_email_window_seconds,
+        }
+        if not settings.allow_unauthenticated:
+            try:
+                ensure_login_rate_limit_available(session, **rate_limit_kwargs)
+            except LoginRateLimitError as exc:
+                session.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="login_rate_limit_exceeded",
+                ) from exc
+            # Rotating source IPs cannot bypass this account-keyed pressure:
+            # it is read before the expensive scrypt verification and grows
+            # only after failed credentials. It is never a hard lock; the
+            # configured delay is capped and a valid sign-in clears it.
+            backpressure_delay = login_account_backpressure_delay_seconds(
+                session,
+                secret=rate_limit_kwargs["secret"],
+                email_key=rate_limit_kwargs["email_key"],
+                window_seconds=settings.login_account_backpressure_window_seconds,
+                free_failures=settings.login_account_backpressure_free_failures,
+                base_delay_seconds=settings.login_account_backpressure_base_delay_seconds,
+                max_delay_seconds=settings.login_account_backpressure_max_delay_seconds,
+            )
+            if backpressure_delay > 0:
+                await asyncio.sleep(backpressure_delay)
         try:
             if payload.email:
                 principal = authenticate_email_password(
@@ -1088,7 +1128,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     password=payload.password,
                 )
             elif (
-                settings.admin_token
+                settings.legacy_admin_token_enabled
+                and settings.admin_token
                 and hmac.compare_digest(payload.password, settings.admin_token)
             ):
                 principal = legacy_principal(session)
@@ -1097,11 +1138,45 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             else:
                 raise IdentityServiceError("invalid_login_credentials")
         except IdentityServiceError as exc:
+            try:
+                if not settings.allow_unauthenticated:
+                    # A failed static-token compatibility attempt and a
+                    # failed email/password attempt share the same durable
+                    # non-enumerating public limiter.
+                    #
+                    # Commit the account-only progressive counter first. If
+                    # the per-client hard limiter has already exhausted its
+                    # short window, a distributed attack still cannot evade
+                    # the cross-IP pre-verification delay by changing IP.
+                    record_login_account_backpressure_failure(
+                        session,
+                        secret=rate_limit_kwargs["secret"],
+                        email_key=rate_limit_kwargs["email_key"],
+                        window_seconds=settings.login_account_backpressure_window_seconds,
+                    )
+                    _commit_or_raise(session)
+                    record_login_failure(session, **rate_limit_kwargs)
+                    _commit_or_raise(session)
+            except LoginRateLimitError as rate_limit_exc:
+                session.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="login_rate_limit_exceeded",
+                ) from rate_limit_exc
+            except HTTPException:
+                session.rollback()
+                raise
             session.rollback()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid_login_credentials",
             ) from exc
+        if not settings.allow_unauthenticated:
+            clear_login_account_backpressure(
+                session,
+                secret=rate_limit_kwargs["secret"],
+                email_key=rate_limit_kwargs["email_key"],
+            )
         _commit_or_raise(session)
         establish_session(request.session, principal)
         set_organization_context(session, principal.organization_id)
@@ -1135,11 +1210,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             _, email_key = normalize_email(payload.email)
             enforce_registration_rate_limit(
                 session,
-                secret=(
-                    settings.session_secret
-                    or settings.admin_token
-                    or "resume-v3-development-registration-rate-limit"
-                ),
+                secret=_public_auth_rate_limit_secret(settings),
                 client_identifier=_registration_client_identifier(request, settings),
                 email_key=email_key,
                 global_limit=settings.registration_rate_limit_global_limit,
@@ -1290,55 +1361,71 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     ) -> PasswordResetRequestResult:
         provider: TransactionalEmailProvider = request.app.state.transactional_email_provider
         settings: AppSettings = request.app.state.settings
+        response_started_at = begin_password_reset_response()
+        email_key = _password_reset_rate_limit_email_key(payload.email)
+        timing_secret = _public_auth_rate_limit_secret(settings)
         try:
-            # Persist abuse accounting before looking up the account or
-            # issuing a token.  In particular, a rejected request must never
-            # reach issue_password_reset(), because that method intentionally
-            # invalidates an older active recovery link when it replaces it.
-            enforce_password_reset_rate_limit(
-                session,
-                secret=(
-                    settings.session_secret
-                    or settings.admin_token
-                    or "resume-v3-development-password-reset-rate-limit"
-                ),
-                client_identifier=_registration_client_identifier(request, settings),
-                email_key=_password_reset_rate_limit_email_key(payload.email),
-                global_limit=settings.password_reset_rate_limit_global_limit,
-                global_window_seconds=settings.password_reset_rate_limit_global_window_seconds,
-                client_limit=settings.password_reset_rate_limit_client_limit,
-                client_window_seconds=settings.password_reset_rate_limit_client_window_seconds,
-                email_limit=settings.password_reset_rate_limit_email_limit,
-                email_window_seconds=settings.password_reset_rate_limit_email_window_seconds,
-            )
-            _commit_or_raise(session)
-        except PasswordResetRateLimitError as exc:
-            session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="password_reset_rate_limit_exceeded",
-            ) from exc
-        # Keep both the HTTP body and status identical for registered and
-        # unknown addresses.  The raw token exists only long enough to build
-        # the provider message, while its database row stores a digest.
-        if provider.password_reset_configured:
-            token = issue_password_reset(
-                session,
-                email_value=payload.email,
-                ttl_seconds=settings.password_reset_ttl_seconds,
-            )
-            _commit_or_raise(session)
-            if token is not None:
-                _deliver_password_reset(
-                    settings=settings,
-                    provider=provider,
-                    recipient=payload.email.strip(),
-                    token=token,
+            try:
+                # Persist abuse accounting before looking up the account or
+                # issuing a token. In particular, a rejected request must never
+                # reach issue_password_reset(), because that method intentionally
+                # invalidates an older active recovery link when it replaces it.
+                delivery_allowed = enforce_password_reset_rate_limit(
+                    session,
+                    secret=timing_secret,
+                    client_identifier=_registration_client_identifier(request, settings),
+                    email_key=email_key,
+                    client_limit=settings.password_reset_rate_limit_client_limit,
+                    client_window_seconds=settings.password_reset_rate_limit_client_window_seconds,
+                    email_limit=settings.password_reset_rate_limit_email_limit,
+                    email_window_seconds=settings.password_reset_rate_limit_email_window_seconds,
                 )
-        return PasswordResetRequestResult(
-            accepted=True,
-            delivery_available=provider.password_reset_configured,
-        )
+                _commit_or_raise(session)
+            except PasswordResetRateLimitError as exc:
+                session.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="password_reset_rate_limit_exceeded",
+                ) from exc
+            # Registered, unknown, email-suppressed, and client-throttled
+            # requests retain the same public response/timing strategy. A
+            # known account receives a durable encrypted outbox row only when
+            # the opaque email budget permits it; all provider I/O happens in
+            # the worker after the HTTP response.
+            if provider.password_reset_configured and delivery_allowed:
+                try:
+                    issued = issue_password_reset(
+                        session,
+                        email_value=payload.email,
+                        ttl_seconds=settings.password_reset_ttl_seconds,
+                    )
+                    if issued is not None:
+                        enqueue_password_reset_delivery(
+                            session,
+                            settings=settings,
+                            issued=issued,
+                        )
+                    _commit_or_raise(session)
+                except (TransactionalEmailOutboxError, IntegrityError, HTTPException):
+                    # A production startup validates the key, but retain a safe
+                    # public response if an operator rotates it incorrectly while
+                    # the API is live or a concurrent reset races the enqueue.
+                    # Do not leave an undeliverable active link, and never turn a
+                    # registered account into a public existence signal.
+                    session.rollback()
+                    logger.warning("password_reset_outbox_enqueue_unavailable")
+            return PasswordResetRequestResult(
+                accepted=True,
+                delivery_available=provider.password_reset_configured,
+            )
+        finally:
+            await enforce_password_reset_minimum_response_time(
+                started_at=response_started_at,
+                minimum_seconds=settings.password_reset_min_response_seconds,
+                jitter_seconds=settings.password_reset_response_jitter_seconds,
+                secret=timing_secret,
+                email_key=email_key,
+            )
 
     @app.post("/v1/auth/password-reset/complete", status_code=status.HTTP_204_NO_CONTENT)
     async def post_password_reset_complete(

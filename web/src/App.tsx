@@ -10,6 +10,7 @@ import {
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -1405,6 +1406,19 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const summaryRequestRef = useRef(0);
   const originalFileRequestRef = useRef(0);
   const originalFileRevokeRef = useRef<(() => void) | null>(null);
+  const agentTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  const canManageMailbox =
+    authSession?.role === "admin" &&
+    authSession.plan?.feature_flags.mailbox_import === true;
+  const canGenerateAiJd =
+    authSession?.role === "admin" &&
+    authSession.plan?.feature_flags.ai_jd_generation === true;
+
+  const closeAgent = useCallback(() => {
+    setAgentOpen(false);
+    window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+  }, []);
 
   const replaceFilterDraft = useCallback((next: FilterDraft) => {
     filterDraftRef.current = next;
@@ -1628,12 +1642,20 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (agentOpen) {
+        event.preventDefault();
+        closeAgent();
+        return;
+      }
       setDrawerOpen(false);
-      setAgentOpen(false);
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, []);
+  }, [agentOpen, closeAgent]);
+
+  useEffect(() => {
+    if (view === "inbox" && !canManageMailbox) setView("library");
+  }, [canManageMailbox, view]);
 
   const openCandidate = useCallback(
     (item: CandidateSearchItem, tab: DrawerTab = "summary") => {
@@ -2243,9 +2265,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
       <SideRail
         activeView={view}
         canManageCandidateData={authSession?.role === "admin"}
+        canManageMailbox={canManageMailbox}
         inert={drawerOpen || agentOpen}
         onChangeView={setView}
       />
@@ -2258,6 +2282,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             setDrawerOpen(false);
             setAgentOpen(true);
           }}
+          agentTriggerRef={agentTriggerRef}
           onLogout={() => void logout()}
           onNewUpload={() => setView("upload")}
           organizationName={authSession?.organization?.name ?? null}
@@ -2303,7 +2328,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           <div hidden={view !== "upload"}>
             <UploadPage onComplete={openUploadedResume} notify={notify} />
           </div>
-          {view === "inbox" && (
+          {view === "inbox" && canManageMailbox && (
             <MailboxPage
               notify={notify}
               onImported={() => setLibraryRefreshToken((current) => current + 1)}
@@ -2319,6 +2344,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           )}
           {view === "match" && (
             <MatchPage
+              canGenerateAiJd={canGenerateAiJd}
               selected={selectedResume}
               notify={notify}
               onOpenMatchedResume={openMatchedResume}
@@ -2337,8 +2363,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         aria-hidden="true"
         className={`drawer-scrim${drawerOpen || agentOpen ? " is-open" : ""}`}
         onClick={() => {
-          setDrawerOpen(false);
-          setAgentOpen(false);
+          if (agentOpen) closeAgent();
+          else setDrawerOpen(false);
         }}
       />
       <CandidateDrawer
@@ -2376,7 +2402,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           authSession?.plan?.feature_flags.mailbox_import === true
         }
         selectedResume={selectedResume}
-        onClose={() => setAgentOpen(false)}
+        onClose={closeAgent}
         onOpenMatchWorkspace={() => {
           setAgentOpen(false);
           setView("match");
@@ -2918,11 +2944,13 @@ function TrialStatusBanner({
 function SideRail({
   activeView,
   canManageCandidateData,
+  canManageMailbox,
   onChangeView,
   inert,
 }: {
   activeView: View;
   canManageCandidateData: boolean;
+  canManageMailbox: boolean;
   onChangeView: (view: View) => void;
   inert: boolean;
 }) {
@@ -2930,19 +2958,21 @@ function SideRail({
     <aside aria-label="主导航" className="side-rail" inert={inert}>
       <div aria-label="AI 简历筛选工作台" className="rail-mark" role="img" />
       <nav className="rail-nav">
-        {navigation.map((item) => (
-          <button
-            aria-current={activeView === item.view ? "page" : undefined}
-            aria-label={item.label}
-            className={`rail-item${activeView === item.view ? " is-active" : ""}`}
-            key={item.view}
-            onClick={() => onChangeView(item.view)}
-            type="button"
-          >
-            <Icon name={item.icon} size={19} />
-            <span className="rail-tooltip">{item.label}</span>
-          </button>
-        ))}
+        {navigation
+          .filter((item) => item.view !== "inbox" || canManageMailbox)
+          .map((item) => (
+            <button
+              aria-current={activeView === item.view ? "page" : undefined}
+              aria-label={item.label}
+              className={`rail-item${activeView === item.view ? " is-active" : ""}`}
+              key={item.view}
+              onClick={() => onChangeView(item.view)}
+              type="button"
+            >
+              <Icon name={item.icon} size={19} />
+              <span className="rail-tooltip">{item.label}</span>
+            </button>
+          ))}
       </nav>
       <div className="rail-bottom">
         <button aria-label="工作记录" className="rail-item" type="button">
@@ -2971,6 +3001,7 @@ function Topbar({
   onGlobalQueryChange,
   onGlobalSearchKeyDown,
   onOpenAgent,
+  agentTriggerRef,
   onLogout,
   onNewUpload,
   organizationName,
@@ -2983,6 +3014,7 @@ function Topbar({
   onGlobalQueryChange: (value: string) => void;
   onGlobalSearchKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => void;
   onOpenAgent: () => void;
+  agentTriggerRef: RefObject<HTMLButtonElement | null>;
   onLogout: () => void;
   onNewUpload: () => void;
   organizationName: string | null;
@@ -3029,6 +3061,7 @@ function Topbar({
         <button
           className="button button-agent"
           onClick={onOpenAgent}
+          ref={agentTriggerRef}
           type="button"
         >
           <Icon name="spark" size={16} />
@@ -3121,6 +3154,8 @@ function RecruitingAgentDrawer({
   const [jobs, setJobs] = useState<JobVersion[]>([]);
   const [jobVersionId, setJobVersionId] = useState("");
   const [loading, setLoading] = useState(false);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const [messages, setMessages] = useState<AgentChatMessage[]>([
     {
       id: 1,
@@ -3151,6 +3186,36 @@ function RecruitingAgentDrawer({
       })
       .catch(() => setJobs([]));
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const frame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [isOpen]);
+
+  const trapFocus = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Tab") return;
+    const drawer = drawerRef.current;
+    if (!drawer) return;
+    const focusable = Array.from(
+      drawer.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   const addAssistantReply = (turn: RecruitingAgentTurn) => {
     setMessages((current) => [
@@ -3205,6 +3270,9 @@ function RecruitingAgentDrawer({
       aria-label="招聘助手"
       aria-modal="true"
       className={`recruiting-agent-drawer${isOpen ? " is-open" : ""}`}
+      inert={!isOpen}
+      onKeyDown={trapFocus}
+      ref={drawerRef}
       role="dialog"
     >
       <header className="agent-header">
@@ -3215,7 +3283,13 @@ function RecruitingAgentDrawer({
             <p>工具执行，结论可追溯</p>
           </div>
         </div>
-        <button aria-label="关闭招聘助手" className="icon-button" onClick={onClose} type="button">
+        <button
+          aria-label="关闭招聘助手"
+          className="icon-button"
+          onClick={onClose}
+          ref={closeButtonRef}
+          type="button"
+        >
           <Icon name="close" size={18} />
         </button>
       </header>
@@ -3443,6 +3517,7 @@ function FilterPanel({
   const [selectedSavedId, setSelectedSavedId] = useState("");
   const [saveName, setSaveName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   const update = (patch: Partial<FilterDraft>) =>
     onDraftChange({ ...draft, ...patch });
@@ -3462,19 +3537,39 @@ function FilterPanel({
     }
   };
 
+  const apply = () => {
+    onApply();
+    setMobileFiltersOpen(false);
+  };
+
   return (
-    <aside className="filter-panel" aria-label="筛选条件">
+    <aside
+      aria-label="筛选条件"
+      className={`filter-panel${mobileFiltersOpen ? " is-mobile-open" : ""}`}
+    >
       <div className="filter-panel-header">
         <h2 className="filter-panel-title">筛选条件</h2>
-        <button
-          className="text-button"
-          onClick={() => void onReset()}
-          type="button"
-        >
-          清空
-        </button>
+        <div className="filter-panel-header-actions">
+          <button
+            aria-controls="filter-controls"
+            aria-expanded={mobileFiltersOpen}
+            className="text-button filter-mobile-toggle"
+            onClick={() => setMobileFiltersOpen((current) => !current)}
+            type="button"
+          >
+            <Icon name="filter" size={15} />
+            {mobileFiltersOpen ? "收起筛选" : "展开筛选"}
+          </button>
+          <button
+            className="text-button"
+            onClick={() => void onReset()}
+            type="button"
+          >
+            清空
+          </button>
+        </div>
       </div>
-      <div className="filter-scroll">
+      <div className="filter-scroll" id="filter-controls">
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>已保存的筛选</h3>
@@ -4063,7 +4158,7 @@ function FilterPanel({
       <div className="filter-actions">
         <button
           className="button button-primary"
-          onClick={() => void onApply()}
+          onClick={apply}
           type="button"
         >
           <Icon name="filter" size={16} />
@@ -8950,10 +9045,12 @@ function ScoreBatchDetails({
 }
 
 function MatchPage({
+  canGenerateAiJd,
   selected,
   notify,
   onOpenMatchedResume,
 }: {
+  canGenerateAiJd: boolean;
   selected: SelectedResume | null;
   notify: (kind: ToastKind, message: string) => void;
   onOpenMatchedResume: (match: JobMatch) => void;
@@ -9060,6 +9157,10 @@ function MatchPage({
     setGenerationError("JD 已修改，请重新运行 AI 生成后再启用岗位。");
   };
   const generateJobDescription = async () => {
+    if (!canGenerateAiJd) {
+      notify("error", "当前套餐未开通 AI 生成 JD。你仍可直接发布原版 JD。");
+      return;
+    }
     const sourceText =
       (editedGeneratedJd && jdText.trim()) || jobBrief.trim();
     if (!title.trim() || !sourceText) {
@@ -9324,7 +9425,9 @@ function MatchPage({
         <div>
           <h1>岗位 JD 匹配</h1>
           <p>
-            描述岗位需求，由 AI 生成可编辑 JD 和匹配条件；启用后即可对已核验的简历事实逐项比对。
+            {canGenerateAiJd
+              ? "描述岗位需求，由 AI 生成可编辑 JD 和匹配条件；启用后即可对已核验的简历事实逐项比对。"
+              : "可直接发布原版 JD；AI 生成 JD 与候选人匹配需要开通相应套餐。"}
           </p>
         </div>
         {selected ? (
@@ -9462,11 +9565,17 @@ function MatchPage({
                           setGeneratedRequirements(null);
                         }
                       }}
-                      placeholder="填写岗位需求后点击「AI 生成 JD」；已有完整 JD 可直接粘贴后点击「原版发布」。"
+                      placeholder={
+                        canGenerateAiJd
+                          ? "填写岗位需求后点击「AI 生成 JD」；已有完整 JD 可直接粘贴后点击「原版发布」。"
+                          : "粘贴完整原版 JD 后点击「原版发布」，内容会按原样保存。"
+                      }
                       value={jobBrief}
                     />
                     <p className="candidate-meta">
-                      AI 生成 JD 会提取匹配条件，原版发布会按当前内容原样保存。
+                      {canGenerateAiJd
+                        ? "AI 生成 JD 会提取匹配条件，原版发布会按当前内容原样保存。"
+                        : "原版发布不会调用 AI，内容会按当前输入原样保存。"}
                     </p>
                   </div>
                   {jdText && (
@@ -9496,27 +9605,29 @@ function MatchPage({
                   </p>
                 )}
                 <div className="review-actions">
-                  <button
-                    className={`button${generatedJobIsReady ? " button-ghost" : " button-primary"}`}
-                    disabled={loading}
-                    onClick={() => void generateJobDescription()}
-                    type="button"
-                  >
-                    {loading ? (
-                      <>
-                        <i className="spinner" />
-                        正在生成…
-                      </>
-                    ) : (
-                      <>
-                        <Icon name="spark" size={16} />
-                        {jdText ? "重新生成 JD" : "生成 JD"}
-                      </>
-                    )}
-                  </button>
-                  {!generatedJobIsReady && (
+                  {canGenerateAiJd && (
                     <button
-                      className="button"
+                      className={`button${generatedJobIsReady ? " button-ghost" : " button-primary"}`}
+                      disabled={loading}
+                      onClick={() => void generateJobDescription()}
+                      type="button"
+                    >
+                      {loading ? (
+                        <>
+                          <i className="spinner" />
+                          正在生成…
+                        </>
+                      ) : (
+                        <>
+                          <Icon name="spark" size={16} />
+                          {jdText ? "重新生成 JD" : "生成 JD"}
+                        </>
+                      )}
+                    </button>
+                  )}
+                  {(!canGenerateAiJd || !generatedJobIsReady) && (
+                    <button
+                      className={`button${canGenerateAiJd ? "" : " button-primary"}`}
                       disabled={loading}
                       onClick={() => void publishOriginalJob()}
                       type="button"

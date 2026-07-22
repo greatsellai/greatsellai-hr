@@ -9,6 +9,7 @@
 - [发布运行时回归执行手册](docs/RELEASE_REGRESSION_HARNESS.md)
 - [团队共建工作流](docs/TEAM_WORKFLOW.md)
 - [GitHub Actions CI/CD](docs/CI_CD.md)
+- [Text encoding policy](docs/ENCODING_POLICY.md)
 
 当前版本已覆盖：重新上传 PDF → 解析质量校验 → AI 从原文识别候选人姓名（不可靠则留空）并提取教育/经历/技能 → 字段级原文证据校验并自动启用 → 简历库汇总（AI 总结预览、最新 AI 评分、原 PDF）→ 条件筛选 → AI 评分、总结与 JD 匹配；React/Vite 工作台通过同域名 Caddy 静态部署，浏览器只请求同源的 `/v1/*` API。
 

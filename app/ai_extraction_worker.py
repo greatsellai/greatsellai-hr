@@ -26,6 +26,9 @@ from app.services.candidate_data_export_service import (
     run_candidate_data_export_worker_once,
 )
 from app.services.resume_score_batch_service import run_resume_score_batch_worker_once
+from app.services.transactional_email_outbox_service import (
+    run_transactional_email_outbox_worker_once,
+)
 from app.services.institution_service import (
     is_institution_registry_seeded,
     seed_institution_registry,
@@ -60,6 +63,11 @@ def run_forever(settings: AppSettings) -> None:
     worker_id = _worker_id()
     try:
         while True:
+            ran_transactional_email = run_transactional_email_outbox_worker_once(
+                database,
+                settings=settings,
+                worker_id=worker_id,
+            )
             ran_mailbox_job = run_mailbox_background_job_worker_once(
                 database,
                 settings=settings,
@@ -112,6 +120,7 @@ def run_forever(settings: AppSettings) -> None:
                 not ran_extraction
                 and not ran_job_match
                 and not ran_score_batch
+                and not ran_transactional_email
                 and not ran_mailbox_job
                 and not queued_due_mailbox_sync
                 and not ran_mailbox_retention_cleanup
@@ -142,12 +151,17 @@ def main() -> None:
 
     database = _create_worker_database(settings)
     try:
+        ran_transactional_email = run_transactional_email_outbox_worker_once(
+            database,
+            settings=settings,
+            worker_id=_worker_id(),
+        )
         ran_mailbox_job = run_mailbox_background_job_worker_once(
             database,
             settings=settings,
             worker_id=_worker_id(),
         )
-        if not ran_mailbox_job:
+        if not ran_transactional_email and not ran_mailbox_job:
             ran_extraction = run_ai_extraction_worker_once(
                 database,
                 settings=settings,

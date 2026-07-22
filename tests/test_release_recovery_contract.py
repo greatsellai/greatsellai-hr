@@ -203,8 +203,9 @@ def test_pending_target_finalizer_is_specific_and_preserves_the_normal_pending_g
     assert "validate_pending_target_source" in finalizer
     assert "validate_pending_target_backup" in finalizer
     assert "Pending target paired backup" in helper
-    assert 'docker network connect --ip "$api_proxy_ip"' in finalizer
+    assert 'docker network connect --alias api --ip "$api_proxy_ip"' in finalizer
     assert 'docker inspect --format \'{{.Name}}\' "$api_container"' in finalizer
+    assert "api_proxy_aliases" in finalizer
     assert '{{$container.Name}}' in finalizer
     assert '{{"\\n"}}' in finalizer
     assert '{{"\\\\n"}}' not in finalizer
@@ -438,8 +439,38 @@ reconcile_legacy_pending_unlocked \\
     assert not list((history_dir / "releases").glob("interrupted-*.env"))
 
 
+@pytest.mark.parametrize(
+    (
+        "api_proxy_address",
+        "initial_caddy_state",
+        "caddy_error",
+        "api_proxy_aliases",
+        "should_succeed",
+    ),
+    (
+        (
+            "172.30.0.2",
+            "created",
+            "failed to set up container networking: Address already in use",
+            "api",
+            True,
+        ),
+        ("172.30.0.3", "exited", "", "", True),
+        ("172.30.0.3", "exited", "", "api", False),
+    ),
+    ids=(
+        "initial-static-address-collision",
+        "retry-after-api-reassignment",
+        "reject-retry-after-alias-is-already-restored",
+    ),
+)
 def test_pending_target_finalizer_advances_only_after_the_verified_proxy_recovery(
     tmp_path: Path,
+    api_proxy_address: str,
+    initial_caddy_state: str,
+    caddy_error: str,
+    api_proxy_aliases: str,
+    should_succeed: bool,
 ) -> None:
     if os.name != "posix":
         pytest.skip("the Bash pending-target harness is exercised in Linux CI")
@@ -530,6 +561,7 @@ archive_finalized_pending_record() {{
   rm -f "${{2}}"
 }}
 caddy_recreated=0
+network_connect_args=""
 sudo() {{
   [[ "${{1:-}}" == -n ]] && shift
   [[ "${{1:-}}" == docker ]] || return 1
@@ -539,13 +571,14 @@ sudo() {{
     inspect)
       local template="${{3:-}}" container="${{@: -1}}"
       case "$template" in
+        *"range .Aliases"*) printf {api_proxy_aliases!r} ;;
         *State.ExitCode*) printf 0 ;;
-        *NetworkSettings.Networks*) printf 172.30.0.2 ;;
-        *State.Error*) printf 'failed to set up container networking: Address already in use' ;;
+        *NetworkSettings.Networks*) printf {api_proxy_address!r} ;;
+        *State.Error*) printf {caddy_error!r} ;;
         *State.Health*) printf healthy ;;
         *Name*) printf '/synthetic-api' ;;
         *State.Status*)
-          if [[ "$container" == synthetic-caddy && "$caddy_recreated" == 0 ]]; then printf created
+          if [[ "$container" == synthetic-caddy && "$caddy_recreated" == 0 ]]; then printf {initial_caddy_state!r}
           elif [[ "$container" == synthetic-migrate ]]; then printf exited
           else printf running
           fi
@@ -556,6 +589,8 @@ sudo() {{
         network)
           if [[ "${{2:-}}" == inspect ]]; then
             printf synthetic-api
+          elif [[ "${{2:-}}" == connect ]]; then
+            network_connect_args="$*"
           else
             :
           fi
@@ -574,6 +609,7 @@ finalize_pending_target_unlocked \\
   FINALIZE_PENDING_PROXY_STARTUP \\
   {stage_tool.as_posix()!r} \\
   {'c' * 64}
+printf '%s' "$network_connect_args" > {str(tmp_path / 'network-connect-args')!r}
 """,
         encoding="utf-8",
     )
@@ -584,8 +620,14 @@ finalize_pending_target_unlocked \\
         capture_output=True,
     )
 
+    if not should_succeed:
+        assert completed.returncode != 0
+        assert pending_path.exists()
+        return
+
     assert completed.returncode == 0, completed.stderr
     assert not pending_path.exists()
+    assert "--alias api" in (tmp_path / "network-connect-args").read_text(encoding="utf-8")
     for marker in (
         "source-validated",
         "backup-validated",

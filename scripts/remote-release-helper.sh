@@ -593,7 +593,7 @@ finalize_pending_target_unlocked() {
   local pending_previous_commit pending_mode pending_backup_state pending_backup_id
   local pending_prepared_at pending_state pending_format current_state
   local api_container worker_container caddy_container migrate_container
-  local api_container_name observed_proxy_address caddy_state caddy_error attached_containers
+  local api_container_name observed_proxy_address api_proxy_aliases caddy_state caddy_exit_code caddy_error attached_containers
   local writers_started=0 caddy_started=0 public_runtime_verified=0 finalization_completed=0
 
   finalize_cleanup() {
@@ -672,21 +672,34 @@ finalize_pending_target_unlocked() {
     die "Pending target migration did not complete successfully."
 
   observed_proxy_address="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{.IPAddress}}{{end}}' "$api_container")"
+  api_proxy_aliases="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{range .Aliases}}{{.}}{{"\n"}}{{end}}{{end}}' "$api_container" | sed '/^$/d')"
   api_container_name="$(sudo -n docker inspect --format '{{.Name}}' "$api_container" | sed 's#^/##')"
   caddy_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$caddy_container")"
+  caddy_exit_code="$(sudo -n docker inspect --format '{{.State.ExitCode}}' "$caddy_container")"
   caddy_error="$(sudo -n docker inspect --format '{{.State.Error}}' "$caddy_container")"
   attached_containers="$(sudo -n docker network inspect "$proxy_network_name" --format '{{range $id, $container := .Containers}}{{$container.Name}}{{"\n"}}{{end}}' | sed '/^$/d')"
-  [[ "$observed_proxy_address" == "$caddy_proxy_ip" ]] || \
-    die "Pending target does not have the known Caddy proxy-address collision."
   [[ -n "$api_container_name" && "$attached_containers" == "$api_container_name" ]] || \
     die "Pending target proxy network has unexpected attached containers."
-  [[ "$caddy_state" == "created" && "$caddy_error" == *"container networking"* && "$caddy_error" == *"Address already in use"* ]] || \
-    die "Pending target Caddy failure is not the known static-address collision."
+  if [[ "$observed_proxy_address" == "$caddy_proxy_ip" ]]; then
+    [[ "$caddy_state" == "created" && "$caddy_error" == *"container networking"* && "$caddy_error" == *"Address already in use"* ]] || \
+      die "Pending target Caddy failure is not the known static-address collision."
+  elif [[ "$observed_proxy_address" == "$api_proxy_ip" ]]; then
+    # A prior finalization attempt can have completed the safe API reassignment,
+    # then stopped Caddy after public verification failed. Allow only that exact
+    # retry state; it is reconnected below to restore the Compose service alias.
+    [[ "$caddy_state" == "exited" && "$caddy_exit_code" == "0" && -z "$caddy_error" && "$api_proxy_aliases" != *"api"* ]] || \
+      die "Pending target does not have the retryable proxy-reassignment state."
+  else
+    die "Pending target does not have the known Caddy proxy-address collision."
+  fi
 
   trap finalize_cleanup EXIT
   sudo -n docker stop "$api_container" "$worker_container" >/dev/null
   sudo -n docker network disconnect "$proxy_network_name" "$api_container" >/dev/null
-  sudo -n docker network connect --ip "$api_proxy_ip" "$proxy_network_name" "$api_container" >/dev/null
+  # ``docker network connect`` does not restore Compose's service DNS alias by
+  # itself. Caddy resolves this upstream as ``api``, so preserve that alias when
+  # reassociating the API with its deterministic proxy address.
+  sudo -n docker network connect --alias api --ip "$api_proxy_ip" "$proxy_network_name" "$api_container" >/dev/null
   sudo -n docker rm "$caddy_container" >/dev/null
   sudo -n docker start "$api_container" "$worker_container" >/dev/null
   writers_started=1

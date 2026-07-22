@@ -69,6 +69,25 @@ def test_pending_target_finalization_is_manual_and_narrowly_confirmed() -> None:
     assert "does not build, migrate, restore, remove Docker networks" in wrapper
 
 
+def test_healthy_pending_finalization_is_manual_and_read_only_for_runtime_state() -> None:
+    workflow = (
+        ROOT / ".github" / "workflows" / "production-healthy-pending-finalize.yml"
+    ).read_text(encoding="utf-8")
+    wrapper = (ROOT / "scripts" / "finalize-healthy-pending-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "workflow_dispatch:" in workflow
+    assert "FINALIZE_HEALTHY_PENDING_RUNTIME" in workflow
+    assert "group: greatsellai-hr-production" in workflow
+    assert "environment:" in workflow and "name: production" in workflow
+    assert "ref: main" in workflow
+    assert 'scripts/finalize-healthy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "StrictHostKeyChecking=yes" in wrapper
+    assert "does not build, migrate, stop, start, recreate, restore, remove" in wrapper
+
+
 def test_server_preflight_is_read_only_and_uses_candidate_compose() -> None:
     script = (ROOT / "scripts" / "preflight-production-release.sh").read_text(
         encoding="utf-8"

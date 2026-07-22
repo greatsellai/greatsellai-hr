@@ -231,6 +231,47 @@ def test_pending_target_finalizer_is_specific_and_preserves_the_normal_pending_g
     assert "FINALIZE_PENDING_PROXY_STARTUP" in wrapper
 
 
+def test_healthy_pending_finalizer_archives_only_an_already_healthy_target() -> None:
+    """This recovery path must not become a second deployment mechanism."""
+
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    wrapper = (
+        REPOSITORY_ROOT / "scripts" / "finalize-healthy-pending-release.sh"
+    ).read_text(encoding="utf-8")
+    finalizer = helper.split("finalize_healthy_pending_target_unlocked()", maxsplit=1)[
+        1
+    ].split("finalize_healthy_pending_target()", maxsplit=1)[0]
+
+    assert "FINALIZE_HEALTHY_PENDING_RUNTIME" in finalizer
+    assert "Current release is not the exact healthy pending target." in finalizer
+    assert "validate_pending_target_source" in finalizer
+    assert "validate_pending_target_backup" in finalizer
+    assert "Healthy pending target API is not healthy." in finalizer
+    assert "Healthy pending target proxy network has unexpected members." in finalizer
+    assert "caddy validate --config /etc/caddy/Caddyfile" in finalizer
+    assert "verify_public_runtime" in finalizer
+    assert "archive_verified_healthy_pending_record" in finalizer
+    assert "write_release_records" not in finalizer
+    for prohibited in (
+        "docker stop",
+        "docker start",
+        "docker rm",
+        "docker network connect",
+        "docker network disconnect",
+        " compose_run \"$pending_source_dir\" \"$environment_dir\" \"$pending_commit\" up",
+        "alembic",
+        "pg_restore",
+    ):
+        assert prohibited not in finalizer
+
+    assert "FINALIZE_HEALTHY_PENDING_RUNTIME" in wrapper
+    assert "StrictHostKeyChecking=yes" in wrapper
+    assert "finalize-healthy-pending-target" in wrapper
+    assert "does not build, migrate, stop, start, recreate, restore, remove" in wrapper
+
+
 def test_legacy_reconciliation_refuses_structured_pending_metadata() -> None:
     helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
         encoding="utf-8"

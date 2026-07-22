@@ -742,6 +742,139 @@ finalize_pending_target() {
     "$environment_dir" "$history_dir" "$@"
 }
 
+archive_verified_healthy_pending_record() {
+  # The current release record is already authoritative for this exact target.
+  # Preserve the interrupted transaction metadata for audit, then remove only
+  # the marker which blocks a later normal release.
+  local history_dir="$1" pending_record="$2" pending_tag="$3" target_commit="$4"
+  local timestamp archive temporary_archive
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive="$history_dir/releases/finalized-healthy-$timestamp-$pending_tag.env"
+  temporary_archive="$history_dir/releases/.finalized-healthy-$timestamp-$pending_tag.partial"
+  [[ ! -e "$archive" && ! -e "$temporary_archive" ]] || die "Healthy pending archive path already exists; retry."
+  umask 077
+  {
+    cat "$pending_record"
+    cat <<EOF
+state=finalized
+finalization_reason=verified_healthy_target_runtime_after_runtime_check_failure
+finalized_target_commit=$target_commit
+finalized_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  } > "$temporary_archive"
+  mv "$temporary_archive" "$archive"
+  rm -f "$pending_record" || die "Unable to clear finalized healthy pending metadata."
+  printf 'Healthy pending target finalized: %s\n' "$archive"
+}
+
+finalize_healthy_pending_target_unlocked() {
+  # This path deliberately handles no deployment operation. It accepts only a
+  # structured pending marker whose requested target is already the current,
+  # healthy runtime. It re-validates source, paired backup, container identity,
+  # proxy topology, Caddy syntax, and public protections before archiving the
+  # marker. It never builds, migrates, stops, starts, reconfigures, restores,
+  # or removes a Docker resource.
+  local environment_dir="$1" history_dir="$2" expected_pending_tag="$3"
+  local expected_pending_commit="$4" confirmation="$5" expected_tree_sha256="$6"
+  local pending_record current_record pending_tag pending_commit pending_source_dir
+  local pending_previous_tag pending_previous_commit pending_mode pending_backup_state
+  local pending_backup_id pending_prepared_at pending_state pending_format
+  local current_state
+  local api_container worker_container caddy_container migrate_container
+  local api_proxy_address caddy_proxy_address api_proxy_aliases
+  local api_container_name caddy_container_name attached_containers expected_members
+
+  validate_environment_dir "$environment_dir"
+  validate_history_dir "$history_dir"
+  require_release_reference "$expected_pending_tag" "$expected_pending_commit"
+  [[ "$expected_tree_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+    die "Healthy pending finalization requires a valid staged-source tree checksum."
+  [[ "$confirmation" == "FINALIZE_HEALTHY_PENDING_RUNTIME" ]] || \
+    die "Healthy pending finalization requires the exact confirmation FINALIZE_HEALTHY_PENDING_RUNTIME."
+  mkdir -p "$history_dir/releases"
+  chmod 700 "$history_dir" "$history_dir/releases"
+
+  pending_record="$history_dir/pending-release.env"
+  current_record="$history_dir/current-release.env"
+  [[ -f "$pending_record" && -f "$current_record" ]] || \
+    die "Healthy pending finalization requires both pending and current release records."
+
+  pending_tag="$(record_value "$pending_record" tag)"
+  pending_commit="$(record_value "$pending_record" commit)"
+  pending_source_dir="$(record_value "$pending_record" source_dir)"
+  pending_previous_tag="$(record_value "$pending_record" previous_tag)"
+  pending_previous_commit="$(record_value "$pending_record" previous_commit)"
+  pending_mode="$(record_value "$pending_record" mode)"
+  pending_backup_state="$(record_value "$pending_record" backup_state)"
+  pending_backup_id="$(record_value "$pending_record" backup_id)"
+  pending_prepared_at="$(record_value "$pending_record" prepared_at)"
+  pending_state="$(record_value "$pending_record" state)"
+  pending_format="$(record_value "$pending_record" format_version)"
+
+  require_release_reference "$pending_tag" "$pending_commit"
+  require_release_reference "$pending_previous_tag" "$pending_previous_commit"
+  [[ "$pending_tag" == "$expected_pending_tag" && "$pending_commit" == "$expected_pending_commit" ]] || \
+    die "Pending release does not match the exact operator-confirmed healthy target."
+  [[ "$pending_format" == "1" && "$pending_state" == "prepared" && "$pending_mode" == "deploy" ]] || \
+    die "Pending release is not a structured prepared deployment."
+  [[ "$pending_backup_state" == "complete" && -n "$pending_backup_id" && -n "$pending_prepared_at" ]] || \
+    die "Healthy pending finalization requires a completed paired backup."
+
+  load_current_runtime "$environment_dir" "$history_dir"
+  current_state="$(record_value "$current_record" state)"
+  [[ "$current_state" == "complete" && "$current_tag" == "$pending_tag" && "$current_commit" == "$pending_commit" ]] || \
+    die "Current release is not the exact healthy pending target."
+  [[ "$current_source_dir" == "$pending_source_dir" ]] || \
+    die "Current release source does not match the healthy pending target."
+  [[ "$pending_previous_tag" == "$current_tag" && "$pending_previous_commit" == "$current_commit" ]] || \
+    die "Healthy pending predecessor does not match the recorded current release."
+
+  validate_pending_target_source "$history_dir" "$pending_source_dir" "$pending_commit" "$expected_tree_sha256"
+  validate_pending_target_backup "$history_dir" "$pending_backup_id" "$pending_tag" "$pending_commit" \
+    "$pending_previous_tag" "$pending_previous_commit" "$pending_mode"
+
+  api_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" api)"
+  worker_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" worker)"
+  caddy_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" caddy)"
+  migrate_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" migrate)"
+  require_container_image "$api_container" "greatsellai-hr-api:$pending_commit"
+  require_container_image "$worker_container" "greatsellai-hr-api:$pending_commit"
+  require_container_image "$caddy_container" "greatsellai-hr-caddy:$pending_commit"
+  require_container_image "$migrate_container" "greatsellai-hr-api:$pending_commit"
+  require_container_state "$api_container" running
+  require_container_state "$worker_container" running
+  require_container_state "$caddy_container" running
+  require_container_state "$migrate_container" exited
+  [[ "$(sudo -n docker inspect --format '{{.State.ExitCode}}' "$migrate_container")" == "0" ]] || \
+    die "Healthy pending target migration did not complete successfully."
+  [[ "$(sudo -n docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "$api_container")" == "healthy" ]] || \
+    die "Healthy pending target API is not healthy."
+
+  api_proxy_address="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{.IPAddress}}{{end}}' "$api_container")"
+  caddy_proxy_address="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{.IPAddress}}{{end}}' "$caddy_container")"
+  api_proxy_aliases="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{range .Aliases}}{{.}}{{"\n"}}{{end}}{{end}}' "$api_container" | sed '/^$/d')"
+  api_container_name="$(sudo -n docker inspect --format '{{.Name}}' "$api_container" | sed 's#^/##')"
+  caddy_container_name="$(sudo -n docker inspect --format '{{.Name}}' "$caddy_container" | sed 's#^/##')"
+  [[ "$api_proxy_address" == "$api_proxy_ip" && "$caddy_proxy_address" == "$caddy_proxy_ip" ]] || \
+    die "Healthy pending target does not have the expected proxy addresses."
+  grep -qx 'api' <<< "$api_proxy_aliases" || die "Healthy pending target API is missing its proxy DNS alias."
+  attached_containers="$(sudo -n docker network inspect "$proxy_network_name" --format '{{range $id, $container := .Containers}}{{$container.Name}}{{"\n"}}{{end}}' | sed '/^$/d' | sort)"
+  expected_members="$(printf '%s\n%s\n' "$api_container_name" "$caddy_container_name" | sort)"
+  [[ "$attached_containers" == "$expected_members" ]] || die "Healthy pending target proxy network has unexpected members."
+
+  compose_run "$pending_source_dir" "$environment_dir" "$pending_commit" exec -T caddy \
+    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null >/dev/null
+  verify_public_runtime "$environment_dir"
+  archive_verified_healthy_pending_record "$history_dir" "$pending_record" "$pending_tag" "$pending_commit"
+}
+
+finalize_healthy_pending_target() {
+  local environment_dir="$1" history_dir="$2"
+  shift 2
+  with_release_lock "$history_dir" finalize_healthy_pending_target_unlocked \
+    "$environment_dir" "$history_dir" "$@"
+}
+
 restore_unlocked() {
   local environment_dir="$1" history_dir="$2" backup_id="$3" confirmation="$4"
   local backup_dir manifest state manifest_id database_file uploads_file safety_backup_id
@@ -1076,8 +1209,12 @@ case "${1:-}" in
     shift
     finalize_pending_target "$@"
     ;;
+  finalize-healthy-pending-target)
+    shift
+    finalize_healthy_pending_target "$@"
+    ;;
   *)
-    echo "Usage: $0 {release|restore|reconcile-legacy-pending|finalize-pending-target} <release arguments>" >&2
+    echo "Usage: $0 {release|restore|reconcile-legacy-pending|finalize-pending-target|finalize-healthy-pending-target} <release arguments>" >&2
     exit 2
     ;;
 esac

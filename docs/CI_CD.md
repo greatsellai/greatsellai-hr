@@ -19,6 +19,13 @@
   监听任意标签推送，避免受保护流程外的标签绕过预检。
 - **Production rollback**：只能手动触发，且只接受已有 `prod-*` 标签。默认拒绝
   回滚到数据库 schema 落后的代码；只有已确认兼容时才可显式允许该情形。
+- **Production legacy pending reconciliation**：仅用于历史发布器遗留的中断
+  `pending-release.env`。它必须由管理员从 `main` 手动输入记录中的精确 tag、40 位 commit
+  和确认词；在所有应用写入服务已经停止时，先创建并校验新的 PostgreSQL + uploads 成对
+  备份，再归档 pending 记录。该流程还会校验数据库与 API/worker 容器实际挂载的是受 Compose
+  管理的两个持久化卷（兼容历史无标签 uploads 卷时要求 API/worker 双重挂载证明），并记录
+  已退出迁移容器的状态；运行中的迁移容器会被拒绝。它不部署、
+  构建、迁移、重启服务或读取 `.env.production`。
 
 发布与回滚仍复用仓库已有的脚本。它们会在每次变更前创建统一 backup ID 的 PostgreSQL
 逻辑备份与 `uploads_data` 原件卷备份，校验 checksum 后再执行发布，并保留发布记录、健康
@@ -70,6 +77,11 @@
 5. 如需回滚，在 **Production rollback** 中指定一个已发布的 `prod-*` 标签，并输入
    `ROLLBACK`。数据库与原文件恢复不属于自动回滚范围，必须基于同一 backup ID 的成对
    备份、兼容性评审和显式 `restore-production-backup.sh --confirm-restore` 单独决策。
+
+如果历史环境存在无法自动清除的 legacy pending 记录，不能把 `backup=none` 当成无数据，
+也不能手工删除该文件。先运行 **Production legacy pending reconciliation**：它会确认 current
+记录恰好等于 pending 所记录的前序版本，且数据库和两个持久化卷仍存在，完成新的一组受校验
+成对备份后才归档 pending。随后再重新运行 **Production release**。
 
 ## 安全与边界
 

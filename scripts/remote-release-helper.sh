@@ -125,8 +125,8 @@ load_current_runtime() {
 }
 
 resolve_pending_release() {
-  local history_dir="$1" pending_record current_record
-  local pending_tag pending_commit pending_backup_id current_state
+  local history_dir="$1" pending_record
+  local pending_tag pending_commit pending_backup_id
   pending_record="$history_dir/pending-release.env"
   [[ -f "$pending_record" ]] || return 0
 
@@ -135,18 +135,7 @@ resolve_pending_release() {
   pending_backup_id="$(record_value "$pending_record" backup_id)"
   require_release_reference "$pending_tag" "$pending_commit"
 
-  current_record="$history_dir/current-release.env"
-  current_state=""
-  if [[ -f "$current_record" ]]; then
-    current_state="$(record_value "$current_record" state)"
-  fi
-  if [[ "$current_tag" == "$pending_tag" && "$current_commit" == "$pending_commit" && "$current_state" == "complete" ]]; then
-    rm -f "$pending_record" || die "Unable to clear completed pending release metadata."
-    printf 'Cleared stale completed pending release: %s (%s)\n' "$pending_tag" "$pending_commit"
-    return 0
-  fi
-
-  die "Unresolved pending release for $pending_tag ($pending_commit), backup ${pending_backup_id:-none}. Inspect the target and paired backup before retrying; refusing to overwrite interrupted release state."
+  die "Unresolved pending release for $pending_tag ($pending_commit), backup ${pending_backup_id:-none}. Use an explicit, audited reconciliation after verifying a paired backup; refusing to overwrite interrupted release state."
 }
 
 create_backup_bundle() (
@@ -458,6 +447,7 @@ restore_unlocked() {
   require_safe_backup_id "$backup_id"
   [[ "$confirmation" == "RESTORE" ]] || die "Restore requires the exact confirmation RESTORE."
   load_current_runtime "$environment_dir" "$history_dir"
+  resolve_pending_release "$history_dir"
   [[ -n "$current_commit" ]] || die "Current release record is missing; refusing destructive restore."
 
   backup_dir="$history_dir/backups/$backup_id"
@@ -528,6 +518,235 @@ restore() {
   with_release_lock "$history_dir" restore_unlocked "$environment_dir" "$history_dir" "$@"
 }
 
+legacy_db_container() {
+  local containers
+  containers="$(sudo -n docker ps -q \
+    --filter label=com.docker.compose.project=resume-screening-v3 \
+    --filter label=com.docker.compose.service=db)"
+  [[ -n "$containers" && "$(printf '%s\n' "$containers" | wc -l | tr -d ' ')" == "1" ]] || \
+    die "Legacy reconciliation requires exactly one running PostgreSQL container."
+  sudo -n docker inspect --format '{{.Name}}' "$containers" | sed 's#^/##'
+}
+
+require_legacy_runtime_quiescent() {
+  local service
+  for service in api worker caddy; do
+    [[ -z "$(sudo -n docker ps -q \
+      --filter label=com.docker.compose.project=resume-screening-v3 \
+      --filter "label=com.docker.compose.service=$service")" ]] || \
+      die "Legacy reconciliation refuses a runtime with $service still running."
+  done
+}
+
+legacy_migrate_state() {
+  local containers state
+  containers="$(sudo -n docker ps -aq \
+    --filter label=com.docker.compose.project=resume-screening-v3 \
+    --filter label=com.docker.compose.service=migrate)"
+  [[ -z "$containers" ]] && {
+    printf absent
+    return 0
+  }
+  [[ "$(printf '%s\n' "$containers" | wc -l | tr -d ' ')" == "1" ]] || \
+    die "Legacy reconciliation refuses ambiguous migrate container history."
+  state="$(sudo -n docker inspect --format '{{.State.Status}}:{{.State.ExitCode}}' "$containers")"
+  [[ "$state" != running:* ]] || die "Legacy reconciliation refuses a running migration container."
+  printf '%s' "$state"
+}
+
+require_legacy_compose_volume() {
+  local volume="$1" expected_logical_name="$2"
+  local project_label logical_label
+  project_label="$(sudo -n docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$volume")"
+  logical_label="$(sudo -n docker volume inspect --format '{{index .Labels "com.docker.compose.volume"}}' "$volume")"
+  [[ "$project_label" == "resume-screening-v3" && "$logical_label" == "$expected_logical_name" ]] || \
+    die "Legacy reconciliation refuses a volume without the expected Compose ownership labels."
+}
+
+require_legacy_uploads_volume_provenance() {
+  local project_label logical_label
+  project_label="$(sudo -n docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$uploads_volume_name")"
+  logical_label="$(sudo -n docker volume inspect --format '{{index .Labels "com.docker.compose.volume"}}' "$uploads_volume_name")"
+  if [[ "$project_label" == "resume-screening-v3" && "$logical_label" == "uploads_data" ]]; then
+    return 0
+  fi
+  # Some legacy Compose versions created this named volume without labels. It
+  # is still provably the active original-file volume only when both retained
+  # API and worker containers mount this exact volume at the app data path.
+  [[ -z "$project_label" && -z "$logical_label" ]] || \
+    die "Legacy reconciliation refuses uploads volume ownership-label mismatch."
+  require_legacy_container_volume_mount api "$uploads_volume_name" /var/lib/resume-v3/uploads
+  require_legacy_container_volume_mount worker "$uploads_volume_name" /var/lib/resume-v3/uploads
+}
+
+require_legacy_container_volume_mount() {
+  local service="$1" volume="$2" destination="$3"
+  local containers matched
+  containers="$(sudo -n docker ps -aq \
+    --filter label=com.docker.compose.project=resume-screening-v3 \
+    --filter "label=com.docker.compose.service=$service")"
+  [[ -n "$containers" && "$(printf '%s\n' "$containers" | wc -l | tr -d ' ')" == "1" ]] || \
+    die "Legacy reconciliation requires exactly one $service container for volume verification."
+  matched="$(sudo -n docker inspect --format "{{range .Mounts}}{{if and (eq .Name \"$volume\") (eq .Destination \"$destination\")}}matched{{end}}{{end}}" "$containers")"
+  [[ "$matched" == "matched" ]] || \
+    die "Legacy reconciliation refuses a container without the expected persistent-volume mount."
+}
+
+create_legacy_reconciliation_backup() (
+  # The interrupted legacy deploy left the source/image relationship
+  # ambiguous. This snapshot intentionally avoids compose lifecycle commands:
+  # every application writer is already confirmed stopped while PostgreSQL is
+  # healthy, so a direct database + named-volume backup is deterministic.
+  set -Eeuo pipefail
+  local db_container="$1" history_dir="$2" pending_tag="$3" pending_commit="$4"
+  local previous_tag="$5" previous_commit="$6"
+  local timestamp backup_id staging_dir final_dir completed=0
+
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_id="reconcile-$pending_tag-$timestamp"
+  require_safe_backup_id "$backup_id"
+  final_dir="$history_dir/backups/$backup_id"
+  staging_dir="$history_dir/backups/.$backup_id.partial"
+  [[ ! -e "$final_dir" && ! -e "$staging_dir" ]] || die "Legacy reconciliation backup ID collision; retry."
+
+  cleanup() {
+    local status=$?
+    if [[ "$completed" != "1" && -n "$staging_dir" ]]; then
+      rm -rf -- "$staging_dir"
+    fi
+    exit "$status"
+  }
+  trap cleanup EXIT
+
+  umask 077
+  mkdir -p "$staging_dir"
+  chmod 700 "$staging_dir"
+  sudo -n docker exec "$db_container" pg_isready -U resume_v3 -d resume_v3 >/dev/null
+  sudo -n docker exec "$db_container" pg_dump -U resume_v3 -d resume_v3 -Fc </dev/null \
+    > "$staging_dir/database.dump"
+  [[ -s "$staging_dir/database.dump" ]] || die "Legacy reconciliation database backup is empty."
+  sudo -n docker run --rm --network none -v "$staging_dir:/backup:ro" postgres:16-alpine \
+    pg_restore --list /backup/database.dump >/dev/null
+
+  sudo -n docker run --rm --network none --user 0 \
+    -v "$uploads_volume_name:/source:ro" -v "$staging_dir:/backup" postgres:16-alpine \
+    sh -ceu 'tar -C /source -czf /backup/uploads.tar.gz .'
+  [[ -s "$staging_dir/uploads.tar.gz" ]] || die "Legacy reconciliation uploads backup is empty."
+  validate_upload_archive "$staging_dir"
+  (
+    cd "$staging_dir"
+    sha256sum database.dump uploads.tar.gz > checksums.sha256
+    sha256sum --check checksums.sha256 >/dev/null
+  )
+  cat > "$staging_dir/manifest.env" <<EOF
+format_version=1
+state=complete
+backup_id=$backup_id
+release_tag=$pending_tag
+release_commit=$pending_commit
+previous_tag=$previous_tag
+previous_commit=$previous_commit
+mode=legacy_reconcile
+database_file=database.dump
+uploads_file=uploads.tar.gz
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+  mv "$staging_dir" "$final_dir"
+  completed=1
+  printf '%s\n' "$backup_id"
+)
+
+reconcile_legacy_pending_unlocked() {
+  local environment_dir="$1" history_dir="$2" expected_pending_tag="$3"
+  local expected_pending_commit="$4" confirmation="$5"
+  local pending_record current_record pending_tag pending_commit pending_previous_tag
+  local pending_previous_commit pending_state current_tag current_commit current_state
+  local db_container backup_id migrate_state timestamp archive temporary_archive
+
+  validate_environment_dir "$environment_dir"
+  validate_history_dir "$history_dir"
+  require_release_reference "$expected_pending_tag" "$expected_pending_commit"
+  [[ "$confirmation" == "RECONCILE_LEGACY_PENDING" ]] || \
+    die "Legacy reconciliation requires the exact confirmation RECONCILE_LEGACY_PENDING."
+  mkdir -p "$history_dir/releases" "$history_dir/backups"
+  chmod 700 "$history_dir" "$history_dir/releases" "$history_dir/backups"
+
+  pending_record="$history_dir/pending-release.env"
+  current_record="$history_dir/current-release.env"
+  [[ -f "$pending_record" ]] || die "Legacy reconciliation requires a pending release record."
+  [[ -f "$current_record" ]] || die "Legacy reconciliation requires a current release record."
+
+  pending_tag="$(record_value "$pending_record" tag)"
+  pending_commit="$(record_value "$pending_record" commit)"
+  pending_previous_tag="$(record_value "$pending_record" previous_tag)"
+  pending_previous_commit="$(record_value "$pending_record" previous_commit)"
+  pending_state="$(record_value "$pending_record" state)"
+  current_tag="$(record_value "$current_record" tag)"
+  current_commit="$(record_value "$current_record" commit)"
+  current_state="$(record_value "$current_record" state)"
+
+  require_release_reference "$pending_tag" "$pending_commit"
+  require_release_reference "$pending_previous_tag" "$pending_previous_commit"
+  require_release_reference "$current_tag" "$current_commit"
+  [[ "$pending_tag" == "$expected_pending_tag" && "$pending_commit" == "$expected_pending_commit" ]] || \
+    die "Pending release does not match the exact operator-confirmed legacy target."
+  [[ -z "$pending_state" || "$pending_state" == "pending" ]] || \
+    die "Pending release is not a legacy pending record."
+  [[ -z "$current_state" ]] || \
+    die "Current release is already structured; do not use the legacy reconciliation flow."
+  [[ "$current_tag" == "$pending_previous_tag" && "$current_commit" == "$pending_previous_commit" ]] || \
+    die "Current release does not match the interrupted release's recorded predecessor."
+
+  # A blank legacy backup field never implies an empty environment. Require a
+  # fresh, validated paired backup before the active marker can be archived.
+  uploads_volume_exists || die "Legacy reconciliation refuses a missing uploads volume."
+  postgres_volume_exists || die "Legacy reconciliation refuses a missing PostgreSQL volume."
+  require_legacy_compose_volume "$postgres_volume_name" postgres_data
+  require_legacy_runtime_quiescent
+  db_container="$(legacy_db_container)"
+  require_legacy_container_volume_mount db "$postgres_volume_name" /var/lib/postgresql/data
+  require_legacy_container_volume_mount api "$uploads_volume_name" /var/lib/resume-v3/uploads
+  require_legacy_container_volume_mount worker "$uploads_volume_name" /var/lib/resume-v3/uploads
+  require_legacy_uploads_volume_provenance
+  migrate_state="$(legacy_migrate_state)"
+  backup_id="$(create_legacy_reconciliation_backup "$db_container" "$history_dir" \
+    "$pending_tag" "$pending_commit" "$current_tag" "$current_commit")"
+  require_safe_backup_id "$backup_id"
+  # Re-check after the snapshot so a concurrent manual service start cannot
+  # make us archive an active pending record based on a writable snapshot.
+  require_legacy_runtime_quiescent
+
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive="$history_dir/releases/interrupted-$timestamp-$pending_tag.env"
+  temporary_archive="$history_dir/releases/.interrupted-$timestamp-$pending_tag.partial"
+  [[ ! -e "$archive" && ! -e "$temporary_archive" ]] || \
+    die "Legacy reconciliation archive path already exists; retry."
+  umask 077
+  {
+    cat "$pending_record"
+    cat <<EOF
+state=interrupted
+interruption_reason=legacy_pending_reconciled_after_verified_paired_backup
+reconciliation_backup_id=$backup_id
+observed_current_tag=$current_tag
+observed_current_commit=$current_commit
+observed_migrate_state=$migrate_state
+reconciled_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  } > "$temporary_archive"
+  mv "$temporary_archive" "$archive"
+  rm -f "$pending_record" || die "Unable to clear archived legacy pending release metadata."
+  printf 'Legacy pending release archived: %s (paired backup: %s)\n' "$archive" "$backup_id"
+}
+
+reconcile_legacy_pending() {
+  local environment_dir="$1" history_dir="$2"
+  shift 2
+  with_release_lock "$history_dir" reconcile_legacy_pending_unlocked \
+    "$environment_dir" "$history_dir" "$@"
+}
+
 case "${1:-}" in
   release)
     shift
@@ -537,8 +756,12 @@ case "${1:-}" in
     shift
     restore "$@"
     ;;
+  reconcile-legacy-pending)
+    shift
+    reconcile_legacy_pending "$@"
+    ;;
   *)
-    echo "Usage: $0 {release|restore} <release arguments>" >&2
+    echo "Usage: $0 {release|restore|reconcile-legacy-pending} <release arguments>" >&2
     exit 2
     ;;
 esac

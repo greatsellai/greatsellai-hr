@@ -37,6 +37,19 @@ def test_retry_deploy_is_manual_and_uses_current_reviewed_tooling() -> None:
     assert 'git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"' in workflow
 
 
+def test_legacy_pending_reconciliation_is_manual_and_uses_the_production_lock() -> None:
+    workflow = (
+        ROOT / ".github" / "workflows" / "production-legacy-reconcile.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert "RECONCILE_LEGACY_PENDING" in workflow
+    assert "group: greatsellai-hr-production" in workflow
+    assert "environment:" in workflow and "name: production" in workflow
+    assert "ref: main" in workflow
+    assert 'scripts/reconcile-legacy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
+
+
 def test_server_preflight_is_read_only_and_uses_candidate_compose() -> None:
     script = (ROOT / "scripts" / "preflight-production-release.sh").read_text(
         encoding="utf-8"

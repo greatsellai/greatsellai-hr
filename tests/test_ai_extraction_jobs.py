@@ -4,15 +4,25 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from app.models import ResumeAiExtractionJob, ResumeSourceBlock
+from app.models import (
+    ResumeAiExtractionJob,
+    ResumeDocumentExtractionJob,
+    ResumeSourceBlock,
+)
 from app.schemas import ResumeFactsSubmission
 from app.services import ai_extraction_job_service as job_service
+from app.services import document_extraction_job_service
 from app.services.deepseek_provider import DeepSeekProviderError
 from app.services.institution_service import load_registry
 from test_resume_flow import make_pdf_with_text
 
 
-def _upload_new_resume(client, *, filename: str = "resume.pdf") -> dict[str, object]:
+def _upload_new_resume(
+    client,
+    *,
+    filename: str = "resume.pdf",
+    process_document: bool = True,
+) -> dict[str, object]:
     response = client.post(
         "/v1/resumes/upload",
         files={
@@ -24,6 +34,12 @@ def _upload_new_resume(client, *, filename: str = "resume.pdf") -> dict[str, obj
         },
     )
     assert response.status_code == 200, response.text
+    if process_document:
+        assert document_extraction_job_service.run_document_extraction_worker_once(
+            client.app.state.database,
+            settings=client.app.state.settings,
+            worker_id="ai-job-document-worker",
+        )
     return response.json()
 
 
@@ -39,7 +55,11 @@ def test_both_upload_paths_enqueue_jobs_without_inline_model_calls(
 
     monkeypatch.setattr(job_service, "extract_resume_facts", should_not_run)
 
-    combined = _upload_new_resume(ai_client, filename="combined.pdf")
+    combined = _upload_new_resume(
+        ai_client,
+        filename="combined.pdf",
+        process_document=False,
+    )
     candidate = ai_client.post(
         "/v1/candidates", json={"display_name": "Candidate path"}
     )
@@ -62,9 +82,10 @@ def test_both_upload_paths_enqueue_jobs_without_inline_model_calls(
 
     database = ai_client.app.state.database
     with database.session_factory() as session:
-        jobs = session.scalars(select(ResumeAiExtractionJob)).all()
+        jobs = session.scalars(select(ResumeDocumentExtractionJob)).all()
         assert len(jobs) == 2
         assert {job.status for job in jobs} == {"queued"}
+        assert session.scalars(select(ResumeAiExtractionJob)).all() == []
 
 
 def test_worker_auto_activates_grounded_ai_facts_for_search(
@@ -205,6 +226,11 @@ def test_worker_never_overwrites_an_existing_candidate_name(
     assert uploaded.json()["candidate_display_name"] == "Existing candidate name"
     resume_id = str(uploaded.json()["resume_id"])
     database = ai_client.app.state.database
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        database,
+        settings=ai_client.app.state.settings,
+        worker_id="ai-job-document-worker",
+    )
 
     def fake_extract(**kwargs: object) -> ResumeFactsSubmission:
         return ResumeFactsSubmission.model_validate(

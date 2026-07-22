@@ -48,7 +48,6 @@ from app.tenant_scope import (
     organization_context_id,
     set_organization_context,
 )
-from app.services.ai_extraction_job_service import enqueue_uploaded_resume_ai_extraction
 from app.services.document_text_extraction import SUPPORTED_DOCUMENT_EXTENSIONS
 from app.services.mailbox_retention_service import (
     MailboxRetentionError,
@@ -2189,12 +2188,9 @@ def _ingest_attachment(
         resume.ingestion_source_type = "mailbox_attachment"
         resume.source_mailbox_config_id = config.id
         resume.source_mailbox_label_snapshot = config.display_name
-        if resume.extraction_status == "failed":
-            raise _AttachmentIngestionFailure(
-                "attachment_text_extraction_failed",
-                storage_key=resume.storage_key,
-            )
-        enqueue_uploaded_resume_ai_extraction(session, resume=resume, settings=settings)
+        # The attachment is now durably stored and its source normalization is
+        # queued in the same transaction by `save_pdf_resume`. Do not execute
+        # an untrusted converter on the mailbox worker's IMAP transaction.
         return resume
     except _AttachmentIngestionFailure:
         raise

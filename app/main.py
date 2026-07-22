@@ -243,7 +243,6 @@ from app.services.platform_admin_service import (
 from app.services.ai_extraction_job_service import (
     AiExtractionJobError,
     ai_extraction_state,
-    enqueue_uploaded_resume_ai_extraction,
     request_resume_ai_extraction,
     request_resume_filter_v2_enrichment,
 )
@@ -2694,11 +2693,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 settings=settings,
             )
             storage_key = resume.storage_key
-            enqueue_uploaded_resume_ai_extraction(
-                session,
-                resume=resume,
-                settings=settings,
-            )
             _commit_or_raise(session)
         except NotFoundError as exc:
             session.rollback()
@@ -2821,11 +2815,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 # Surface a competing idempotency key before the transaction
                 # commits, so its just-written PDF can be removed.
                 session.flush()
-            enqueue_uploaded_resume_ai_extraction(
-                session,
-                resume=resume,
-                settings=settings,
-            )
             session.commit()
         except UploadValidationError as exc:
             session.rollback()
@@ -2894,7 +2883,10 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         rows = session.execute(
             select(Resume, Candidate.display_name)
             .join(Candidate, Resume.candidate_id == Candidate.id)
-            .options(selectinload(Resume.ai_extraction_job))
+            .options(
+                selectinload(Resume.document_extraction_job),
+                selectinload(Resume.ai_extraction_job),
+            )
             .where(pending)
             .order_by(Resume.created_at.desc(), Resume.id.desc())
             .offset((page - 1) * page_size)

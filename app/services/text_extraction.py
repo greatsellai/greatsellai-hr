@@ -133,6 +133,8 @@ def extract_pdf_text(
     min_text_chars_per_page: int,
     ocr_sparse_text_chars_per_page: int = 500,
     tencent_ocr_config: TencentOcrConfig | None = None,
+    max_pages: int | None = None,
+    max_text_chars: int | None = None,
 ) -> PdfExtractionResult:
     try:
         reader = PdfReader(str(path))
@@ -149,6 +151,8 @@ def extract_pdf_text(
 
     if source_page_count < 1:
         raise PdfExtractionError("empty_pdf")
+    if max_pages is not None and source_page_count > max_pages:
+        raise PdfExtractionError("document_page_limit_exceeded")
 
     if ocr_sparse_text_chars_per_page < min_text_chars_per_page:
         raise ValueError("ocr_sparse_text_chars_per_page_must_cover_minimum_text")
@@ -269,6 +273,8 @@ def extract_pdf_text(
     raw_text = "\n\n".join(
         f"--- PAGE {page.page_no} ---\n{page.text}" for page in pages if page.text
     )
+    if max_text_chars is not None and len(raw_text) > max_text_chars:
+        raise PdfExtractionError("document_text_limit_exceeded")
     if not raw_text:
         flags.append("no_extractable_text")
 

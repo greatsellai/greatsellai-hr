@@ -19,6 +19,7 @@ from app.models import (
     utcnow,
 )
 from app.services.resume_service import ResumeServiceError, auto_extract_and_save_facts
+from app.services.document_extraction_job_service import run_document_extraction_worker_once
 from test_resume_flow import make_pdf_with_text
 
 
@@ -34,8 +35,15 @@ def _upload_text_ready_resume(client) -> str:
         },
     )
     assert response.status_code == 200, response.text
-    assert response.json()["extraction_status"] == "text_ready"
-    return str(response.json()["resume_id"])
+    assert response.json()["extraction_status"] == "queued"
+    assert run_document_extraction_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="sync-gateway-document-worker",
+    )
+    resume_id = str(response.json()["resume_id"])
+    assert client.get(f"/v1/resumes/{resume_id}").json()["extraction_status"] == "text_ready"
+    return resume_id
 
 
 def _source_grounded_resume_completion() -> CompletionResult:

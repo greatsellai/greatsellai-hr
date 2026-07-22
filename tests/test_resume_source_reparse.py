@@ -7,11 +7,13 @@ from sqlalchemy import select
 from app.models import (
     Resume,
     ResumeAiExtractionJob,
+    ResumeDocumentExtractionJob,
     ResumeFactSnapshot,
     ResumeSourceBlock,
 )
 from app.schemas import ResumeFactsSubmission
 from app.services import ai_extraction_job_service as job_service
+from app.services import document_extraction_job_service
 from app.services import resume_service
 from app.services.institution_service import load_registry
 from app.services.text_extraction import ExtractedPage, PdfExtractionResult
@@ -144,8 +146,15 @@ def test_active_source_reparse_creates_isolated_new_resume_version(
         "Education Test University Computer Science Bachelor. "
         "Work Experience Example Company Python Engineer. Skills Python SQL."
     )
+    inline_parse_calls: list[object] = []
+
+    def inline_parse_must_not_run(*_args: object, **_kwargs: object) -> PdfExtractionResult:
+        inline_parse_calls.append(True)
+        raise AssertionError("reparse HTTP/service path must not parse the original")
+
+    monkeypatch.setattr(resume_service, "extract_document_text", inline_parse_must_not_run)
     monkeypatch.setattr(
-        resume_service,
+        document_extraction_job_service,
         "extract_document_text",
         lambda *args, **kwargs: PdfExtractionResult(
             source_page_count=1,
@@ -193,6 +202,34 @@ def test_active_source_reparse_creates_isolated_new_resume_version(
         replacement_id = replacement.id
         replacement_storage_key = replacement.storage_key
         session.commit()
+
+    assert inline_parse_calls == []
+    with database.session_factory() as session:
+        pending_document_job = session.scalar(
+            select(ResumeDocumentExtractionJob).where(
+                ResumeDocumentExtractionJob.resume_id == replacement_id
+            )
+        )
+        pending_blocks = session.scalars(
+            select(ResumeSourceBlock).where(
+                ResumeSourceBlock.resume_id == replacement_id
+            )
+        ).all()
+        pending_ai_job = session.scalar(
+            select(ResumeAiExtractionJob).where(
+                ResumeAiExtractionJob.resume_id == replacement_id
+            )
+        )
+    assert pending_document_job is not None
+    assert pending_document_job.status == "queued"
+    assert pending_blocks == []
+    assert pending_ai_job is None
+
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        database,
+        settings=client.app.state.settings,
+        worker_id="source-reparse-document-worker",
+    )
 
     with database.session_factory() as session:
         source_after = session.get(Resume, source_resume_id)
@@ -255,8 +292,19 @@ def test_active_source_reparse_endpoint_creates_a_new_version(
 ) -> None:
     source_resume_id = _ready_source_resume(client)
     recovered_text = "Recovered source text with sufficient content for a resume."
+    inline_parse_calls: list[object] = []
+
+    def inline_parse_must_not_run(*_args: object, **_kwargs: object) -> PdfExtractionResult:
+        inline_parse_calls.append(True)
+        raise AssertionError("reparse endpoint must not parse the original")
+
     monkeypatch.setattr(
         resume_service,
+        "extract_document_text",
+        inline_parse_must_not_run,
+    )
+    monkeypatch.setattr(
+        document_extraction_job_service,
         "extract_document_text",
         lambda *args, **kwargs: PdfExtractionResult(
             source_page_count=1,
@@ -280,17 +328,40 @@ def test_active_source_reparse_endpoint_creates_a_new_version(
     assert replacement["resume_id"] != source_resume_id
     assert replacement["candidate_id"]
     assert replacement["is_active"] is False
-    assert replacement["extraction_status"] == "text_ready"
+    assert replacement["extraction_status"] == "queued"
+    assert inline_parse_calls == []
 
     database = client.app.state.database
     with database.session_factory() as session:
         source = session.get(Resume, source_resume_id)
         clone = session.get(Resume, replacement["resume_id"])
+        clone_document_job = session.scalar(
+            select(ResumeDocumentExtractionJob).where(
+                ResumeDocumentExtractionJob.resume_id == replacement["resume_id"]
+            )
+        )
+        clone_blocks = session.scalars(
+            select(ResumeSourceBlock).where(
+                ResumeSourceBlock.resume_id == replacement["resume_id"]
+            )
+        ).all()
     assert source is not None
     assert clone is not None
+    assert clone_document_job is not None
+    assert clone_document_job.status == "queued"
+    assert clone_blocks == []
     assert source.is_active is True
     assert "source_text_unreliable" in source.quality_flags
     assert clone.storage_key != source.storage_key
+
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        database,
+        settings=client.app.state.settings,
+        worker_id="source-reparse-endpoint-document-worker",
+    )
+    completed = client.get(f"/v1/resumes/{replacement['resume_id']}")
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["extraction_status"] == "text_ready"
 
 
 def test_reparse_clone_auto_activates_only_after_new_grounded_ai_facts(
@@ -302,7 +373,7 @@ def test_reparse_clone_auto_activates_only_after_new_grounded_ai_facts(
     school = load_registry().institutions[0].canonical_name
     recovered_text = f"Education {school} Computer Science Skills Python SQL."
     monkeypatch.setattr(
-        resume_service,
+        document_extraction_job_service,
         "extract_document_text",
         lambda *args, **kwargs: PdfExtractionResult(
             source_page_count=1,
@@ -332,6 +403,12 @@ def test_reparse_clone_auto_activates_only_after_new_grounded_ai_facts(
         assert source_job is not None
         assert source_job.status == "needs_attention"
         assert source_job.last_error == "source_reparse_superseded_ai_extraction"
+
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        database,
+        settings=ai_client.app.state.settings,
+        worker_id="source-reparse-document-worker",
+    )
 
     def fake_extract(**kwargs: object) -> ResumeFactsSubmission:
         return ResumeFactsSubmission.model_validate(
@@ -372,31 +449,11 @@ def test_reparse_clone_auto_activates_only_after_new_grounded_ai_facts(
 
 def test_active_source_reparse_rejects_second_pending_clone(
     client,
-    monkeypatch,
 ) -> None:
     source_resume_id = _ready_source_resume(client)
     database = client.app.state.database
-    recovered_text = "Recovered source text with sufficient content for a resume."
-    monkeypatch.setattr(
-        resume_service,
-        "extract_document_text",
-        lambda *args, **kwargs: PdfExtractionResult(
-            source_page_count=1,
-            parsed_page_count=1,
-            pages=[
-                ExtractedPage(
-                    page_no=1,
-                    text=recovered_text,
-                    non_whitespace_chars=len(recovered_text.replace(" ", "")),
-                )
-            ],
-            raw_text=recovered_text,
-            quality_flags=[],
-            parser_version="pymupdf-test",
-        ),
-    )
-    # Give the clone a queued job so the duplicate protection is observable
-    # without calling a real provider.
+    # The document job itself is enough to make a second request conflict;
+    # AI work is intentionally not enqueued before source normalization.
     queued_settings = replace(client.app.state.settings, deepseek_api_key="test-key")
     with database.session_factory() as session:
         first = resume_service.reparse_active_resume_as_new_version(
@@ -404,8 +461,9 @@ def test_active_source_reparse_rejects_second_pending_clone(
             resume_id=source_resume_id,
             settings=queued_settings,
         )
-        assert first.ai_extraction_job is not None
-        assert first.ai_extraction_job.status == "queued"
+        assert first.document_extraction_job is not None
+        assert first.document_extraction_job.status == "queued"
+        assert first.ai_extraction_job is None
         try:
             resume_service.reparse_active_resume_as_new_version(
                 session,
@@ -421,29 +479,9 @@ def test_active_source_reparse_rejects_second_pending_clone(
 
 def test_reparse_clone_activation_guard_requires_unchanged_active_source(
     client,
-    monkeypatch,
 ) -> None:
     source_resume_id = _ready_source_resume(client)
     database = client.app.state.database
-    recovered_text = "Recovered source text with sufficient content for a resume."
-    monkeypatch.setattr(
-        resume_service,
-        "extract_document_text",
-        lambda *args, **kwargs: PdfExtractionResult(
-            source_page_count=1,
-            parsed_page_count=1,
-            pages=[
-                ExtractedPage(
-                    page_no=1,
-                    text=recovered_text,
-                    non_whitespace_chars=len(recovered_text.replace(" ", "")),
-                )
-            ],
-            raw_text=recovered_text,
-            quality_flags=[],
-            parser_version="pymupdf-test",
-        ),
-    )
     queued_settings = replace(client.app.state.settings, deepseek_api_key="test-key")
     with database.session_factory() as session:
         replacement = resume_service.reparse_active_resume_as_new_version(

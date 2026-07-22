@@ -126,6 +126,16 @@ def ai_extraction_state(
 ) -> tuple[str, str | None]:
     """Return the UI-safe status for the most recent durable AI job."""
 
+    document_job = resume.document_extraction_job
+    if document_job is not None:
+        if document_job.status in {"queued", "running"}:
+            # The browser already understands the existing queued/running AI
+            # vocabulary. Keeping it here avoids a misleading
+            # `needs_attention` state while source text is still being safely
+            # normalized by the preceding worker stage.
+            return AI_EXTRACTION_QUEUED, None
+        if document_job.status == "needs_attention":
+            return AI_EXTRACTION_NEEDS_ATTENTION, document_job.last_error
     job = resume.ai_extraction_job
     if job is not None:
         return job.status, job.last_error

@@ -113,6 +113,7 @@ def list_resume_library(
         select(Resume)
         .options(
             selectinload(Resume.candidate),
+            selectinload(Resume.document_extraction_job),
             selectinload(Resume.ai_extraction_job),
             selectinload(Resume.summaries),
             selectinload(Resume.scores).selectinload(ResumeScore.template),

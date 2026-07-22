@@ -642,6 +642,13 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    document_extraction_job: Mapped["ResumeDocumentExtractionJob | None"] = (
+        relationship(
+            back_populates="resume",
+            cascade="all, delete-orphan",
+            uselist=False,
+        )
+    )
     source_mailbox_config: Mapped["MailboxConfig | None"] = relationship(
         back_populates="ingested_resumes",
         foreign_keys=[source_mailbox_config_id],
@@ -1544,6 +1551,58 @@ class MailboxRetentionCleanupRun(OrganizationScoped, Base):
     mailbox_config: Mapped[MailboxConfig] = relationship(
         back_populates="retention_cleanup_runs"
     )
+
+
+class ResumeDocumentExtractionJob(OrganizationScoped, Base):
+    """Durable, lease-based normalization work for one uploaded original.
+
+    Upload handlers never run an untrusted document converter in the API
+    process.  They persist an original and one row in this queue instead; the
+    worker claims the row under its owning organization before it opens the
+    file.  There is intentionally one mutable job per resume so retries are
+    idempotent and cannot create duplicate source evidence.
+    """
+
+    __tablename__ = "resume_document_extraction_jobs"
+    __table_args__ = (
+        UniqueConstraint("resume_id", name="uq_resume_document_extraction_job_resume"),
+        Index(
+            "ix_resume_document_extraction_job_claim",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_resume_document_extraction_job_lease",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_resume_document_extraction_job_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    resume_id: Mapped[str] = mapped_column(ForeignKey("resumes.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    resume: Mapped[Resume] = relationship(back_populates="document_extraction_job")
 
 
 class ResumeAiExtractionJob(OrganizationScoped, Base):

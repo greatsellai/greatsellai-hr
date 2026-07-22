@@ -60,6 +60,19 @@ class AppSettings:
     ai_extraction_job_max_attempts: int = 3
     ai_extraction_job_lease_seconds: int = 180
     ai_extraction_worker_poll_seconds: float = 2.0
+    # Original-file normalization is deliberately a separate durable queue.
+    # Unlike an LLM call it may invoke Office, OCR or archive readers, so the
+    # API must never perform it inline with an upload request.
+    document_extraction_job_max_attempts: int = 3
+    document_extraction_job_lease_seconds: int = 180
+    document_max_pages: int = 30
+    document_max_text_chars: int = 250_000
+    document_max_archive_uncompressed_bytes: int = 100 * 1024 * 1024
+    document_max_spreadsheet_sheets: int = 20
+    document_max_spreadsheet_rows_per_sheet: int = 5_000
+    document_max_spreadsheet_cells: int = 50_000
+    document_office_timeout_seconds: int = 90
+    document_image_ocr_timeout_seconds: int = 60
     mailbox_sync_interval_seconds: float = 600.0
     # The scheduler checks a workspace at this cadence for expired short-lived
     # mail body/attachment cache entries. Candidate resume originals are not
@@ -266,6 +279,39 @@ class AppSettings:
             ),
             ai_extraction_worker_poll_seconds=float(
                 os.getenv("RESUME_V3_AI_EXTRACTION_WORKER_POLL_SECONDS", "2")
+            ),
+            document_extraction_job_max_attempts=int(
+                os.getenv("RESUME_V3_DOCUMENT_EXTRACTION_JOB_MAX_ATTEMPTS", "3")
+            ),
+            document_extraction_job_lease_seconds=int(
+                os.getenv("RESUME_V3_DOCUMENT_EXTRACTION_JOB_LEASE_SECONDS", "180")
+            ),
+            document_max_pages=int(
+                os.getenv("RESUME_V3_DOCUMENT_MAX_PAGES", "30")
+            ),
+            document_max_text_chars=int(
+                os.getenv("RESUME_V3_DOCUMENT_MAX_TEXT_CHARS", "250000")
+            ),
+            document_max_archive_uncompressed_bytes=int(
+                os.getenv(
+                    "RESUME_V3_DOCUMENT_MAX_ARCHIVE_UNCOMPRESSED_BYTES",
+                    str(100 * 1024 * 1024),
+                )
+            ),
+            document_max_spreadsheet_sheets=int(
+                os.getenv("RESUME_V3_DOCUMENT_MAX_SPREADSHEET_SHEETS", "20")
+            ),
+            document_max_spreadsheet_rows_per_sheet=int(
+                os.getenv("RESUME_V3_DOCUMENT_MAX_SPREADSHEET_ROWS_PER_SHEET", "5000")
+            ),
+            document_max_spreadsheet_cells=int(
+                os.getenv("RESUME_V3_DOCUMENT_MAX_SPREADSHEET_CELLS", "50000")
+            ),
+            document_office_timeout_seconds=int(
+                os.getenv("RESUME_V3_DOCUMENT_OFFICE_TIMEOUT_SECONDS", "90")
+            ),
+            document_image_ocr_timeout_seconds=int(
+                os.getenv("RESUME_V3_DOCUMENT_IMAGE_OCR_TIMEOUT_SECONDS", "60")
             ),
             mailbox_sync_interval_seconds=float(
                 os.getenv("RESUME_V3_MAILBOX_SYNC_INTERVAL_SECONDS", "600")
@@ -516,6 +562,40 @@ class AppSettings:
             raise ValueError(
                 "RESUME_V3_AI_EXTRACTION_JOB_MAX_ATTEMPTS must be at least 1"
             )
+        if not 1 <= self.document_extraction_job_max_attempts <= 10:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_EXTRACTION_JOB_MAX_ATTEMPTS must be between 1 and 10"
+            )
+        if not 1 <= self.document_max_pages <= 200:
+            raise ValueError("RESUME_V3_DOCUMENT_MAX_PAGES must be between 1 and 200")
+        if self.document_max_text_chars < self.min_text_chars_per_page:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_MAX_TEXT_CHARS must cover MIN_TEXT_CHARS_PER_PAGE"
+            )
+        if not self.document_max_archive_uncompressed_bytes >= self.max_upload_bytes:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_MAX_ARCHIVE_UNCOMPRESSED_BYTES must cover one upload"
+            )
+        if not 1 <= self.document_max_spreadsheet_sheets <= 100:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_MAX_SPREADSHEET_SHEETS must be between 1 and 100"
+            )
+        if not 1 <= self.document_max_spreadsheet_rows_per_sheet <= 100_000:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_MAX_SPREADSHEET_ROWS_PER_SHEET must be between 1 and 100000"
+            )
+        if not 1 <= self.document_max_spreadsheet_cells <= 1_000_000:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_MAX_SPREADSHEET_CELLS must be between 1 and 1000000"
+            )
+        if self.document_office_timeout_seconds < 1:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_OFFICE_TIMEOUT_SECONDS must be at least 1"
+            )
+        if self.document_image_ocr_timeout_seconds < 1:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_IMAGE_OCR_TIMEOUT_SECONDS must be at least 1"
+            )
         if self.mailbox_retention_cleanup_interval_seconds < 60:
             raise ValueError(
                 "RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS must be at least 60"
@@ -554,6 +634,16 @@ class AppSettings:
             raise ValueError(
                 "RESUME_V3_AI_EXTRACTION_JOB_LEASE_SECONDS must exceed "
                 "DEEPSEEK_TIMEOUT_SECONDS by at least 30 seconds"
+            )
+        document_longest_subprocess_seconds = max(
+            self.document_office_timeout_seconds,
+            self.document_image_ocr_timeout_seconds,
+            self.tencent_ocr_timeout_seconds,
+        )
+        if self.document_extraction_job_lease_seconds < document_longest_subprocess_seconds + 30:
+            raise ValueError(
+                "RESUME_V3_DOCUMENT_EXTRACTION_JOB_LEASE_SECONDS must exceed "
+                "the longest document subprocess timeout by at least 30 seconds"
             )
         if self.ai_extraction_worker_poll_seconds <= 0:
             raise ValueError(

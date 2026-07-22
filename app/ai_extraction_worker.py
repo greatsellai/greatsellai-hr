@@ -9,6 +9,9 @@ from uuid import uuid4
 from app.config import AppSettings
 from app.database import Database
 from app.services.ai_extraction_job_service import run_ai_extraction_worker_once
+from app.services.document_extraction_job_service import (
+    run_document_extraction_worker_once,
+)
 from app.services.job_match_batch_service import run_job_match_batch_worker_once
 from app.services.mailbox_background_job_service import (
     enqueue_due_mailbox_sync_jobs,
@@ -73,6 +76,11 @@ def run_forever(settings: AppSettings) -> None:
                 settings=settings,
                 worker_id=worker_id,
             )
+            ran_document_extraction = run_document_extraction_worker_once(
+                database,
+                settings=settings,
+                worker_id=worker_id,
+            )
             ran_extraction = run_ai_extraction_worker_once(
                 database,
                 settings=settings,
@@ -118,6 +126,7 @@ def run_forever(settings: AppSettings) -> None:
             )
             if (
                 not ran_extraction
+                and not ran_document_extraction
                 and not ran_job_match
                 and not ran_score_batch
                 and not ran_transactional_email
@@ -162,11 +171,19 @@ def main() -> None:
             worker_id=_worker_id(),
         )
         if not ran_transactional_email and not ran_mailbox_job:
-            ran_extraction = run_ai_extraction_worker_once(
+            ran_document_extraction = run_document_extraction_worker_once(
                 database,
                 settings=settings,
                 worker_id=_worker_id(),
             )
+            if not ran_document_extraction:
+                ran_extraction = run_ai_extraction_worker_once(
+                    database,
+                    settings=settings,
+                    worker_id=_worker_id(),
+                )
+            else:
+                ran_extraction = True
         else:
             ran_extraction = True
         if not ran_extraction:

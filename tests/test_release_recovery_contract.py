@@ -217,20 +217,6 @@ def test_pending_target_finalizer_is_specific_and_preserves_the_normal_pending_g
     assert "FINALIZE_PENDING_PROXY_STARTUP" in wrapper
 
 
-def test_public_release_checks_use_the_first_configured_caddy_address() -> None:
-    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
-        encoding="utf-8"
-    )
-    verification = helper.split("verify_public_runtime()", maxsplit=1)[1].split(
-        "validate_pending_target_source()", maxsplit=1
-    )[0]
-
-    assert "domain_addresses" in verification
-    assert 'domain="${domain_addresses%%,*}"' in verification
-    assert "RESUME_V3_DOMAIN has no primary address." in verification
-    assert '"https://$domain/health"' in verification
-
-
 def test_legacy_reconciliation_refuses_structured_pending_metadata() -> None:
     helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
         encoding="utf-8"

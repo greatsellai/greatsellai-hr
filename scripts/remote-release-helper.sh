@@ -113,14 +113,9 @@ validate_upload_archive() {
 }
 
 verify_public_runtime() {
-  local environment_dir="$1" domain_addresses domain session_body protected_status
-  domain_addresses="$(sed -n 's/^RESUME_V3_DOMAIN=//p' "$environment_dir/.env.production" | tail -n 1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
-  [[ -n "$domain_addresses" ]] || die "RESUME_V3_DOMAIN is not set."
-  # Caddy accepts a comma-separated address list. The first address is the
-  # canonical endpoint used for release health and access-control checks.
-  domain="${domain_addresses%%,*}"
-  domain="$(printf '%s' "$domain" | xargs)"
-  [[ -n "$domain" ]] || die "RESUME_V3_DOMAIN has no primary address."
+  local environment_dir="$1" domain session_body protected_status
+  domain="$(sed -n 's/^RESUME_V3_DOMAIN=//p' "$environment_dir/.env.production" | tail -n 1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
+  [[ -n "$domain" ]] || die "RESUME_V3_DOMAIN is not set."
   for attempt in $(seq 1 30); do
     if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$domain/health" >/dev/null; then
       break

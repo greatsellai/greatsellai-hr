@@ -38,20 +38,6 @@ Compose 将 Caddy 固定在专用 `proxy` 网络的 `172.30.0.2`，API 同时连
 
 浏览器使用同源的 `/v1/*` 请求 API，不需要在生产环境设置前端 API 域名或开放 CORS。HR 主站、登录和工作台均位于 `https://hr.greatsellai.net/`，首次签发 HTTPS 证书前，只需确认该主域的 A/AAAA 记录已指向 HR 服务器，并且云防火墙放行 `80` 与 `443`。
 
-一个部署单元可以服务一个主域及其别名：在服务器本地 `.env.production` 将
-`RESUME_V3_DOMAIN` 写为 Caddy 的逗号分隔地址列表，第一项是发布健康检查使用的
-主域。例如佳芯备案入口可使用：
-
-```dotenv
-RESUME_V3_DOMAIN=greatsellai.cn, www.greatsellai.cn
-RESUME_V3_PUBLIC_APP_URL=https://greatsellai.cn
-RESUME_V3_SESSION_COOKIE_SECURE=1
-```
-
-这只让两个域名访问该服务器上独立部署的同一应用版本；不会复制或同步另一台服务器的
-PostgreSQL 数据、候选人原件、会话或环境变量。若需要跨服务器数据同步，必须单独设计
-并确认数据主库、备份和隐私边界。
-
 `https://greatsellai.net/` 属于未来官网，HR 部署不得声明、接管或要求该根域指向 HR 服务器。如需保留 `https://greatsellai.net/greatsellhr/` 兼容入口，应由官网自身的边缘代理将该路径转发到 HR 主站，并继续由官网处理根路径和静态资源。
 
 ## AI 提取 worker
@@ -121,7 +107,7 @@ PostgreSQL 逻辑导出和共享 `uploads_data` 原文件卷在同一备份 ID�
 脚本重建 `api`、`worker` 和 `caddy`，让 Compose 正常执行迁移依赖，并验证：
 
 - Caddy 配置有效；
-- `https://<RESUME_V3_DOMAIN 的第一项>/health` 可用；
+- `https://<RESUME_V3_DOMAIN>/health` 可用；
 - 未登录会话仍处于登录保护状态；
 - 不携带认证信息时，伪造 ID 的原 PDF 请求被拒绝。
 

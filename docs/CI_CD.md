@@ -52,25 +52,6 @@
 - `PROD_HISTORY_DIR`：项目目录之外、供发布记录和逻辑备份使用的目录。它必须沿用
   当前人工发布所使用的受保护目录。
 
-如需将同一个已发布标签同步到佳芯中国镜像服务器，在同一 `production` Environment
-增加下列值，并将开关设为 `true`：
-
-### 中国镜像 Variables
-
-- `CN_MIRROR_ENABLED`：`true` 时启用佳芯镜像部署；未设置或不是 `true` 时保持单目标发布。
-- `CN_MIRROR_DEPLOY_HOST`：佳芯部署用户名与主机，例如 `ubuntu@58.87.96.20`。
-- `CN_MIRROR_PROJECT_DIR`：佳芯项目目录，例如 `/home/ubuntu/resume-screening-v3`。
-- `CN_MIRROR_HISTORY_DIR`：佳芯项目外的发布记录与数据库备份目录。
-
-### 中国镜像 Secrets
-
-- `CN_MIRROR_SSH_PRIVATE_KEY`：仅用于佳芯部署的 SSH 私钥。
-- `CN_MIRROR_SSH_KNOWN_HOSTS`：已通过可信渠道核验的佳芯主机 `known_hosts` 条目。
-
-镜像目标会在主 HR 服务器成功发布后部署相同的不可变 `prod-*` 标签；手动重部署和
-回滚也会遵循同一顺序。两台服务器的数据库、候选人原件、会话和环境变量始终独立，
-这不是跨服务器数据复制机制。
-
 要启用**无人值守自动发布**，不要给 `production` 设置 required reviewers。若未来需要
 人工闸门，可以开启审批规则；此时自动发布会在部署前暂停等待审批，而不会跳过 CI。
 无论是否启用审批，都应将 Environment 的 deployment branches and tags 限制为受保护的

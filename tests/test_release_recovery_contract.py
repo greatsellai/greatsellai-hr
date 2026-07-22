@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
 import re
+import shutil
+import subprocess
 import sys
 import tarfile
 import tomllib
@@ -142,15 +145,28 @@ def test_release_scripts_require_paired_recovery_and_explicit_targeting() -> Non
     dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "uploads.tar.gz" in helper
+    assert 'postgres_volume_name="resume-screening-v3_postgres_data"' in helper
     assert "checksums.sha256" in helper
     assert "state=complete" in helper
     assert "Restore requires the exact confirmation RESTORE." in helper
+    assert "tar -tzf /backup/uploads.tar.gz >/dev/null" in helper
+    assert "Unsupported uploads archive member type." in helper
     assert "pg_restore --list /backup/database.dump" in helper
     assert "Missing deployment target" in deploy
     assert "58.87.96.20" not in deploy
-    assert "git show \"$tag:compose.yml\"" in deploy
-    assert "config --quiet" in deploy
-    assert deploy.index('git show "$tag:compose.yml"') < deploy.index("remote_release precheck")
+    assert "release-sources" in helper
+    assert "with_release_lock" in helper
+    assert "up -d --no-build --no-deps api worker" in helper
+    assert 'compose_run "$runtime_source_dir" "$environment_dir" "$previous_commit"' in helper
+    assert "source_dir=$target_source_dir" in helper
+    assert "current-release.env" in helper
+    assert "Unresolved pending release" in helper
+    assert 'tar -x -C $(shell_quote "$project_dir")' not in deploy
+    assert 'cat "$repo_root/scripts/remote-release-helper.sh"' in deploy
+    assert 'cat "$repo_root/scripts/release_source_stage.py"' in deploy
+    assert 'bash $(shell_quote "$remote_helper") release' in deploy
+    assert "Target tag predates the current production release." in deploy
+    assert "state=complete" in deploy
     assert "requirements-production.lock" in dockerfile
 
 
@@ -177,3 +193,106 @@ def test_production_lock_covers_every_runtime_dependency_exactly() -> None:
         for dependency in project["project"]["dependencies"]
     }
     assert runtime_packages <= lock
+
+
+def test_release_transaction_prepares_target_before_quiescing_current_runtime() -> None:
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    transaction = helper.split("release_unlocked()", maxsplit=1)[1].split(
+        "with_release_lock()", maxsplit=1
+    )[0]
+
+    assert transaction.index("prepare_target_images") < transaction.index("create_backup_bundle")
+    assert "compose_run \"$target_source_dir\" \"$environment_dir\" \"$target_commit\" build api caddy" in helper
+    assert "up -d --no-build api worker caddy" in helper
+    assert "flock -n 9" in helper
+    assert "refusing to treat persistent data as an initial deployment" in helper.lower()
+
+
+def test_current_release_record_commits_before_the_complete_history_record() -> None:
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    record_writer = helper.split("write_release_records()", maxsplit=1)[1].split(
+        "deploy_target()", maxsplit=1
+    )[0]
+
+    current_commit = 'mv -f "$temporary_current" "$history_dir/current-release.env"'
+    history_publish = 'mv "$temporary_record" "$record"'
+    assert record_writer.index(current_commit) < record_writer.index("deployment_succeeded=1")
+    assert record_writer.index("deployment_succeeded=1") < record_writer.index(history_publish)
+
+
+def test_release_transaction_passes_all_double_digit_arguments_to_the_source_stager(
+    tmp_path: Path,
+) -> None:
+    """Guard the shell positional-parameter boundary used by the SSH release call.
+
+    The remote helper receives eleven release arguments.  In Bash, ``$10`` is
+    parsed as ``${1}0`` rather than the tenth argument, so this tiny harness
+    executes the real transaction with all side effects stubbed out.  It keeps
+    the archive checksum and staged-tool path from silently becoming literals.
+    """
+
+    if os.name != "posix":
+        pytest.skip("the Bash transaction harness is exercised in Linux CI")
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required for the remote release helper contract")
+
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    definitions, separator, _ = helper.partition('case "${1:-}" in')
+    assert separator, "remote helper dispatch block is missing"
+
+    history_dir = tmp_path / "history"
+    captured_arguments = tmp_path / "captured-stage-arguments.txt"
+    checksum = "a" * 64
+    stage_tool = "/tmp/release-stage.py"
+    harness = tmp_path / "release-helper-arguments.sh"
+    harness.write_text(
+        definitions
+        + f"""
+validate_environment_dir() {{ :; }}
+validate_history_dir() {{ :; }}
+require_release_reference() {{ :; }}
+stage_target_source() {{
+  printf '%s|%s\\n' "$3" "$4" > {captured_arguments.as_posix()!r}
+  printf '%s/source' "$1"
+}}
+prepare_target_images() {{ :; }}
+load_current_runtime() {{
+  current_tag=""
+  current_commit=""
+  current_source_dir="$1"
+}}
+compose_run() {{ :; }}
+deploy_target() {{ :; }}
+
+release_unlocked \
+  {tmp_path.as_posix()!r} \
+  {history_dir.as_posix()!r} \
+  prod-20260722-1234567 \
+  {'b' * 40} \
+  __none__ \
+  __none__ \
+  deploy \
+  0 \
+  0 \
+  {checksum} \
+  {stage_tool}
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [bash, str(harness)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert captured_arguments.read_text(encoding="utf-8").strip() == f"{checksum}|{stage_tool}"

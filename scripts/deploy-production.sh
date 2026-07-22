@@ -20,8 +20,8 @@ Options:
                             keeps the current database schema and skips migrate
 
 Only prod-YYYYMMDD-<commit-sha> tags that are reachable from origin/main are
-accepted. The command transfers tracked source with git archive; it never uses
---delete and cannot transfer .env.production, Docker volumes, PDFs, or database data.
+accepted. The command stages tracked source in an immutable release directory;
+it never overwrites .env.production, Docker volumes, PDFs, or database data.
 EOF
 }
 
@@ -108,7 +108,23 @@ while IFS= read -r line; do
 done <<< "$remote_current"
 
 if [[ "$mode" == "rollback" ]]; then
-  published_target="$(ssh_run "if [ -d $(shell_quote "$history_dir/releases") ] && grep -R -q -- $(shell_quote "^tag=$tag$") $(shell_quote "$history_dir/releases"); then printf yes; fi")"
+  successful_release_lookup="$(cat <<'EOF'
+set -Eeuo pipefail
+releases_dir="$1"
+target_tag="$2"
+
+if [[ -d "$releases_dir" ]]; then
+  for record in "$releases_dir"/*.env; do
+    [[ -f "$record" ]] || continue
+    if grep -q -x -- "tag=$target_tag" "$record" && grep -q -x -- 'state=complete' "$record"; then
+      printf yes
+      exit 0
+    fi
+  done
+fi
+EOF
+)"
+  published_target="$(ssh_run "bash -c $(shell_quote "$successful_release_lookup") -- $(shell_quote "$history_dir/releases") $(shell_quote "$tag")")"
   [[ "$published_target" == "yes" ]] || \
     die "Rollback target '$tag' has no successful production deployment record."
 fi
@@ -122,6 +138,11 @@ elif [[ -n "$(git diff --name-only "$previous_commit" "$release_commit" -- migra
   migration_changed=1
 fi
 
+if [[ "$mode" == "deploy" && -n "$previous_commit" && "$release_commit" != "$previous_commit" ]] && \
+  git merge-base --is-ancestor "$release_commit" "$previous_commit"; then
+  die "Target tag predates the current production release. Use the explicit rollback workflow so schema compatibility is acknowledged."
+fi
+
 if [[ "$mode" == "rollback" && "$migration_changed" -eq 1 && "$allow_schema_ahead" -ne 1 ]]; then
   die "Rollback crosses migration changes. Review schema compatibility and retry with --allow-schema-ahead; this does not downgrade the database."
 fi
@@ -129,42 +150,32 @@ if [[ "$mode" != "rollback" && "$allow_schema_ahead" -eq 1 ]]; then
   die "--allow-schema-ahead is only valid for an explicit rollback."
 fi
 
-# A release can change application behavior even without a migration. Capture
-# PostgreSQL and the shared originals volume as one verified bundle before
-# every deploy or rollback, rather than treating schema changes as the only
-# moment when recoverability matters.
-backup_required=1
-
 previous_tag_arg="${previous_tag:-__none__}"
 previous_commit_arg="${previous_commit:-__none__}"
 remote_helper="/tmp/greatsell-release-${tag}.sh"
-remote_compose="/tmp/greatsell-compose-${tag}.yml"
+remote_stage_tool="/tmp/greatsell-release-stage-${tag}.py"
 
-git show "$tag:scripts/remote-release-helper.sh" | ssh "${ssh_options[@]}" "$remote_host" \
+# The transport helpers come from the current reviewed deployment tooling. The
+# application source itself is still archived strictly from the selected tag,
+# which also lets the new safe transport deploy an older production tag.
+cat "$repo_root/scripts/remote-release-helper.sh" | ssh "${ssh_options[@]}" "$remote_host" \
   "umask 077 && cat > $(shell_quote "$remote_helper") && chmod 700 $(shell_quote "$remote_helper")"
-
-# Render the tagged Compose file against the server's existing environment
-# before quiescing data services or transferring any source. This catches a
-# newly required non-secret deployment setting (for example the fixed Caddy
-# trusted-proxy CIDR) while the previous release remains fully available.
-git show "$tag:compose.yml" | ssh "${ssh_options[@]}" "$remote_host" \
-  "umask 077; temp=$(shell_quote "$remote_compose"); trap 'rm -f -- \"$remote_compose\"' EXIT; cat > \"$remote_compose\"; sudo -n env RESUME_V3_RELEASE_IMAGE_TAG=$(shell_quote "$release_commit") docker compose --project-directory $(shell_quote "$project_dir") -f \"$remote_compose\" --env-file $(shell_quote "$project_dir/.env.production") config --quiet"
-remote_release() {
-  ssh_run "bash $(shell_quote "$remote_helper") $(shell_quote "$1") $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$2")"
+cat "$repo_root/scripts/release_source_stage.py" | ssh "${ssh_options[@]}" "$remote_host" \
+  "umask 077 && cat > $(shell_quote "$remote_stage_tool") && chmod 700 $(shell_quote "$remote_stage_tool")"
+cleanup_remote_tools() {
+  ssh_run "rm -f $(shell_quote "$remote_helper") $(shell_quote "$remote_stage_tool")" >/dev/null 2>&1 || true
 }
-remote_release precheck "$backup_required"
+trap cleanup_remote_tools EXIT
 
-# git archive contains tracked source only. It cannot include ignored production
-# secrets or data, and extraction intentionally does not delete unknown files.
-git archive --format=tar "$tag" | ssh "${ssh_options[@]}" "$remote_host" \
-  "tar -x -C $(shell_quote "$project_dir")"
+archive_sha256="$(git archive --format=tar "$tag" | sha256sum | awk '{print $1}')"
+[[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Unable to checksum release archive."
 
 skip_migrate=0
 if [[ "$mode" == "rollback" && "$migration_changed" -eq 1 ]]; then
   skip_migrate=1
 fi
 
-remote_release deploy "$skip_migrate"
-ssh_run "rm -f $(shell_quote "$remote_helper")"
+git archive --format=tar "$tag" | ssh "${ssh_options[@]}" "$remote_host" \
+  "bash $(shell_quote "$remote_helper") release $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$migration_changed") $(shell_quote "$skip_migrate") $(shell_quote "$archive_sha256") $(shell_quote "$remote_stage_tool")"
 
 echo "Deployment succeeded: $tag ($release_commit)"

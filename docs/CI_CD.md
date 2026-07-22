@@ -2,7 +2,8 @@
 
 本仓库的自动化分为两层：每个 PR 的持续集成（CI），以及在 `main` CI 成功后的自动
 生产发布（CD）。合并 `main` 本身不会立即连接生产服务器；只有该次 `main` 提交的 CI
-四项检查全部成功后，才会自动创建不可变的 `prod-*` 标签并部署。
+四项检查全部成功后，才会先对服务器既有环境执行无副作用 Compose 预检，通过后自动创建
+不可变的 `prod-*` 标签并部署。
 
 ## 已提供的工作流
 
@@ -10,12 +11,12 @@
   它分别执行 Python 3.12 全量测试、PostgreSQL 邮箱附件去重并发回归、Node 22.12
   前端生产构建，以及应用与 Caddy 两个生产镜像构建和 Compose 配置校验。
 - **Production release**：监听 `main` 上一次成功的 CI `push` 运行。它只接受本仓库
-  的 `main` 提交，校验该提交仍是当前 `origin/main` 后，创建不可变的
-  `prod-YYYYMMDD-<commit>` 标签并在同一次工作流中部署。若 CI 完成前已有更新的
-  `main` 提交，它会停止，等待更新提交自己的 CI 成功后再发布。保留从 `main` 手动运行
-  并输入 `RELEASE` 的应急入口。
-- **Production deploy**：用于手动重部署已有 `prod-*` 标签，或由非 GitHub Actions
-  创建并推送的受保护生产标签触发。
+  的 `main` 提交，先用该提交的 Compose 文件和服务器既有 `.env.production` 做只读预检，
+  再次确认 `main` 未前进后，创建不可变的 `prod-YYYYMMDD-<commit>` 标签并在同一次工作流中
+  部署。若预检失败，不会创建标签；若预检期间 `main` 前进，它会停止，等待更新提交自己的
+  CI 成功后再发布。保留从 `main` 手动运行并输入 `RELEASE` 的应急入口。
+- **Production deploy**：只用于手动重部署已有 `prod-*` 标签，必须输入 `DEPLOY`；不再
+  监听任意标签推送，避免受保护流程外的标签绕过预检。
 - **Production rollback**：只能手动触发，且只接受已有 `prod-*` 标签。默认拒绝
   回滚到数据库 schema 落后的代码；只有已确认兼容时才可显式允许该情形。
 
@@ -61,7 +62,9 @@
 
 1. PR 合并到 `main`。
 2. `main` CI 的四项检查全部变绿。
-3. **Production release** 自动创建标签、部署、验证并保留发布记录，无需手动操作。
+3. **Production release** 先做服务器配置预检；通过后自动创建标签、部署、验证并保留发布
+   记录，无需手动操作。`prod-*` 是发布候选，只有服务器的 `current-release.env` 和工作流
+   成功才表示已部署。
 4. 若部署因 GitHub runner 中断而未完成，可在 **Production deploy** 中输入同一个
    已创建的标签与确认词 `DEPLOY` 重试；不会创建第二个版本。
 5. 如需回滚，在 **Production rollback** 中指定一个已发布的 `prod-*` 标签，并输入
@@ -72,12 +75,12 @@
 
 - CI 不读取生产 Environment 的 SSH 密钥或变量。
 - 自动发布只接受本仓库的 `main` 推送 CI；PR CI、手动 CI、取消或失败的 CI 都不能发布。
-- 工作流只调用现有 `scripts/deploy-production.sh` 与
+- 工作流只调用现有 `scripts/preflight-production-release.sh`、`scripts/deploy-production.sh` 与
   `scripts/rollback-production.sh`，并始终显式传入 GitHub Environment 中的目标主机和
   路径，因此不会误用脚本中的历史默认服务器地址。
 - 不要把部署密钥、主机指纹、环境文件、候选人 PDF、数据库或任何 API 密钥加入 Git。
-- GitHub 使用的 `GITHUB_TOKEN` 创建标签不会再触发第二个工作流；因此
-  **Production release** 会在创建标签后的同一工作流内完成部署。
+- GitHub 使用的 `GITHUB_TOKEN` 创建标签不会触发第二个工作流；因此 **Production release**
+  会在创建标签后的同一工作流内完成部署，而 **Production deploy** 仅保留人工重试入口。
 
 详细的服务器发布与恢复行为见 [DEPLOYMENT.md](DEPLOYMENT.md)，团队协作和标签规则见
 [TEAM_WORKFLOW.md](TEAM_WORKFLOW.md)。

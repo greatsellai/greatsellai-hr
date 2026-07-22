@@ -47,13 +47,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.release_tag }}
+          ref: main
       - name: Verify production tag identity
         run: |
           set -Eeuo pipefail
+          git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           expected_short_sha="${RELEASE_TAG##*-}"
-          [[ "$(git rev-parse HEAD)" == "$expected_short_sha"* ]] || {
+          [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" == "$expected_short_sha"* ]] || {
             echo "Production tag suffix does not match its target commit." >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "refs/tags/$RELEASE_TAG^{commit}" origin/main || {
+            echo "Production tag is not reachable from origin/main." >&2
             exit 1
           }
       - name: Configure production SSH

@@ -62,8 +62,8 @@ Compose 将 Caddy 固定在专用 `proxy` 网络的 `172.30.0.2`，API 同时连
 ### 创建生产版本
 
 启用 GitHub Actions CI/CD 后，日常发布不需要在本地执行以下命令：合并到 `main` 的
-提交会在四项 CI 成功后自动创建生产标签并部署。下列本地命令仅保留给已获授权的应急
-恢复或 CI 不可用时使用；常规发布流程见 `docs/CI_CD.md`。
+提交会在四项 CI 成功后先执行服务器配置预检，预检通过才自动创建生产标签并部署。下列
+本地命令仅保留给已获授权的应急恢复或 CI 不可用时使用；常规发布流程见 `docs/CI_CD.md`。
 
 在本地干净的、与 `origin/main` 完全一致的 `main` 分支上运行：
 
@@ -88,8 +88,15 @@ scripts/deploy-production.sh prod-YYYYMMDD-<commit短码> \
 ```
 
 脚本只接受已推送到 GitHub、且可从 `origin/main` 追溯的 `prod-*` 标签。它通过
-`git archive` 传输 Git 受控源码，不使用删除式同步，因此不会覆盖或删除生产环境
-文件、数据库、上传 PDF 或 Docker 卷。
+`git archive` 传输 Git 受控源码，但先校验并原子发布到发布记录目录下的版本化
+`release-sources/<commit>`；Docker 只从该不可变目录构建。环境目录仅保存既有
+`.env.production`，不会被源码传输覆盖；数据库、上传 PDF 和 Docker 卷也不会被删除。
+
+发布开始前会在目标源码目录中完成 Compose 配置校验和 API/Caddy 镜像构建，随后才短暂停止
+API/worker 创建成对备份。备份失败时只使用当前已记录的源码目录和镜像恢复服务，绝不会尝试
+使用尚未验证的目标版本。服务器端 `flock` 同时保护发布、回滚和数据恢复；发布成功后才原子
+更新 `current-release.env` 与 `current-source` 指针。因此 `prod-*` 标签表示不可变候选，只有
+当前发布记录与健康检查成功才表示实际上线。
 
 部署前，脚本会读取服务器项目目录外的发布记录，并在
 `/home/ubuntu/greatsellai-hr-deployments/backups/` 创建受限权限的成对备份：

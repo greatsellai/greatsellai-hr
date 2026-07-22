@@ -22,9 +22,11 @@ Options:
   --ssh-key <path>          Optional SSH private-key path; never committed
   --confirm-restore         Required acknowledgement for the destructive restore
 
-The prod tag supplies the reviewed restore helper. The command verifies both
-backup artifacts and takes a new safety backup before replacing PostgreSQL or
-uploads_data. It never transfers .env.production, candidate files, or secrets.
+The current reviewed deployment tooling verifies both backup artifacts and
+takes a new safety backup before replacing PostgreSQL or uploads_data. The
+selected prod tag is still verified as a reachable, immutable application
+release. The command never transfers .env.production, candidate files, or
+secrets.
 EOF
 }
 
@@ -105,7 +107,7 @@ cleanup_remote_helper() {
 }
 trap cleanup_remote_helper EXIT
 
-git show "$release_tag:scripts/remote-release-helper.sh" | ssh "${ssh_options[@]}" "$remote_host" \
+cat "$repo_root/scripts/remote-release-helper.sh" | ssh "${ssh_options[@]}" "$remote_host" \
   "umask 077 && cat > $(shell_quote "$remote_helper") && chmod 700 $(shell_quote "$remote_helper")"
 ssh_run "bash $(shell_quote "$remote_helper") restore $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$backup_id") RESTORE"
 

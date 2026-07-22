@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -185,6 +186,45 @@ def test_any_active_pending_release_blocks_normal_release_until_audited_reconcil
         "restore()", maxsplit=1
     )[0]
     assert 'resolve_pending_release "$history_dir"' in restore
+
+
+def test_pending_target_finalizer_is_specific_and_preserves_the_normal_pending_gate() -> None:
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    wrapper = (REPOSITORY_ROOT / "scripts" / "finalize-pending-release.sh").read_text(
+        encoding="utf-8"
+    )
+    finalizer = helper.split("finalize_pending_target_unlocked()", maxsplit=1)[1].split(
+        "finalize_pending_target()", maxsplit=1
+    )[0]
+
+    assert "FINALIZE_PENDING_PROXY_STARTUP" in finalizer
+    assert "validate_pending_target_source" in finalizer
+    assert "validate_pending_target_backup" in finalizer
+    assert "Pending target paired backup" in helper
+    assert 'docker network connect --ip "$api_proxy_ip"' in finalizer
+    assert 'docker network rm' not in finalizer
+    assert "Pending target migration did not complete successfully." in finalizer
+    assert "verify_public_runtime" in finalizer
+    assert "archive_finalized_pending_record" in finalizer
+    assert "finalize-pending-target" in helper
+    assert "FINALIZE_PENDING_PROXY_STARTUP" in wrapper
+
+
+def test_legacy_reconciliation_refuses_structured_pending_metadata() -> None:
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    transaction = helper.split("reconcile_legacy_pending_unlocked()", maxsplit=1)[1].split(
+        "reconcile_legacy_pending()", maxsplit=1
+    )[0]
+
+    assert "pending_source_dir" in transaction
+    assert "structured deployment fields" in transaction
+    assert transaction.index("structured deployment fields") < transaction.index(
+        "create_legacy_reconciliation_backup"
+    )
 
 
 def test_legacy_pending_reconciliation_requires_a_fresh_paired_backup_before_archiving() -> None:
@@ -394,6 +434,222 @@ reconcile_legacy_pending_unlocked \\
     assert not list((history_dir / "releases").glob("interrupted-*.env"))
 
 
+def test_pending_target_finalizer_advances_only_after_the_verified_proxy_recovery(
+    tmp_path: Path,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("the Bash pending-target harness is exercised in Linux CI")
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required for the remote release helper contract")
+
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    definitions, separator, _ = helper.partition('case "${1:-}" in')
+    assert separator, "remote helper dispatch block is missing"
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    history_dir = tmp_path / "history"
+    (history_dir / "releases").mkdir(parents=True)
+    (history_dir / "backups").mkdir()
+    previous_tag = "prod-20260721-1234567"
+    previous_commit = "a" * 40
+    pending_tag = "prod-20260722-7654321"
+    pending_commit = "b" * 40
+    source_dir = history_dir / "release-sources" / pending_commit
+    source_dir.mkdir(parents=True)
+    (history_dir / "current-release.env").write_text(
+        "\n".join(
+            (
+                "state=complete",
+                f"tag={previous_tag}",
+                f"commit={previous_commit}",
+                f"source_dir={project_dir}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    pending_path = history_dir / "pending-release.env"
+    pending_path.write_text(
+        "\n".join(
+            (
+                f"tag={pending_tag}",
+                f"commit={pending_commit}",
+                f"source_dir={source_dir}",
+                f"previous_tag={previous_tag}",
+                f"previous_commit={previous_commit}",
+                f"previous_source_dir={project_dir}",
+                "mode=deploy",
+                "backup_state=complete",
+                "backup_id=pre-synthetic",
+                "prepared_at=2026-07-22T00:00:00Z",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    stage_tool = tmp_path / "activate.py"
+    stage_tool.write_text("raise SystemExit(0)\n", encoding="utf-8")
+
+    harness = tmp_path / "pending-target-finalize.sh"
+    harness.write_text(
+        definitions
+        + f"""
+set -Eeuo pipefail
+validate_environment_dir() {{ :; }}
+validate_history_dir() {{ :; }}
+require_release_reference() {{ :; }}
+load_current_runtime() {{
+  current_tag={previous_tag!r}
+  current_commit={'a' * 40!r}
+  current_source_dir={project_dir.as_posix()!r}
+}}
+validate_pending_target_source() {{ touch {str(tmp_path / 'source-validated')!r}; }}
+validate_pending_target_backup() {{ touch {str(tmp_path / 'backup-validated')!r}; }}
+compose_service_container_id() {{ printf 'synthetic-%s' "${{4}}"; }}
+require_container_image() {{ :; }}
+require_container_state() {{ :; }}
+compose_run() {{
+  shift 3
+  if [[ "${{1:-}}" == ps ]]; then
+    printf 'synthetic-%s' "${{@: -1}}"
+  fi
+}}
+verify_public_runtime() {{ touch {str(tmp_path / 'public-verified')!r}; }}
+write_release_records() {{ touch {str(tmp_path / 'record-written')!r}; }}
+archive_finalized_pending_record() {{
+  touch {str(tmp_path / 'pending-archived')!r}
+  rm -f "${{2}}"
+}}
+caddy_recreated=0
+sudo() {{
+  [[ "${{1:-}}" == -n ]] && shift
+  [[ "${{1:-}}" == docker ]] || return 1
+  shift
+  case "${{1:-}}" in
+    image) return 0 ;;
+    inspect)
+      local template="${{3:-}}" container="${{@: -1}}"
+      case "$template" in
+        *State.ExitCode*) printf 0 ;;
+        *NetworkSettings.Networks*) printf 172.30.0.2 ;;
+        *State.Error*) printf 'failed to set up container networking: Address already in use' ;;
+        *State.Health*) printf healthy ;;
+        *State.Status*)
+          if [[ "$container" == synthetic-caddy && "$caddy_recreated" == 0 ]]; then printf created
+          elif [[ "$container" == synthetic-migrate ]]; then printf exited
+          else printf running
+          fi
+          ;;
+        *) : ;;
+      esac
+      ;;
+    network)
+      [[ "${{2:-}}" == inspect ]] && printf synthetic-api
+      ;;
+    rm) caddy_recreated=1 ;;
+    stop|start) : ;;
+    *) : ;;
+  esac
+}}
+
+finalize_pending_target_unlocked \\
+  {project_dir.as_posix()!r} \\
+  {history_dir.as_posix()!r} \\
+  {pending_tag} \\
+  {'b' * 40} \\
+  FINALIZE_PENDING_PROXY_STARTUP \\
+  {stage_tool.as_posix()!r} \\
+  {'c' * 64}
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [bash, str(harness)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not pending_path.exists()
+    for marker in (
+        "source-validated",
+        "backup-validated",
+        "public-verified",
+        "record-written",
+        "pending-archived",
+    ):
+        assert (tmp_path / marker).exists()
+
+
+def test_pending_target_source_validation_binds_the_staged_tree_to_its_checksum(
+    tmp_path: Path,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("the Bash staged-source harness is exercised in Linux CI")
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required for the remote release helper contract")
+
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    definitions, separator, _ = helper.partition('case "${1:-}" in')
+    assert separator, "remote helper dispatch block is missing"
+
+    commit = "c" * 40
+    history_dir = tmp_path / "history"
+    source_dir = history_dir / "release-sources" / commit
+    (source_dir / "deploy").mkdir(parents=True)
+    for relative in ("compose.yml", "Dockerfile", "deploy/Caddy.Dockerfile"):
+        (source_dir / relative).write_text(f"synthetic:{relative}\n", encoding="utf-8")
+    (source_dir / ".greatsell-release-source.json").write_text(
+        '{"archive_sha256":"' + "a" * 64 + '","format_version":1,"release_commit":"' + commit + '"}\n',
+        encoding="utf-8",
+    )
+
+    rows: list[bytes] = []
+    for candidate in sorted(source_dir.rglob("*")):
+        if candidate.name == ".greatsell-release-source.json" or candidate.is_dir():
+            continue
+        content = candidate.read_bytes()
+        blob = hashlib.sha1(
+            b"blob " + str(len(content)).encode() + b"\0" + content
+        ).hexdigest()
+        mode = "100755" if candidate.stat().st_mode & 0o111 else "100644"
+        rows.append(
+            f"{mode} blob {blob}\t{candidate.relative_to(source_dir).as_posix()}\n".encode()
+        )
+    checksum = hashlib.sha256(b"".join(rows)).hexdigest()
+
+    harness = tmp_path / "validate-staged-source.sh"
+    harness.write_text(
+        definitions
+        + f"""
+validate_pending_target_source \\
+  {history_dir.as_posix()!r} \\
+  {source_dir.as_posix()!r} \\
+  {commit} \\
+  {checksum}
+""",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [bash, str(harness)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_production_lock_covers_every_runtime_dependency_exactly() -> None:
     project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lock_lines = (REPOSITORY_ROOT / "requirements-production.lock").read_text(
@@ -446,6 +702,19 @@ def test_current_release_record_commits_before_the_complete_history_record() -> 
     history_publish = 'mv "$temporary_record" "$record"'
     assert record_writer.index(current_commit) < record_writer.index("deployment_succeeded=1")
     assert record_writer.index("deployment_succeeded=1") < record_writer.index(history_publish)
+
+
+def test_deploy_failure_cleanup_does_not_mask_the_original_error_under_nounset() -> None:
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    deploy = helper.split("deploy_target()", maxsplit=1)[1].split(
+        "release_unlocked()", maxsplit=1
+    )[0]
+
+    assert '"${deployment_succeeded:-0}"' in deploy
+    assert '"${current_commit:-}"' in deploy
+    assert '"${migration_changed:-1}"' in deploy
 
 
 def test_release_transaction_passes_all_double_digit_arguments_to_the_source_stager(

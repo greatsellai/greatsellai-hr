@@ -85,7 +85,11 @@ services:
       migrate:
         condition: service_completed_successfully
     networks:
-      proxy: {}
+      # The API must never receive Caddy's reserved .2 address while Caddy is
+      # temporarily absent during a release. Keeping both endpoints static
+      # makes the precise trusted-proxy /32 deterministic.
+      proxy:
+        ipv4_address: 172.30.0.3
       backend: {}
     healthcheck:
       test:

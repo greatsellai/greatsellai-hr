@@ -7,6 +7,11 @@ set -Eeuo pipefail
 readonly uploads_volume_name="resume-screening-v3_uploads_data"
 readonly postgres_volume_name="resume-screening-v3_postgres_data"
 readonly release_sources_directory_name="release-sources"
+# Only the API and Caddy may join this network. Their addresses are intentionally
+# stable: the API trusts forwarded client headers only from Caddy's exact /32.
+readonly proxy_network_name="resume-screening-v3_proxy"
+readonly caddy_proxy_ip="172.30.0.2"
+readonly api_proxy_ip="172.30.0.3"
 
 current_tag=""
 current_commit=""
@@ -105,6 +110,134 @@ validate_upload_archive() {
         esac
       done
     '
+}
+
+verify_public_runtime() {
+  local environment_dir="$1" domain session_body protected_status
+  domain="$(sed -n 's/^RESUME_V3_DOMAIN=//p' "$environment_dir/.env.production" | tail -n 1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
+  [[ -n "$domain" ]] || die "RESUME_V3_DOMAIN is not set."
+  for attempt in $(seq 1 30); do
+    if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$domain/health" >/dev/null; then
+      break
+    fi
+    [[ "$attempt" -eq 30 ]] && die "HTTPS health check did not become ready."
+    sleep 2
+  done
+  session_body="$(curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$domain/v1/auth/session")"
+  [[ "$session_body" == *'"authenticated":false'*'"login_required":true'* ]] || \
+    die "Unexpected unauthenticated session response."
+  protected_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 5 --max-time 15 "https://$domain/v1/resumes/00000000-0000-0000-0000-000000000000/original-file")"
+  [[ "$protected_status" == "401" ]] || die "Protected PDF endpoint did not reject an unauthenticated request."
+}
+
+validate_pending_target_source() {
+  local history_dir="$1" target_source_dir="$2" target_commit="$3" expected_tree_sha256="$4"
+  local expected_source_dir manifest_path
+  expected_source_dir="$(release_sources_root "$history_dir")/$target_commit"
+  [[ "$target_source_dir" == "$expected_source_dir" ]] || \
+    die "Pending target source path does not match its recorded commit."
+  validate_source_dir "$target_source_dir" "__not_used__" "$history_dir"
+  manifest_path="$target_source_dir/.greatsell-release-source.json"
+  [[ -f "$manifest_path" && ! -L "$manifest_path" ]] || \
+    die "Pending target release source manifest is missing."
+  if ! python3 - "$manifest_path" "$target_commit" "$expected_tree_sha256" <<'PY'
+import json
+import hashlib
+import sys
+from pathlib import Path
+
+manifest_path, expected_commit, expected_tree_sha256 = sys.argv[1:]
+try:
+    with open(manifest_path, encoding="utf-8") as stream:
+        manifest = json.load(stream)
+except (OSError, ValueError):
+    raise SystemExit(1)
+if manifest.get("format_version") != 1 or manifest.get("release_commit") != expected_commit:
+    raise SystemExit(1)
+
+root = Path(manifest_path).parent
+rows = []
+for candidate in sorted(root.rglob("*")):
+    if candidate.name == ".greatsell-release-source.json":
+        continue
+    if candidate.is_dir():
+        continue
+    if not candidate.is_file() or candidate.is_symlink():
+        raise SystemExit(1)
+    content = candidate.read_bytes()
+    blob = hashlib.sha1(
+        b"blob " + str(len(content)).encode() + b"\0" + content
+    ).hexdigest()
+    mode = "100755" if candidate.stat().st_mode & 0o111 else "100644"
+    rows.append(
+        f"{mode} blob {blob}\t{candidate.relative_to(root).as_posix()}\n".encode()
+    )
+if hashlib.sha256(b"".join(rows)).hexdigest() != expected_tree_sha256:
+    raise SystemExit(1)
+PY
+  then
+    die "Pending target release source manifest is invalid."
+  fi
+}
+
+validate_pending_target_backup() {
+  local history_dir="$1" backup_id="$2" target_tag="$3" target_commit="$4"
+  local previous_tag="$5" previous_commit="$6" mode="$7"
+  local backup_dir manifest state manifest_id release_tag release_commit
+  local manifest_previous_tag manifest_previous_commit manifest_mode database_file uploads_file
+  require_safe_backup_id "$backup_id"
+  backup_dir="$history_dir/backups/$backup_id"
+  manifest="$backup_dir/manifest.env"
+  [[ -d "$backup_dir" && ! -L "$backup_dir" && -f "$manifest" && ! -L "$manifest" ]] || \
+    die "Pending target paired backup is missing."
+  state="$(record_value "$manifest" state)"
+  manifest_id="$(record_value "$manifest" backup_id)"
+  release_tag="$(record_value "$manifest" release_tag)"
+  release_commit="$(record_value "$manifest" release_commit)"
+  manifest_previous_tag="$(record_value "$manifest" previous_tag)"
+  manifest_previous_commit="$(record_value "$manifest" previous_commit)"
+  manifest_mode="$(record_value "$manifest" mode)"
+  database_file="$(record_value "$manifest" database_file)"
+  uploads_file="$(record_value "$manifest" uploads_file)"
+  [[ "$state" == "complete" && "$manifest_id" == "$backup_id" ]] || \
+    die "Pending target paired backup is not complete."
+  [[ "$release_tag" == "$target_tag" && "$release_commit" == "$target_commit" ]] || \
+    die "Pending target paired backup does not match the target release."
+  [[ "$manifest_previous_tag" == "$previous_tag" && "$manifest_previous_commit" == "$previous_commit" ]] || \
+    die "Pending target paired backup does not match the recorded predecessor."
+  [[ "$manifest_mode" == "$mode" && "$database_file" == "database.dump" && "$uploads_file" == "uploads.tar.gz" ]] || \
+    die "Pending target paired backup manifest is invalid."
+  [[ -s "$backup_dir/$database_file" && -s "$backup_dir/$uploads_file" && -f "$backup_dir/checksums.sha256" ]] || \
+    die "Pending target paired backup artifacts are incomplete."
+  (
+    cd "$backup_dir"
+    sha256sum --check checksums.sha256 >/dev/null
+  ) || die "Pending target paired backup checksums do not validate."
+  sudo -n docker run --rm --network none -v "$backup_dir:/backup:ro" postgres:16-alpine \
+    pg_restore --list "/backup/$database_file" >/dev/null
+  validate_upload_archive "$backup_dir"
+}
+
+compose_service_container_id() {
+  local source_dir="$1" environment_dir="$2" image_tag="$3" service="$4" containers
+  containers="$(compose_run "$source_dir" "$environment_dir" "$image_tag" ps --all -q "$service")"
+  [[ -n "$containers" && "$(printf '%s\n' "$containers" | wc -l | tr -d ' ')" == "1" ]] || \
+    die "Expected exactly one $service container for pending target recovery."
+  printf '%s' "$containers"
+}
+
+require_container_image() {
+  local container_id="$1" expected_image="$2" observed_image
+  observed_image="$(sudo -n docker inspect --format '{{.Config.Image}}' "$container_id")"
+  [[ "$observed_image" == "$expected_image" ]] || \
+    die "Pending target container does not use its recorded release image."
+}
+
+require_container_state() {
+  local container_id="$1" expected_state="$2" observed_state
+  observed_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$container_id")"
+  [[ "$observed_state" == "$expected_state" ]] || \
+    die "Pending target container is not in the expected state."
 }
 
 load_current_runtime() {
@@ -304,7 +437,7 @@ deploy_target() {
 
   recover_previous_runtime() {
     local status=$?
-    if [[ "$deployment_succeeded" != "1" && -n "$current_commit" && "$migration_changed" == "0" ]]; then
+    if [[ "${deployment_succeeded:-0}" != "1" && -n "${current_commit:-}" && "${migration_changed:-1}" == "0" ]]; then
       compose_run "$current_source_dir" "$environment_dir" "$current_commit" \
         up -d --no-build --no-deps api worker caddy >/dev/null 2>&1 || true
     fi
@@ -321,22 +454,7 @@ deploy_target() {
   fi
   compose_run "$target_source_dir" "$environment_dir" "$target_commit" exec -T caddy \
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null >/dev/null
-
-  local domain session_body protected_status
-  domain="$(sed -n 's/^RESUME_V3_DOMAIN=//p' "$environment_dir/.env.production" | tail -n 1 | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')"
-  [[ -n "$domain" ]] || die "RESUME_V3_DOMAIN is not set."
-  for attempt in $(seq 1 30); do
-    if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$domain/health" >/dev/null; then
-      break
-    fi
-    [[ "$attempt" -eq 30 ]] && die "HTTPS health check did not become ready."
-    sleep 2
-  done
-  session_body="$(curl --fail --silent --show-error --connect-timeout 5 --max-time 15 "https://$domain/v1/auth/session")"
-  [[ "$session_body" == *'"authenticated":false'*'"login_required":true'* ]] || \
-    die "Unexpected unauthenticated session response."
-  protected_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 5 --max-time 15 "https://$domain/v1/resumes/00000000-0000-0000-0000-000000000000/original-file")"
-  [[ "$protected_status" == "401" ]] || die "Protected PDF endpoint did not reject an unauthenticated request."
+  verify_public_runtime "$environment_dir"
 
   write_release_records "$history_dir" "$tag" "$target_commit" "$target_source_dir" \
     "$mode" "$skip_migrate" "$backup_state" "$backup_id"
@@ -400,6 +518,8 @@ release_unlocked() {
 
   umask 077
   cat > "$history_dir/.pending-release.$$.tmp" <<EOF
+format_version=1
+state=prepared
 tag=$tag
 commit=$target_commit
 source_dir=$target_source_dir
@@ -435,6 +555,174 @@ release() {
   local environment_dir="$1" history_dir="$2"
   shift 2
   with_release_lock "$history_dir" release_unlocked "$environment_dir" "$history_dir" "$@"
+}
+
+archive_finalized_pending_record() {
+  local history_dir="$1" pending_record="$2" pending_tag="$3" target_commit="$4"
+  local timestamp archive temporary_archive
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive="$history_dir/releases/finalized-$timestamp-$pending_tag.env"
+  temporary_archive="$history_dir/releases/.finalized-$timestamp-$pending_tag.partial"
+  [[ ! -e "$archive" && ! -e "$temporary_archive" ]] || \
+    die "Pending finalization archive path already exists; retry."
+  umask 077
+  {
+    cat "$pending_record"
+    cat <<EOF
+state=finalized
+finalization_reason=verified_proxy_static_ip_collision_recovery
+finalized_target_commit=$target_commit
+finalized_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  } > "$temporary_archive"
+  mv "$temporary_archive" "$archive"
+  rm -f "$pending_record" || die "Unable to clear finalized pending release metadata."
+  printf 'Pending target finalized: %s\n' "$archive"
+}
+
+finalize_pending_target_unlocked() {
+  # This deliberately handles one narrow, verified state only: a structured
+  # deployment whose migration/API/worker reached the selected target, but
+  # whose Caddy container could not claim its reserved proxy address because
+  # the dynamically-addressed API took it first. It never runs migrations,
+  # rebuilds images, restores data, removes a Docker network, or guesses at a
+  # host port conflict.
+  local environment_dir="$1" history_dir="$2" expected_pending_tag="$3"
+  local expected_pending_commit="$4" confirmation="$5" stage_tool="$6" expected_tree_sha256="$7"
+  local pending_record pending_tag pending_commit pending_source_dir pending_previous_tag
+  local pending_previous_commit pending_mode pending_backup_state pending_backup_id
+  local pending_prepared_at pending_state pending_format current_state
+  local api_container worker_container caddy_container migrate_container
+  local observed_proxy_address caddy_state caddy_error attached_containers
+  local writers_started=0 caddy_started=0 public_runtime_verified=0 finalization_completed=0
+
+  finalize_cleanup() {
+    local status=$?
+    if [[ "${public_runtime_verified:-0}" != "1" && "${caddy_started:-0}" == "1" && -n "${pending_source_dir:-}" ]]; then
+      compose_run "$pending_source_dir" "$environment_dir" "$expected_pending_commit" \
+        stop caddy >/dev/null 2>&1 || true
+    fi
+    if [[ "${writers_started:-0}" != "1" && -n "${api_container:-}" && -n "${worker_container:-}" ]]; then
+      sudo -n docker start "$api_container" "$worker_container" >/dev/null 2>&1 || true
+    fi
+    exit "$status"
+  }
+
+  validate_environment_dir "$environment_dir"
+  validate_history_dir "$history_dir"
+  require_release_reference "$expected_pending_tag" "$expected_pending_commit"
+  [[ "$expected_tree_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+    die "Pending target finalization requires a valid staged-source tree checksum."
+  [[ "$confirmation" == "FINALIZE_PENDING_PROXY_STARTUP" ]] || \
+    die "Pending target finalization requires the exact confirmation FINALIZE_PENDING_PROXY_STARTUP."
+  [[ -f "$stage_tool" ]] || die "Pending target finalization source activator is missing."
+  mkdir -p "$history_dir/releases" "$history_dir/backups"
+  chmod 700 "$history_dir" "$history_dir/releases" "$history_dir/backups"
+
+  pending_record="$history_dir/pending-release.env"
+  [[ -f "$pending_record" ]] || die "Pending target finalization requires a pending release record."
+  load_current_runtime "$environment_dir" "$history_dir"
+  current_state="$(record_value "$history_dir/current-release.env" state)"
+
+  pending_tag="$(record_value "$pending_record" tag)"
+  pending_commit="$(record_value "$pending_record" commit)"
+  pending_source_dir="$(record_value "$pending_record" source_dir)"
+  pending_previous_tag="$(record_value "$pending_record" previous_tag)"
+  pending_previous_commit="$(record_value "$pending_record" previous_commit)"
+  pending_mode="$(record_value "$pending_record" mode)"
+  pending_backup_state="$(record_value "$pending_record" backup_state)"
+  pending_backup_id="$(record_value "$pending_record" backup_id)"
+  pending_prepared_at="$(record_value "$pending_record" prepared_at)"
+  pending_state="$(record_value "$pending_record" state)"
+  pending_format="$(record_value "$pending_record" format_version)"
+
+  require_release_reference "$pending_tag" "$pending_commit"
+  require_release_reference "$pending_previous_tag" "$pending_previous_commit"
+  [[ "$pending_tag" == "$expected_pending_tag" && "$pending_commit" == "$expected_pending_commit" ]] || \
+    die "Pending target does not match the exact operator-confirmed release."
+  [[ "$pending_mode" == "deploy" && "$pending_backup_state" == "complete" && -n "$pending_backup_id" && -n "$pending_prepared_at" ]] || \
+    die "Pending release is not a recoverable structured deployment."
+  [[ -z "$pending_state" || "$pending_state" == "prepared" ]] || \
+    die "Pending release is not in a prepared state."
+  [[ -z "$pending_format" || "$pending_format" == "1" ]] || \
+    die "Pending release has an unsupported format version."
+  [[ "$current_tag" == "$pending_previous_tag" && "$current_commit" == "$pending_previous_commit" ]] || \
+    die "Current release does not match the pending target's recorded predecessor."
+  [[ -z "$current_state" || "$current_state" == "complete" ]] || \
+    die "Current release record is not in a complete state."
+
+  validate_pending_target_source "$history_dir" "$pending_source_dir" "$pending_commit" "$expected_tree_sha256"
+  validate_pending_target_backup "$history_dir" "$pending_backup_id" "$pending_tag" "$pending_commit" \
+    "$pending_previous_tag" "$pending_previous_commit" "$pending_mode"
+  sudo -n docker image inspect "greatsellai-hr-api:$pending_commit" >/dev/null
+  sudo -n docker image inspect "greatsellai-hr-caddy:$pending_commit" >/dev/null
+
+  api_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" api)"
+  worker_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" worker)"
+  caddy_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" caddy)"
+  migrate_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" migrate)"
+  require_container_image "$api_container" "greatsellai-hr-api:$pending_commit"
+  require_container_image "$worker_container" "greatsellai-hr-api:$pending_commit"
+  require_container_image "$caddy_container" "greatsellai-hr-caddy:$pending_commit"
+  require_container_image "$migrate_container" "greatsellai-hr-api:$pending_commit"
+  require_container_state "$api_container" running
+  require_container_state "$worker_container" running
+  require_container_state "$migrate_container" exited
+  [[ "$(sudo -n docker inspect --format '{{.State.ExitCode}}' "$migrate_container")" == "0" ]] || \
+    die "Pending target migration did not complete successfully."
+
+  observed_proxy_address="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{.IPAddress}}{{end}}' "$api_container")"
+  caddy_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$caddy_container")"
+  caddy_error="$(sudo -n docker inspect --format '{{.State.Error}}' "$caddy_container")"
+  attached_containers="$(sudo -n docker network inspect "$proxy_network_name" --format '{{range $id, $_ := .Containers}}{{$id}}{{"\\n"}}{{end}}' | sed '/^$/d')"
+  [[ "$observed_proxy_address" == "$caddy_proxy_ip" ]] || \
+    die "Pending target does not have the known Caddy proxy-address collision."
+  [[ "$attached_containers" == "$api_container" ]] || \
+    die "Pending target proxy network has unexpected attached containers."
+  [[ "$caddy_state" == "created" && "$caddy_error" == *"container networking"* && "$caddy_error" == *"Address already in use"* ]] || \
+    die "Pending target Caddy failure is not the known static-address collision."
+
+  trap finalize_cleanup EXIT
+  sudo -n docker stop "$api_container" "$worker_container" >/dev/null
+  sudo -n docker network disconnect "$proxy_network_name" "$api_container" >/dev/null
+  sudo -n docker network connect --ip "$api_proxy_ip" "$proxy_network_name" "$api_container" >/dev/null
+  sudo -n docker rm "$caddy_container" >/dev/null
+  sudo -n docker start "$api_container" "$worker_container" >/dev/null
+  writers_started=1
+  for attempt in $(seq 1 30); do
+    if [[ "$(sudo -n docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "$api_container")" == "healthy" ]]; then
+      break
+    fi
+    [[ "$attempt" -eq 30 ]] && die "Pending target API did not become healthy after proxy reassignment."
+    sleep 2
+  done
+  compose_run "$pending_source_dir" "$environment_dir" "$pending_commit" \
+    up -d --no-build --no-deps caddy </dev/null
+  caddy_started=1
+  caddy_container="$(compose_service_container_id "$pending_source_dir" "$environment_dir" "$pending_commit" caddy)"
+  require_container_image "$caddy_container" "greatsellai-hr-caddy:$pending_commit"
+  require_container_state "$caddy_container" running
+  compose_run "$pending_source_dir" "$environment_dir" "$pending_commit" exec -T caddy \
+    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null >/dev/null
+  verify_public_runtime "$environment_dir"
+  public_runtime_verified=1
+
+  write_release_records "$history_dir" "$pending_tag" "$pending_commit" "$pending_source_dir" \
+    "$pending_mode" 0 "$pending_backup_state" "$pending_backup_id"
+  finalization_completed=1
+  if ! python3 "$stage_tool" --release-root "$(release_sources_root "$history_dir")" \
+    --activate-source "$pending_source_dir" >/dev/null; then
+    echo "Warning: finalized target is healthy but current-source could not be updated." >&2
+  fi
+  archive_finalized_pending_record "$history_dir" "$pending_record" "$pending_tag" "$pending_commit"
+  trap - EXIT
+}
+
+finalize_pending_target() {
+  local environment_dir="$1" history_dir="$2"
+  shift 2
+  with_release_lock "$history_dir" finalize_pending_target_unlocked \
+    "$environment_dir" "$history_dir" "$@"
 }
 
 restore_unlocked() {
@@ -662,6 +950,7 @@ reconcile_legacy_pending_unlocked() {
   local expected_pending_commit="$4" confirmation="$5"
   local pending_record current_record pending_tag pending_commit pending_previous_tag
   local pending_previous_commit pending_state current_tag current_commit current_state
+  local pending_source_dir pending_backup_state pending_backup_id pending_prepared_at
   local db_container backup_id migrate_state timestamp archive temporary_archive
 
   validate_environment_dir "$environment_dir"
@@ -682,6 +971,10 @@ reconcile_legacy_pending_unlocked() {
   pending_previous_tag="$(record_value "$pending_record" previous_tag)"
   pending_previous_commit="$(record_value "$pending_record" previous_commit)"
   pending_state="$(record_value "$pending_record" state)"
+  pending_source_dir="$(record_value "$pending_record" source_dir)"
+  pending_backup_state="$(record_value "$pending_record" backup_state)"
+  pending_backup_id="$(record_value "$pending_record" backup_id)"
+  pending_prepared_at="$(record_value "$pending_record" prepared_at)"
   current_tag="$(record_value "$current_record" tag)"
   current_commit="$(record_value "$current_record" commit)"
   current_state="$(record_value "$current_record" state)"
@@ -693,6 +986,8 @@ reconcile_legacy_pending_unlocked() {
     die "Pending release does not match the exact operator-confirmed legacy target."
   [[ -z "$pending_state" || "$pending_state" == "pending" ]] || \
     die "Pending release is not a legacy pending record."
+  [[ -z "$pending_source_dir" && -z "$pending_backup_state" && -z "$pending_backup_id" && -z "$pending_prepared_at" ]] || \
+    die "Pending release has structured deployment fields; do not use legacy reconciliation."
   [[ -z "$current_state" ]] || \
     die "Current release is already structured; do not use the legacy reconciliation flow."
   [[ "$current_tag" == "$pending_previous_tag" && "$current_commit" == "$pending_previous_commit" ]] || \
@@ -760,8 +1055,12 @@ case "${1:-}" in
     shift
     reconcile_legacy_pending "$@"
     ;;
+  finalize-pending-target)
+    shift
+    finalize_pending_target "$@"
+    ;;
   *)
-    echo "Usage: $0 {release|restore|reconcile-legacy-pending} <release arguments>" >&2
+    echo "Usage: $0 {release|restore|reconcile-legacy-pending|finalize-pending-target} <release arguments>" >&2
     exit 2
     ;;
 esac

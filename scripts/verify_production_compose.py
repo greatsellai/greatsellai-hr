@@ -13,8 +13,9 @@ from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_PROXY_IP = "172.30.0.2"
-EXPECTED_PROXY_CIDR = f"{EXPECTED_PROXY_IP}/32"
+EXPECTED_CADDY_PROXY_IP = "172.30.0.2"
+EXPECTED_API_PROXY_IP = "172.30.0.3"
+EXPECTED_PROXY_CIDR = f"{EXPECTED_CADDY_PROXY_IP}/32"
 EXPECTED_UPLOADS_VOLUME = "resume-screening-v3_uploads_data"
 
 
@@ -71,9 +72,14 @@ def main() -> None:
         _fail("caddy_has_unexpected_network_membership")
     if "proxy" not in api_networks:
         _fail("api_missing_proxy_network")
+    api_proxy = _mapping(api_networks.get("proxy"), label="api_proxy_network")
+    if api_proxy.get("ipv4_address") != EXPECTED_API_PROXY_IP:
+        _fail("api_proxy_address_not_static")
     caddy_proxy = _mapping(caddy_networks.get("proxy"), label="caddy_proxy_network")
-    if caddy_proxy.get("ipv4_address") != EXPECTED_PROXY_IP:
+    if caddy_proxy.get("ipv4_address") != EXPECTED_CADDY_PROXY_IP:
         _fail("caddy_proxy_address_not_static")
+    if api_proxy.get("ipv4_address") == caddy_proxy.get("ipv4_address"):
+        _fail("api_and_caddy_proxy_addresses_collide")
 
     for service_name in ("db", "migrate", "worker"):
         service = _mapping(services.get(service_name), label=service_name)

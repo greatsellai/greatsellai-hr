@@ -50,6 +50,25 @@ def test_legacy_pending_reconciliation_is_manual_and_uses_the_production_lock() 
     assert 'scripts/reconcile-legacy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
 
 
+def test_pending_target_finalization_is_manual_and_narrowly_confirmed() -> None:
+    workflow = (
+        ROOT / ".github" / "workflows" / "production-pending-finalize.yml"
+    ).read_text(encoding="utf-8")
+    wrapper = (ROOT / "scripts" / "finalize-pending-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "workflow_dispatch:" in workflow
+    assert "FINALIZE_PENDING_PROXY_STARTUP" in workflow
+    assert "group: greatsellai-hr-production" in workflow
+    assert "environment:" in workflow and "name: production" in workflow
+    assert "ref: main" in workflow
+    assert 'scripts/finalize-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
+    assert "git merge-base --is-ancestor" in workflow
+    assert "StrictHostKeyChecking=yes" in wrapper
+    assert "does not build, migrate, restore, remove Docker networks" in wrapper
+
+
 def test_server_preflight_is_read_only_and_uses_candidate_compose() -> None:
     script = (ROOT / "scripts" / "preflight-production-release.sh").read_text(
         encoding="utf-8"

@@ -151,6 +151,11 @@ def test_compose_pins_the_only_trusted_proxy_to_caddy_private_address() -> None:
         "${RESUME_V3_TRUSTED_PROXY_CIDRS:?set RESUME_V3_TRUSTED_PROXY_CIDRS in .env.production}"
     ) in compose
     assert "RESUME_V3_TRUSTED_PROXY_CIDRS=172.30.0.2/32" in production_example
+    api_networks = re.search(
+        r"(?ms)^  api:\n(?P<body>.*?)(?=^  [a-z][a-z_]*:|\Z)", compose
+    )
+    assert api_networks is not None
+    assert "ipv4_address: 172.30.0.3" in api_networks.group("body")
     assert "ipv4_address: 172.30.0.2" in compose
     assert "subnet: 172.30.0.0/24" in compose
     assert "  caddy:\n" in compose

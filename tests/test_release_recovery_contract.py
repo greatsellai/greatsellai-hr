@@ -206,6 +206,8 @@ def test_pending_target_finalizer_is_specific_and_preserves_the_normal_pending_g
     assert 'docker network connect --ip "$api_proxy_ip"' in finalizer
     assert 'docker inspect --format \'{{.Name}}\' "$api_container"' in finalizer
     assert '{{$container.Name}}' in finalizer
+    assert '{{"\\n"}}' in finalizer
+    assert '{{"\\\\n"}}' not in finalizer
     assert 'docker network rm' not in finalizer
     assert "Pending target migration did not complete successfully." in finalizer
     assert "verify_public_runtime" in finalizer

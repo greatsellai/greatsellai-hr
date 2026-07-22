@@ -675,7 +675,7 @@ finalize_pending_target_unlocked() {
   api_container_name="$(sudo -n docker inspect --format '{{.Name}}' "$api_container" | sed 's#^/##')"
   caddy_state="$(sudo -n docker inspect --format '{{.State.Status}}' "$caddy_container")"
   caddy_error="$(sudo -n docker inspect --format '{{.State.Error}}' "$caddy_container")"
-  attached_containers="$(sudo -n docker network inspect "$proxy_network_name" --format '{{range $id, $container := .Containers}}{{$container.Name}}{{"\\n"}}{{end}}' | sed '/^$/d')"
+  attached_containers="$(sudo -n docker network inspect "$proxy_network_name" --format '{{range $id, $container := .Containers}}{{$container.Name}}{{"\n"}}{{end}}' | sed '/^$/d')"
   [[ "$observed_proxy_address" == "$caddy_proxy_ip" ]] || \
     die "Pending target does not have the known Caddy proxy-address collision."
   [[ -n "$api_container_name" && "$attached_containers" == "$api_container_name" ]] || \

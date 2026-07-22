@@ -14,6 +14,7 @@ host data directories.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import secrets
 import subprocess
 import sys
@@ -42,6 +43,8 @@ class RuntimeResources:
     source_postgres: str
     restored_postgres: str
     seed_container: str
+    source_uploads_volume: str
+    restored_uploads_volume: str
 
 
 def _redact(value: str, *, secrets_to_redact: tuple[str, ...]) -> str:
@@ -128,6 +131,11 @@ def _build_image(tag: str, *, run_label: str) -> None:
 def _runtime_mount() -> str:
     # --mount accepts Windows drive paths without the colon ambiguity of -v.
     return f"type=bind,src={RUNTIME_RUNNER.parent},dst=/release-regression-scripts,readonly"
+
+
+def _volume_mount(*, volume_name: str, destination: str, readonly: bool = False) -> str:
+    value = f"type=volume,src={volume_name},dst={destination}"
+    return f"{value},readonly" if readonly else value
 
 
 def _run_document_regression(image: str, prefix: str) -> None:
@@ -244,6 +252,11 @@ def _run_seed(
         *_resource_label_arguments(resources.run_label),
         "--mount",
         _runtime_mount(),
+        "--mount",
+        _volume_mount(
+            volume_name=resources.source_uploads_volume,
+            destination="/tmp/release-regression/uploads",
+        ),
         "--env",
         f"RESUME_V3_DATABASE_URL={database_url}",
         "--env",
@@ -339,37 +352,197 @@ def _restore_database(
     )
 
 
-def _archive_uploads(source: Path, archive_path: Path) -> None:
-    with tarfile.open(archive_path, mode="w:gz") as archive:
-        archive.add(source, arcname="uploads")
-    if archive_path.stat().st_size == 0:
-        raise RegressionFailure("temporary_upload_backup_empty")
-
-
-def _restore_uploads(archive_path: Path, destination_root: Path) -> Path:
-    with tarfile.open(archive_path, mode="r:gz") as archive:
-        root = destination_root.resolve()
-        for member in archive.getmembers():
-            member_target = (destination_root / member.name).resolve()
-            if not member_target.is_relative_to(root):
-                raise RegressionFailure("temporary_upload_backup_path_unsafe")
-        archive.extractall(destination_root, filter="data")
-    restored = destination_root / "uploads"
-    if not restored.is_dir():
-        raise RegressionFailure("temporary_upload_restore_missing")
-    return restored
-
-
-def _copy_seed_uploads(seed_container: str, destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
+def _create_volume(*, volume_name: str, run_label: str) -> None:
     _docker(
-        "cp",
-        f"{seed_container}:/tmp/release-regression/uploads/.",
-        str(destination),
-        label="temporary_upload_copy",
+        "volume",
+        "create",
+        *_resource_label_arguments(run_label),
+        volume_name,
+        label="temporary_upload_volume_create",
     )
-    if not any(destination.rglob("*")):
-        raise RegressionFailure("temporary_upload_copy_empty")
+    # Docker creates an empty named volume as root. The production image runs
+    # as appuser (UID/GID 10001), so initialize the harness volume explicitly
+    # instead of letting a root-owned mount hide a permission regression.
+    _docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--user",
+        "0",
+        *_resource_label_arguments(run_label),
+        "--mount",
+        _volume_mount(volume_name=volume_name, destination="/uploads"),
+        "postgres:16-alpine",
+        "sh",
+        "-ceu",
+        "mkdir -p /uploads && chown -R 10001:10001 /uploads",
+        label="temporary_upload_volume_initialize",
+        capture=False,
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_upload_archive(archive_path: Path) -> None:
+    if not archive_path.is_file() or archive_path.stat().st_size == 0:
+        raise RegressionFailure("temporary_upload_backup_empty")
+    with tarfile.open(archive_path, mode="r:gz") as archive:
+        members = archive.getmembers()
+        if not members:
+            raise RegressionFailure("temporary_upload_backup_empty")
+        for member in members:
+            member_path = Path(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise RegressionFailure("temporary_upload_backup_path_unsafe")
+
+
+def _archive_uploads_volume(
+    *,
+    volume_name: str,
+    archive_path: Path,
+    run_label: str,
+) -> None:
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    _docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        *_resource_label_arguments(run_label),
+        "--mount",
+        _volume_mount(volume_name=volume_name, destination="/source", readonly=True),
+        "--mount",
+        f"type=bind,src={archive_path.parent},dst=/backup",
+        "postgres:16-alpine",
+        "sh",
+        "-ceu",
+        "tar -C /source -czf /backup/uploads.tar.gz .",
+        label="temporary_upload_volume_archive",
+        capture=False,
+    )
+    _validate_upload_archive(archive_path)
+
+
+def _restore_uploads_volume(
+    *,
+    archive_path: Path,
+    volume_name: str,
+    run_label: str,
+) -> None:
+    _validate_upload_archive(archive_path)
+    _docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        *_resource_label_arguments(run_label),
+        "--mount",
+        _volume_mount(volume_name=volume_name, destination="/target"),
+        "--mount",
+        f"type=bind,src={archive_path.parent},dst=/backup,readonly",
+        "postgres:16-alpine",
+        "sh",
+        "-ceu",
+        "tar -xzf /backup/uploads.tar.gz -C /target",
+        label="temporary_upload_volume_restore",
+        capture=False,
+    )
+
+
+def _create_release_backup_bundle(
+    *,
+    postgres_container: str,
+    uploads_volume: str,
+    bundle_root: Path,
+    password: str,
+    run_label: str,
+) -> Path:
+    """Write a publish-after-verify paired backup matching production layout."""
+
+    backup_id = f"synthetic-{run_label}"
+    staging = bundle_root / f".{backup_id}.partial"
+    completed = bundle_root / backup_id
+    staging.mkdir(parents=True)
+    database_backup = staging / "database.dump"
+    uploads_backup = staging / "uploads.tar.gz"
+    try:
+        _dump_database(
+            postgres_container=postgres_container,
+            destination=database_backup,
+            password=password,
+        )
+        _archive_uploads_volume(
+            volume_name=uploads_volume,
+            archive_path=uploads_backup,
+            run_label=run_label,
+        )
+        checksums = {
+            "database.dump": _sha256(database_backup),
+            "uploads.tar.gz": _sha256(uploads_backup),
+        }
+        (staging / "checksums.sha256").write_text(
+            "".join(f"{digest}  {name}\n" for name, digest in checksums.items()),
+            encoding="utf-8",
+        )
+        (staging / "manifest.env").write_text(
+            "\n".join(
+                (
+                    "format_version=1",
+                    "state=complete",
+                    f"backup_id={backup_id}",
+                    "database_file=database.dump",
+                    "uploads_file=uploads.tar.gz",
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        _validate_release_backup_bundle(completed=staging, expected_backup_id=backup_id)
+        staging.replace(completed)
+    except Exception:
+        # The temporary directory itself is harness-owned. Never let a partial
+        # bundle look like a completed backup in the recovery exercise.
+        if staging.exists():
+            for child in staging.iterdir():
+                child.unlink()
+            staging.rmdir()
+        raise
+    return completed
+
+
+def _validate_release_backup_bundle(*, completed: Path, expected_backup_id: str) -> None:
+    manifest = completed / "manifest.env"
+    checksums_path = completed / "checksums.sha256"
+    if not manifest.is_file() or not checksums_path.is_file():
+        raise RegressionFailure("temporary_release_backup_manifest_missing")
+    values = dict(
+        line.split("=", maxsplit=1)
+        for line in manifest.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+    if (
+        values.get("format_version") != "1"
+        or values.get("state") != "complete"
+        or values.get("backup_id") != expected_backup_id
+        or values.get("database_file") != "database.dump"
+        or values.get("uploads_file") != "uploads.tar.gz"
+    ):
+        raise RegressionFailure("temporary_release_backup_manifest_invalid")
+    expected_files = {"database.dump", "uploads.tar.gz"}
+    checksum_rows = [line.split(maxsplit=1) for line in checksums_path.read_text(encoding="utf-8").splitlines()]
+    if len(checksum_rows) != 2 or {row[1].strip() for row in checksum_rows if len(row) == 2} != expected_files:
+        raise RegressionFailure("temporary_release_backup_checksums_invalid")
+    for row in checksum_rows:
+        if len(row) != 2 or _sha256(completed / row[1].strip()) != row[0]:
+            raise RegressionFailure("temporary_release_backup_checksum_mismatch")
+    _validate_upload_archive(completed / "uploads.tar.gz")
 
 
 def _run_restore_verify(
@@ -378,7 +551,7 @@ def _run_restore_verify(
     resources: RuntimeResources,
     database_url: str,
     password: str,
-    restored_uploads: Path,
+    restored_uploads_volume: str,
 ) -> None:
     _docker(
         "run",
@@ -391,7 +564,11 @@ def _run_restore_verify(
         "--mount",
         _runtime_mount(),
         "--mount",
-        f"type=bind,src={restored_uploads},dst=/release-regression/uploads,readonly",
+        _volume_mount(
+            volume_name=restored_uploads_volume,
+            destination="/release-regression/uploads",
+            readonly=True,
+        ),
         "--env",
         f"RESUME_V3_DATABASE_URL={database_url}",
         "--env",
@@ -426,6 +603,8 @@ def _run_postgres_recovery(image: str, prefix: str) -> None:
         source_postgres=f"{prefix}-postgres-source",
         restored_postgres=f"{prefix}-postgres-restored",
         seed_container=f"{prefix}-seed",
+        source_uploads_volume=f"{prefix}-uploads-source",
+        restored_uploads_volume=f"{prefix}-uploads-restored",
     )
     _docker(
         "network",
@@ -442,6 +621,10 @@ def _run_postgres_recovery(image: str, prefix: str) -> None:
             database_password=password,
             run_label=resources.run_label,
         )
+        _create_volume(
+            volume_name=resources.source_uploads_volume,
+            run_label=resources.run_label,
+        )
         source_url = _database_url(resources.source_postgres, password)
         _run_seed(
             image=image,
@@ -452,35 +635,36 @@ def _run_postgres_recovery(image: str, prefix: str) -> None:
 
         with tempfile.TemporaryDirectory(prefix="greatsell-postgres-recovery-") as temporary:
             root = Path(temporary)
-            source_uploads = root / "source-uploads"
-            backup_uploads = root / "uploads.tar.gz"
-            restored_root = root / "restored"
-            database_backup = root / "database.dump"
-            _copy_seed_uploads(resources.seed_container, source_uploads)
-            _archive_uploads(source_uploads, backup_uploads)
-            restored_uploads = _restore_uploads(backup_uploads, restored_root)
-            # The read-only appuser in the verification container needs to
-            # traverse these synthetic files on Linux CI.  Windows ignores
-            # chmod here, which is harmless.
-            for path in (restored_root, restored_uploads, *restored_uploads.rglob("*")):
-                if path.is_dir():
-                    path.chmod(0o755)
-                else:
-                    path.chmod(0o644)
-            _dump_database(
+            backup_dir = _create_release_backup_bundle(
                 postgres_container=resources.source_postgres,
-                destination=database_backup,
+                uploads_volume=resources.source_uploads_volume,
+                bundle_root=root,
                 password=password,
+                run_label=resources.run_label,
             )
+            # Prove the restore does not accidentally reuse the original
+            # database, worker container, or uploads volume after backup.
+            _remove_if_present("rm", "--force", resources.seed_container)
+            _remove_if_present("rm", "--force", resources.source_postgres)
+            _remove_if_present("volume", "rm", resources.source_uploads_volume)
             _start_postgres(
                 container_name=resources.restored_postgres,
                 network=resources.network,
                 database_password=password,
                 run_label=resources.run_label,
             )
+            _create_volume(
+                volume_name=resources.restored_uploads_volume,
+                run_label=resources.run_label,
+            )
+            _restore_uploads_volume(
+                archive_path=backup_dir / "uploads.tar.gz",
+                volume_name=resources.restored_uploads_volume,
+                run_label=resources.run_label,
+            )
             _restore_database(
                 postgres_container=resources.restored_postgres,
-                source=database_backup,
+                source=backup_dir / "database.dump",
                 password=password,
             )
             restored_url = _database_url(resources.restored_postgres, password)
@@ -489,12 +673,14 @@ def _run_postgres_recovery(image: str, prefix: str) -> None:
                 resources=resources,
                 database_url=restored_url,
                 password=password,
-                restored_uploads=restored_uploads,
+                restored_uploads_volume=resources.restored_uploads_volume,
             )
     finally:
         _remove_if_present("rm", "--force", resources.seed_container)
         _remove_if_present("rm", "--force", resources.source_postgres)
         _remove_if_present("rm", "--force", resources.restored_postgres)
+        _remove_if_present("volume", "rm", resources.source_uploads_volume)
+        _remove_if_present("volume", "rm", resources.restored_uploads_volume)
         _remove_if_present("network", "rm", resources.network)
 
 

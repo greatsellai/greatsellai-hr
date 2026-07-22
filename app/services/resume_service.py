@@ -56,10 +56,8 @@ from app.services.normalization import (
 from app.services.document_text_extraction import (
     DocumentExtractionError,
     SUPPORTED_DOCUMENT_EXTENSIONS,
-    extract_document_text,
+    validate_document_signature,
 )
-from app.services.text_extraction import PdfExtractionError, extract_pdf_text
-from app.services.tencent_ocr_provider import TencentOcrConfig
 from app.tenant_scope import LEGACY_ORGANIZATION_ID, organization_context_id
 
 
@@ -127,8 +125,14 @@ def validate_pdf_resume_upload(
     submitted_name = Path(original_filename or "resume.pdf").name
     if Path(submitted_name).suffix.lower() not in SUPPORTED_DOCUMENT_EXTENSIONS:
         raise UploadValidationError("unsupported_document_type")
-    if submitted_name.lower().endswith(".pdf") and not content.startswith(b"%PDF-"):
-        raise UploadValidationError("not_a_pdf")
+    try:
+        validate_document_signature(filename=submitted_name, content=content)
+    except DocumentExtractionError as exc:
+        # Preserve the legacy PDF-specific response for existing API clients
+        # while applying the same signature gate to every supported format.
+        if submitted_name.lower().endswith(".pdf") and str(exc) == "invalid_document_signature":
+            raise UploadValidationError("not_a_pdf") from exc
+        raise UploadValidationError(str(exc)) from exc
     return submitted_name
 
 
@@ -364,6 +368,49 @@ def _write_upload_atomically(*, storage_path: Path, content: bytes) -> None:
         raise
 
 
+def _copy_uploaded_original_atomically(
+    *,
+    source_path: Path,
+    storage_path: Path,
+    expected_sha256: str,
+    max_bytes: int,
+) -> None:
+    """Copy a prior original without loading it or parsing it in an API worker.
+
+    Parser-repair requests duplicate a stored original into a new immutable
+    resume version.  The copy stays bounded and independently hashes the
+    source while it streams, so a changed or oversized filesystem object can
+    never be promoted to a replacement version.
+    """
+
+    temporary_path = storage_path.with_name(
+        f".{storage_path.name}.{uuid4().hex}.uploading"
+    )
+    try:
+        if storage_path.exists():
+            raise ResumeServiceError("generated_storage_key_already_exists")
+        digest = hashlib.sha256()
+        copied_bytes = 0
+        with source_path.open("rb") as source, temporary_path.open("xb") as output:
+            while chunk := source.read(1024 * 1024):
+                copied_bytes += len(chunk)
+                if copied_bytes > max_bytes:
+                    raise ResumeServiceError("resume_original_file_too_large")
+                digest.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if digest.hexdigest() != expected_sha256:
+            raise ResumeServiceError("resume_original_hash_mismatch")
+        os.replace(temporary_path, storage_path)
+    except Exception:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def create_candidate(session: Session, *, display_name: str | None) -> Candidate:
     candidate = Candidate(display_name=display_name.strip() if display_name else None)
     session.add(candidate)
@@ -412,70 +459,34 @@ def save_pdf_resume(
     try:
         _write_upload_atomically(storage_path=storage_path, content=content)
         sha256 = hashlib.sha256(content).hexdigest()
-        try:
-            extracted = extract_document_text(
-                storage_path,
-                min_text_chars_per_page=settings.min_text_chars_per_page,
-                ocr_sparse_text_chars_per_page=settings.ocr_sparse_text_chars_per_page,
-                tencent_ocr_config=(
-                    TencentOcrConfig(
-                        secret_id=settings.tencent_secret_id,
-                        secret_key=settings.tencent_secret_key,
-                        region=settings.tencent_ocr_region,
-                        timeout_seconds=settings.tencent_ocr_timeout_seconds,
-                    )
-                    if settings.tencent_secret_id and settings.tencent_secret_key
-                    else None
-                ),
-            )
-        except DocumentExtractionError as exc:
-            resume = Resume(
-                candidate_id=candidate_id,
-                original_filename=submitted_name[:255],
-                storage_key=storage_key,
-                sha256=sha256,
-                source_page_count=0,
-                parsed_page_count=0,
-                extraction_status="failed",
-                quality_flags=[str(exc)],
-                parser_version="pypdf",
-                raw_text=None,
-                is_985_211=None,
-            )
-            session.add(resume)
-            session.flush()
-            return resume
-
-        raw_text = _database_safe_text(extracted.raw_text)
         resume = Resume(
             candidate_id=candidate_id,
             original_filename=submitted_name[:255],
             storage_key=storage_key,
             sha256=sha256,
-            source_page_count=extracted.source_page_count,
-            parsed_page_count=extracted.parsed_page_count,
-            extraction_status=extracted.status,
-            quality_flags=extracted.quality_flags,
-            parser_version=extracted.parser_version,
-            raw_text=raw_text or None,
+            source_page_count=0,
+            parsed_page_count=0,
+            extraction_status="queued",
+            quality_flags=[],
+            parser_version="document-worker",
+            raw_text=None,
             is_985_211=None,
         )
         session.add(resume)
         session.flush()
-        for page in extracted.pages:
-            page_text = _database_safe_text(page.text)
-            if not page_text:
-                continue
-            session.add(
-                ResumeSourceBlock(
-                    resume_id=resume.id,
-                    block_id=f"page-{page.page_no:03d}",
-                    page_no=page.page_no,
-                    block_type="page_text",
-                    text=page_text,
-                )
-            )
-        session.flush()
+        # Import lazily to avoid a service cycle: the worker reuses this
+        # module's safe storage-path resolver when it claims the job. The HTTP
+        # path therefore ends after validation, atomic storage and a durable
+        # queue write; it never runs Office, OCR, OpenPyXL or PDF parsing.
+        from app.services.document_extraction_job_service import (
+            enqueue_uploaded_resume_document_extraction,
+        )
+
+        enqueue_uploaded_resume_document_extraction(
+            session,
+            resume=resume,
+            settings=settings,
+        )
         return resume
     except Exception:
         discard_uploaded_pdf(
@@ -492,95 +503,34 @@ def reparse_inactive_resume_source_text(
     resume_id: str,
     settings: AppSettings,
 ) -> Resume:
-    """Rebuild source evidence for an inactive resume after parser/OCR changes.
+    """Requeue source evidence for an inactive resume after parser/OCR changes.
 
-    This is deliberately unavailable for an active screening version: changing
-    source text changes the evidence contract and must never mutate a version
-    that is already in use.  A successful reparse safely resets the durable AI
-    extraction job so it consumes the new page evidence.
+    The caller remains deliberately parse-free.  The worker owns all PDF,
+    Office, OCR and spreadsheet parsing, and it only replaces source blocks
+    once the new normalization result has passed its file/hash limits.
     """
 
     resume = get_resume(session, resume_id)
-    if resume.is_active or resume.extraction_status == "ready":
-        raise ResumeServiceError("active_resume_cannot_be_reparsed")
-    job = resume.ai_extraction_job
-    if job is not None and job.status in {"queued", "running"}:
-        raise ResumeServiceError("resume_ai_extraction_already_running")
-
-    storage_path = resolve_uploaded_resume_path(
-        settings,
-        storage_key=resume.storage_key,
-        organization_id=organization_context_id(session),
-    )
-
     old_snapshot = _fact_snapshot(resume)
     try:
-        if storage_path.suffix.lower() == ".pdf":
-            extracted = extract_pdf_text(
-                storage_path,
-                min_text_chars_per_page=settings.min_text_chars_per_page,
-                ocr_sparse_text_chars_per_page=settings.ocr_sparse_text_chars_per_page,
-                tencent_ocr_config=(
-                    TencentOcrConfig(
-                        secret_id=settings.tencent_secret_id,
-                        secret_key=settings.tencent_secret_key,
-                        region=settings.tencent_ocr_region,
-                        timeout_seconds=settings.tencent_ocr_timeout_seconds,
-                    )
-                    if settings.tencent_secret_id and settings.tencent_secret_key
-                    else None
-                ),
-            )
-        else:
-            extracted = extract_document_text(
-                storage_path,
-                min_text_chars_per_page=settings.min_text_chars_per_page,
-                ocr_sparse_text_chars_per_page=settings.ocr_sparse_text_chars_per_page,
-            )
-    except (PdfExtractionError, DocumentExtractionError) as exc:
-        raise ResumeServiceError(str(exc)) from exc
-
-    session.execute(delete(ResumeSourceBlock).where(ResumeSourceBlock.resume_id == resume.id))
-    resume.source_page_count = extracted.source_page_count
-    resume.parsed_page_count = extracted.parsed_page_count
-    resume.extraction_status = extracted.status
-    resume.quality_flags = extracted.quality_flags
-    resume.parser_version = extracted.parser_version
-    resume.raw_text = _database_safe_text(extracted.raw_text) or None
-    resume.facts_version += 1
-    for page in extracted.pages:
-        page_text = _database_safe_text(page.text)
-        if not page_text:
-            continue
-        session.add(
-            ResumeSourceBlock(
-                resume_id=resume.id,
-                block_id=f"page-{page.page_no:03d}",
-                page_no=page.page_no,
-                block_type="page_text",
-                text=page_text,
-            )
+        from app.services.document_extraction_job_service import (
+            DocumentExtractionJobError,
+            request_resume_document_extraction,
         )
-    session.flush()
 
-    if any(page.text for page in extracted.pages):
-        # Imported lazily to avoid the module cycle: the worker itself relies
-        # on resume_service for source-grounded fact persistence.
-        from app.services.ai_extraction_job_service import request_resume_ai_extraction
-
-        request_resume_ai_extraction(session, resume_id=resume.id, settings=settings)
-    elif job is not None:
-        job.status = "needs_attention"
-        job.next_attempt_at = None
-        job.lease_owner = None
-        job.lease_expires_at = None
-        job.last_error = "resume_source_reparse_needs_review"
+        resume = request_resume_document_extraction(
+            session,
+            resume_id=resume.id,
+            settings=settings,
+        )
+    except DocumentExtractionJobError as exc:
+        raise ResumeServiceError(str(exc)) from exc
 
     session.add(
         ResumeReviewAction(
             resume_id=resume.id,
-            action="resume_source_reparsed",
-            actor="system:ocr-fallback",
+            action="resume_source_reparse_queued",
+            actor="system:parser-repair",
             note=None,
             old_values=old_snapshot,
             new_values=_fact_snapshot(resume),
@@ -605,10 +555,12 @@ def reparse_active_resume_as_new_version(
     A resume's ``ResumeSourceBlock`` rows are its live evidence contract.  It
     is therefore unsafe to overwrite those rows after facts, scores, summaries
     or JD matches have been created.  Instead this function copies the
-    original into a new ``Resume`` row, extracts fresh source text there, and
-    queues a new AI facts job.  The original evidence and historical outputs
-    remain untouched; it is immediately marked source-unreliable so it cannot
-    continue to influence screening while the new version is being rebuilt.
+    original into a new ``Resume`` row and durably queues its source
+    normalization.  It never invokes an Office converter, OCR, PDF parser or
+    spreadsheet reader in the HTTP request.  The original evidence and
+    historical outputs remain untouched; it is immediately marked
+    source-unreliable so it cannot continue to influence screening while the
+    new version is being rebuilt.
 
     The new job carries an audit-only activation guard through a review action.
     The worker checks that the source version is still the active version just
@@ -649,13 +601,6 @@ def reparse_active_resume_as_new_version(
     suffix = source_path.suffix.lower()
     if suffix not in SUPPORTED_DOCUMENT_EXTENSIONS:
         raise ResumeServiceError("unsupported_document_type")
-    try:
-        content = source_path.read_bytes()
-    except OSError as exc:
-        raise ResumeServiceError("resume_original_file_not_found") from exc
-    if hashlib.sha256(content).hexdigest() != source_resume.sha256:
-        raise ResumeServiceError("resume_original_hash_mismatch")
-
     # This endpoint is only exposed for a source-quality repair.  Make the
     # existing version non-eligible immediately while the replacement is
     # rebuilt, rather than leaving known-bad facts searchable for the worker's
@@ -679,69 +624,40 @@ def reparse_active_resume_as_new_version(
         organization_id=organization_id,
     )
     try:
-        _write_upload_atomically(storage_path=storage_path, content=content)
-        try:
-            extracted = extract_document_text(
-                storage_path,
-                min_text_chars_per_page=settings.min_text_chars_per_page,
-                ocr_sparse_text_chars_per_page=settings.ocr_sparse_text_chars_per_page,
-                tencent_ocr_config=(
-                    TencentOcrConfig(
-                        secret_id=settings.tencent_secret_id,
-                        secret_key=settings.tencent_secret_key,
-                        region=settings.tencent_ocr_region,
-                        timeout_seconds=settings.tencent_ocr_timeout_seconds,
-                    )
-                    if settings.tencent_secret_id and settings.tencent_secret_key
-                    else None
-                ),
-            )
-        except DocumentExtractionError as exc:
-            replacement = Resume(
-                candidate_id=source_resume.candidate_id,
-                original_filename=source_resume.original_filename,
-                storage_key=storage_key,
-                sha256=source_resume.sha256,
-                source_page_count=0,
-                parsed_page_count=0,
-                extraction_status="failed",
-                quality_flags=[str(exc)],
-                parser_version="reparse",
-                raw_text=None,
-                is_985_211=None,
-            )
-            session.add(replacement)
-            session.flush()
-        else:
-            replacement = Resume(
-                candidate_id=source_resume.candidate_id,
-                original_filename=source_resume.original_filename,
-                storage_key=storage_key,
-                sha256=source_resume.sha256,
-                source_page_count=extracted.source_page_count,
-                parsed_page_count=extracted.parsed_page_count,
-                extraction_status=extracted.status,
-                quality_flags=extracted.quality_flags,
-                parser_version=extracted.parser_version,
-                raw_text=_database_safe_text(extracted.raw_text) or None,
-                is_985_211=None,
-            )
-            session.add(replacement)
-            session.flush()
-            for page in extracted.pages:
-                page_text = _database_safe_text(page.text)
-                if not page_text:
-                    continue
-                session.add(
-                    ResumeSourceBlock(
-                        resume_id=replacement.id,
-                        block_id=f"page-{page.page_no:03d}",
-                        page_no=page.page_no,
-                        block_type="page_text",
-                        text=page_text,
-                    )
-                )
-            session.flush()
+        _copy_uploaded_original_atomically(
+            source_path=source_path,
+            storage_path=storage_path,
+            expected_sha256=source_resume.sha256,
+            max_bytes=settings.max_upload_bytes,
+        )
+        replacement = Resume(
+            candidate_id=source_resume.candidate_id,
+            original_filename=source_resume.original_filename,
+            storage_key=storage_key,
+            sha256=source_resume.sha256,
+            source_page_count=0,
+            parsed_page_count=0,
+            extraction_status="queued",
+            quality_flags=[],
+            parser_version="document-worker",
+            raw_text=None,
+            is_985_211=None,
+        )
+        session.add(replacement)
+        session.flush()
+        # This is the same durable parser queue used by browser and mailbox
+        # uploads.  It is intentionally created before the audit rows so a
+        # committed repair action can never point at a replacement that is
+        # missing its source-normalization work item.
+        from app.services.document_extraction_job_service import (
+            enqueue_uploaded_resume_document_extraction,
+        )
+
+        enqueue_uploaded_resume_document_extraction(
+            session,
+            resume=replacement,
+            settings=settings,
+        )
 
         session.add(
             ResumeReviewAction(
@@ -774,18 +690,6 @@ def reparse_active_resume_as_new_version(
             )
         )
 
-        if replacement.source_blocks:
-            # Imported lazily to avoid the module cycle: the worker itself
-            # depends on this module for grounded fact persistence.
-            from app.services.ai_extraction_job_service import (
-                enqueue_uploaded_resume_ai_extraction,
-            )
-
-            enqueue_uploaded_resume_ai_extraction(
-                session,
-                resume=replacement,
-                settings=settings,
-            )
         session.flush()
         return replacement
     except Exception:
@@ -870,6 +774,9 @@ def _assert_no_pending_source_reparse(
         replacement = session.scalar(select(Resume).where(Resume.id == replacement_id))
         if replacement is None or replacement.candidate_id != source_resume.candidate_id:
             continue
+        document_job = replacement.document_extraction_job
+        if document_job is not None and document_job.status in {"queued", "running"}:
+            raise ResumeServiceError("source_resume_reparse_already_running")
         job = replacement.ai_extraction_job
         if job is not None and job.status in {"queued", "running"}:
             raise ResumeServiceError("source_resume_reparse_already_running")

@@ -112,8 +112,40 @@ jobs:
             echo "Production known_hosts does not contain the configured host." >&2
             exit 1
           }
-      - name: Create immutable production tag
+      - name: Preflight production configuration before tagging
         if: steps.target.outputs.deploy == 'true'
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+        run: |
+          set -Eeuo pipefail
+          scripts/preflight-production-release.sh "$RELEASE_SHA" \
+            --host "$PROD_DEPLOY_HOST" \
+            --project-dir "$PROD_PROJECT_DIR" \
+            --history-dir "$PROD_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"
+      - name: Reconfirm release target after preflight
+        id: ready
+        if: steps.target.outputs.deploy == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          git fetch origin main --tags --prune
+          git switch --force-create main origin/main
+          if [[ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+            if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
+              echo "Skipping a superseded commit after server preflight."
+              exit 0
+            fi
+            echo "main advanced during preflight. Re-run the manual release from current main." >&2
+            exit 1
+          fi
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+      - name: Create immutable production tag
+        if: steps.ready.outputs.deploy == 'true'
         id: release
         run: |
           set -Eeuo pipefail
@@ -133,7 +165,7 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Deploy tagged release
-        if: steps.target.outputs.deploy == 'true'
+        if: steps.ready.outputs.deploy == 'true'
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
           PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}

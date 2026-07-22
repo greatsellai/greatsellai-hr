@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.models import Resume, ResumeFactSnapshot
 from app.services.deepseek_provider import FACT_SNAPSHOT_SCHEMA_VERSION
+from app.services.document_extraction_job_service import run_document_extraction_worker_once
 
 
 def _make_pdf_with_text(text: str) -> bytes:
@@ -48,8 +49,15 @@ def _create_resume(client) -> str:
         files={"file": ("resume.pdf", _make_pdf_with_text(source_text), "application/pdf")},
     )
     assert upload_response.status_code == 200, upload_response.text
-    assert upload_response.json()["extraction_status"] == "text_ready"
-    return upload_response.json()["resume_id"]
+    assert upload_response.json()["extraction_status"] == "queued"
+    assert run_document_extraction_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="fact-snapshot-document-worker",
+    )
+    resume_id = upload_response.json()["resume_id"]
+    assert client.get(f"/v1/resumes/{resume_id}").json()["extraction_status"] == "text_ready"
+    return resume_id
 
 
 def _facts(*, skills: list[str]) -> dict[str, object]:

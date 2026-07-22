@@ -168,7 +168,9 @@ def _seed_workspace_b_private_resources(
         set_organization_context(session, organization_id)
 
         task_candidate = Candidate(display_name="Workspace B task fixture")
+        search_candidate = Candidate(display_name="Workspace B search fixture")
         session.add(task_candidate)
+        session.add(search_candidate)
         session.flush()
 
         task_resume = Resume(
@@ -185,6 +187,20 @@ def _seed_workspace_b_private_resources(
             is_active=False,
         )
         session.add(task_resume)
+        search_resume = Resume(
+            candidate_id=search_candidate.id,
+            original_filename="workspace-b-search-fixture.pdf",
+            storage_key="workspace-b-search-fixture.pdf",
+            sha256="c" * 64,
+            source_page_count=1,
+            parsed_page_count=1,
+            extraction_status="ready",
+            quality_flags=[],
+            parser_version="tenant-test-fixture",
+            raw_text="synthetic searchable tenant scope fixture",
+            is_active=True,
+        )
+        session.add(search_resume)
         session.flush()
 
         score_template = ScoreTemplate(
@@ -284,7 +300,9 @@ def _seed_workspace_b_private_resources(
 
         return {
             "task_resume_id": task_resume.id,
+            "search_resume_id": search_resume.id,
             "score_id": score.id,
+            "score_template_id": score_template.id,
             "summary_id": summary.id,
             "job_id": job.id,
             "job_version_id": job_version.id,
@@ -471,6 +489,26 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert private["task_resume_id"] not in {
         item["resume_id"] for item in a_review_queue.json()["items"]
     }
+
+    # The recruiter-facing search index is a separate composite query with
+    # relation preloads for score, education, experience, and skills. It must
+    # retain the same workspace boundary as direct resource endpoints.
+    b_search = client_b.post("/v1/candidates/search", json={"limit": 20})
+    a_search = client_a.post("/v1/candidates/search", json={"limit": 20})
+    assert b_search.status_code == 200, b_search.text
+    assert a_search.status_code == 200, a_search.text
+    assert private["search_resume_id"] in {
+        item["resume_id"] for item in b_search.json()["items"]
+    }
+    assert private["search_resume_id"] not in {
+        item["resume_id"] for item in a_search.json()["items"]
+    }
+    foreign_score_sort = client_a.post(
+        "/v1/candidates/search",
+        json={"limit": 20, "score_template_id": private["score_template_id"]},
+    )
+    assert foreign_score_sort.status_code == 422, foreign_score_sort.text
+    assert foreign_score_sort.json()["detail"] == "score_template_not_found"
 
     foreign_task_retry = client_a.post(
         f"/v1/resumes/{private['task_resume_id']}/queue-ai-extraction"

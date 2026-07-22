@@ -6,26 +6,22 @@ set -Eeuo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-readonly default_host="ubuntu@58.87.96.20"
-readonly default_project_dir="/home/ubuntu/resume-screening-v3"
-readonly default_history_dir="/home/ubuntu/greatsellai-hr-deployments"
-
 usage() {
   cat <<'EOF'
 Usage: scripts/deploy-production.sh <prod-tag> [options]
 
 Options:
-  --host <ssh-host>         SSH target (default: ubuntu@58.87.96.20)
-  --project-dir <path>      Live project directory on the server
-  --history-dir <path>      Server-side release records and database backups
+  --host <ssh-host>         Required SSH target (or RESUME_V3_DEPLOY_HOST)
+  --project-dir <path>      Required live project directory (or RESUME_V3_REMOTE_DIR)
+  --history-dir <path>      Required release-record/backup directory (or RESUME_V3_DEPLOY_HISTORY_DIR)
   --ssh-key <path>          Optional SSH private-key path; never committed
   --rollback                Deploy a prior tag as an application rollback
   --allow-schema-ahead      Required for rollback across migration changes;
                             keeps the current database schema and skips migrate
 
 Only prod-YYYYMMDD-<commit-sha> tags that are reachable from origin/main are
-accepted. The command transfers tracked source with git archive; it never uses
---delete and cannot transfer .env.production, Docker volumes, PDFs, or database data.
+accepted. The command stages tracked source in an immutable release directory;
+it never overwrites .env.production, Docker volumes, PDFs, or database data.
 EOF
 }
 
@@ -47,9 +43,9 @@ tag="${1:-}"
 [[ -n "$tag" && "$tag" != -* ]] || { usage >&2; exit 1; }
 shift
 
-remote_host="${RESUME_V3_DEPLOY_HOST:-$default_host}"
-project_dir="${RESUME_V3_REMOTE_DIR:-$default_project_dir}"
-history_dir="${RESUME_V3_DEPLOY_HISTORY_DIR:-$default_history_dir}"
+remote_host="${RESUME_V3_DEPLOY_HOST:-}"
+project_dir="${RESUME_V3_REMOTE_DIR:-}"
+history_dir="${RESUME_V3_DEPLOY_HISTORY_DIR:-}"
 ssh_key="${RESUME_V3_SSH_KEY:-}"
 mode="deploy"
 allow_schema_ahead=0
@@ -68,6 +64,9 @@ while (($#)); do
 done
 
 [[ "$tag" =~ ^prod-[0-9]{8}-[0-9a-f]{7,40}$ ]] || die "Invalid production tag: $tag"
+[[ -n "$remote_host" ]] || die "Missing deployment target; pass --host or set RESUME_V3_DEPLOY_HOST."
+[[ -n "$project_dir" ]] || die "Missing project directory; pass --project-dir or set RESUME_V3_REMOTE_DIR."
+[[ -n "$history_dir" ]] || die "Missing history directory; pass --history-dir or set RESUME_V3_DEPLOY_HISTORY_DIR."
 [[ "$project_dir" == /home/ubuntu/* && "$project_dir" != /home/ubuntu/ ]] || \
   die "Refusing unsafe project directory: $project_dir"
 [[ "$history_dir" == /home/ubuntu/* && "$history_dir" != /home/ubuntu/ ]] || \
@@ -109,7 +108,23 @@ while IFS= read -r line; do
 done <<< "$remote_current"
 
 if [[ "$mode" == "rollback" ]]; then
-  published_target="$(ssh_run "if [ -d $(shell_quote "$history_dir/releases") ] && grep -R -q -- $(shell_quote "^tag=$tag$") $(shell_quote "$history_dir/releases"); then printf yes; fi")"
+  successful_release_lookup="$(cat <<'EOF'
+set -Eeuo pipefail
+releases_dir="$1"
+target_tag="$2"
+
+if [[ -d "$releases_dir" ]]; then
+  for record in "$releases_dir"/*.env; do
+    [[ -f "$record" ]] || continue
+    if grep -q -x -- "tag=$target_tag" "$record" && grep -q -x -- 'state=complete' "$record"; then
+      printf yes
+      exit 0
+    fi
+  done
+fi
+EOF
+)"
+  published_target="$(ssh_run "bash -c $(shell_quote "$successful_release_lookup") -- $(shell_quote "$history_dir/releases") $(shell_quote "$tag")")"
   [[ "$published_target" == "yes" ]] || \
     die "Rollback target '$tag' has no successful production deployment record."
 fi
@@ -123,6 +138,11 @@ elif [[ -n "$(git diff --name-only "$previous_commit" "$release_commit" -- migra
   migration_changed=1
 fi
 
+if [[ "$mode" == "deploy" && -n "$previous_commit" && "$release_commit" != "$previous_commit" ]] && \
+  git merge-base --is-ancestor "$release_commit" "$previous_commit"; then
+  die "Target tag predates the current production release. Use the explicit rollback workflow so schema compatibility is acknowledged."
+fi
+
 if [[ "$mode" == "rollback" && "$migration_changed" -eq 1 && "$allow_schema_ahead" -ne 1 ]]; then
   die "Rollback crosses migration changes. Review schema compatibility and retry with --allow-schema-ahead; this does not downgrade the database."
 fi
@@ -130,33 +150,32 @@ if [[ "$mode" != "rollback" && "$allow_schema_ahead" -eq 1 ]]; then
   die "--allow-schema-ahead is only valid for an explicit rollback."
 fi
 
-backup_required=0
-if [[ "$mode" == "deploy" && "$migration_changed" -eq 1 ]]; then
-  backup_required=1
-fi
-
 previous_tag_arg="${previous_tag:-__none__}"
 previous_commit_arg="${previous_commit:-__none__}"
 remote_helper="/tmp/greatsell-release-${tag}.sh"
+remote_stage_tool="/tmp/greatsell-release-stage-${tag}.py"
 
-git show "$tag:scripts/remote-release-helper.sh" | ssh "${ssh_options[@]}" "$remote_host" \
+# The transport helpers come from the current reviewed deployment tooling. The
+# application source itself is still archived strictly from the selected tag,
+# which also lets the new safe transport deploy an older production tag.
+cat "$repo_root/scripts/remote-release-helper.sh" | ssh "${ssh_options[@]}" "$remote_host" \
   "umask 077 && cat > $(shell_quote "$remote_helper") && chmod 700 $(shell_quote "$remote_helper")"
-remote_release() {
-  ssh_run "bash $(shell_quote "$remote_helper") $(shell_quote "$1") $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$2")"
+cat "$repo_root/scripts/release_source_stage.py" | ssh "${ssh_options[@]}" "$remote_host" \
+  "umask 077 && cat > $(shell_quote "$remote_stage_tool") && chmod 700 $(shell_quote "$remote_stage_tool")"
+cleanup_remote_tools() {
+  ssh_run "rm -f $(shell_quote "$remote_helper") $(shell_quote "$remote_stage_tool")" >/dev/null 2>&1 || true
 }
-remote_release precheck "$backup_required"
+trap cleanup_remote_tools EXIT
 
-# git archive contains tracked source only. It cannot include ignored production
-# secrets or data, and extraction intentionally does not delete unknown files.
-git archive --format=tar "$tag" | ssh "${ssh_options[@]}" "$remote_host" \
-  "tar -x -C $(shell_quote "$project_dir")"
+archive_sha256="$(git archive --format=tar "$tag" | sha256sum | awk '{print $1}')"
+[[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Unable to checksum release archive."
 
 skip_migrate=0
 if [[ "$mode" == "rollback" && "$migration_changed" -eq 1 ]]; then
   skip_migrate=1
 fi
 
-remote_release deploy "$skip_migrate"
-ssh_run "rm -f $(shell_quote "$remote_helper")"
+git archive --format=tar "$tag" | ssh "${ssh_options[@]}" "$remote_host" \
+  "bash $(shell_quote "$remote_helper") release $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$migration_changed") $(shell_quote "$skip_migrate") $(shell_quote "$archive_sha256") $(shell_quote "$remote_stage_tool")"
 
 echo "Deployment succeeded: $tag ($release_commit)"

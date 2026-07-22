@@ -7,6 +7,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
 
 from app.models import Resume, ResumeSourceBlock
+from app.services import document_extraction_job_service
 from app.services.institution_service import load_registry
 from app.services.text_extraction import ExtractedPage, PdfExtractionResult
 
@@ -57,9 +58,17 @@ def upload_text_resume(client, candidate_id: str) -> str:
     )
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["extraction_status"] == "text_ready"
-    assert payload["source_page_count"] == 1
-    assert payload["parsed_page_count"] == 1
+    assert payload["extraction_status"] == "queued"
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="resume-flow-document-worker",
+    )
+    detail = client.get(f"/v1/resumes/{payload['resume_id']}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["extraction_status"] == "text_ready"
+    assert detail.json()["source_page_count"] == 1
+    assert detail.json()["parsed_page_count"] == 1
     return payload["resume_id"]
 
 
@@ -82,7 +91,7 @@ def test_upload_strips_database_unsafe_nulls_from_extracted_text(
         parser_version="test-parser",
     )
     monkeypatch.setattr(
-        "app.services.resume_service.extract_document_text",
+        "app.services.document_extraction_job_service.extract_document_text",
         lambda *args, **kwargs: extracted,
     )
 
@@ -99,6 +108,11 @@ def test_upload_strips_database_unsafe_nulls_from_extracted_text(
 
     assert response.status_code == 200, response.text
     resume_id = response.json()["resume_id"]
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="resume-flow-document-worker",
+    )
     with client.app.state.database.session_factory() as session:
         resume = session.get(Resume, resume_id)
         source_block = session.scalar(
@@ -261,7 +275,12 @@ def test_blank_pdf_requires_review_and_is_not_searchable(client) -> None:
         files={"file": ("scan.pdf", make_blank_pdf(), "application/pdf")},
     )
     assert response.status_code == 200, response.text
-    payload = response.json()
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="resume-flow-document-worker",
+    )
+    payload = client.get(f"/v1/resumes/{response.json()['resume_id']}").json()
     assert payload["extraction_status"] == "needs_review"
     assert "parsed_page_count_mismatch" in payload["quality_flags"]
 

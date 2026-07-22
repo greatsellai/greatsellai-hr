@@ -219,6 +219,10 @@ class UserAccount(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    transactional_email_outbox: Mapped[list["TransactionalEmailOutbox"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     email_verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
@@ -366,6 +370,65 @@ class PasswordResetToken(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     user: Mapped[UserAccount] = relationship(back_populates="password_reset_tokens")
+    delivery_jobs: Mapped[list["TransactionalEmailOutbox"]] = relationship(
+        back_populates="password_reset_token",
+        cascade="all, delete-orphan",
+    )
+
+
+class TransactionalEmailOutbox(Base):
+    """Durable account-email work that must not run on an HTTP request.
+
+    Reset links are stored only as Fernet ciphertext in ``encrypted_payload``;
+    recipient email is resolved from the account at worker execution time. The
+    queue deliberately contains only safe status/error metadata, never a raw
+    token, URL, or provider response.
+    """
+
+    __tablename__ = "transactional_email_outbox"
+    __table_args__ = (
+        Index(
+            "ix_transactional_email_outbox_due",
+            "status",
+            "next_attempt_at",
+            "requested_at",
+        ),
+        Index(
+            "ix_transactional_email_outbox_user_requested",
+            "user_id",
+            "requested_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    # Reserved for future account mail types; only ``password_reset`` is
+    # currently accepted by the worker.
+    message_kind: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"))
+    password_reset_token_id: Mapped[str] = mapped_column(
+        ForeignKey("password_reset_tokens.id"),
+        unique=True,
+    )
+    encrypted_payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    user: Mapped[UserAccount] = relationship(back_populates="transactional_email_outbox")
+    password_reset_token: Mapped[PasswordResetToken] = relationship(back_populates="delivery_jobs")
 
 
 class EmailVerificationToken(Base):
@@ -578,6 +641,13 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
         back_populates="resume",
         cascade="all, delete-orphan",
         uselist=False,
+    )
+    document_extraction_job: Mapped["ResumeDocumentExtractionJob | None"] = (
+        relationship(
+            back_populates="resume",
+            cascade="all, delete-orphan",
+            uselist=False,
+        )
     )
     source_mailbox_config: Mapped["MailboxConfig | None"] = relationship(
         back_populates="ingested_resumes",
@@ -1481,6 +1551,58 @@ class MailboxRetentionCleanupRun(OrganizationScoped, Base):
     mailbox_config: Mapped[MailboxConfig] = relationship(
         back_populates="retention_cleanup_runs"
     )
+
+
+class ResumeDocumentExtractionJob(OrganizationScoped, Base):
+    """Durable, lease-based normalization work for one uploaded original.
+
+    Upload handlers never run an untrusted document converter in the API
+    process.  They persist an original and one row in this queue instead; the
+    worker claims the row under its owning organization before it opens the
+    file.  There is intentionally one mutable job per resume so retries are
+    idempotent and cannot create duplicate source evidence.
+    """
+
+    __tablename__ = "resume_document_extraction_jobs"
+    __table_args__ = (
+        UniqueConstraint("resume_id", name="uq_resume_document_extraction_job_resume"),
+        Index(
+            "ix_resume_document_extraction_job_claim",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_resume_document_extraction_job_lease",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_resume_document_extraction_job_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    resume_id: Mapped[str] = mapped_column(ForeignKey("resumes.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    resume: Mapped[Resume] = relationship(back_populates="document_extraction_job")
 
 
 class ResumeAiExtractionJob(OrganizationScoped, Base):

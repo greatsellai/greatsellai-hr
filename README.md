@@ -9,6 +9,7 @@
 - [发布运行时回归执行手册](docs/RELEASE_REGRESSION_HARNESS.md)
 - [团队共建工作流](docs/TEAM_WORKFLOW.md)
 - [GitHub Actions CI/CD](docs/CI_CD.md)
+- [Text encoding policy](docs/ENCODING_POLICY.md)
 
 当前版本已覆盖：重新上传 PDF → 解析质量校验 → AI 从原文识别候选人姓名（不可靠则留空）并提取教育/经历/技能 → 字段级原文证据校验并自动启用 → 简历库汇总（AI 总结预览、最新 AI 评分、原 PDF）→ 条件筛选 → AI 评分、总结与 JD 匹配；React/Vite 工作台通过同域名 Caddy 静态部署，浏览器只请求同源的 `/v1/*` API。
 
@@ -59,14 +60,17 @@ GitHub 的 `main` 是唯一的团队代码基线；本地开发通过功能分�
 
 每一个可验证的步骤都应先提交并推送到 GitHub 分支。完成需求后，先运行后端
 测试与前端构建，再创建 PR。PR 合并到 `main` 后，GitHub Actions 会在该提交的 CI
-全部通过后自动创建不可变的 `prod-YYYYMMDD-<commit短码>` 标签并部署；详情见
-[GitHub Actions CI/CD](docs/CI_CD.md)。本地标签和部署脚本仅用于受控的应急重试。
+全部通过后，会先对服务器既有生产环境做无副作用配置预检；通过后才自动创建不可变的
+`prod-YYYYMMDD-<commit短码>` 标签并部署。标签表示经过 CI 与预检的发布候选，只有服务器
+`current-release.env` 记录写入后才表示实际上线；详情见 [GitHub Actions CI/CD](docs/CI_CD.md)。
+本地标签和部署脚本仅用于受控的应急重试。
 部署始终只打包 Git 受控源码，不会传输或删除 `.env.production`、数据库、候选人 PDF、
 Docker 卷或其他生产数据。
 
-部署脚本会在首次发布或存在 Alembic 迁移时先在服务器项目目录外创建受保护的
-PostgreSQL 逻辑备份，随后验证 HTTPS 健康检查、匿名登录保护和受保护 PDF 的拒绝
-访问。它在服务器项目外写入不含密钥和候选人资料的发布记录。
+部署脚本会在每次发布或应用回滚前，在服务器项目目录外创建同一 backup ID 下的
+PostgreSQL 逻辑备份与 `uploads_data` 原件卷备份，并校验两份产物后才允许发布。随后它
+验证 HTTPS 健康检查、匿名登录保护和受保护 PDF 的拒绝访问。它在服务器项目外写入
+不含密钥和候选人资料的发布记录。
 
 回滚只能指向已发布标签，不能以服务器当前文件为来源：
 

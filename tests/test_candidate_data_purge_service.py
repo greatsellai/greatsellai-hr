@@ -24,6 +24,7 @@ from app.models import (
     CandidateDataPurgeJob,
     Resume,
     ResumeAiExtractionJob,
+    ResumeDocumentExtractionJob,
     ResumeFactSnapshot,
     ResumeSourceBlock,
     ResumeSummary,
@@ -244,6 +245,11 @@ def test_due_purge_removes_original_before_dependencies_and_roots(
         assert session.scalar(
             select(func.count(ResumeAiExtractionJob.id)).where(
                 ResumeAiExtractionJob.resume_id == resume_id
+            )
+        ) == 0
+        assert session.scalar(
+            select(func.count(ResumeDocumentExtractionJob.id)).where(
+                ResumeDocumentExtractionJob.resume_id == resume_id
             )
         ) == 0
         assert session.scalar(

@@ -48,7 +48,6 @@ from app.tenant_scope import (
     organization_context_id,
     set_organization_context,
 )
-from app.services.ai_extraction_job_service import enqueue_uploaded_resume_ai_extraction
 from app.services.document_text_extraction import SUPPORTED_DOCUMENT_EXTENSIONS
 from app.services.mailbox_retention_service import (
     MailboxRetentionError,
@@ -228,19 +227,16 @@ def _organization_session(session: Session, organization_id: str) -> Iterator[No
 
 
 def _fernet(settings: AppSettings) -> Fernet:
-    """Use a dedicated key when present, otherwise derive from app session key."""
+    """Use a dedicated key in production; never derive from admin tokens."""
 
-    material = (
-        settings.email_credentials_key
-        or settings.session_secret
-        or settings.admin_token
-        or "resume-v3-development-session"
-    )
     if settings.email_credentials_key:
         try:
-            return Fernet(material.encode("utf-8"))
+            return Fernet(settings.email_credentials_key.encode("utf-8"))
         except (ValueError, TypeError) as exc:
             raise MailboxImportError("mailbox_credentials_key_invalid") from exc
+    if settings.environment in {"production", "prod"}:
+        raise MailboxImportError("mailbox_credentials_key_not_configured")
+    material = settings.session_signing_secret()
     derived = base64.urlsafe_b64encode(hashlib.sha256(material.encode("utf-8")).digest())
     return Fernet(derived)
 
@@ -2192,12 +2188,9 @@ def _ingest_attachment(
         resume.ingestion_source_type = "mailbox_attachment"
         resume.source_mailbox_config_id = config.id
         resume.source_mailbox_label_snapshot = config.display_name
-        if resume.extraction_status == "failed":
-            raise _AttachmentIngestionFailure(
-                "attachment_text_extraction_failed",
-                storage_key=resume.storage_key,
-            )
-        enqueue_uploaded_resume_ai_extraction(session, resume=resume, settings=settings)
+        # The attachment is now durably stored and its source normalization is
+        # queued in the same transaction by `save_pdf_resume`. Do not execute
+        # an untrusted converter on the mailbox worker's IMAP transaction.
         return resume
     except _AttachmentIngestionFailure:
         raise

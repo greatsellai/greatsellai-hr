@@ -59,6 +59,17 @@ def _fake_score_provider(**kwargs: object) -> dict[str, object]:
     }
 
 
+def _fake_score_provider_with_skill_score(raw_score: int):
+    def provider(**kwargs: object) -> dict[str, object]:
+        result = _fake_score_provider(**kwargs)
+        dimensions = result["dimension_scores"]
+        assert isinstance(dimensions, list)
+        dimensions[0]["raw_score"] = raw_score
+        return result
+
+    return provider
+
+
 def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) -> None:
     _, resume_id = _save_ready_resume(
         ai_client,
@@ -214,6 +225,138 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
         json={"raw_score": 101, "reason": "Too high."},
     )
     assert exceeds_hundred.status_code == 422
+
+
+def test_candidate_search_uses_score_order_and_compact_profile_fields(
+    ai_client,
+    monkeypatch,
+) -> None:
+    _, lower_scored_resume_id = _save_ready_resume(
+        ai_client,
+        source_text=(
+            "Education 清华大学 计算机 工作经历 Acme Python Engineer Skills Python SQL"
+        ),
+    )
+    template = ai_client.post("/v1/score-templates", json=_template_payload())
+    assert template.status_code == 200, template.text
+    template_id = template.json()["template_id"]
+    monkeypatch.setattr(
+        "app.services.score_service.score_resume_fact_snapshot",
+        _fake_score_provider_with_skill_score(20),
+    )
+    lower_score = ai_client.post(
+        f"/v1/resumes/{lower_scored_resume_id}/scores",
+        json={"template_id": template_id},
+    )
+    assert lower_score.status_code == 200, lower_score.text
+
+    _, higher_scored_resume_id = _save_ready_resume(
+        ai_client,
+        source_text=(
+            "Education 清华大学 计算机 工作经历 Acme Python Engineer Skills Python SQL"
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.score_service.score_resume_fact_snapshot",
+        _fake_score_provider_with_skill_score(80),
+    )
+    higher_score = ai_client.post(
+        f"/v1/resumes/{higher_scored_resume_id}/scores",
+        json={"template_id": template_id},
+    )
+    assert higher_score.status_code == 200, higher_score.text
+
+    _, unscored_resume_id = _save_ready_resume(
+        ai_client,
+        source_text=(
+            "Education 清华大学 计算机 工作经历 Acme Python Engineer Skills Python SQL"
+        ),
+    )
+    alternative_payload = _template_payload()
+    alternative_payload["name"] = "Alternative score template"
+    alternative_template = ai_client.post(
+        "/v1/score-templates",
+        json=alternative_payload,
+    )
+    assert alternative_template.status_code == 200, alternative_template.text
+    monkeypatch.setattr(
+        "app.services.score_service.score_resume_fact_snapshot",
+        _fake_score_provider_with_skill_score(100),
+    )
+    alternative_score = ai_client.post(
+        f"/v1/resumes/{unscored_resume_id}/scores",
+        json={"template_id": alternative_template.json()["template_id"]},
+    )
+    assert alternative_score.status_code == 200, alternative_score.text
+
+    response = ai_client.post(
+        "/v1/candidates/search",
+        json={"limit": 10, "score_template_id": template_id},
+    )
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert [item["resume_id"] for item in items] == [
+        higher_scored_resume_id,
+        lower_scored_resume_id,
+        unscored_resume_id,
+    ]
+    displayed = items[0]
+    assert displayed["education_school"] == "清华大学"
+    assert displayed["education_major"] == "计算机"
+    assert displayed["latest_experience_title"] == "Python Engineer"
+    assert displayed["latest_experience_organization"] == "Acme"
+    assert displayed["latest_experience_type"] == "employment"
+    assert displayed["skill_highlights"] == ["Python", "SQL"]
+    assert displayed["score_id"] == higher_score.json()["score_id"]
+    assert displayed["score_template_id"] == template_id
+    assert displayed["score_total"] == 68.0
+    assert displayed["score_status"] == "succeeded"
+    # The fake score grounds the 60% skill dimension and leaves the 40%
+    # experience dimension as information-insufficient.
+    assert displayed["score_confidence"] == 60.0
+    # A 80-point score from a different rule is still available in the
+    # candidate's own history, but cannot enter this template's ranking.
+    assert items[2]["score_id"] is None
+    assert items[2]["score_total"] is None
+    assert items[2]["score_template_id"] is None
+
+    first_page = ai_client.post(
+        "/v1/candidates/search",
+        json={"limit": 1, "score_template_id": template_id},
+    )
+    assert first_page.status_code == 200, first_page.text
+    assert [item["resume_id"] for item in first_page.json()["items"]] == [
+        higher_scored_resume_id
+    ]
+    assert first_page.json()["next_cursor"]
+
+    second_page = ai_client.post(
+        "/v1/candidates/search",
+        json={
+            "limit": 1,
+            "score_template_id": template_id,
+            "cursor": first_page.json()["next_cursor"],
+        },
+    )
+    assert second_page.status_code == 200, second_page.text
+    assert [item["resume_id"] for item in second_page.json()["items"]] == [
+        lower_scored_resume_id
+    ]
+    assert second_page.json()["next_cursor"]
+
+    third_page = ai_client.post(
+        "/v1/candidates/search",
+        json={
+            "limit": 1,
+            "score_template_id": template_id,
+            "cursor": second_page.json()["next_cursor"],
+        },
+    )
+    assert third_page.status_code == 200, third_page.text
+    assert [item["resume_id"] for item in third_page.json()["items"]] == [
+        unscored_resume_id
+    ]
+    assert third_page.json()["next_cursor"] is None
 
 
 def test_score_requires_server_side_model_key(client) -> None:

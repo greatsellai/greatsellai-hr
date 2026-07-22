@@ -10,6 +10,7 @@ import {
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -88,7 +89,7 @@ import { Icon, type IconName } from "./icons";
 const AdminApp = lazy(() => import("./admin/AdminApp"));
 
 type View = "library" | "filter" | "upload" | "inbox" | "score" | "match" | "data";
-type DrawerTab = "original" | "summary" | "evidence";
+type DrawerTab = "original" | "summary" | "score" | "evidence";
 type MatchMode = "all" | "any";
 type KeywordMode = "broad" | "precise";
 type ToastKind = "success" | "error";
@@ -938,6 +939,7 @@ function sortInstitutionClassifications(
 function draftToSearchRequest(
   draft: FilterDraft,
   cursor: string | null = null,
+  scoreTemplateId: string | null = null,
 ): CandidateSearchRequest {
   const request: CandidateSearchRequest = {
     schema_version: "candidate_filter.v2",
@@ -1069,6 +1071,7 @@ function draftToSearchRequest(
     request.keywords = draft.keywords;
     request.keyword_match_mode = draft.keywordsMode;
   }
+  if (scoreTemplateId) request.score_template_id = scoreTemplateId;
   return request;
 }
 
@@ -1370,6 +1373,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [filterOptions, setFilterOptions] = useState<FilterOptions>(
     fallbackFilterOptions,
   );
+  const [scoreTemplates, setScoreTemplates] = useState<ScoreTemplate[]>([]);
+  const [scoreTemplateId, setScoreTemplateId] = useState<string | null>(null);
   const [search, setSearch] = useState<CandidateSearchResponse>(emptySearch);
   const [searching, setSearching] = useState(false);
   const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([]);
@@ -1387,6 +1392,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [summaries, setSummaries] = useState<ResumeSummary[]>([]);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [drawerScores, setDrawerScores] = useState<ResumeScore[]>([]);
+  const [drawerScoreLoading, setDrawerScoreLoading] = useState(false);
+  const [drawerScoreError, setDrawerScoreError] = useState<string | null>(null);
   const [reparsingSource, setReparsingSource] = useState(false);
   const [enrichingFacts, setEnrichingFacts] = useState(false);
   const [libraryRefreshToken, setLibraryRefreshToken] = useState(0);
@@ -1400,11 +1408,26 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [authLoading, setAuthLoading] = useState(false);
   const filterDraftRef = useRef(filterDraft);
   const appliedFilterRef = useRef(appliedFilter);
+  const scoreTemplateIdRef = useRef<string | null>(null);
   const searchRequestRef = useRef(0);
   const reviewRequestRef = useRef(0);
   const summaryRequestRef = useRef(0);
+  const drawerScoreRequestRef = useRef(0);
   const originalFileRequestRef = useRef(0);
   const originalFileRevokeRef = useRef<(() => void) | null>(null);
+  const agentTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  const canManageMailbox =
+    authSession?.role === "admin" &&
+    authSession.plan?.feature_flags.mailbox_import === true;
+  const canGenerateAiJd =
+    authSession?.role === "admin" &&
+    authSession.plan?.feature_flags.ai_jd_generation === true;
+
+  const closeAgent = useCallback(() => {
+    setAgentOpen(false);
+    window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+  }, []);
 
   const replaceFilterDraft = useCallback((next: FilterDraft) => {
     filterDraftRef.current = next;
@@ -1415,6 +1438,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     const snapshot = snapshotFilterDraft(next);
     appliedFilterRef.current = snapshot;
     setAppliedFilter(snapshot);
+  }, []);
+
+  const replaceScoreTemplateId = useCallback((next: string | null) => {
+    scoreTemplateIdRef.current = next;
+    setScoreTemplateId(next);
   }, []);
 
   const selectedResumeId = selectedResume?.resumeId ?? null;
@@ -1464,12 +1492,13 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       draft: FilterDraft,
       append = false,
       cursor: string | null = null,
+      selectedScoreTemplateId: string | null = scoreTemplateIdRef.current,
     ) => {
       const requestId = ++searchRequestRef.current;
       setSearching(true);
       try {
         const response = await api.searchCandidates(
-          draftToSearchRequest(draft, cursor),
+          draftToSearchRequest(draft, cursor, selectedScoreTemplateId),
         );
         if (requestId !== searchRequestRef.current) return;
         setSearch((current) => ({
@@ -1489,6 +1518,28 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     },
     [notify, replaceAppliedFilter],
   );
+
+  const registerScoreTemplate = useCallback(
+    (template: ScoreTemplate) => {
+      setScoreTemplates((current) => [
+        template,
+        ...current.filter((item) => item.template_id !== template.template_id),
+      ]);
+      replaceScoreTemplateId(template.template_id);
+      void runSearch(
+        appliedFilterRef.current,
+        false,
+        null,
+        template.template_id,
+      );
+    },
+    [replaceScoreTemplateId, runSearch],
+  );
+
+  const handleScoreCreated = useCallback(() => {
+    refreshLibraryScores();
+    void runSearch(appliedFilterRef.current);
+  }, [refreshLibraryScores, runSearch]);
 
   const refreshReview = useCallback(
     async (resumeId: string) => {
@@ -1539,6 +1590,30 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     [notify],
   );
 
+  const loadDrawerScores = useCallback(
+    async (resumeId: string) => {
+      const requestId = ++drawerScoreRequestRef.current;
+      setDrawerScoreLoading(true);
+      setDrawerScoreError(null);
+      try {
+        const response = await api.listScores(resumeId);
+        if (requestId === drawerScoreRequestRef.current) {
+          setDrawerScores(response);
+        }
+      } catch (error) {
+        if (requestId === drawerScoreRequestRef.current) {
+          setDrawerScores([]);
+          setDrawerScoreError(humanizeError(error));
+        }
+      } finally {
+        if (requestId === drawerScoreRequestRef.current) {
+          setDrawerScoreLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     void api
       .getAuthSession()
@@ -1573,7 +1648,30 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     }).catch(() => {
       setFilterOptions(fallbackFilterOptions);
     });
-  }, [authRoute, authSession?.email_verification_required, authState, refreshSavedFilters, runSearch]);
+    void api.listScoreTemplates().then((templates) => {
+      setScoreTemplates(templates);
+      const defaultTemplateId = templates[0]?.template_id ?? null;
+      replaceScoreTemplateId(defaultTemplateId);
+      if (defaultTemplateId) {
+        void runSearch(
+          appliedFilterRef.current,
+          false,
+          null,
+          defaultTemplateId,
+        );
+      }
+    }).catch(() => {
+      setScoreTemplates([]);
+      replaceScoreTemplateId(null);
+    });
+  }, [
+    authRoute,
+    authSession?.email_verification_required,
+    authState,
+    refreshSavedFilters,
+    replaceScoreTemplateId,
+    runSearch,
+  ]);
 
   useEffect(() => {
     if (
@@ -1603,7 +1701,32 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   }, [drawerOpen, drawerTab, loadSummaries, review, selectedResumeId]);
 
   useEffect(() => {
+    if (
+      !drawerOpen ||
+      drawerTab !== "score" ||
+      !selectedResumeId ||
+      !review ||
+      review.resume_id !== selectedResumeId
+    ) {
+      return;
+    }
+    if (
+      hasSourceTextQualityIssue(review.quality_flags) ||
+      hasSupersededReparseVersion(review.quality_flags)
+    ) {
+      setDrawerScores([]);
+      setDrawerScoreError(null);
+      return;
+    }
+    void loadDrawerScores(selectedResumeId);
+  }, [drawerOpen, drawerTab, loadDrawerScores, review, selectedResumeId]);
+
+  useEffect(() => {
+    drawerScoreRequestRef.current += 1;
     setSummaries([]);
+    setDrawerScores([]);
+    setDrawerScoreError(null);
+    setDrawerScoreLoading(false);
   }, [selectedResumeId]);
 
   /**
@@ -1628,12 +1751,20 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (agentOpen) {
+        event.preventDefault();
+        closeAgent();
+        return;
+      }
       setDrawerOpen(false);
-      setAgentOpen(false);
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, []);
+  }, [agentOpen, closeAgent]);
+
+  useEffect(() => {
+    if (view === "inbox" && !canManageMailbox) setView("library");
+  }, [canManageMailbox, view]);
 
   const openCandidate = useCallback(
     (item: CandidateSearchItem, tab: DrawerTab = "summary") => {
@@ -1797,6 +1928,19 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     replaceFilterDraft(clean);
     await runSearch(clean);
   };
+
+  const changeScoreTemplate = useCallback(
+    (nextTemplateId: string | null) => {
+      replaceScoreTemplateId(nextTemplateId);
+      void runSearch(
+        appliedFilterRef.current,
+        false,
+        null,
+        nextTemplateId,
+      );
+    },
+    [replaceScoreTemplateId, runSearch],
+  );
 
   const saveCurrentFilter = async (name: string) => {
     const normalized = name.trim();
@@ -2243,9 +2387,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
       <SideRail
         activeView={view}
         canManageCandidateData={authSession?.role === "admin"}
+        canManageMailbox={canManageMailbox}
         inert={drawerOpen || agentOpen}
         onChangeView={setView}
       />
@@ -2258,6 +2404,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             setDrawerOpen(false);
             setAgentOpen(true);
           }}
+          agentTriggerRef={agentTriggerRef}
           onLogout={() => void logout()}
           onNewUpload={() => setView("upload")}
           organizationName={authSession?.organization?.name ?? null}
@@ -2293,17 +2440,20 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
               onApplySaved={applySavedFilter}
               onDeleteSaved={deleteSavedFilter}
               onOpenCandidate={openCandidate}
+              onScoreTemplateChange={changeScoreTemplate}
               onToggleInstitutionClassification={toggleInstitutionClassification}
               onLoadMore={() =>
                 void runSearch(appliedFilterRef.current, true, search.next_cursor)
               }
               onUpload={() => setView("upload")}
+              scoreTemplateId={scoreTemplateId}
+              scoreTemplates={scoreTemplates}
             />
           )}
           <div hidden={view !== "upload"}>
             <UploadPage onComplete={openUploadedResume} notify={notify} />
           </div>
-          {view === "inbox" && (
+          {view === "inbox" && canManageMailbox && (
             <MailboxPage
               notify={notify}
               onImported={() => setLibraryRefreshToken((current) => current + 1)}
@@ -2314,11 +2464,13 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             <ScorePage
               selected={selectedResume}
               notify={notify}
-              onScoreCreated={refreshLibraryScores}
+              onScoreCreated={handleScoreCreated}
+              onTemplateCreated={registerScoreTemplate}
             />
           )}
           {view === "match" && (
             <MatchPage
+              canGenerateAiJd={canGenerateAiJd}
               selected={selectedResume}
               notify={notify}
               onOpenMatchedResume={openMatchedResume}
@@ -2337,8 +2489,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         aria-hidden="true"
         className={`drawer-scrim${drawerOpen || agentOpen ? " is-open" : ""}`}
         onClick={() => {
-          setDrawerOpen(false);
-          setAgentOpen(false);
+          if (agentOpen) closeAgent();
+          else setDrawerOpen(false);
         }}
       />
       <CandidateDrawer
@@ -2351,6 +2503,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         pdfUrl={pdfUrl}
         review={review}
         reviewLoading={reviewLoading}
+        scoreError={drawerScoreError}
+        scoreLoading={drawerScoreLoading}
+        scores={drawerScores}
         summaries={summaries}
         summaryLoading={summaryLoading}
         onClose={() => setDrawerOpen(false)}
@@ -2364,6 +2519,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         onReparseSource={() => void reparseSelectedSource()}
         onEnrichFacts={() => void enrichSelectedFacts()}
         onPreviewOriginal={() => void previewOriginalFile()}
+        onRefreshScores={() => {
+          if (selectedResumeId) void loadDrawerScores(selectedResumeId);
+        }}
         enrichingFacts={enrichingFacts}
         onTabChange={setDrawerTab}
         reparsingSource={reparsingSource}
@@ -2376,7 +2534,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           authSession?.plan?.feature_flags.mailbox_import === true
         }
         selectedResume={selectedResume}
-        onClose={() => setAgentOpen(false)}
+        onClose={closeAgent}
         onOpenMatchWorkspace={() => {
           setAgentOpen(false);
           setView("match");
@@ -2918,11 +3076,13 @@ function TrialStatusBanner({
 function SideRail({
   activeView,
   canManageCandidateData,
+  canManageMailbox,
   onChangeView,
   inert,
 }: {
   activeView: View;
   canManageCandidateData: boolean;
+  canManageMailbox: boolean;
   onChangeView: (view: View) => void;
   inert: boolean;
 }) {
@@ -2930,19 +3090,21 @@ function SideRail({
     <aside aria-label="主导航" className="side-rail" inert={inert}>
       <div aria-label="AI 简历筛选工作台" className="rail-mark" role="img" />
       <nav className="rail-nav">
-        {navigation.map((item) => (
-          <button
-            aria-current={activeView === item.view ? "page" : undefined}
-            aria-label={item.label}
-            className={`rail-item${activeView === item.view ? " is-active" : ""}`}
-            key={item.view}
-            onClick={() => onChangeView(item.view)}
-            type="button"
-          >
-            <Icon name={item.icon} size={19} />
-            <span className="rail-tooltip">{item.label}</span>
-          </button>
-        ))}
+        {navigation
+          .filter((item) => item.view !== "inbox" || canManageMailbox)
+          .map((item) => (
+            <button
+              aria-current={activeView === item.view ? "page" : undefined}
+              aria-label={item.label}
+              className={`rail-item${activeView === item.view ? " is-active" : ""}`}
+              key={item.view}
+              onClick={() => onChangeView(item.view)}
+              type="button"
+            >
+              <Icon name={item.icon} size={19} />
+              <span className="rail-tooltip">{item.label}</span>
+            </button>
+          ))}
       </nav>
       <div className="rail-bottom">
         <button aria-label="工作记录" className="rail-item" type="button">
@@ -2971,6 +3133,7 @@ function Topbar({
   onGlobalQueryChange,
   onGlobalSearchKeyDown,
   onOpenAgent,
+  agentTriggerRef,
   onLogout,
   onNewUpload,
   organizationName,
@@ -2983,6 +3146,7 @@ function Topbar({
   onGlobalQueryChange: (value: string) => void;
   onGlobalSearchKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => void;
   onOpenAgent: () => void;
+  agentTriggerRef: RefObject<HTMLButtonElement | null>;
   onLogout: () => void;
   onNewUpload: () => void;
   organizationName: string | null;
@@ -3029,6 +3193,7 @@ function Topbar({
         <button
           className="button button-agent"
           onClick={onOpenAgent}
+          ref={agentTriggerRef}
           type="button"
         >
           <Icon name="spark" size={16} />
@@ -3121,6 +3286,8 @@ function RecruitingAgentDrawer({
   const [jobs, setJobs] = useState<JobVersion[]>([]);
   const [jobVersionId, setJobVersionId] = useState("");
   const [loading, setLoading] = useState(false);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const [messages, setMessages] = useState<AgentChatMessage[]>([
     {
       id: 1,
@@ -3151,6 +3318,36 @@ function RecruitingAgentDrawer({
       })
       .catch(() => setJobs([]));
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const frame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [isOpen]);
+
+  const trapFocus = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Tab") return;
+    const drawer = drawerRef.current;
+    if (!drawer) return;
+    const focusable = Array.from(
+      drawer.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   const addAssistantReply = (turn: RecruitingAgentTurn) => {
     setMessages((current) => [
@@ -3205,6 +3402,9 @@ function RecruitingAgentDrawer({
       aria-label="招聘助手"
       aria-modal="true"
       className={`recruiting-agent-drawer${isOpen ? " is-open" : ""}`}
+      inert={!isOpen}
+      onKeyDown={trapFocus}
+      ref={drawerRef}
       role="dialog"
     >
       <header className="agent-header">
@@ -3215,7 +3415,13 @@ function RecruitingAgentDrawer({
             <p>工具执行，结论可追溯</p>
           </div>
         </div>
-        <button aria-label="关闭招聘助手" className="icon-button" onClick={onClose} type="button">
+        <button
+          aria-label="关闭招聘助手"
+          className="icon-button"
+          onClick={onClose}
+          ref={closeButtonRef}
+          type="button"
+        >
           <Icon name="close" size={18} />
         </button>
       </header>
@@ -3364,9 +3570,12 @@ function FilterWorkspace({
   onApplySaved,
   onDeleteSaved,
   onOpenCandidate,
+  onScoreTemplateChange,
   onToggleInstitutionClassification,
   onLoadMore,
   onUpload,
+  scoreTemplateId,
+  scoreTemplates,
 }: {
   appliedDraft: FilterDraft;
   draft: FilterDraft;
@@ -3382,11 +3591,14 @@ function FilterWorkspace({
   onApplySaved: (filter: SavedFilter) => boolean;
   onDeleteSaved: (filter: SavedFilter) => Promise<void>;
   onOpenCandidate: (item: CandidateSearchItem, tab?: DrawerTab) => void;
+  onScoreTemplateChange: (templateId: string | null) => void;
   onToggleInstitutionClassification: (
     classification: InstitutionClassification,
   ) => void;
   onLoadMore: () => void;
   onUpload: () => void;
+  scoreTemplateId: string | null;
+  scoreTemplates: ScoreTemplate[];
 }) {
   const classifications = resolvedInstitutionClassificationOptions(filterOptions);
 
@@ -3409,11 +3621,14 @@ function FilterWorkspace({
         institutionClassificationOptions={classifications}
         onLoadMore={onLoadMore}
         onOpenCandidate={onOpenCandidate}
+        onScoreTemplateChange={onScoreTemplateChange}
         onToggleInstitutionClassification={onToggleInstitutionClassification}
         onUpload={onUpload}
         search={search}
         searching={searching}
         selectedResumeId={selectedResumeId}
+        scoreTemplateId={scoreTemplateId}
+        scoreTemplates={scoreTemplates}
       />
     </div>
   );
@@ -3443,6 +3658,7 @@ function FilterPanel({
   const [selectedSavedId, setSelectedSavedId] = useState("");
   const [saveName, setSaveName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   const update = (patch: Partial<FilterDraft>) =>
     onDraftChange({ ...draft, ...patch });
@@ -3462,19 +3678,39 @@ function FilterPanel({
     }
   };
 
+  const apply = () => {
+    onApply();
+    setMobileFiltersOpen(false);
+  };
+
   return (
-    <aside className="filter-panel" aria-label="筛选条件">
+    <aside
+      aria-label="筛选条件"
+      className={`filter-panel${mobileFiltersOpen ? " is-mobile-open" : ""}`}
+    >
       <div className="filter-panel-header">
         <h2 className="filter-panel-title">筛选条件</h2>
-        <button
-          className="text-button"
-          onClick={() => void onReset()}
-          type="button"
-        >
-          清空
-        </button>
+        <div className="filter-panel-header-actions">
+          <button
+            aria-controls="filter-controls"
+            aria-expanded={mobileFiltersOpen}
+            className="text-button filter-mobile-toggle"
+            onClick={() => setMobileFiltersOpen((current) => !current)}
+            type="button"
+          >
+            <Icon name="filter" size={15} />
+            {mobileFiltersOpen ? "收起筛选" : "展开筛选"}
+          </button>
+          <button
+            className="text-button"
+            onClick={() => void onReset()}
+            type="button"
+          >
+            清空
+          </button>
+        </div>
       </div>
-      <div className="filter-scroll">
+      <div className="filter-scroll" id="filter-controls">
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>已保存的筛选</h3>
@@ -4063,7 +4299,7 @@ function FilterPanel({
       <div className="filter-actions">
         <button
           className="button button-primary"
-          onClick={() => void onApply()}
+          onClick={apply}
           type="button"
         >
           <Icon name="filter" size={16} />
@@ -4359,6 +4595,103 @@ function ResultColumnHeader({
   );
 }
 
+function scoreConfidencePresentation(value: number | null): {
+  label: string;
+  tone: "grounded" | "partial" | "unknown";
+} {
+  if (value === null) {
+    return { label: "依据待核实", tone: "unknown" };
+  }
+  if (value >= 80) {
+    return { label: `可信度高 · ${value.toFixed(0)}%`, tone: "grounded" };
+  }
+  if (value >= 50) {
+    return { label: `可信度中 · ${value.toFixed(0)}%`, tone: "partial" };
+  }
+  return { label: `待核实 · ${value.toFixed(0)}%`, tone: "unknown" };
+}
+
+function scoreStatusLabel(status: string | null): string | null {
+  if (status === "overridden") return "含人工调整";
+  if (status === "needs_review") return "建议复核";
+  if (status === "succeeded") return null;
+  return status ? "评分待更新" : null;
+}
+
+function CandidateEducationCell({ item }: { item: CandidateSearchItem }) {
+  const hasEducation = Boolean(
+    item.highest_degree ||
+      item.education_school ||
+      item.education_major ||
+      item.institution_classifications.length,
+  );
+  if (!hasEducation) return <span className="candidate-meta">未识别</span>;
+  return (
+    <div className="candidate-profile-cell candidate-education-cell">
+      <div className="candidate-profile-primary">
+        {item.highest_degree && (
+          <span className="degree-label">{degreeLabels[item.highest_degree]}</span>
+        )}
+        <span className="candidate-profile-title">
+          {item.education_school || "学校信息待补充"}
+        </span>
+      </div>
+      {item.education_major && (
+        <span className="candidate-meta">{item.education_major}</span>
+      )}
+      <InstitutionClassificationTags
+        classifications={item.institution_classifications}
+      />
+    </div>
+  );
+}
+
+function CandidateExperienceCell({ item }: { item: CandidateSearchItem }) {
+  const experienceType = experienceTypeOptions.find(
+    (option) => option.value === item.latest_experience_type,
+  )?.label;
+  const role = [
+    item.latest_experience_title,
+    item.latest_experience_organization,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="candidate-profile-cell">
+      <div className="candidate-profile-primary">
+        <span className="candidate-profile-title">
+          {formatMonths(item.employment_months)} 正式工作
+        </span>
+      </div>
+      {role ? (
+        <span className="candidate-meta">
+          {experienceType ? `${experienceType} · ` : ""}
+          {role}
+        </span>
+      ) : (
+        <span className="candidate-meta">最近岗位信息待补充</span>
+      )}
+    </div>
+  );
+}
+
+function CandidateSkillHighlights({ item }: { item: CandidateSearchItem }) {
+  const skills = item.skill_highlights ?? [];
+  if (!skills.length) return <span className="candidate-meta">未识别</span>;
+  return (
+    <div
+      aria-label={`核心技能：${skills.join("；")}`}
+      className="candidate-skill-highlights"
+      title={skills.join("；")}
+    >
+      {skills.slice(0, 3).map((skill) => (
+        <span className="tag" key={skill}>{skill}</span>
+      ))}
+      {skills.length > 3 && <span className="candidate-skills-more">+{skills.length - 3}</span>}
+    </div>
+  );
+}
+
 function ResultsPane({
   appliedDraft,
   institutionClassifications,
@@ -4367,9 +4700,12 @@ function ResultsPane({
   searching,
   selectedResumeId,
   onOpenCandidate,
+  onScoreTemplateChange,
   onToggleInstitutionClassification,
   onLoadMore,
   onUpload,
+  scoreTemplateId,
+  scoreTemplates,
 }: {
   appliedDraft: FilterDraft;
   institutionClassifications: InstitutionClassification[];
@@ -4381,14 +4717,23 @@ function ResultsPane({
   searching: boolean;
   selectedResumeId: string | null;
   onOpenCandidate: (item: CandidateSearchItem, tab?: DrawerTab) => void;
+  onScoreTemplateChange: (templateId: string | null) => void;
   onToggleInstitutionClassification: (
     classification: InstitutionClassification,
   ) => void;
   onLoadMore: () => void;
   onUpload: () => void;
+  scoreTemplateId: string | null;
+  scoreTemplates: ScoreTemplate[];
 }) {
   const displayColumns = activeResultDisplayColumns(appliedDraft);
   const hasAppliedDisplayColumns = displayColumns.length > 0;
+  const selectedScoreTemplate = scoreTemplates.find(
+    (template) => template.template_id === scoreTemplateId,
+  );
+  const scoreOrderLabel = selectedScoreTemplate
+    ? `按“${selectedScoreTemplate.name} · v${selectedScoreTemplate.version}”综合评分排序`
+    : "未选择统一评分规则，按最近更新排序";
 
   return (
     <section className="results-pane" aria-label="候选人结果">
@@ -4397,11 +4742,30 @@ function ResultsPane({
           <h1>候选人结果</h1>
           <p>
             {search.items.length
-              ? `当前已加载 ${search.items.length} 位候选人`
+              ? `当前已加载 ${search.items.length} 位候选人，${scoreOrderLabel}`
               : "仅显示已完成 AI 提取并启用的简历"}
           </p>
         </div>
         <div className="results-toolbar">
+          <label className="score-sort-control">
+            <span>评分口径</span>
+            <span className="select-wrap">
+              <select
+                aria-label="综合评分排序规则"
+                className="select-field"
+                onChange={(event) => onScoreTemplateChange(event.target.value || null)}
+                value={scoreTemplateId ?? ""}
+              >
+                <option value="">不按评分排序</option>
+                {scoreTemplates.map((template) => (
+                  <option key={template.template_id} value={template.template_id}>
+                    {template.name} · v{template.version}
+                  </option>
+                ))}
+              </select>
+              <Icon name="chevron-down" size={15} />
+            </span>
+          </label>
           {search.needs_review_count > 0 && (
             <span className="status-pill">
               待处理 {search.needs_review_count}
@@ -4454,32 +4818,15 @@ function ResultsPane({
             <thead>
               <tr>
                 <th scope="col">候选人</th>
-                <th scope="col">
-                  <ResultColumnHeader
-                    active={appliedDraft.institutionClassifications.length > 0}
-                  >
-                    院校类型
-                  </ResultColumnHeader>
-                </th>
-                <th scope="col">
-                  <ResultColumnHeader active={appliedDraft.degrees.length > 0}>
-                    最高学历
-                  </ResultColumnHeader>
-                </th>
-                <th scope="col">
-                  <ResultColumnHeader
-                    active={appliedDraft.minEmploymentMonths > 0}
-                  >
-                    正式工作年限
-                  </ResultColumnHeader>
-                </th>
+                <th scope="col">学历 / 院校</th>
+                <th scope="col">经历</th>
+                <th scope="col">核心技能</th>
                 {displayColumns.map((column) => (
                   <th className="result-display-column" key={column.key} scope="col">
                     <ResultColumnHeader active>{column.label}</ResultColumnHeader>
                   </th>
                 ))}
-                <th scope="col">最近评分</th>
-                <th scope="col">原件</th>
+                <th scope="col">综合评分</th>
                 <th scope="col" aria-label="查看详情" />
               </tr>
             </thead>
@@ -4493,6 +4840,12 @@ function ResultsPane({
                   key={item.resume_id}
                   onClick={() => onOpenCandidate(item)}
                   onKeyDown={(event) => {
+                    if (
+                      event.target instanceof HTMLElement &&
+                      event.target.closest("button, a, input, select, textarea")
+                    ) {
+                      return;
+                    }
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       onOpenCandidate(item);
@@ -4505,32 +4858,15 @@ function ResultsPane({
                       <span className="candidate-name">
                         {item.display_name?.trim() || "未命名候选人"}
                       </span>
-                      <span className="candidate-meta">
-                        {item.original_filename}
-                      </span>
                     </div>
                   </td>
                   <td>
-                    {appliedDraft.institutionClassifications.length ? (
-                      <ResultDisplayValues
-                        fieldKey="institution_classifications"
-                        item={item}
-                        label="院校类型"
-                      />
-                    ) : (
-                      <InstitutionClassificationTags
-                        classifications={item.institution_classifications}
-                      />
-                    )}
+                    <CandidateEducationCell item={item} />
                   </td>
                   <td>
-                    <span className="degree-label">
-                      {item.highest_degree
-                        ? degreeLabels[item.highest_degree]
-                        : "未知"}
-                    </span>
+                    <CandidateExperienceCell item={item} />
                   </td>
-                  <td>{formatMonths(item.employment_months)}</td>
+                  <td><CandidateSkillHighlights item={item} /></td>
                   {displayColumns.map((column) => (
                     <td className="result-display-cell" key={column.key}>
                       <ResultDisplayValues
@@ -4540,35 +4876,38 @@ function ResultsPane({
                       />
                     </td>
                   ))}
-                  <td>
+                  <td className="candidate-score-cell">
                     {item.score_total !== null ? (
-                      <div
-                        className="library-score"
-                        title={item.score_template_name ?? undefined}
-                      >
-                        <strong>{item.score_total.toFixed(1)}</strong>
-                        <span>/ 100</span>
-                        {item.score_template_name && (
-                          <small>{item.score_template_name}</small>
+                      <div className="candidate-score-summary">
+                        <button
+                          aria-label={`查看 ${item.display_name ?? "候选人"} 的评分详情`}
+                          className="library-score candidate-score-link"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onOpenCandidate(item, "score");
+                          }}
+                          type="button"
+                        >
+                          <strong>{item.score_total.toFixed(1)}</strong>
+                          <span>/ 100</span>
+                          {item.score_template_name && (
+                            <small>{item.score_template_name}</small>
+                          )}
+                        </button>
+                        <span
+                          className={`score-confidence is-${scoreConfidencePresentation(item.score_confidence).tone}`}
+                        >
+                          {scoreConfidencePresentation(item.score_confidence).label}
+                        </span>
+                        {scoreStatusLabel(item.score_status) && (
+                          <span className="candidate-score-status">
+                            {scoreStatusLabel(item.score_status)}
+                          </span>
                         )}
                       </div>
                     ) : (
                       <span className="library-empty-copy">尚未评分</span>
                     )}
-                  </td>
-                  <td>
-                    <button
-                      aria-label={`查看 ${item.display_name ?? "候选人"} 的原始文件`}
-                      className="button button-ghost match-open-button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onOpenCandidate(item, "original");
-                      }}
-                      type="button"
-                    >
-                      <Icon name="document" size={15} />
-                      原件
-                    </button>
                   </td>
                   <td>
                     <Icon name="chevron-right" size={18} />
@@ -4845,7 +5184,7 @@ function ResumeLibraryPage({
             <table className="candidate-table library-table">
               <thead>
                 <tr>
-                  <th scope="col">候选人 / 原始文件</th>
+                  <th scope="col">候选人</th>
                   <th scope="col">AI 总结</th>
                   <th scope="col">AI 评分</th>
                   <th scope="col">状态</th>
@@ -4884,27 +5223,14 @@ function ResumeLibraryPage({
                     >
                       <td className="library-candidate-cell">
                         <div className="candidate-person">
-                          <div className="library-candidate-title">
-                            <span className="candidate-name">
-                              {item.display_name?.trim() || "未命名候选人"}
-                            </span>
-                            <span className="library-file-type">
-                              {resumeFileTypeLabel(item.original_filename)}
-                            </span>
-                          </div>
-                          <div className="library-origin">
-                            <span
-                              className="candidate-meta library-filename"
-                              title={item.original_filename}
-                            >
-                              {item.original_filename}
-                            </span>
-                            <span className="candidate-meta library-source-label">
-                              {item.source_mailbox_label
-                                ? `邮箱 · ${item.source_mailbox_label}`
-                                : "手动上传"}
-                            </span>
-                          </div>
+                          <span className="candidate-name">
+                            {item.display_name?.trim() || "未命名候选人"}
+                          </span>
+                          <span className="candidate-meta library-source-label">
+                            {item.source_mailbox_label
+                              ? `邮箱 · ${item.source_mailbox_label}`
+                              : "手动上传"}
+                          </span>
                         </div>
                       </td>
                       <td className="library-summary-cell">
@@ -5535,6 +5861,9 @@ function CandidateDrawer({
   pdfError,
   summaries,
   summaryLoading,
+  scores,
+  scoreLoading,
+  scoreError,
   onGenerateSummary,
   onCreateManualSummary,
   onReparseSource,
@@ -5544,6 +5873,7 @@ function CandidateDrawer({
   canManageCandidateData,
   onPreviewOriginal,
   onDownloadOriginal,
+  onRefreshScores,
   onDeleteResume,
   onDeleteCandidate,
   onSetRetentionHold,
@@ -5562,6 +5892,9 @@ function CandidateDrawer({
   pdfError: string | null;
   summaries: ResumeSummary[];
   summaryLoading: boolean;
+  scores: ResumeScore[];
+  scoreLoading: boolean;
+  scoreError: string | null;
   onGenerateSummary: () => void;
   onCreateManualSummary: (
     summaryId: string,
@@ -5574,6 +5907,7 @@ function CandidateDrawer({
   canManageCandidateData: boolean;
   onPreviewOriginal: () => void;
   onDownloadOriginal: () => void;
+  onRefreshScores: () => void;
   onDeleteResume: (
     reason: CandidateDataDeletionReason,
     otherNote?: string | null,
@@ -5599,6 +5933,7 @@ function CandidateDrawer({
   }, [isOpen]);
   return (
     <aside
+      aria-hidden={!isOpen}
       aria-label={
         candidate ? `${candidate.candidateName} 的简历详情` : "简历详情"
       }
@@ -5646,6 +5981,7 @@ function CandidateDrawer({
             [
               ["original", "原始文件"],
               ["summary", "AI 总结"],
+              ["score", "评分详情"],
               ["evidence", "提取依据"],
             ] as Array<[DrawerTab, string]>
           ).map(([tab, label]) => (
@@ -5706,6 +6042,27 @@ function CandidateDrawer({
                 summaries={summaries}
               />
             )
+          ) : drawerTab === "score" ? (
+            sourceTextIssue ? (
+              <ScoreDetailsUnavailable
+                busy={reparsingSource}
+                onOpenEvidence={() => onTabChange("evidence")}
+                onReparse={onReparseSource}
+                reason="这份简历的提取文本疑似乱码。为避免误导，本版本的评分结论不会在这里展示。"
+              />
+            ) : supersededReparse ? (
+              <ScoreDetailsUnavailable
+                onOpenEvidence={() => onTabChange("evidence")}
+                reason="候选人已有更新版本。为避免旧解析结果影响判断，请从当前版本查看评分。"
+              />
+            ) : (
+              <CandidateScoreDetails
+                error={scoreError}
+                loading={scoreLoading}
+                onRefresh={onRefreshScores}
+                scores={scores}
+              />
+            )
           ) : (
             <EvidenceTab
               enriching={enrichingFacts}
@@ -5717,6 +6074,235 @@ function CandidateDrawer({
         </div>
       </div>
     </aside>
+  );
+}
+
+function scoreEvidenceCoverage(score: ResumeScore): number | null {
+  const weightedDimensions = score.dimension_scores.filter(
+    (dimension) => dimension.weight > 0,
+  );
+  const totalWeight = weightedDimensions.reduce(
+    (total, dimension) => total + dimension.weight,
+    0,
+  );
+  if (!totalWeight) return null;
+  const groundedWeight = weightedDimensions
+    .filter((dimension) => dimension.evidence_state === "grounded")
+    .reduce((total, dimension) => total + dimension.weight, 0);
+  return Math.round((groundedWeight / totalWeight) * 100);
+}
+
+function scoreRecordLabel(score: ResumeScore): string {
+  if (score.status === "overridden") return "含人工调整";
+  if (score.status === "needs_review") return "建议复核";
+  return "AI 评分";
+}
+
+function CandidateScoreDetails({
+  scores,
+  loading,
+  error,
+  onRefresh,
+}: {
+  scores: ResumeScore[];
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const score = scores.find(
+    (item) => item.is_current_facts_version && item.is_current_template_version,
+  ) ?? scores.find((item) => item.is_current_facts_version) ?? scores[0] ?? null;
+  const evidenceCoverage = score ? scoreEvidenceCoverage(score) : null;
+
+  if (loading && !scores.length) {
+    return <div className="drawer-score-details"><TableSkeleton /></div>;
+  }
+  if (error) {
+    return (
+      <div className="empty-state drawer-score-empty">
+        <div className="empty-state-inner">
+          <span className="empty-glyph"><Icon name="refresh" size={23} /></span>
+          <h2>暂时无法读取评分详情</h2>
+          <p>{error}</p>
+          <button className="button" onClick={onRefresh} type="button">
+            <Icon name="refresh" size={16} />重新加载
+          </button>
+        </div>
+      </div>
+    );
+  }
+  if (!score) {
+    return (
+      <div className="empty-state drawer-score-empty">
+        <div className="empty-state-inner">
+          <span className="empty-glyph"><Icon name="layers" size={23} /></span>
+          <h2>尚未生成评分</h2>
+          <p>请先在评分规则中选择模板并生成评分。生成后，这里会展示每项得分、理由和简历依据。</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <section aria-label="综合评分详情" className="drawer-score-details">
+      <header className="drawer-score-heading">
+        <div>
+          <h3>评分详情</h3>
+          <p>
+            {score.template_name ?? "评分规则"} · 模板 v{score.template_version} · {formatLibraryDate(score.created_at)}
+          </p>
+        </div>
+        <span className={`score-record-status is-${score.status}`}>
+          {scoreRecordLabel(score)}
+        </span>
+      </header>
+
+      <div className="drawer-score-overview">
+        <div className="drawer-score-total">
+          <span>综合评分</span>
+          <strong>{score.total_score.toFixed(1)}<small>/ 100</small></strong>
+        </div>
+        <dl className="drawer-score-metrics">
+          <div>
+            <dt>计算方式</dt>
+            <dd>最终分 ÷ 100 × 权重</dd>
+          </div>
+          <div>
+            <dt>事实覆盖</dt>
+            <dd>{evidenceCoverage === null ? "待核实" : `${evidenceCoverage}%`}</dd>
+          </div>
+          <div>
+            <dt>当前版本</dt>
+            <dd>{score.is_current_facts_version ? "是" : "否，请重新评分"}</dd>
+          </div>
+        </dl>
+      </div>
+      <p className="drawer-score-formula">
+        总分 = Σ（每项最终分 ÷ 100 × 权重）。事实覆盖只表示简历中可验证依据的覆盖程度，不代表候选人能力高低。
+      </p>
+
+      <div className="drawer-score-dimensions">
+        {score.dimension_scores.map((dimension) => {
+          const manuallyAdjusted =
+            dimension.manual_reason !== null ||
+            dimension.final_raw_score !== dimension.ai_raw_score;
+          return (
+            <article className="drawer-score-dimension" key={dimension.key}>
+              <div className="drawer-score-dimension-heading">
+                <div>
+                  <h4>{dimension.label}</h4>
+                  <span className="drawer-score-dimension-score">
+                    {dimension.final_raw_score.toFixed(0)} / 100
+                  </span>
+                </div>
+                <div className="drawer-score-contribution">
+                  <span>对总分贡献</span>
+                  <strong>{dimension.final_weighted_score.toFixed(1)} 分</strong>
+                </div>
+              </div>
+              <div className="drawer-score-dimension-meta">
+                <span>AI 原始分 {dimension.ai_raw_score.toFixed(0)} / 100</span>
+                <span>权重 {dimension.weight}%</span>
+                <span className={`score-evidence-state is-${dimension.evidence_state}`}>
+                  {dimension.evidence_state === "grounded" ? "已提供简历依据" : "证据不足"}
+                </span>
+                {manuallyAdjusted && <span className="score-manual-mark">已人工调整</span>}
+              </div>
+
+              <div className="drawer-score-section">
+                <span>AI 评分理由</span>
+                <p>{dimension.rationale || "信息不足，未提供可验证判断依据。"}</p>
+              </div>
+              <div className="drawer-score-section">
+                <span>简历事实依据</span>
+                {dimension.fact_evidence.length ? (
+                  <ul className="drawer-score-facts">
+                    {dimension.fact_evidence.map((fact) => (
+                      <li key={fact.fact_id}>{fact.summary}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>当前维度没有足够的已验证简历依据。</p>
+                )}
+              </div>
+              {dimension.uncertainties.length > 0 && (
+                <div className="drawer-score-section is-uncertain">
+                  <span>待确认项</span>
+                  <ul className="drawer-score-facts">
+                    {dimension.uncertainties.map((item) => <li key={item}>{item}</li>)}
+                  </ul>
+                </div>
+              )}
+              {dimension.manual_reason && (
+                <div className="drawer-score-section is-manual">
+                  <span>人工调整原因</span>
+                  <p>{dimension.manual_reason}</p>
+                </div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+
+      {score.analysis.overall_summary && (
+        <section className="drawer-score-analysis">
+          <h4>AI 综合判断</h4>
+          <p>{score.analysis.overall_summary}</p>
+        </section>
+      )}
+      {score.analysis.risk_flags.length > 0 && (
+        <section className="drawer-score-risks">
+          <h4>待关注项</h4>
+          <ul>
+            {score.analysis.risk_flags.map((risk, index) => (
+              <li key={`${risk.message}-${index}`}>
+                <span>{risk.message}</span>
+                {risk.fact_evidence.length > 0 && (
+                  <small>依据：{risk.fact_evidence.map((fact) => fact.summary).join("；")}</small>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function ScoreDetailsUnavailable({
+  reason,
+  busy = false,
+  onOpenEvidence,
+  onReparse,
+}: {
+  reason: string;
+  busy?: boolean;
+  onOpenEvidence: () => void;
+  onReparse?: () => void;
+}) {
+  return (
+    <div className="empty-state source-quality-blocked-summary">
+      <div className="empty-state-inner">
+        <span className="empty-glyph"><Icon name="layers" size={23} /></span>
+        <h2>评分详情暂不可用</h2>
+        <p>{reason}</p>
+        <div className="source-quality-summary-actions">
+          {onReparse && (
+            <button
+              className="button button-primary"
+              disabled={busy}
+              onClick={onReparse}
+              type="button"
+            >
+              {busy ? <><i className="spinner" />正在创建</> : <><Icon name="refresh" size={16} />重新解析为新版本</>}
+            </button>
+          )}
+          <button className="button button-ghost" onClick={onOpenEvidence} type="button">
+            查看提取依据
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -8078,10 +8664,12 @@ function ScorePage({
   selected,
   notify,
   onScoreCreated,
+  onTemplateCreated,
 }: {
   selected: SelectedResume | null;
   notify: (kind: ToastKind, message: string) => void;
   onScoreCreated: () => void;
+  onTemplateCreated: (template: ScoreTemplate) => void;
 }) {
   const [templates, setTemplates] = useState<ScoreTemplate[]>([]);
   const [templateId, setTemplateId] = useState("");
@@ -8183,6 +8771,7 @@ function ScorePage({
       });
       setTemplates((current) => [created, ...current]);
       setTemplateId(created.template_id);
+      onTemplateCreated(created);
       notify("success", `评分规则“${created.name}”已创建。`);
     } catch (error) {
       notify("error", humanizeError(error));
@@ -8950,10 +9539,12 @@ function ScoreBatchDetails({
 }
 
 function MatchPage({
+  canGenerateAiJd,
   selected,
   notify,
   onOpenMatchedResume,
 }: {
+  canGenerateAiJd: boolean;
   selected: SelectedResume | null;
   notify: (kind: ToastKind, message: string) => void;
   onOpenMatchedResume: (match: JobMatch) => void;
@@ -9060,6 +9651,10 @@ function MatchPage({
     setGenerationError("JD 已修改，请重新运行 AI 生成后再启用岗位。");
   };
   const generateJobDescription = async () => {
+    if (!canGenerateAiJd) {
+      notify("error", "当前套餐未开通 AI 生成 JD。你仍可直接发布原版 JD。");
+      return;
+    }
     const sourceText =
       (editedGeneratedJd && jdText.trim()) || jobBrief.trim();
     if (!title.trim() || !sourceText) {
@@ -9324,7 +9919,9 @@ function MatchPage({
         <div>
           <h1>岗位 JD 匹配</h1>
           <p>
-            描述岗位需求，由 AI 生成可编辑 JD 和匹配条件；启用后即可对已核验的简历事实逐项比对。
+            {canGenerateAiJd
+              ? "描述岗位需求，由 AI 生成可编辑 JD 和匹配条件；启用后即可对已核验的简历事实逐项比对。"
+              : "可直接发布原版 JD；AI 生成 JD 与候选人匹配需要开通相应套餐。"}
           </p>
         </div>
         {selected ? (
@@ -9462,11 +10059,17 @@ function MatchPage({
                           setGeneratedRequirements(null);
                         }
                       }}
-                      placeholder="填写岗位需求后点击「AI 生成 JD」；已有完整 JD 可直接粘贴后点击「原版发布」。"
+                      placeholder={
+                        canGenerateAiJd
+                          ? "填写岗位需求后点击「AI 生成 JD」；已有完整 JD 可直接粘贴后点击「原版发布」。"
+                          : "粘贴完整原版 JD 后点击「原版发布」，内容会按原样保存。"
+                      }
                       value={jobBrief}
                     />
                     <p className="candidate-meta">
-                      AI 生成 JD 会提取匹配条件，原版发布会按当前内容原样保存。
+                      {canGenerateAiJd
+                        ? "AI 生成 JD 会提取匹配条件，原版发布会按当前内容原样保存。"
+                        : "原版发布不会调用 AI，内容会按当前输入原样保存。"}
                     </p>
                   </div>
                   {jdText && (
@@ -9496,27 +10099,29 @@ function MatchPage({
                   </p>
                 )}
                 <div className="review-actions">
-                  <button
-                    className={`button${generatedJobIsReady ? " button-ghost" : " button-primary"}`}
-                    disabled={loading}
-                    onClick={() => void generateJobDescription()}
-                    type="button"
-                  >
-                    {loading ? (
-                      <>
-                        <i className="spinner" />
-                        正在生成…
-                      </>
-                    ) : (
-                      <>
-                        <Icon name="spark" size={16} />
-                        {jdText ? "重新生成 JD" : "生成 JD"}
-                      </>
-                    )}
-                  </button>
-                  {!generatedJobIsReady && (
+                  {canGenerateAiJd && (
                     <button
-                      className="button"
+                      className={`button${generatedJobIsReady ? " button-ghost" : " button-primary"}`}
+                      disabled={loading}
+                      onClick={() => void generateJobDescription()}
+                      type="button"
+                    >
+                      {loading ? (
+                        <>
+                          <i className="spinner" />
+                          正在生成…
+                        </>
+                      ) : (
+                        <>
+                          <Icon name="spark" size={16} />
+                          {jdText ? "重新生成 JD" : "生成 JD"}
+                        </>
+                      )}
+                    </button>
+                  )}
+                  {(!canGenerateAiJd || !generatedJobIsReady) && (
+                    <button
+                      className={`button${canGenerateAiJd ? "" : " button-primary"}`}
                       disabled={loading}
                       onClick={() => void publishOriginalJob()}
                       type="button"

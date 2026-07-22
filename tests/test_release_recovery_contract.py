@@ -548,9 +548,13 @@ sudo() {{
         *) : ;;
       esac
       ;;
-    network)
-      [[ "${{2:-}}" == inspect ]] && printf synthetic-api
-      ;;
+        network)
+          if [[ "${{2:-}}" == inspect ]]; then
+            printf synthetic-api
+          else
+            :
+          fi
+          ;;
     rm) caddy_recreated=1 ;;
     stop|start) : ;;
     *) : ;;

@@ -11,13 +11,16 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.config import AppSettings
+from app.filter_options import language_credential_label
 from app.schemas import (
     CandidateSearchRequest,
     RecruitingAgentAction,
     RecruitingAgentCandidate,
     RecruitingAgentRequest,
     RecruitingAgentResponse,
+    RecruitingAgentSearchSummary,
     RecruitingAgentToolTrace,
+    RecruitingAgentVerificationEvidence,
 )
 from app.services.ai_gateway_service import (
     AiExecutionSpec,
@@ -81,6 +84,7 @@ class ToolRun:
     cards: list[RecruitingAgentCandidate] = field(default_factory=list)
     actions: list[RecruitingAgentAction] = field(default_factory=list)
     traces: list[RecruitingAgentToolTrace] = field(default_factory=list)
+    search_summary: RecruitingAgentSearchSummary | None = None
     batch_id: str | None = None
     intent: AgentIntent | None = None
 
@@ -1312,6 +1316,65 @@ def _remove_null_values(value: object) -> object:
     return value
 
 
+def _language_filter_labels(request: CandidateSearchRequest) -> list[str]:
+    labels: list[str] = []
+    for item in request.language_credentials_any_of:
+        if item.credential_code == "custom" and item.custom_name_contains:
+            labels.append(item.custom_name_contains)
+        else:
+            labels.append(language_credential_label(item.credential_code))
+    return labels
+
+
+def _language_verification_items(item: object) -> list[RecruitingAgentVerificationEvidence]:
+    """Expose only source-grounded language evidence to the Agent/UI.
+
+    The browser never receives source-block text, filenames, or contact
+    details here.  A recruiter can open the candidate detail when they need
+    the original page-level evidence.
+    """
+
+    result: list[RecruitingAgentVerificationEvidence] = []
+    seen: set[tuple[str, str]] = set()
+    for match in getattr(item, "matched_evidence", []) or []:
+        if (
+            getattr(match, "filter_key", None) != "language_credentials_any_of"
+            or not getattr(match, "evidence_block_ids", None)
+        ):
+            continue
+        raw_label = str(getattr(match, "label", "")).strip()
+        source = getattr(match, "evidence_origin", "structured_fact")
+        if source not in {"structured_fact", "resume_text"}:
+            source = "structured_fact"
+        if not raw_label or (raw_label, source) in seen:
+            continue
+        seen.add((raw_label, source))
+        result.append(
+            RecruitingAgentVerificationEvidence(
+                label=raw_label,
+                source=source,
+            )
+        )
+    return result
+
+
+def _search_trace_summary(
+    request: CandidateSearchRequest,
+    *,
+    confirmed_count: int,
+    unconfirmed_count: int | None,
+) -> str:
+    """Keep visible Agent traces recruiter-readable, never JSON-shaped."""
+
+    language_labels = _language_filter_labels(request)
+    if language_labels:
+        text = f"已完成{'、'.join(language_labels)}检索：已确认 {confirmed_count} 人"
+        if unconfirmed_count is not None:
+            text += f"，未确认 {unconfirmed_count} 份"
+        return text
+    return f"已完成候选人筛选：找到 {confirmed_count} 人"
+
+
 def _search(session: Session, arguments: dict[str, Any]) -> ToolRun:
     allowed = set(_SEARCH_SCHEMA["properties"])
     # Tool models occasionally include optional keys with JSON null.  Those
@@ -1334,29 +1397,74 @@ def _search(session: Session, arguments: dict[str, Any]) -> ToolRun:
         request = CandidateSearchRequest.model_validate(values)
     except (TypeError, ValueError) as exc:
         raise RecruitingAgentServiceError("agent_search_arguments_invalid") from exc
-    result = search_candidates(session, request)
+    # The normal recruiter filter intentionally remains extracted-fact-only.
+    # The Agent additionally receives source-grounded language evidence so a
+    # clearly stated CET-4/CET-6 style credential is not lost merely because
+    # one extraction run omitted its structured row.
+    result = search_candidates(
+        session,
+        request,
+        include_source_language_evidence=True,
+    )
+    confirmed_count = int(getattr(result, "total_count", len(result.items)))
+    unconfirmed_count: int | None = None
+    if request.language_credentials_any_of:
+        scope_request = request.model_copy(
+            update={
+                "language_credentials_any_of": [],
+                "limit": 1,
+                "cursor": None,
+            }
+        )
+        scope_result = search_candidates(session, scope_request)
+        scope_count = int(
+            getattr(scope_result, "total_count", len(scope_result.items))
+        )
+        unconfirmed_count = max(scope_count - confirmed_count, 0)
+    search_summary = RecruitingAgentSearchSummary(
+        confirmed_count=confirmed_count,
+        displayed_count=len(result.items),
+        unconfirmed_count=unconfirmed_count,
+        confirmation_basis=(
+            "已确认表示简历明确提及；未确认不代表未通过。"
+            if request.language_credentials_any_of
+            else None
+        ),
+    )
     applied = {
         key: value
         for key, value in request.model_dump(exclude_none=True).items()
         if value not in ([], 20, None)
     }
-    cards = [
-        RecruitingAgentCandidate(
-            candidate_id=item.candidate_id,
-            resume_id=item.resume_id,
-            display_name=item.display_name,
-            detail=(
-                f"{' / '.join(_INSTITUTION_CLASSIFICATION_LABELS[value] for value in item.institution_classifications) or '院校类型待识别'} · "
-                f"工作经历 {item.employment_months // 12} 年 {item.employment_months % 12} 个月"
-            ),
+    cards: list[RecruitingAgentCandidate] = []
+    for item in result.items:
+        verification_evidence = _language_verification_items(item)
+        cards.append(
+            RecruitingAgentCandidate(
+                candidate_id=item.candidate_id,
+                resume_id=item.resume_id,
+                display_name=item.display_name,
+                detail=(
+                    f"{' / '.join(_INSTITUTION_CLASSIFICATION_LABELS[value] for value in item.institution_classifications) or '院校类型待识别'} · "
+                    f"工作经历 {item.employment_months // 12} 年 {item.employment_months % 12} 个月"
+                ),
+                verification_status=(
+                    "confirmed"
+                    if request.language_credentials_any_of and verification_evidence
+                    else (
+                        "unconfirmed"
+                        if request.language_credentials_any_of
+                        else None
+                    )
+                ),
+                verification_evidence=verification_evidence,
+            )
         )
-        for item in result.items
-    ]
     return ToolRun(
         payload={
             "applied_filters": applied,
-            "result_count": len(cards),
-            "needs_review_count": result.needs_review_count,
+            "result_count": confirmed_count,
+            "search_summary": search_summary.model_dump(),
             "candidates": [
                 {
                     "name": card.display_name or "未命名候选人",
@@ -1364,12 +1472,27 @@ def _search(session: Session, arguments: dict[str, Any]) -> ToolRun:
                     "institution_classifications": item.institution_classifications,
                     "employment_months": item.employment_months,
                     "matched_filters": item.matched_filters,
+                    "verification_status": card.verification_status,
+                    "verification_evidence": [
+                        evidence.model_dump()
+                        for evidence in card.verification_evidence
+                    ],
                 }
                 for card, item in zip(cards, result.items, strict=True)
             ],
         },
         cards=cards,
-        traces=[RecruitingAgentToolTrace(tool="简历筛选", summary=f"已按 {json.dumps(applied, ensure_ascii=False)} 筛选 {len(cards)} 人")],
+        traces=[
+            RecruitingAgentToolTrace(
+                tool="简历筛选",
+                summary=_search_trace_summary(
+                    request,
+                    confirmed_count=confirmed_count,
+                    unconfirmed_count=unconfirmed_count,
+                ),
+            )
+        ],
+        search_summary=search_summary,
         intent="search_candidates",
     )
 
@@ -1619,8 +1742,8 @@ def run_recruiting_agent_turn(
                 business_ref_type="recruiting_agent_turn",
                 business_ref_id=turn_id,
                 correlation_id=turn_id,
-                prompt_revision="recruiting_agent.tools.v3",
-                contract_version="recruiting_agent.tools.v3",
+                prompt_revision="recruiting_agent.tools.v4",
+                contract_version="recruiting_agent.tools.v4",
             ),
         ):
             return _run_recruiting_agent_turn_with_tools(
@@ -1671,6 +1794,13 @@ def _run_recruiting_agent_turn_with_tools(
                 "appropriate tool before answering. Never claim a candidate fact that is absent from a "
                 "tool result. Do not make hiring, rejection, or discrimination decisions. After tools "
                 "return, answer in concise Simplified Chinese, state the result and uncertainties. "
+                "For an English credential search, `confirmed` means the resume explicitly "
+                "mentions the requested credential in a source-grounded extracted fact or in "
+                "reliable original resume text. `unconfirmed` means no clear resume evidence "
+                "within the same screening scope; it never means the candidate failed or lacks "
+                "the credential. Use the tool's search_summary counts exactly. Do not say that "
+                "zero confirmed records proves nobody has passed the credential, and do not invent "
+                "reasons such as a missing upload unless the tool reports them. "
                 "For a request to score all candidates in the current workspace, call "
                 "start_workspace_score_batch and use only a template_id from current_score_templates. "
                 "Never select, score, or imply facts about one current candidate. "
@@ -1696,6 +1826,7 @@ def _run_recruiting_agent_turn_with_tools(
     cards: list[RecruitingAgentCandidate] = []
     actions: list[RecruitingAgentAction] = []
     traces: list[RecruitingAgentToolTrace] = []
+    search_summary: RecruitingAgentSearchSummary | None = None
     batch_id: str | None = None
     intent: AgentIntent = "help"
     token = _ACTIVE_TOOL_DEFINITIONS.set(
@@ -1716,6 +1847,7 @@ def _run_recruiting_agent_turn_with_tools(
                     candidates=cards,
                     actions=actions,
                     tool_trace=traces,
+                    search_summary=search_summary,
                     batch_id=batch_id,
                 )
             if not isinstance(calls, list):
@@ -1745,9 +1877,19 @@ def _run_recruiting_agent_turn_with_tools(
                     run = _recoverable_tool_call_error(exc)
                     if run is None:
                         raise
-                cards = run.cards or cards
+                # A model may refine its first search with a second, narrower
+                # search.  The visible cards and summary must always describe
+                # the same, most recent search, including a valid zero-result
+                # refinement.
+                if run.intent == "search_candidates":
+                    cards = run.cards
+                    search_summary = run.search_summary
+                elif run.cards:
+                    cards = run.cards
                 actions.extend(run.actions)
                 traces.extend(run.traces)
+                if run.intent != "search_candidates" and run.search_summary is not None:
+                    search_summary = run.search_summary
                 batch_id = run.batch_id or batch_id
                 if run.intent is not None:
                     intent = run.intent

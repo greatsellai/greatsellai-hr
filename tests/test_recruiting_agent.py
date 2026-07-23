@@ -11,6 +11,34 @@ from app.models import AiRun, ApiInvocation
 from app.services.ai_gateway_service import AiGatewayError
 from app.services.recruiting_agent_service import ResolvedJob, _TOOLS, _resolve_job
 from test_score_service import _template_payload
+from test_resume_flow import create_candidate, replace_page_evidence, upload_text_resume
+
+
+def _save_agent_source_only_resume(
+    client: TestClient,
+    *,
+    source_text: str,
+) -> str:
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(client, resume_id, source_text)
+    saved = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "education": [
+                    {
+                        "school_name_raw": "北京大学",
+                        "degree": "bachelor",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+            }
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    return resume_id
 
 
 def test_agent_fails_visibly_when_model_is_not_configured(client: TestClient) -> None:
@@ -71,8 +99,163 @@ def test_agent_executes_model_selected_search_tool(
     payload = response.json()
     assert payload["message"] == "## 筛选结果\n\n已按 **985/211、3 年以上和 Python** 条件完成筛选。"
     assert payload["tool_trace"][0]["tool"] == "简历筛选"
-    assert "Python" in payload["tool_trace"][0]["summary"]
+    assert payload["tool_trace"][0]["summary"] == "已完成候选人筛选：找到 0 人"
+    assert "{" not in payload["tool_trace"][0]["summary"]
     assert calls == 2
+
+
+def test_agent_language_search_returns_source_grounded_confirmation_and_unconfirmed_count(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    confirmed_resume_id = _save_agent_source_only_resume(
+        ai_client,
+        source_text="教育经历 北京大学 本科。大学英语四级 CET-4 成绩 520。",
+    )
+    _save_agent_source_only_resume(
+        ai_client,
+        source_text="教育经历 北京大学 本科。具备英语沟通能力。",
+    )
+    calls = 0
+    captured: dict[str, object] = {}
+
+    def fake_completion(*, settings, messages):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-cet4-search",
+                        "type": "function",
+                        "function": {
+                            "name": "search_candidates",
+                            "arguments": json.dumps(
+                                {
+                                    "language_credentials_any_of": [
+                                        {"credential_code": "cet4"}
+                                    ]
+                                }
+                            ),
+                        },
+                    }
+                ],
+            }
+        captured["tool_payload"] = json.loads(messages[-1]["content"])
+        return {
+            "content": (
+                "找到 1 位简历明确提到英语四级的候选人。"
+                "另有 1 份简历未确认英语四级，不代表未通过。"
+            )
+        }
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "给我找过了英语四级的人"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["search_summary"] == {
+        "confirmed_count": 1,
+        "displayed_count": 1,
+        "unconfirmed_count": 1,
+        "confirmation_basis": "已确认表示简历明确提及；未确认不代表未通过。",
+    }
+    assert len(payload["candidates"]) == 1
+    candidate = payload["candidates"][0]
+    assert candidate["resume_id"] == confirmed_resume_id
+    assert candidate["verification_status"] == "confirmed"
+    assert candidate["verification_evidence"] == [
+        {
+            "label": "大学英语四级（CET-4）",
+            "source": "resume_text",
+        }
+    ]
+    trace = payload["tool_trace"][0]["summary"]
+    assert trace == "已完成大学英语四级（CET-4）检索：已确认 1 人，未确认 1 份"
+    assert "{" not in trace
+    assert "language_credentials_any_of" not in trace
+    tool_payload = captured["tool_payload"]
+    assert tool_payload["search_summary"]["confirmed_count"] == 1
+    assert tool_payload["candidates"][0]["verification_evidence"] == [
+        {
+            "label": "大学英语四级（CET-4）",
+            "source": "resume_text",
+        }
+    ]
+    serialized_tool_payload = json.dumps(tool_payload, ensure_ascii=False)
+    assert "大学英语四级 CET-4 成绩 520" not in serialized_tool_payload
+    assert "original_filename" not in serialized_tool_payload
+    serialized_response = json.dumps(payload, ensure_ascii=False)
+    assert "page-001" not in serialized_response
+    assert "original_filename" not in serialized_response
+
+
+def test_agent_refined_search_replaces_prior_cards_and_summary(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    _save_agent_source_only_resume(
+        ai_client,
+        source_text="教育经历 北京大学 本科。大学英语四级 CET-4 成绩 520。",
+    )
+    calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            arguments = {"language_credentials_any_of": [{"credential_code": "cet4"}]}
+        elif calls == 2:
+            arguments = {"language_credentials_any_of": [{"credential_code": "ielts"}]}
+        else:
+            return {"content": "已按更严格的雅思条件重新检索。"}
+        return {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": f"call-search-{calls}",
+                    "type": "function",
+                    "function": {
+                        "name": "search_candidates",
+                        "arguments": json.dumps(arguments),
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "先找英语四级，再收窄为雅思的人"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    # The second search validly has no confirmed result.  Its zero-result
+    # summary must not be paired with candidate cards from the first search.
+    assert payload["candidates"] == []
+    assert payload["search_summary"] == {
+        "confirmed_count": 0,
+        "displayed_count": 0,
+        "unconfirmed_count": 1,
+        "confirmation_basis": "已确认表示简历明确提及；未确认不代表未通过。",
+    }
+    assert [item["summary"] for item in payload["tool_trace"]] == [
+        "已完成大学英语四级（CET-4）检索：已确认 1 人，未确认 0 份",
+        "已完成雅思（IELTS）检索：已确认 0 人，未确认 1 份",
+    ]
 
 
 def test_agent_timeout_is_returned_as_a_retryable_service_error(
@@ -373,8 +556,9 @@ def test_agent_search_supports_full_recruiter_filter_contract(
             }
         return {"content": "已按完整条件完成筛选。"}
 
-    def fake_search(session, request):
-        captured["request"] = request
+    def fake_search(session, request, **kwargs):
+        captured.setdefault("requests", []).append(request)
+        captured.setdefault("options", []).append(kwargs)
         return SimpleNamespace(items=[], needs_review_count=0)
 
     monkeypatch.setattr(
@@ -393,7 +577,7 @@ def test_agent_search_supports_full_recruiter_filter_contract(
 
     assert response.status_code == 200, response.text
     assert response.json()["intent"] == "search_candidates"
-    request = captured["request"]
+    request = captured["requests"][0]
     assert request.is_985_211 is True
     assert request.min_employment_months == 36
     assert request.min_employment_or_internship_months == 42
@@ -423,6 +607,8 @@ def test_agent_search_supports_full_recruiter_filter_contract(
     assert request.keyword_match_mode == "broad"
     assert request.keywords_all_of == ["FastAPI"]
     assert request.keywords_any_of == ["LLM", "Agent"]
+    assert captured["options"][0] == {"include_source_language_evidence": True}
+    assert len(captured["requests"]) == 2
 
     search_tool = next(
         item["function"] for item in _TOOLS if item["function"]["name"] == "search_candidates"

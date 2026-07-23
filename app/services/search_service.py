@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.filter_options import (
     AWARD_LEVEL_OPTIONS,
+    LANGUAGE_CREDENTIAL_ALIASES,
     language_credential_label,
     normalize_language_credential,
 )
@@ -46,6 +47,26 @@ from app.services.resume_eligibility import is_resume_screening_eligible
 # score exists at all.
 _CURRENT_SCORE_STATUSES = {"succeeded", "needs_review", "overridden"}
 _SUMMARY_PREVIEW_MAX_CHARS = 180
+_AMBIGUOUS_LANGUAGE_SOURCE_ALIASES = {
+    normalized_key("四级"),
+    normalized_key("六级"),
+}
+_LANGUAGE_MENTION_NEGATION_HINTS = tuple(
+    normalized_key(value)
+    for value in (
+        "未通过",
+        "未过",
+        "未取得",
+        "未获得",
+        "备考",
+        "备考中",
+        "准备",
+        "待考",
+        "待出",
+        "未出",
+        "未达到",
+    )
+)
 _DISPLAY_FIELD_ORDER = (
     "institution_classifications",
     "highest_degree",
@@ -422,6 +443,225 @@ def _matches_language_filter(
     )
 
 
+@dataclass(frozen=True)
+class _LanguageEvidenceMatch:
+    """One language condition backed by either a fact or direct resume text."""
+
+    label: str
+    evidence_block_ids: list[str]
+    evidence_origin: str
+
+
+def _language_aliases_for_language_filter(
+    filter_item: LanguageCredentialFilter,
+) -> tuple[str, ...]:
+    """Return conservative aliases for direct, page-grounded evidence."""
+
+    if filter_item.credential_code == "custom":
+        return (
+            (filter_item.custom_name_contains or "").strip(),
+        ) if filter_item.custom_name_contains else ()
+    return tuple(
+        alias
+        for alias in LANGUAGE_CREDENTIAL_ALIASES.get(
+            filter_item.credential_code,
+            (),
+        )
+        if normalized_key(alias) not in _AMBIGUOUS_LANGUAGE_SOURCE_ALIASES
+    )
+
+
+def _source_aliases_for_language_filter(
+    filter_item: LanguageCredentialFilter,
+) -> tuple[str, ...]:
+    """Return aliases eligible for Agent-only source-text fallback.
+
+    A source-only mention cannot safely prove a requested minimum score.  The
+    single-word aliases ``四级`` and ``六级`` are deliberately excluded because
+    they also occur in professional-English credentials such as ``专四``.
+    """
+
+    if filter_item.min_score is not None:
+        return ()
+    return _language_aliases_for_language_filter(filter_item)
+
+
+def _source_language_alias_state(
+    source_text: str,
+    aliases: tuple[str, ...],
+) -> tuple[bool, bool]:
+    """Return ``(positive_mention, negative_mention)`` for one credential."""
+
+    normalized_source = normalized_key(source_text)
+    positive_mention = False
+    negative_mention = False
+    for alias in aliases:
+        alias_key = normalized_key(alias)
+        if not alias_key:
+            continue
+        start = normalized_source.find(alias_key)
+        while start >= 0:
+            end = start + len(alias_key)
+            context = normalized_source[max(0, start - 12) : end + 12]
+            if any(hint in context for hint in _LANGUAGE_MENTION_NEGATION_HINTS):
+                negative_mention = True
+            else:
+                positive_mention = True
+            start = normalized_source.find(alias_key, start + len(alias_key))
+    return positive_mention, negative_mention
+
+
+def _source_mentions_language_alias(
+    source_text: str,
+    aliases: tuple[str, ...],
+) -> bool:
+    """Match a direct resume mention while rejecting obvious negative context."""
+
+    return _source_language_alias_state(source_text, aliases)[0]
+
+
+def _source_has_negative_language_alias(
+    source_text: str,
+    aliases: tuple[str, ...],
+) -> bool:
+    """Identify a clear not-passed or in-progress mention for one credential."""
+
+    return _source_language_alias_state(source_text, aliases)[1]
+
+
+def _source_language_evidence_block_ids(
+    resume: Resume,
+    filter_item: LanguageCredentialFilter,
+) -> list[str]:
+    aliases = _source_aliases_for_language_filter(filter_item)
+    if not aliases:
+        return []
+    return sorted(
+        block.block_id
+        for block in resume.source_blocks
+        if _source_mentions_language_alias(block.text, aliases)
+    )
+
+
+def _credential_has_negative_source_context(
+    resume: Resume,
+    filter_item: LanguageCredentialFilter,
+    credential: ResumeLanguageCredential,
+) -> bool:
+    """Keep an unqualified extracted row from becoming a passed credential.
+
+    Some extraction runs identify a credential name but leave ``passed`` null.
+    If the source block grounding that row clearly says it is being prepared
+    for or was not passed, the Agent must leave it unconfirmed.
+    """
+
+    evidence_block_ids = set(credential.evidence_block_ids or [])
+    aliases = _language_aliases_for_language_filter(filter_item)
+    if not evidence_block_ids or not aliases:
+        return False
+    return any(
+        _source_has_negative_language_alias(block.text, aliases)
+        for block in resume.source_blocks
+        if block.block_id in evidence_block_ids
+    )
+
+
+def _matching_language_evidence(
+    resume: Resume,
+    filters: list[LanguageCredentialFilter],
+    *,
+    include_source_language_evidence: bool,
+) -> list[_LanguageEvidenceMatch]:
+    """Resolve language conditions without changing the public hard-filter API.
+
+    The normal recruiter table continues to use only extracted credential
+    facts.  The bounded Agent can opt into direct, page-grounded source text
+    when an extractor missed a clearly stated credential.  Neither path writes
+    a new fact or changes a resume's extraction state.
+    """
+
+    matches: list[_LanguageEvidenceMatch] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    for filter_item in filters:
+        # An extracted explicit ``passed=False`` is stronger than a loose
+        # source-text alias.  Do not let the fallback reverse that known
+        # negative into a recruiter-facing confirmation.
+        has_explicit_not_passed = any(
+            _matches_language_filter(filter_item, credential)
+            and credential.passed is False
+            for credential in resume.language_credentials
+        )
+        structured_matches = [
+            credential
+            for credential in resume.language_credentials
+            if _matches_language_filter(filter_item, credential)
+            and (
+                not include_source_language_evidence
+                or (
+                    credential.passed is not False
+                    and bool(credential.evidence_block_ids)
+                    and not (
+                        credential.passed is None
+                        and _credential_has_negative_source_context(
+                            resume,
+                            filter_item,
+                            credential,
+                        )
+                    )
+                )
+            )
+        ]
+        for credential in structured_matches:
+            evidence_ids = tuple(sorted(credential.evidence_block_ids or []))
+            key = (
+                _language_display_label(credential),
+                "structured_fact",
+                evidence_ids,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(
+                _LanguageEvidenceMatch(
+                    label=(
+                        _language_display_label(credential)
+                        + (
+                            f" {credential.score:g}"
+                            if credential.score is not None
+                            else ""
+                        )
+                    ),
+                    evidence_block_ids=list(evidence_ids),
+                    evidence_origin="structured_fact",
+                )
+            )
+        if (
+            structured_matches
+            or has_explicit_not_passed
+            or not include_source_language_evidence
+        ):
+            continue
+
+        source_ids = _source_language_evidence_block_ids(resume, filter_item)
+        if not source_ids:
+            continue
+        label = language_credential_label(filter_item.credential_code)
+        if filter_item.credential_code == "custom" and filter_item.custom_name_contains:
+            label = filter_item.custom_name_contains
+        key = (label, "resume_text", tuple(source_ids))
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append(
+            _LanguageEvidenceMatch(
+                label=label,
+                evidence_block_ids=source_ids,
+                evidence_origin="resume_text",
+            )
+        )
+    return matches
+
+
 def _matches_leadership(filter_item: LeadershipFilter, experience: object) -> bool:
     return bool(
         experience.leadership_role
@@ -549,7 +789,18 @@ def _matching_v2_keyword_block_ids(
 def search_candidates(
     session: Session,
     request: CandidateSearchRequest,
+    *,
+    include_source_language_evidence: bool = False,
 ) -> CandidateSearchResponse:
+    """Search one workspace's eligible resumes.
+
+    ``include_source_language_evidence`` is reserved for the bounded
+    recruiting Agent.  It lets the Agent treat a direct, reliable resume-text
+    mention as a recruiter-confirmed self-report when structured extraction
+    missed the same language credential.  Public filter endpoints intentionally
+    retain their existing extracted-fact-only contract.
+    """
+
     score_template: ScoreTemplate | None = None
     if request.score_template_id is not None:
         score_template = session.get(ScoreTemplate, request.score_template_id)
@@ -1002,48 +1253,33 @@ def search_candidates(
             )
 
         if request.language_credentials_any_of:
-            matching_credentials = [
-                credential
-                for filter_item in request.language_credentials_any_of
-                for credential in resume.language_credentials
-                if _matches_language_filter(filter_item, credential)
-            ]
-            if not matching_credentials:
+            matching_language_evidence = _matching_language_evidence(
+                resume,
+                request.language_credentials_any_of,
+                include_source_language_evidence=include_source_language_evidence,
+            )
+            if not matching_language_evidence:
                 continue
             matched_filters.append("language_credentials_any_of")
             _add_display_field(
                 display_field_values,
                 key="language",
-                values=[
-                    _language_display_label(credential)
-                    + (
-                        f" {credential.score:g}"
-                        if credential.score is not None
-                        else ""
-                    )
-                    for credential in matching_credentials
-                ],
+                values=[item.label for item in matching_language_evidence],
                 evidence_block_ids=[
                     block_id
-                    for credential in matching_credentials
-                    for block_id in (credential.evidence_block_ids or [])
+                    for item in matching_language_evidence
+                    for block_id in item.evidence_block_ids
                 ],
             )
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="language_credentials_any_of",
-                    label=(
-                        _language_display_label(credential)
-                        + (
-                            f" {credential.score:g}"
-                            if credential.score is not None
-                            else ""
-                        )
-                    ),
+                    label=item.label,
                     fact_type="language",
-                    evidence_block_ids=credential.evidence_block_ids or [],
+                    evidence_block_ids=item.evidence_block_ids,
+                    evidence_origin=item.evidence_origin,
                 )
-                for credential in matching_credentials
+                for item in matching_language_evidence
             )
 
         if request.scholarship_status == "unknown":
@@ -1371,6 +1607,7 @@ def search_candidates(
             key=lambda result: (result.updated_at, result.item.resume_id),
             reverse=True,
         )
+    total_count = len(results)
     if cursor_resume_id is not None:
         cursor_index = next(
             (
@@ -1417,4 +1654,5 @@ def search_candidates(
         items=page_items,
         next_cursor=next_cursor,
         needs_review_count=len(needs_review_candidate_ids),
+        total_count=total_count,
     )

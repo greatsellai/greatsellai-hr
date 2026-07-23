@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from test_resume_flow import create_candidate, replace_page_evidence, upload_text_resume
 from app.models import ResumeAiExtractionJob
-from app.schemas import ResumeFactsSubmission
+from app.schemas import CandidateSearchRequest, ResumeFactsSubmission
 from app.services import ai_extraction_job_service as job_service
+from app.services.search_service import search_candidates
 
 
 def _save_v2_resume(client) -> str:
@@ -151,6 +152,7 @@ def test_v2_filters_match_same_grounded_facts_and_school_alias(client) -> None:
         match["fact_type"] for match in item["matched_evidence"]
     }
     assert {"education", "skill", "language", "scholarship", "experience"} <= evidence_types
+    assert all("evidence_origin" not in match for match in item["matched_evidence"])
     display_fields = {
         field["key"]: field["values"] for field in item["display_fields"]
     }
@@ -535,6 +537,147 @@ def test_language_minimum_score_does_not_match_missing_or_lower_score(client) ->
     )
     assert response.status_code == 200, response.text
     assert response.json()["items"] == []
+
+
+def _save_source_only_cet4_resume(client, *, source_text: str) -> str:
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(client, resume_id, source_text)
+    saved = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "education": [
+                    {
+                        "school_name_raw": "北京大学",
+                        "degree": "bachelor",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+            }
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    return resume_id
+
+
+def test_agent_language_search_can_use_clear_source_text_without_relaxing_public_filter(
+    client,
+) -> None:
+    resume_id = _save_source_only_cet4_resume(
+        client,
+        source_text="教育经历 北京大学 本科。大学英语四级 CET-4 成绩 520。",
+    )
+    request_payload = {
+        "language_credentials_any_of": [{"credential_code": "cet4"}],
+    }
+
+    # The recruiter filter API remains structured-fact-only.  Agent fallback
+    # is opt-in so a normal saved filter never changes its historical meaning.
+    public_response = client.post("/v1/candidates/search", json=request_payload)
+    assert public_response.status_code == 200, public_response.text
+    assert public_response.json()["items"] == []
+
+    database = client.app.state.database
+    with database.session_factory() as session:
+        result = search_candidates(
+            session,
+            CandidateSearchRequest.model_validate(request_payload),
+            include_source_language_evidence=True,
+        )
+
+    assert result.total_count == 1
+    assert [item.resume_id for item in result.items] == [resume_id]
+    language_match = next(
+        item
+        for item in result.items[0].matched_evidence
+        if item.filter_key == "language_credentials_any_of"
+    )
+    assert language_match.label == "大学英语四级（CET-4）"
+    assert language_match.evidence_origin == "resume_text"
+    assert language_match.evidence_block_ids == ["page-001"]
+
+
+def test_agent_language_source_fallback_rejects_professional_level_and_negative_mentions(
+    client,
+) -> None:
+    _save_source_only_cet4_resume(
+        client,
+        source_text="教育经历 北京大学 本科。英语专业四级 TEM-4。",
+    )
+    _save_source_only_cet4_resume(
+        client,
+        source_text="教育经历 北京大学 本科。目前备考英语四级，尚未通过。",
+    )
+
+    database = client.app.state.database
+    with database.session_factory() as session:
+        result = search_candidates(
+            session,
+            CandidateSearchRequest(
+                language_credentials_any_of=[{"credential_code": "cet4"}],
+            ),
+            include_source_language_evidence=True,
+        )
+
+    assert result.total_count == 0
+    assert result.items == []
+
+
+def test_agent_language_search_keeps_negative_unqualified_fact_unconfirmed(client) -> None:
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(
+        client,
+        resume_id,
+        "教育经历 北京大学 本科。目前备考大学英语四级，尚未通过。",
+    )
+    saved = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "education": [
+                    {
+                        "school_name_raw": "北京大学",
+                        "degree": "bachelor",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+                "language_credentials": [
+                    {
+                        "credential_code": "cet4",
+                        "credential_name_raw": "大学英语四级",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+            }
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    request = CandidateSearchRequest(
+        language_credentials_any_of=[{"credential_code": "cet4"}],
+    )
+
+    # The historical recruiter filter remains an extracted-fact filter.
+    public_response = client.post("/v1/candidates/search", json=request.model_dump())
+    assert public_response.status_code == 200, public_response.text
+    assert [item["resume_id"] for item in public_response.json()["items"]] == [resume_id]
+
+    # The Agent's added evidence policy is stricter: an unqualified extracted
+    # row cannot override the source page explicitly saying the exam was not
+    # passed.  It will be counted as unconfirmed in the Agent scope instead.
+    database = client.app.state.database
+    with database.session_factory() as session:
+        result = search_candidates(
+            session,
+            request,
+            include_source_language_evidence=True,
+        )
+
+    assert result.total_count == 0
+    assert result.items == []
 
 
 def test_unquoted_academic_number_is_rejected_instead_of_becoming_a_filter_fact(client) -> None:

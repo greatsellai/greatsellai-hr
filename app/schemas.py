@@ -1195,6 +1195,40 @@ class RecruitingAgentCandidate(ApiModel):
     display_name: str | None
     detail: str
     score: float | None = None
+    # ``confirmed`` means the resume itself contains a source-grounded
+    # statement for the requested condition.  It is not third-party
+    # credential verification and it is never inferred from a missing value.
+    verification_status: Literal["confirmed", "unconfirmed"] | None = None
+    verification_evidence: list["RecruitingAgentVerificationEvidence"] = Field(
+        default_factory=list
+    )
+
+
+class RecruitingAgentVerificationEvidence(ApiModel):
+    """One compact, safe-to-display basis for an Agent search result.
+
+    Source block identifiers remain server-side provenance.  The Agent and
+    browser receive only the matched recruiter-facing label and whether it
+    came from an extracted fact or a direct resume-text mention.
+    """
+
+    label: str
+    source: Literal["structured_fact", "resume_text"]
+
+
+class RecruitingAgentSearchSummary(ApiModel):
+    """Deterministic recruiter-facing status for one candidate search.
+
+    A language condition is special because a missing extracted credential
+    must never be presented as a failed credential.  ``unconfirmed_count``
+    is therefore scoped to candidates that match every other requested
+    condition, but have no clear resume evidence for the language condition.
+    """
+
+    confirmed_count: int = Field(ge=0)
+    displayed_count: int = Field(ge=0)
+    unconfirmed_count: int | None = Field(default=None, ge=0)
+    confirmation_basis: str | None = None
 
 
 class RecruitingAgentAction(ApiModel):
@@ -1229,6 +1263,7 @@ class RecruitingAgentResponse(ApiModel):
     candidates: list[RecruitingAgentCandidate] = Field(default_factory=list)
     actions: list[RecruitingAgentAction] = Field(default_factory=list)
     tool_trace: list[RecruitingAgentToolTrace] = Field(default_factory=list)
+    search_summary: RecruitingAgentSearchSummary | None = None
     batch_id: str | None = None
 
 
@@ -1830,12 +1865,22 @@ class CandidateSearchMatch(ApiModel):
         "aggregate", "education", "experience", "skill", "language", "scholarship", "keyword"
     ]
     evidence_block_ids: list[str]
+    # Internal-only provenance used by the bounded recruiting Agent.  It is
+    # deliberately excluded from the public candidate-search response so the
+    # established filter API remains byte-for-byte compatible.
+    evidence_origin: Literal["structured_fact", "resume_text"] = Field(
+        default="structured_fact",
+        exclude=True,
+    )
 
 
 class CandidateSearchResponse(ApiModel):
     items: list[CandidateSearchItem]
     next_cursor: str | None = None
     needs_review_count: int = 0
+    # Total matching records before cursor pagination.  Existing callers may
+    # continue to use ``items`` and ``next_cursor`` unchanged.
+    total_count: int = 0
 
 
 class ResumeLibraryItem(ApiModel):

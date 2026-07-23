@@ -76,8 +76,8 @@ import type {
   RegistrationOffer,
   RecruitingAgentAction,
   RecruitingAgentCandidate,
+  RecruitingAgentSearchSummary,
   RecruitingAgentTurn,
-  RecruitingAgentToolTrace,
   SavedFilter,
   ScoreDimensionInput,
   ScoreTemplate,
@@ -169,6 +169,7 @@ const emptySearch: CandidateSearchResponse = {
   items: [],
   next_cursor: null,
   needs_review_count: 0,
+  total_count: 0,
 };
 
 const fallbackRegistrationOffer: RegistrationOffer = {
@@ -3267,7 +3268,7 @@ interface AgentChatMessage {
   content: string;
   candidates?: RecruitingAgentCandidate[];
   actions?: RecruitingAgentAction[];
-  toolTrace?: RecruitingAgentToolTrace[];
+  searchSummary?: RecruitingAgentSearchSummary | null;
   failure?: boolean;
   retryMessage?: string;
 }
@@ -3304,6 +3305,98 @@ function AgentMarkdown({ content }: { content: string }) {
         {content}
       </ReactMarkdown>
     </div>
+  );
+}
+
+function AgentSearchSummaryPanel({
+  summary,
+}: {
+  summary: RecruitingAgentSearchSummary;
+}) {
+  const hasVerificationSplit = summary.unconfirmed_count !== null;
+  return (
+    <section className="agent-search-summary" aria-label="候选人检索结果">
+      <div className="agent-search-summary-heading">
+        <span>检索结果</span>
+        <small>已基于当前工作区简历完成检索</small>
+      </div>
+      <div className="agent-search-summary-metrics">
+        <div>
+          <strong>{summary.confirmed_count}</strong>
+          <span>{hasVerificationSplit ? "已确认" : "符合条件"}</span>
+        </div>
+        {hasVerificationSplit && (
+          <div className="is-unconfirmed">
+            <strong>{summary.unconfirmed_count}</strong>
+            <span>未确认</span>
+          </div>
+        )}
+      </div>
+      {summary.confirmation_basis && (
+        <p className="agent-search-summary-note">{summary.confirmation_basis}</p>
+      )}
+      {summary.displayed_count < summary.confirmed_count && (
+        <p className="agent-search-summary-note">
+          当前展示前 {summary.displayed_count} 位候选人。
+        </p>
+      )}
+    </section>
+  );
+}
+
+function AgentCandidateCard({
+  candidate,
+  onOpen,
+}: {
+  candidate: RecruitingAgentCandidate;
+  onOpen: () => void;
+}) {
+  const verificationEvidence = candidate.verification_evidence ?? [];
+  const confirmationLabel =
+    candidate.verification_status === "confirmed" ? "已确认" : "未确认";
+  return (
+    <article className="agent-candidate-card">
+      <div className="agent-candidate-card-heading">
+        <div>
+          <strong>{candidate.display_name?.trim() || "未命名候选人"}</strong>
+          <small>{candidate.detail}</small>
+        </div>
+        <div className="agent-candidate-card-actions">
+          {candidate.score !== null && <b>{candidate.score.toFixed(1)}</b>}
+          <button
+            aria-label={`查看${candidate.display_name?.trim() || "候选人"}详情`}
+            className="icon-button agent-candidate-open"
+            onClick={onOpen}
+            type="button"
+          >
+            <Icon name="chevron-right" size={16} />
+          </button>
+        </div>
+      </div>
+      {candidate.verification_status && (
+        <div className="agent-verification">
+          <span
+            className={`agent-verification-status is-${candidate.verification_status}`}
+          >
+            {confirmationLabel}
+          </span>
+          {verificationEvidence.length ? (
+            <ul className="agent-verification-evidence" aria-label="简历依据">
+              {verificationEvidence.map((evidence) => (
+                <li key={`${evidence.source}-${evidence.label}`}>
+                  <span>
+                    {evidence.source === "resume_text" ? "简历原文" : "已提取事实"}
+                  </span>
+                  {evidence.label}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <small>简历未明确提及或当前信息无法识别。</small>
+          )}
+        </div>
+      )}
+    </article>
   );
 }
 
@@ -3398,7 +3491,7 @@ function RecruitingAgentDrawer({
         content: turn.message,
         candidates: turn.candidates,
         actions: turn.actions,
-        toolTrace: turn.tool_trace,
+        searchSummary: turn.search_summary,
       },
     ]);
     if (turn.job_version_id) setJobVersionId(turn.job_version_id);
@@ -3507,29 +3600,15 @@ function RecruitingAgentDrawer({
                 </button>
               </div>
             )}
-            {!!item.toolTrace?.length && (
-              <div className="agent-tool-trace">
-                {item.toolTrace.map((trace, index) => (
-                  <span key={`${trace.tool}-${index}`}>已调用：{trace.summary}</span>
-                ))}
-              </div>
-            )}
+            {item.searchSummary && <AgentSearchSummaryPanel summary={item.searchSummary} />}
             {!!item.candidates?.length && (
               <div className="agent-candidate-list">
                 {item.candidates.map((candidate) => (
-                  <button
-                    className="agent-candidate-row"
+                  <AgentCandidateCard
                     key={candidate.resume_id}
-                    onClick={() => onOpenResume(candidate)}
-                    type="button"
-                  >
-                    <span>
-                      <strong>{candidate.display_name?.trim() || "未命名候选人"}</strong>
-                      <small>{candidate.detail}</small>
-                    </span>
-                    {candidate.score !== null && <b>{candidate.score.toFixed(1)}</b>}
-                    <Icon name="chevron-right" size={16} />
-                  </button>
+                    candidate={candidate}
+                    onOpen={() => onOpenResume(candidate)}
+                  />
                 ))}
               </div>
             )}

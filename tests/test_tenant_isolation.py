@@ -24,11 +24,15 @@ from app.models import (
     MailboxSyncFailureAlert,
     Resume,
     ResumeAiExtractionJob,
+    ResumeEducation,
     ResumeScore,
+    ResumeSourceBlock,
     ResumeSummary,
     ScoreTemplate,
 )
+from app.schemas import CandidateSearchRequest
 from app.services import mailbox_import_service
+from app.services.search_service import search_candidates
 from app.tenant_scope import bypass_organization_scope, set_organization_context
 
 
@@ -311,6 +315,58 @@ def _seed_workspace_b_private_resources(
         }
 
 
+def _seed_source_only_language_resume(
+    client: TestClient,
+    *,
+    organization_id: str,
+    suffix: str,
+) -> str:
+    """Create one ready resume whose CET-4 evidence exists only in source text."""
+
+    database = client.app.state.database
+    with database.session_factory() as session:
+        set_organization_context(session, organization_id)
+        candidate = Candidate(display_name=f"Agent source fixture {suffix}")
+        session.add(candidate)
+        session.flush()
+        resume = Resume(
+            candidate_id=candidate.id,
+            original_filename=f"agent-source-{suffix}.pdf",
+            storage_key=f"agent-source-{suffix}.pdf",
+            sha256=(suffix * 64)[:64],
+            source_page_count=1,
+            parsed_page_count=1,
+            extraction_status="ready",
+            quality_flags=[],
+            parser_version="tenant-test-fixture",
+            raw_text="CET-4 source-only fixture",
+            is_active=True,
+            highest_degree="bachelor",
+            facts_version=1,
+        )
+        session.add(resume)
+        session.flush()
+        session.add_all(
+            (
+                ResumeSourceBlock(
+                    resume_id=resume.id,
+                    block_id="page-001",
+                    page_no=1,
+                    block_type="paragraph",
+                    text="Test University bachelor degree. CET-4 520.",
+                ),
+                ResumeEducation(
+                    resume_id=resume.id,
+                    school_name_raw="Test University",
+                    degree="bachelor",
+                    evidence_block_ids=["page-001"],
+                ),
+            )
+        )
+        session.commit()
+        return resume.id
+
+
 def test_registration_and_login_keep_workspace_sessions_separate(
     workspace_clients: tuple[TestClient, TestClient],
 ) -> None:
@@ -346,6 +402,58 @@ def test_registration_and_login_keep_workspace_sessions_separate(
     forbidden_directory_fields = {"organizations", "memberships", "workspace_ids"}
     assert not forbidden_directory_fields.intersection(session_a)
     assert not forbidden_directory_fields.intersection(session_b)
+
+
+def test_agent_source_text_language_evidence_never_crosses_workspaces(
+    workspace_clients: tuple[TestClient, TestClient],
+) -> None:
+    client_a, client_b = workspace_clients
+    session_a = _register_and_login(
+        client_a,
+        organization_name="Agent evidence workspace alpha",
+        full_name="Alpha Admin",
+        email="agent-evidence-alpha@example.test",
+        password="tenant-test-password-a",
+    )
+    session_b = _register_and_login(
+        client_b,
+        organization_name="Agent evidence workspace beta",
+        full_name="Beta Admin",
+        email="agent-evidence-beta@example.test",
+        password="tenant-test-password-b",
+    )
+    organization_a_id = str(session_a["organization"]["organization_id"])
+    organization_b_id = str(session_b["organization"]["organization_id"])
+    resume_a_id = _seed_source_only_language_resume(
+        client_a,
+        organization_id=organization_a_id,
+        suffix="a",
+    )
+    _seed_source_only_language_resume(
+        client_b,
+        organization_id=organization_b_id,
+        suffix="b",
+    )
+
+    database = client_a.app.state.database
+    with database.session_factory() as session:
+        set_organization_context(session, organization_a_id)
+        result = search_candidates(
+            session,
+            CandidateSearchRequest(
+                language_credentials_any_of=[{"credential_code": "cet4"}],
+            ),
+            include_source_language_evidence=True,
+        )
+
+    assert result.total_count == 1
+    assert [item.resume_id for item in result.items] == [resume_a_id]
+    evidence = next(
+        match
+        for match in result.items[0].matched_evidence
+        if match.filter_key == "language_credentials_any_of"
+    )
+    assert evidence.evidence_origin == "resume_text"
 
 
 def test_workspaces_can_reuse_candidate_names_without_cross_tenant_access(

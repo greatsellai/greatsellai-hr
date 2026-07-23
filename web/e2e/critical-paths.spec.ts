@@ -332,6 +332,66 @@ test.describe("招聘工作台关键路径", () => {
     await expect(trigger).toBeFocused();
   });
 
+  test("招聘助手将简历依据和未确认状态以招聘语言展示", async ({ page }) => {
+    await registerAndVerify(page, "agent-evidence");
+    await page.route("**/v1/recruiting-agent/turns", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          message: "找到 1 位简历明确提到英语四级的候选人。",
+          intent: "search_candidates",
+          job_version_id: null,
+          candidates: [
+            {
+              candidate_id: "candidate-e2e-evidence",
+              resume_id: "resume-e2e-evidence",
+              display_name: "候选人甲",
+              detail: "本科 · 工作经历 3 年 0 个月",
+              score: null,
+              verification_status: "confirmed",
+              verification_evidence: [
+                {
+                  label: "大学英语四级（CET-4）",
+                  source: "resume_text",
+                },
+              ],
+            },
+          ],
+          actions: [],
+          tool_trace: [
+            {
+              tool: "简历筛选",
+              summary: "已完成大学英语四级（CET-4）检索：已确认 1 人，未确认 4 份",
+            },
+          ],
+          search_summary: {
+            confirmed_count: 1,
+            displayed_count: 1,
+            unconfirmed_count: 4,
+            confirmation_basis: "已确认表示简历明确提及；未确认不代表未通过。",
+          },
+          batch_id: null,
+        }),
+      });
+    });
+
+    await page.getByRole("button", { name: "招聘助手", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    await dialog.getByLabel("向招聘助手提问").fill("给我找过了英语四级的人");
+    await dialog.getByRole("button", { name: "发送提问" }).click();
+
+    await expect(dialog.getByText("检索结果")).toBeVisible();
+    await expect(dialog.getByText("已确认", { exact: true }).first()).toBeVisible();
+    await expect(dialog.getByText("未确认", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("简历原文", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("大学英语四级（CET-4）")).toBeVisible();
+    await expect(dialog.locator(".agent-tool-trace")).toHaveCount(0);
+    await expect(dialog.getByText("language_credentials_any_of", { exact: false })).toHaveCount(0);
+    await expect(
+      dialog.getByRole("button", { name: "查看候选人甲详情" }),
+    ).toBeVisible();
+  });
+
   test("邮箱通道保存后同步请求只进入后台队列", async ({ page }) => {
     await registerAndVerify(page, "mailbox");
     await page.getByRole("button", { name: "邮箱入库", exact: true }).click();

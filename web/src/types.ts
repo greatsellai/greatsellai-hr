@@ -339,6 +339,20 @@ export interface RecruitingAgentCandidate {
   display_name: string | null;
   detail: string;
   score: number | null;
+  verification_status: "confirmed" | "unconfirmed" | null;
+  verification_evidence: RecruitingAgentVerificationEvidence[];
+}
+
+export interface RecruitingAgentVerificationEvidence {
+  label: string;
+  source: "structured_fact" | "resume_text";
+}
+
+export interface RecruitingAgentSearchSummary {
+  confirmed_count: number;
+  displayed_count: number;
+  unconfirmed_count: number | null;
+  confirmation_basis: string | null;
 }
 
 export interface RecruitingAgentAction {
@@ -363,6 +377,7 @@ export interface RecruitingAgentTurn {
   candidates: RecruitingAgentCandidate[];
   actions: RecruitingAgentAction[];
   tool_trace: RecruitingAgentToolTrace[];
+  search_summary: RecruitingAgentSearchSummary | null;
   batch_id: string | null;
 }
 
@@ -887,6 +902,7 @@ export interface CandidateSearchResponse {
   items: CandidateSearchItem[];
   next_cursor: string | null;
   needs_review_count: number;
+  total_count: number;
 }
 
 export interface ResumeLibraryItem {

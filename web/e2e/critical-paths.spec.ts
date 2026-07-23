@@ -217,6 +217,9 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("button", { name: /技术岗位初筛/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /销售与业务岗位初筛/ })).toBeVisible();
     await expect(page.locator('input[id^="dimension-key-"]')).toHaveCount(0);
+    await expect(page.getByLabel("评分维度", { exact: true })).toHaveCount(3);
+    await expect(page.getByLabel("权重（%）", { exact: true })).toHaveCount(3);
+    await expect(page.getByLabel("AI 评分说明（可选）", { exact: true })).toHaveCount(3);
     await page.locator("#template-name").fill("E2E 批量评分规则");
     const createTemplateRequest = page.waitForRequest((request) => {
       const { pathname } = new URL(request.url());

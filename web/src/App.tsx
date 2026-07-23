@@ -8858,30 +8858,77 @@ function ScorePage({
             </div>
             <div className="model-list">
               {dimensions.map((dimension) => (
-                <div className="model-row" key={dimension.id}>
-                  <div className="dimension-main-fields">
-                    <label
-                      className="sr-only"
-                      htmlFor={`dimension-label-${dimension.id}`}
+                <div className="score-template-dimension" key={dimension.id}>
+                  <div className="score-template-dimension-header">
+                    <div className="dimension-field-stack">
+                      <label
+                        className="field-label"
+                        htmlFor={`dimension-label-${dimension.id}`}
+                      >
+                        评分维度
+                      </label>
+                      <input
+                        className="field"
+                        id={`dimension-label-${dimension.id}`}
+                        onChange={(event) =>
+                          updateDimension(dimension.id, {
+                            label: event.target.value,
+                          })
+                        }
+                        placeholder="例如：技能匹配"
+                        value={dimension.label}
+                      />
+                    </div>
+                    <div className="dimension-field-stack dimension-weight-field">
+                      <label
+                        className="field-label"
+                        htmlFor={`dimension-weight-${dimension.id}`}
+                      >
+                        权重（%）
+                      </label>
+                      <input
+                        aria-describedby={`dimension-weight-hint-${dimension.id}`}
+                        className="field"
+                        id={`dimension-weight-${dimension.id}`}
+                        max="100"
+                        min="0"
+                        onChange={(event) =>
+                          updateDimension(dimension.id, {
+                            weight: Number(event.target.value),
+                          })
+                        }
+                        step="1"
+                        type="number"
+                        value={dimension.weight}
+                      />
+                      <span
+                        className="dimension-numeric-hint"
+                        id={`dimension-weight-hint-${dimension.id}`}
+                      >
+                        占总分
+                      </span>
+                    </div>
+                    <button
+                      aria-label={`删除 ${dimension.label}`}
+                      className="icon-button"
+                      disabled={dimensions.length <= 1}
+                      onClick={() => {
+                        setSelectedPresetId(null);
+                        setDimensions((current) =>
+                          current.filter((item) => item.id !== dimension.id),
+                        );
+                      }}
+                      type="button"
                     >
-                      维度名称
-                    </label>
-                    <input
-                      className="field"
-                      id={`dimension-label-${dimension.id}`}
-                      onChange={(event) =>
-                        updateDimension(dimension.id, {
-                          label: event.target.value,
-                        })
-                      }
-                      placeholder="例如：技能匹配"
-                      value={dimension.label}
-                    />
+                      <Icon name="close" size={16} />
+                    </button>
+                  </div>
+                  <div className="dimension-guidance-stack">
                     <label
-                      className="sr-only"
+                      className="field-label"
                       htmlFor={`dimension-guidance-${dimension.id}`}
                     >
-                      评分指引
+                      AI 评分说明（可选）
                     </label>
                     <textarea
                       className="textarea-field dimension-guidance-field"
@@ -8895,43 +8942,6 @@ function ScorePage({
                       value={dimension.guidance ?? ""}
                     />
                   </div>
-                  <div className="dimension-numeric-fields">
-                    <label
-                      className="sr-only"
-                      htmlFor={`dimension-weight-${dimension.id}`}
-                    >
-                      权重
-                    </label>
-                    <input
-                      className="field"
-                      id={`dimension-weight-${dimension.id}`}
-                      max="100"
-                      min="0"
-                      onChange={(event) =>
-                        updateDimension(dimension.id, {
-                          weight: Number(event.target.value),
-                        })
-                      }
-                      step="1"
-                      type="number"
-                      value={dimension.weight}
-                    />
-                    <span className="dimension-numeric-hint">占总分</span>
-                  </div>
-                  <button
-                    aria-label={`删除 ${dimension.label}`}
-                    className="icon-button"
-                    disabled={dimensions.length <= 1}
-                    onClick={() => {
-                      setSelectedPresetId(null);
-                      setDimensions((current) =>
-                        current.filter((item) => item.id !== dimension.id),
-                      );
-                    }}
-                    type="button"
-                  >
-                    <Icon name="close" size={16} />
-                  </button>
                 </div>
               ))}
             </div>

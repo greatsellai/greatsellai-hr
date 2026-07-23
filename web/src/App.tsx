@@ -87,7 +87,9 @@ import { Icon, type IconName } from "./icons";
 
 const AdminApp = lazy(() => import("./admin/AdminApp"));
 
-type View = "library" | "filter" | "upload" | "inbox" | "score" | "match" | "data";
+type View = "library" | "filter" | "upload" | "score" | "match" | "settings";
+type MainWorkspaceView = Exclude<View, "settings">;
+type SettingsSection = "mailbox" | "data";
 type DrawerTab = "original" | "summary" | "score" | "evidence";
 type MatchMode = "all" | "any";
 type KeywordMode = "broad" | "precise";
@@ -543,14 +545,29 @@ function createTemplateDraftDimensions(
   }));
 }
 
-const navigation: Array<{ view: View; label: string; icon: IconName }> = [
+const navigation: Array<{ view: MainWorkspaceView; label: string; icon: IconName }> = [
   { view: "library", label: "简历库", icon: "folder" },
   { view: "filter", label: "筛选工作台", icon: "filter" },
   { view: "upload", label: "上传简历", icon: "upload" },
-  { view: "inbox", label: "邮箱入库", icon: "inbox" },
   { view: "score", label: "评分模板", icon: "layers" },
   { view: "match", label: "招聘详情", icon: "match" },
 ];
+
+function settingsSectionFromHash(hash: string): SettingsSection | null {
+  const value = hash
+    .replace(/^#/, "")
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .toLowerCase();
+
+  if (value === "settings/mailbox" || value === "inbox") return "mailbox";
+  if (value === "settings/data" || value === "data") return "data";
+  return null;
+}
+
+function settingsHash(section: SettingsSection): string {
+  return `#settings/${section}`;
+}
 
 const mailboxRetentionPolicies: Array<{
   value: MailboxRetentionPolicy;
@@ -1435,7 +1452,12 @@ function App() {
 }
 
 function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
-  const [view, setView] = useState<View>("library");
+  const [view, setView] = useState<View>(() =>
+    settingsSectionFromHash(window.location.hash) ? "settings" : "library",
+  );
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>(
+    () => settingsSectionFromHash(window.location.hash) ?? "mailbox",
+  );
   const [filterDraft, setFilterDraft] =
     useState<FilterDraft>(freshDefaultFilter);
   const [appliedFilter, setAppliedFilter] =
@@ -1491,9 +1513,42 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const canManageMailbox =
     authSession?.role === "admin" &&
     authSession.plan?.feature_flags.mailbox_import === true;
+  const canManageCandidateData = authSession?.role === "admin";
+  const canManageSettings = canManageMailbox || canManageCandidateData;
   const canGenerateAiJd =
     authSession?.role === "admin" &&
     authSession.plan?.feature_flags.ai_jd_generation === true;
+
+  const updateSettingsHash = useCallback(
+    (section: SettingsSection | null, replace = false) => {
+      const nextHash = section ? settingsHash(section) : "";
+      if (window.location.hash === nextHash) return;
+      const nextLocation = `${window.location.pathname}${window.location.search}${nextHash}`;
+      if (replace) {
+        window.history.replaceState(window.history.state, "", nextLocation);
+      } else {
+        window.history.pushState(window.history.state, "", nextLocation);
+      }
+    },
+    [],
+  );
+
+  const navigateToView = useCallback(
+    (nextView: MainWorkspaceView) => {
+      setView(nextView);
+      updateSettingsHash(null);
+    },
+    [updateSettingsHash],
+  );
+
+  const openSettings = useCallback(
+    (section: SettingsSection) => {
+      setSettingsSection(section);
+      setView("settings");
+      updateSettingsHash(section);
+    },
+    [updateSettingsHash],
+  );
 
   const closeAgent = useCallback(() => {
     setAgentOpen(false);
@@ -1886,8 +1941,53 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   }, [agentOpen, closeAgent]);
 
   useEffect(() => {
-    if (view === "inbox" && !canManageMailbox) setView("library");
-  }, [canManageMailbox, view]);
+    const syncSettingsFromHash = () => {
+      const section = settingsSectionFromHash(window.location.hash);
+      if (!section) {
+        setView((current) => current === "settings" ? "library" : current);
+        return;
+      }
+      setSettingsSection(section);
+      setView("settings");
+      updateSettingsHash(section, true);
+    };
+
+    syncSettingsFromHash();
+    window.addEventListener("hashchange", syncSettingsFromHash);
+    window.addEventListener("popstate", syncSettingsFromHash);
+    return () => {
+      window.removeEventListener("hashchange", syncSettingsFromHash);
+      window.removeEventListener("popstate", syncSettingsFromHash);
+    };
+  }, [updateSettingsHash]);
+
+  useEffect(() => {
+    if (!authSession || view !== "settings") return;
+    const sectionAllowed =
+      (settingsSection === "mailbox" && canManageMailbox) ||
+      (settingsSection === "data" && canManageCandidateData);
+    if (sectionAllowed) return;
+
+    const fallbackSection = canManageMailbox
+      ? "mailbox"
+      : canManageCandidateData
+        ? "data"
+        : null;
+    if (!fallbackSection) {
+      setView("library");
+      updateSettingsHash(null, true);
+      return;
+    }
+    setSettingsSection(fallbackSection);
+    updateSettingsHash(fallbackSection, true);
+  }, [
+    authSession,
+    canManageCandidateData,
+    canManageMailbox,
+    settingsSection,
+    updateSettingsHash,
+    view,
+  ]);
 
   const openCandidate = useCallback(
     (item: CandidateSearchItem, tab: DrawerTab = "summary") => {
@@ -1918,11 +2018,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       });
       setDrawerTab("summary");
       setDrawerOpen(true);
-      setView("library");
+      navigateToView("library");
       setLibraryRefreshToken((current) => current + 1);
       void refreshReview(resumeId);
     },
-    [refreshReview],
+    [navigateToView, refreshReview],
   );
 
   const openLibraryResume = useCallback(
@@ -2244,7 +2344,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     const next = { ...filterDraftRef.current, keywords: terms };
     cancelScheduledFilterSearch();
     replaceFilterDraft(next);
-    setView("filter");
+    navigateToView("filter");
     void runSearch(next);
   };
 
@@ -2426,10 +2526,10 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       <a className="skip-link" href="#main-content">跳到主要内容</a>
       <SideRail
         activeView={view}
-        canManageCandidateData={authSession?.role === "admin"}
-        canManageMailbox={canManageMailbox}
+        canManageSettings={canManageSettings}
         inert={drawerOpen || agentOpen}
-        onChangeView={setView}
+        onChangeView={navigateToView}
+        onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
       />
       <div className="app-area" inert={drawerOpen || agentOpen}>
         <Topbar
@@ -2442,7 +2542,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           }}
           agentTriggerRef={agentTriggerRef}
           onLogout={() => void logout()}
-          onNewUpload={() => setView("upload")}
+          onNewUpload={() => navigateToView("upload")}
           organizationName={authSession?.organization?.name ?? null}
           platformAdmin={authSession?.is_platform_admin ?? false}
           planName={authSession?.plan?.name ?? null}
@@ -2456,7 +2556,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
               refreshToken={libraryRefreshToken}
               selectedResumeId={selectedResumeId}
               onOpenResume={openLibraryResume}
-              onUpload={() => setView("upload")}
+              onUpload={() => navigateToView("upload")}
             />
           )}
           {view === "filter" && (
@@ -2478,7 +2578,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
               onLoadMore={() =>
                 void runSearch(appliedFilterRef.current, true, search.next_cursor)
               }
-              onUpload={() => setView("upload")}
+              onUpload={() => navigateToView("upload")}
               scoreTemplateId={scoreTemplateId}
               scoreTemplates={scoreTemplates}
             />
@@ -2486,13 +2586,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           <div hidden={view !== "upload"}>
             <UploadPage onComplete={openUploadedResume} notify={notify} />
           </div>
-          {view === "inbox" && canManageMailbox && (
-            <MailboxPage
-              notify={notify}
-              onImported={() => setLibraryRefreshToken((current) => current + 1)}
-              role={authSession?.role ?? null}
-            />
-          )}
           {view === "score" && (
             <ScorePage
               notify={notify}
@@ -2507,10 +2600,16 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
               onOpenMatchedResume={openMatchedResume}
             />
           )}
-          {view === "data" && (
-            <CandidateDataLifecyclePage
+          {view === "settings" && canManageSettings && (
+            <WorkspaceSettingsPage
+              activeSection={settingsSection}
+              canManageCandidateData={canManageCandidateData}
+              canManageMailbox={canManageMailbox}
               notify={notify}
-              onOpenLibrary={() => setView("library")}
+              onImported={() => setLibraryRefreshToken((current) => current + 1)}
+              onOpenLibrary={() => navigateToView("library")}
+              onSelectSection={openSettings}
+              role={authSession?.role ?? null}
             />
           )}
         </main>
@@ -2553,22 +2652,22 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         enrichingFacts={enrichingFacts}
         onTabChange={setDrawerTab}
         reparsingSource={reparsingSource}
-        canManageCandidateData={authSession?.role === "admin"}
+        canManageCandidateData={canManageCandidateData}
       />
       <RecruitingAgentDrawer
         isOpen={agentOpen}
         onClose={closeAgent}
         onOpenMatchWorkspace={() => {
           setAgentOpen(false);
-          setView("match");
+          navigateToView("match");
         }}
         onOpenScoreWorkspace={() => {
           setAgentOpen(false);
-          setView("score");
+          navigateToView("score");
         }}
-        onOpenMailboxWorkspace={() => {
+        onOpenMailboxSettings={() => {
           setAgentOpen(false);
-          setView("inbox");
+          openSettings("mailbox");
         }}
         onOpenResume={openAgentResume}
       />
@@ -3182,24 +3281,22 @@ function TrialStatusBanner({
 
 function SideRail({
   activeView,
-  canManageCandidateData,
-  canManageMailbox,
+  canManageSettings,
   onChangeView,
+  onOpenSettings,
   inert,
 }: {
   activeView: View;
-  canManageCandidateData: boolean;
-  canManageMailbox: boolean;
-  onChangeView: (view: View) => void;
+  canManageSettings: boolean;
+  onChangeView: (view: MainWorkspaceView) => void;
+  onOpenSettings: () => void;
   inert: boolean;
 }) {
   return (
     <aside aria-label="主导航" className="side-rail" inert={inert}>
       <div aria-label="AI 简历筛选工作台" className="rail-mark" role="img" />
       <nav className="rail-nav">
-        {navigation
-          .filter((item) => item.view !== "inbox" || canManageMailbox)
-          .map((item) => (
+        {navigation.map((item) => (
             <button
               aria-current={activeView === item.view ? "page" : undefined}
               aria-label={item.label}
@@ -3218,16 +3315,16 @@ function SideRail({
           <Icon name="history" size={18} />
           <span className="rail-tooltip">工作记录</span>
         </button>
-        {canManageCandidateData && (
+        {canManageSettings && (
           <button
-            aria-current={activeView === "data" ? "page" : undefined}
-            aria-label="数据保留与恢复"
-            className={`rail-item${activeView === "data" ? " is-active" : ""}`}
-            onClick={() => onChangeView("data")}
+            aria-current={activeView === "settings" ? "page" : undefined}
+            aria-label="设置"
+            className={`rail-item${activeView === "settings" ? " is-active" : ""}`}
+            onClick={onOpenSettings}
             type="button"
           >
             <Icon name="gear" size={18} />
-            <span className="rail-tooltip">数据保留与恢复</span>
+            <span className="rail-tooltip">设置</span>
           </button>
         )}
       </div>
@@ -3469,14 +3566,14 @@ function RecruitingAgentDrawer({
   onClose,
   onOpenMatchWorkspace,
   onOpenScoreWorkspace,
-  onOpenMailboxWorkspace,
+  onOpenMailboxSettings,
   onOpenResume,
 }: {
   isOpen: boolean;
   onClose: () => void;
   onOpenMatchWorkspace: () => void;
   onOpenScoreWorkspace: () => void;
-  onOpenMailboxWorkspace: () => void;
+  onOpenMailboxSettings: () => void;
   onOpenResume: (candidate: RecruitingAgentCandidate) => void;
 }) {
   const [input, setInput] = useState("");
@@ -3689,9 +3786,9 @@ function RecruitingAgentDrawer({
               </button>
             )}
             {item.actions?.some((action) => action.action === "open_mailbox_workspace") && (
-              <button className="button button-ghost agent-workspace-button" onClick={onOpenMailboxWorkspace} type="button">
+              <button className="button button-ghost agent-workspace-button" onClick={onOpenMailboxSettings} type="button">
                 <Icon name="inbox" size={15} />
-                打开邮箱附件入库
+                打开收件邮箱设置
               </button>
             )}
           </article>
@@ -5584,10 +5681,13 @@ function candidateDataAuditActionLabel(event: CandidateDataAuditEvent): string {
 function CandidateDataLifecyclePage({
   notify,
   onOpenLibrary,
+  embedded = false,
 }: {
   notify: (kind: ToastKind, message: string) => void;
   onOpenLibrary: () => void;
+  embedded?: boolean;
 }) {
+  const pageClassName = `candidate-data-page${embedded ? " is-embedded" : " page-frame"}`;
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -5768,14 +5868,14 @@ function CandidateDataLifecyclePage({
   };
 
   if (loading && !policy) {
-    return <div className="page-frame candidate-data-page"><TableSkeleton /></div>;
+    return <div className={pageClassName}><TableSkeleton /></div>;
   }
 
   return (
-    <div className="page-frame candidate-data-page">
+    <div className={pageClassName}>
       <header className="page-heading">
         <div>
-          <h1>数据保留与恢复</h1>
+          {embedded ? <h2>候选人数据与保留</h2> : <h1>数据保留与恢复</h1>}
           <p>在工作区内管理候选人资料的保留期限、可恢复删除、导出文件和原件访问记录。所有清理操作先进入恢复期，不会直接做出招聘结论。</p>
         </div>
         <div className="candidate-data-page-actions">
@@ -5965,6 +6065,117 @@ function CandidateDataEmptyState({
     <div className="candidate-data-empty">
       <strong>{title}</strong>
       <span>{description}</span>
+    </div>
+  );
+}
+
+function WorkspaceSettingsPage({
+  activeSection,
+  canManageCandidateData,
+  canManageMailbox,
+  notify,
+  onImported,
+  onOpenLibrary,
+  onSelectSection,
+  role,
+}: {
+  activeSection: SettingsSection;
+  canManageCandidateData: boolean;
+  canManageMailbox: boolean;
+  notify: (kind: ToastKind, message: string) => void;
+  onImported: () => void;
+  onOpenLibrary: () => void;
+  onSelectSection: (section: SettingsSection) => void;
+  role: "admin" | "recruiter" | null;
+}) {
+  const sections: Array<{
+    id: SettingsSection;
+    label: string;
+    description: string;
+    icon: IconName;
+  }> = [];
+
+  if (canManageMailbox) {
+    sections.push({
+      id: "mailbox",
+      label: "收件邮箱",
+      description: "管理收件通道、同步和附件入库保留。",
+      icon: "inbox",
+    });
+  }
+  if (canManageCandidateData) {
+    sections.push({
+      id: "data",
+      label: "候选人数据与保留",
+      description: "管理资料保留、导出、删除和访问记录。",
+      icon: "gear",
+    });
+  }
+
+  const currentSection = sections.some((section) => section.id === activeSection)
+    ? activeSection
+    : sections[0]?.id;
+  if (!currentSection) return null;
+
+  return (
+    <div className="page-frame settings-page">
+      <header className="page-heading">
+        <div>
+          <h1>设置</h1>
+          <p>管理当前工作区的收件通道，以及候选人资料的保留和访问规则。</p>
+        </div>
+      </header>
+      <div className="settings-layout">
+        <nav aria-label="设置分类" className="panel settings-navigation">
+          <p className="settings-navigation-label">工作区设置</p>
+          <div aria-orientation="vertical" className="settings-navigation-list" role="tablist">
+            {sections.map((section) => {
+              const selected = section.id === currentSection;
+              return (
+                <button
+                  aria-controls={`settings-panel-${section.id}`}
+                  aria-label={section.label}
+                  aria-selected={selected}
+                  className={`settings-navigation-item${selected ? " is-active" : ""}`}
+                  id={`settings-tab-${section.id}`}
+                  key={section.id}
+                  onClick={() => onSelectSection(section.id)}
+                  role="tab"
+                  type="button"
+                >
+                  <span className="settings-navigation-icon"><Icon name={section.icon} size={17} /></span>
+                  <span>
+                    <strong>{section.label}</strong>
+                    <small>{section.description}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+        <section
+          aria-labelledby={`settings-tab-${currentSection}`}
+          className="settings-content"
+          id={`settings-panel-${currentSection}`}
+          role="tabpanel"
+          tabIndex={-1}
+        >
+          {currentSection === "mailbox" ? (
+            <MailboxPage
+              embedded
+              notify={notify}
+              onImported={onImported}
+              role={role}
+            />
+          ) : (
+            <CandidateDataLifecyclePage
+              embedded
+              notify={notify}
+              onOpenLibrary={onOpenLibrary}
+            />
+          )}
+        </section>
+      </div>
     </div>
   );
 }
@@ -7170,11 +7381,14 @@ function MailboxPage({
   notify,
   onImported,
   role,
+  embedded = false,
 }: {
   notify: (kind: ToastKind, message: string) => void;
   onImported: () => void;
   role: "admin" | "recruiter" | null;
+  embedded?: boolean;
 }) {
+  const pageClassName = `mailbox-page${embedded ? " is-embedded" : " page-frame"}`;
   const [mailboxes, setMailboxes] = useState<MailboxConfig[]>([]);
   const [selectedMailboxId, setSelectedMailboxId] = useState<string | null>(null);
   const [historyFilterMailboxId, setHistoryFilterMailboxId] = useState<string | null>(null);
@@ -7737,10 +7951,10 @@ function MailboxPage({
   );
 
   return (
-    <div className="page-frame mailbox-page">
+    <div className={pageClassName}>
       <header className="page-heading">
         <div>
-          <h1>邮箱附件入库</h1>
+          {embedded ? <h2>收件邮箱</h2> : <h1>邮箱附件入库</h1>}
           <p>连接招聘邮箱后，系统只接收绑定之后到达的附件。</p>
         </div>
         {hasMailboxChannels && (

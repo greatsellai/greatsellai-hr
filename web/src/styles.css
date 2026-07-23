@@ -3098,6 +3098,101 @@ button {
   padding: clamp(1.5rem, 3vw, 3rem);
 }
 
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(13rem, 16rem) minmax(0, 1fr);
+  gap: var(--space-xl);
+  align-items: start;
+}
+
+.settings-navigation {
+  align-self: start;
+  padding: var(--space-sm);
+}
+
+.settings-navigation-label {
+  margin: 0.25rem 0 0.625rem;
+  padding: 0 var(--space-xs);
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.settings-navigation-list {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.settings-navigation-item {
+  display: grid;
+  width: 100%;
+  min-height: 4.5rem;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: 0.625rem;
+  padding: 0.75rem;
+  color: var(--ink-soft);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: color 160ms var(--ease-out), background-color 160ms var(--ease-out), border-color 160ms var(--ease-out);
+}
+
+.settings-navigation-item:hover {
+  color: var(--ink);
+  background: var(--surface-muted);
+}
+
+.settings-navigation-item.is-active {
+  color: var(--ink);
+  background: var(--surface-selected);
+  border-color: rgb(215 22 24 / 0.24);
+}
+
+.settings-navigation-icon {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  color: var(--ink-muted);
+  background: var(--surface-muted);
+  border-radius: var(--radius-xs);
+}
+
+.settings-navigation-item.is-active .settings-navigation-icon {
+  color: var(--red);
+  background: var(--red-tint);
+}
+
+.settings-navigation-item > span:last-child {
+  display: grid;
+  gap: 0.125rem;
+  min-width: 0;
+  align-content: center;
+}
+
+.settings-navigation-item strong {
+  color: inherit;
+  font-size: 0.8125rem;
+  font-weight: 680;
+}
+
+.settings-navigation-item small {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.settings-content {
+  min-width: 0;
+}
+
+.settings-content > .mailbox-page,
+.settings-content > .candidate-data-page {
+  min-width: 0;
+}
+
 .page-heading {
   display: flex;
   gap: var(--space-md);
@@ -5994,6 +6089,14 @@ button {
 
   .page-layout {
     grid-template-columns: 1fr;
+  }
+
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-navigation-list {
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
   }
 
   .mailbox-workspace {

@@ -411,8 +411,12 @@ test.describe("招聘工作台关键路径", () => {
 
   test("邮箱通道保存后同步请求只进入后台队列", async ({ page }) => {
     await registerAndVerify(page, "mailbox");
-    await page.getByRole("button", { name: "邮箱入库", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "邮箱附件入库" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "邮箱入库", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("tab", { name: "收件邮箱", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("heading", { name: "收件邮箱", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "绑定招聘收件邮箱" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "收件通道" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "附件入库记录" })).toHaveCount(0);
@@ -423,5 +427,18 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByText("收件通道已创建，只会入库从现在起收到的附件。")).toBeVisible();
     await page.getByRole("button", { name: "同步此通道" }).click();
     await expect(page.getByText("已加入后台同步队列。")).toBeVisible();
+  });
+
+  test("旧邮箱入口会转入设置中的收件邮箱", async ({ page }) => {
+    await registerAndVerify(page, "mailbox-hash");
+    await page.goto("/#inbox");
+
+    await expect(page).toHaveURL(/#settings\/mailbox$/);
+    await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("tab", { name: "收件邮箱", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("heading", { name: "收件邮箱", exact: true })).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByRole("tab", { name: "收件邮箱", exact: true })).toHaveAttribute("aria-selected", "true");
   });
 });

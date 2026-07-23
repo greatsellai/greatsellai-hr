@@ -948,17 +948,21 @@ export interface SavedFilter {
   updated_at: string;
 }
 
-export interface ScoreDimensionInput {
-  key: string;
+export interface ScoreDimensionCreateInput {
   label: string;
   weight: number;
   guidance?: string | null;
 }
 
+/** Server response only. `key` is never entered or rendered for recruiters. */
+export interface ScoreDimensionInput extends ScoreDimensionCreateInput {
+  key: string;
+}
+
 export interface ScoreTemplateCreate {
   name: string;
   description?: string | null;
-  dimensions: ScoreDimensionInput[];
+  dimensions: ScoreDimensionCreateInput[];
 }
 
 export interface ScoreTemplate {

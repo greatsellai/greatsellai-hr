@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from test_filter_mvp_contract import _education, _employment, _facts, _save_ready_resume
 from app.services.deepseek_provider import FACT_SNAPSHOT_SCHEMA_VERSION
 
@@ -10,13 +12,11 @@ def _template_payload() -> dict[str, object]:
         "description": "Grounded scoring test template",
         "dimensions": [
             {
-                "key": "skills",
                 "label": "Skills",
                 "weight": 60,
                 "guidance": "Assess explicit relevant skills only.",
             },
             {
-                "key": "experience",
                 "label": "Experience",
                 "weight": 40,
                 "guidance": "Assess explicit work evidence only.",
@@ -30,18 +30,23 @@ def _fake_score_provider(**kwargs: object) -> dict[str, object]:
     assert isinstance(snapshot, dict)
     assert snapshot["schema_version"] == FACT_SNAPSHOT_SCHEMA_VERSION
     fact_id = snapshot["skills"][0]["fact_id"]
+    dimensions = kwargs["dimensions"]
+    assert isinstance(dimensions, list)
+    assert len(dimensions) == 2
+    assert all(isinstance(dimension, dict) for dimension in dimensions)
+    skill_key, experience_key = [str(dimension["key"]) for dimension in dimensions]
     return {
         "schema_version": "resume_score.v1",
         "dimension_scores": [
             {
-                "key": "skills",
+                "key": skill_key,
                 "raw_score": 40,
                 "rationale": "Explicit Python and SQL facts are present.",
                 "fact_ids": [fact_id],
                 "uncertainties": [],
             },
             {
-                "key": "experience",
+                "key": experience_key,
                 "raw_score": 50,
                 "rationale": "No directly cited fact supports this dimension.",
                 "fact_ids": [],
@@ -89,6 +94,9 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     assert template.status_code == 200, template.text
     template_id = template.json()["template_id"]
     assert "max_raw_score" not in template.json()["dimensions"][0]
+    template_dimension_keys = [item["key"] for item in template.json()["dimensions"]]
+    assert len(template_dimension_keys) == len(set(template_dimension_keys))
+    assert all(re.fullmatch(r"dim_[a-f0-9]{32}", item) for item in template_dimension_keys)
 
     score = ai_client.post(
         f"/v1/resumes/{resume_id}/scores",
@@ -137,9 +145,10 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     assert payload["dimension_scores"][1]["fact_evidence"] == []
     assert payload["dimension_scores"][1]["evidence_state"] == "insufficient_information"
     assert payload["audit_trail"] == []
+    skills_key = payload["dimension_scores"][0]["key"]
 
     overridden = ai_client.post(
-        f"/v1/resume-scores/{payload['score_id']}/dimensions/skills/override",
+        f"/v1/resume-scores/{payload['score_id']}/dimensions/{skills_key}/override",
         json={"raw_score": 80, "reason": "Verified with portfolio evidence."},
     )
     assert overridden.status_code == 200, overridden.text
@@ -168,7 +177,7 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
             "action": "score_dimension_overridden",
             "actor": "single_admin",
             "reason": "Verified with portfolio evidence.",
-            "dimension_key": "skills",
+            "dimension_key": skills_key,
             "ai_raw_score": 40.0,
             "previous_final_raw_score": 40.0,
             "final_raw_score": 80.0,
@@ -179,7 +188,7 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     ]
 
     overridden_again = ai_client.post(
-        f"/v1/resume-scores/{payload['score_id']}/dimensions/skills/override",
+        f"/v1/resume-scores/{payload['score_id']}/dimensions/{skills_key}/override",
         json={"raw_score": 60, "reason": "Adjusted after a second review."},
     )
     assert overridden_again.status_code == 200, overridden_again.text
@@ -221,10 +230,33 @@ def test_score_template_score_run_and_manual_override(ai_client, monkeypatch) ->
     assert stale_detail.json()["is_current_facts_version"] is False
 
     exceeds_hundred = ai_client.post(
-        f"/v1/resume-scores/{payload['score_id']}/dimensions/skills/override",
+        f"/v1/resume-scores/{payload['score_id']}/dimensions/{skills_key}/override",
         json={"raw_score": 101, "reason": "Too high."},
     )
     assert exceeds_hundred.status_code == 422
+
+
+def test_score_template_generates_internal_keys_and_rejects_duplicate_labels(client) -> None:
+    created = client.post("/v1/score-templates", json=_template_payload())
+    assert created.status_code == 200, created.text
+    dimensions = created.json()["dimensions"]
+    assert [item["label"] for item in dimensions] == ["Skills", "Experience"]
+    assert all(re.fullmatch(r"dim_[a-f0-9]{32}", item["key"]) for item in dimensions)
+
+    duplicate_labels = _template_payload()
+    duplicate_dimensions = duplicate_labels["dimensions"]
+    assert isinstance(duplicate_dimensions, list)
+    duplicate_dimensions[1]["label"] = " Skills "
+    rejected = client.post("/v1/score-templates", json=duplicate_labels)
+    assert rejected.status_code == 422
+    assert "dimension labels must be unique" in rejected.text
+
+    client_supplied_key = _template_payload()
+    client_supplied_dimensions = client_supplied_key["dimensions"]
+    assert isinstance(client_supplied_dimensions, list)
+    client_supplied_dimensions[0]["key"] = "skills"
+    rejected_key = client.post("/v1/score-templates", json=client_supplied_key)
+    assert rejected_key.status_code == 422
 
 
 def test_candidate_search_uses_score_order_and_compact_profile_fields(

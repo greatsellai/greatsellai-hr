@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Literal, Mapping
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -54,6 +55,17 @@ class ScoreTemplateNotFoundError(ScoreServiceError):
 
 class ResumeScoreNotFoundError(ScoreServiceError):
     pass
+
+
+def _new_dimension_key() -> str:
+    """Create an opaque, stable key for model output and audit joins.
+
+    Recruiters configure labels, weights, and guidance. The model-facing key
+    is generated only by the server so renaming a visible label never changes
+    the stored scoring identity.
+    """
+
+    return f"dim_{uuid4().hex}"
 
 
 def _dimension_input(dimension: ScoreTemplateDimension) -> ScoreDimensionInput:
@@ -397,7 +409,7 @@ def create_score_template(
         session.add(
             ScoreTemplateDimension(
                 template_id=template.id,
-                key=dimension.key,
+                key=_new_dimension_key(),
                 label=dimension.label.strip(),
                 weight=dimension.weight,
                 guidance=dimension.guidance.strip() if dimension.guidance else None,

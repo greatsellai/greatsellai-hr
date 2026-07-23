@@ -79,7 +79,7 @@ import type {
   RecruitingAgentSearchSummary,
   RecruitingAgentTurn,
   SavedFilter,
-  ScoreDimensionInput,
+  ScoreDimensionCreateInput,
   ScoreTemplate,
   TrialAccess,
 } from "./types";
@@ -161,8 +161,15 @@ interface UploadQueueItem {
   retryable?: boolean;
 }
 
-interface TemplateDraftDimension extends ScoreDimensionInput {
+interface TemplateDraftDimension extends ScoreDimensionCreateInput {
   id: string;
+}
+
+interface ScoreTemplatePreset {
+  id: string;
+  name: string;
+  description: string;
+  dimensions: ScoreDimensionCreateInput[];
 }
 
 const emptySearch: CandidateSearchResponse = {
@@ -455,29 +462,86 @@ const fallbackFilterOptions: FilterOptions = {
   ],
 };
 
-const defaultTemplateDimensions: TemplateDraftDimension[] = [
+const scoreTemplatePresets: ScoreTemplatePreset[] = [
   {
-    id: "skill_fit",
-    key: "skill_fit",
-    label: "技能匹配",
-    weight: 40,
-    guidance: "重点看核心技术栈、工具与岗位场景的可验证匹配。",
+    id: "general-screening",
+    name: "通用候选人初筛",
+    description: "适用于尚未绑定具体 JD 的首轮简历筛选，只根据可验证的简历事实评分。",
+    dimensions: [
+      {
+        label: "技能匹配",
+        weight: 40,
+        guidance: "重点看核心技能、工具与目标岗位场景的可验证匹配。",
+      },
+      {
+        label: "经历深度",
+        weight: 35,
+        guidance: "重点看工作或实习职责范围、成果、复杂度与持续时间。",
+      },
+      {
+        label: "教育与基础条件",
+        weight: 25,
+        guidance: "重点看明确记载的学历、专业及岗位必要的基础条件。",
+      },
+    ],
   },
   {
-    id: "experience_depth",
-    key: "experience_depth",
-    label: "经历深度",
-    weight: 35,
-    guidance: "重点看工作年限、职责范围、成果与复杂度。",
+    id: "technical-screening",
+    name: "技术岗位初筛",
+    description: "适用于软件、算法、数据与 AI 等技术岗位，重点识别真实工程与项目实践。",
+    dimensions: [
+      {
+        label: "核心技术匹配",
+        weight: 40,
+        guidance: "重点看岗位所需语言、框架、模型、工具和技术方向的明确记录。",
+      },
+      {
+        label: "项目与工程实践",
+        weight: 35,
+        guidance: "重点看项目职责、技术方案、交付结果、复杂问题和工程规模。",
+      },
+      {
+        label: "技术深度与成长证据",
+        weight: 25,
+        guidance: "重点看明确记载的性能优化、质量保障、研究、开源或持续技术投入。",
+      },
+    ],
   },
   {
-    id: "education_basis",
-    key: "education_basis",
-    label: "教育背景",
-    weight: 25,
-    guidance: "重点看学历、专业及必要的院校条件。",
+    id: "business-screening",
+    name: "销售与业务岗位初筛",
+    description: "适用于销售、商务与业务拓展岗位，重点关注可验证的客户场景和业务成果。",
+    dimensions: [
+      {
+        label: "行业与客户场景匹配",
+        weight: 30,
+        guidance: "重点看明确记载的行业、客户类型、产品或业务场景是否相关。",
+      },
+      {
+        label: "业绩与目标达成",
+        weight: 45,
+        guidance: "重点看明确记载的营收、签约、增长、目标完成或其他业务结果。",
+      },
+      {
+        label: "业务推进与协作",
+        weight: 25,
+        guidance: "重点看客户推进、跨团队协作、渠道或项目协调等可验证职责。",
+      },
+    ],
   },
 ];
+
+const defaultScoreTemplatePreset = scoreTemplatePresets[0];
+let templateDraftDimensionSequence = 0;
+
+function createTemplateDraftDimensions(
+  preset: Pick<ScoreTemplatePreset, "dimensions">,
+): TemplateDraftDimension[] {
+  return preset.dimensions.map((dimension) => ({
+    ...dimension,
+    id: `score-dimension-${Date.now()}-${++templateDraftDimensionSequence}`,
+  }));
+}
 
 const navigation: Array<{ view: View; label: string; icon: IconName }> = [
   { view: "library", label: "简历库", icon: "folder" },
@@ -8562,10 +8626,15 @@ function ScorePage({
 }) {
   const [templates, setTemplates] = useState<ScoreTemplate[]>([]);
   const [templateId, setTemplateId] = useState("");
-  const [templateName, setTemplateName] = useState("通用候选人评分");
-  const [templateDescription, setTemplateDescription] = useState("");
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(
+    defaultScoreTemplatePreset.id,
+  );
+  const [templateName, setTemplateName] = useState(defaultScoreTemplatePreset.name);
+  const [templateDescription, setTemplateDescription] = useState(
+    defaultScoreTemplatePreset.description,
+  );
   const [dimensions, setDimensions] = useState<TemplateDraftDimension[]>(() =>
-    defaultTemplateDimensions.map((item) => ({ ...item })),
+    createTemplateDraftDimensions(defaultScoreTemplatePreset),
   );
   const [loadingTemplates, setLoadingTemplates] = useState(false);
   const [savingTemplate, setSavingTemplate] = useState(false);
@@ -8598,10 +8667,18 @@ function ScorePage({
   const updateDimension = (
     id: string,
     patch: Partial<TemplateDraftDimension>,
-  ) =>
+  ) => {
+    setSelectedPresetId(null);
     setDimensions((current) =>
       current.map((item) => (item.id === id ? { ...item, ...patch } : item)),
     );
+  };
+  const applyPreset = (preset: ScoreTemplatePreset) => {
+    setSelectedPresetId(preset.id);
+    setTemplateName(preset.name);
+    setTemplateDescription(preset.description);
+    setDimensions(createTemplateDraftDimensions(preset));
+  };
   const saveTemplate = async () => {
     if (!templateName.trim()) {
       notify("error", "请填写评分模板名称。");
@@ -8611,14 +8688,15 @@ function ScorePage({
       notify("error", `评分权重当前为 ${totalWeight}，必须恰好为 100。`);
       return;
     }
-    if (
-      dimensions.some(
-        (item) =>
-          !/^[a-z][a-z0-9_]{1,63}$/.test(item.key) ||
-          !item.label.trim(),
-      )
-    ) {
-      notify("error", "每个维度都需要合法英文 key 和显示名称。");
+    if (dimensions.some((item) => !item.label.trim())) {
+      notify("error", "请为每个评分维度填写名称。");
+      return;
+    }
+    const normalizedLabels = dimensions.map((item) =>
+      item.label.trim().replace(/\s+/g, " ").toLowerCase(),
+    );
+    if (new Set(normalizedLabels).size !== normalizedLabels.length) {
+      notify("error", "同一评分规则内不能使用重复的维度名称。");
       return;
     }
     setSavingTemplate(true);
@@ -8727,6 +8805,26 @@ function ScorePage({
                 刷新模板
               </button>
             </div>
+            <section aria-labelledby="score-preset-heading" className="score-template-preset-section">
+              <div className="score-template-preset-copy">
+                <h3 id="score-preset-heading">从预置起点开始</h3>
+                <p>选择后仍可修改规则名称、维度、权重和评分说明。</p>
+              </div>
+              <div className="score-template-presets" role="group" aria-label="评分规则预置起点">
+                {scoreTemplatePresets.map((preset) => (
+                  <button
+                    aria-pressed={selectedPresetId === preset.id}
+                    className={`score-template-preset${selectedPresetId === preset.id ? " is-selected" : ""}`}
+                    key={preset.id}
+                    onClick={() => applyPreset(preset)}
+                    type="button"
+                  >
+                    <strong>{preset.name}</strong>
+                    <span>{preset.dimensions.map((dimension) => dimension.label).join(" · ")}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
             <div className="form-grid">
               <div className="field-stack span-full">
                 <label className="field-label" htmlFor="template-name">
@@ -8735,7 +8833,10 @@ function ScorePage({
                 <input
                   className="field"
                   id="template-name"
-                  onChange={(event) => setTemplateName(event.target.value)}
+                  onChange={(event) => {
+                    setSelectedPresetId(null);
+                    setTemplateName(event.target.value);
+                  }}
                   value={templateName}
                 />
               </div>
@@ -8746,7 +8847,10 @@ function ScorePage({
                 <textarea
                   className="textarea-field template-description-field"
                   id="template-description"
-                  onChange={(event) => setTemplateDescription(event.target.value)}
+                  onChange={(event) => {
+                    setSelectedPresetId(null);
+                    setTemplateDescription(event.target.value);
+                  }}
                   placeholder="说明此规则适用的岗位、评价重点或使用边界。"
                   value={templateDescription}
                 />
@@ -8770,26 +8874,8 @@ function ScorePage({
                           label: event.target.value,
                         })
                       }
+                      placeholder="例如：技能匹配"
                       value={dimension.label}
-                    />
-                    <label
-                      className="sr-only"
-                      htmlFor={`dimension-key-${dimension.id}`}
-                    >
-                      维度 key
-                    </label>
-                    <input
-                      className="field"
-                      id={`dimension-key-${dimension.id}`}
-                      onChange={(event) =>
-                        updateDimension(dimension.id, {
-                          key: event.target.value
-                            .replace(/\s+/g, "_")
-                            .toLowerCase(),
-                        })
-                      }
-                      placeholder="english_key"
-                      value={dimension.key}
                     />
                     <label
                       className="sr-only"
@@ -8826,20 +8912,22 @@ function ScorePage({
                           weight: Number(event.target.value),
                         })
                       }
+                      step="1"
                       type="number"
                       value={dimension.weight}
                     />
-                    <span className="dimension-numeric-hint">权重 % · 单项满分固定 100</span>
+                    <span className="dimension-numeric-hint">占总分</span>
                   </div>
                   <button
                     aria-label={`删除 ${dimension.label}`}
                     className="icon-button"
                     disabled={dimensions.length <= 1}
-                    onClick={() =>
+                    onClick={() => {
+                      setSelectedPresetId(null);
                       setDimensions((current) =>
                         current.filter((item) => item.id !== dimension.id),
-                      )
-                    }
+                      );
+                    }}
                     type="button"
                   >
                     <Icon name="close" size={16} />
@@ -8850,18 +8938,18 @@ function ScorePage({
             <div className="review-actions">
               <button
                 className="button button-ghost"
-                onClick={() =>
+                onClick={() => {
+                  setSelectedPresetId(null);
                   setDimensions((current) => [
                     ...current,
                     {
-                      id: `dimension-${Date.now()}`,
-                      key: "new_dimension",
+                      id: `score-dimension-${Date.now()}-${++templateDraftDimensionSequence}`,
                       label: "新评分维度",
                       weight: 0,
                       guidance: "",
                     },
-                  ])
-                }
+                  ]);
+                }}
                 type="button"
               >
                 <Icon name="plus" size={15} />
@@ -8887,8 +8975,8 @@ function ScorePage({
               </button>
             </div>
             <div className="weight-total">
-              <span>当前权重总和</span>
-              <strong>{totalWeight} / 100</strong>
+              <span>已分配权重</span>
+              <strong>{totalWeight} / 100%</strong>
             </div>
           </section>
           <section className="panel">
@@ -9010,6 +9098,9 @@ function ScoreResult({
   const [draftReason, setDraftReason] = useState("");
   const [savingOverride, setSavingOverride] = useState(false);
   const riskFlags = score.analysis.risk_flags ?? [];
+  const scoreDimensionLabels = new Map(
+    score.dimension_scores.map((dimension) => [dimension.key, dimension.label]),
+  );
 
   useEffect(() => {
     setEditingDimensionKey(null);
@@ -9188,7 +9279,11 @@ function ScoreResult({
               <ul>
                 {score.audit_trail.map((entry) => (
                   <li key={entry.audit_id}>
-                    <strong>{entry.dimension_key ?? "评分维度"}</strong>
+                    <strong>
+                      {entry.dimension_key
+                        ? scoreDimensionLabels.get(entry.dimension_key) ?? "评分维度"
+                        : "评分维度"}
+                    </strong>
                     <span>
                       {entry.previous_final_raw_score ?? "—"} → {entry.final_raw_score ?? "—"} · {entry.reason ?? "未填写原因"}
                     </span>

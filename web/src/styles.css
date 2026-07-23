@@ -3718,6 +3718,87 @@ button {
   gap: 0.75rem;
 }
 
+.score-template-preset-section {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.875rem;
+  margin: 0 0 var(--space-lg);
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.score-template-preset-copy h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.score-template-preset-copy p {
+  margin: 0.25rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+}
+
+.score-template-presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.score-template-preset {
+  display: grid;
+  min-width: 0;
+  min-height: 4.75rem;
+  gap: 0.25rem;
+  padding: 0.6875rem 0.75rem;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out), transform 100ms var(--ease-out);
+}
+
+.score-template-preset:hover {
+  border-color: #bcb6b2;
+  box-shadow: var(--shadow-sm);
+}
+
+.score-template-preset:active {
+  transform: scale(0.985);
+}
+
+.score-template-preset.is-selected {
+  background: var(--red-tint);
+  border-color: rgb(215 22 24 / 0.45);
+  box-shadow: inset 0 0 0 1px rgb(215 22 24 / 0.08);
+}
+
+.score-template-preset strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.score-template-preset.is-selected strong {
+  color: var(--red-pressed);
+}
+
+.score-template-preset span {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .model-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(8.75rem, 10rem) 3.25rem;
@@ -6089,6 +6170,7 @@ button {
 
   .form-grid,
   .model-row,
+  .score-template-presets,
   .experience-detail-fields {
     grid-template-columns: 1fr;
   }

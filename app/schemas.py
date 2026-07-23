@@ -1937,25 +1937,43 @@ class SavedFilterResponse(ApiModel):
     updated_at: str
 
 
-class ScoreDimensionInput(ApiModel):
-    key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
+class ScoreDimensionCreateInput(ApiModel):
     label: str = Field(min_length=1, max_length=120)
     weight: int = Field(ge=0, le=100)
     guidance: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("label")
+    @classmethod
+    def valid_label(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("dimension label must not be blank")
+        return normalized
+
+
+class ScoreDimensionInput(ScoreDimensionCreateInput):
+    """A persisted dimension with its server-managed model key.
+
+    The key binds model output, manual adjustments, and audit data. It is an
+    implementation detail, so clients receive it for compatibility but never
+    submit it when creating a scoring template.
+    """
+
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
 
 
 class ScoreTemplateCreate(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
-    dimensions: list[ScoreDimensionInput] = Field(min_length=1, max_length=10)
+    dimensions: list[ScoreDimensionCreateInput] = Field(min_length=1, max_length=10)
 
     @model_validator(mode="after")
-    def valid_weights_and_keys(self) -> "ScoreTemplateCreate":
+    def valid_weights_and_labels(self) -> "ScoreTemplateCreate":
         if sum(item.weight for item in self.dimensions) != 100:
             raise ValueError("dimension weights must sum to 100")
-        keys = [item.key for item in self.dimensions]
-        if len(keys) != len(set(keys)):
-            raise ValueError("dimension keys must be unique")
+        labels = [" ".join(item.label.split()).casefold() for item in self.dimensions]
+        if len(labels) != len(set(labels)):
+            raise ValueError("dimension labels must be unique")
         return self
 
 

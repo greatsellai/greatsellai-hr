@@ -13,7 +13,6 @@ def _template_payload() -> dict[str, object]:
         "name": "Gateway scoring template",
         "dimensions": [
             {
-                "key": "skills",
                 "label": "Skills",
                 "weight": 100,
                 "guidance": "Use explicit skill facts only.",
@@ -31,11 +30,15 @@ def _score_provider_inside_gateway(**kwargs: object) -> dict[str, object]:
     snapshot = kwargs["fact_snapshot"]
     assert isinstance(snapshot, dict)
     fact_id = snapshot["skills"][0]["fact_id"]
+    dimensions = kwargs["dimensions"]
+    assert isinstance(dimensions, list)
+    assert len(dimensions) == 1
+    assert isinstance(dimensions[0], dict)
     return {
         "schema_version": "resume_score.v1",
         "dimension_scores": [
             {
-                "key": "skills",
+                "key": str(dimensions[0]["key"]),
                 "raw_score": 75,
                 "rationale": "An explicit skill fact is available.",
                 "fact_ids": [fact_id],

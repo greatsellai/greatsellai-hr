@@ -14,13 +14,11 @@ def _template_payload() -> dict[str, object]:
         "description": "Fixed 100-point batch scoring template.",
         "dimensions": [
             {
-                "key": "skills",
                 "label": "Skills",
                 "weight": 60,
                 "guidance": "Assess only explicit relevant skills.",
             },
             {
-                "key": "experience",
                 "label": "Experience",
                 "weight": 40,
                 "guidance": "Assess only explicit work evidence.",
@@ -34,18 +32,23 @@ def _score_output(**kwargs: object) -> dict[str, object]:
     assert isinstance(snapshot, dict)
     assert snapshot["schema_version"] == FACT_SNAPSHOT_SCHEMA_VERSION
     fact_id = snapshot["skills"][0]["fact_id"]
+    dimensions = kwargs["dimensions"]
+    assert isinstance(dimensions, list)
+    assert len(dimensions) == 2
+    assert all(isinstance(dimension, dict) for dimension in dimensions)
+    skill_key, experience_key = [str(dimension["key"]) for dimension in dimensions]
     return {
         "schema_version": "resume_score.v1",
         "dimension_scores": [
             {
-                "key": "skills",
+                "key": skill_key,
                 "raw_score": 40,
                 "rationale": "Explicit Python evidence is present.",
                 "fact_ids": [fact_id],
                 "uncertainties": [],
             },
             {
-                "key": "experience",
+                "key": experience_key,
                 "raw_score": 50,
                 "rationale": "One explicit employment record is present.",
                 "fact_ids": [],

@@ -213,8 +213,22 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("heading", { name: "通用评分模板", exact: true })).toBeVisible();
     await expect(page.locator("#main-content").getByText(/当前简历：|尚未选择简历/)).toHaveCount(0);
     await expect(page.locator("#main-content").getByRole("button", { name: /生成当前候选人评分/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /通用候选人初筛/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /技术岗位初筛/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /销售与业务岗位初筛/ })).toBeVisible();
+    await expect(page.locator('input[id^="dimension-key-"]')).toHaveCount(0);
     await page.locator("#template-name").fill("E2E 批量评分规则");
+    const createTemplateRequest = page.waitForRequest((request) => {
+      const { pathname } = new URL(request.url());
+      return request.method() === "POST" && pathname === "/v1/score-templates";
+    });
     await page.getByRole("button", { name: "创建评分模板" }).click();
+    const createdTemplateRequest = await createTemplateRequest;
+    const createPayload = createdTemplateRequest.postDataJSON() as {
+      dimensions: Array<Record<string, unknown>>;
+    };
+    expect(createPayload.dimensions).toHaveLength(3);
+    expect(createPayload.dimensions.every((dimension) => !("key" in dimension))).toBeTruthy();
     await expect(page.getByText("评分模板“E2E 批量评分规则”已创建。")).toBeVisible();
     const genericScoreRequest = page.waitForRequest((request) => {
       const { pathname } = new URL(request.url());

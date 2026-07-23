@@ -116,7 +116,6 @@ def _template_payload(name: str) -> dict[str, object]:
         "description": "Workspace-scoped batch scoring fixture.",
         "dimensions": [
             {
-                "key": "skills",
                 "label": "Skills",
                 "weight": 100,
                 "guidance": "Use explicit resume facts only.",

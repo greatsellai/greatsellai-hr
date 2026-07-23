@@ -10,6 +10,7 @@ import type {
   AiUsageTrendBucket,
   AiUsageTrendGranularity,
   PlatformAuditEvent,
+  PlatformOrganizationSummary,
   PlatformUserDetail,
   PlatformUserSummary,
   ProductPlan,
@@ -39,6 +40,106 @@ import {
 } from "../ai-display";
 
 const PAGE_SIZE = 30;
+const ORGANIZATION_OPTIONS_PAGE_SIZE = 100;
+
+async function listAllOrganizations() {
+  const organizations: PlatformOrganizationSummary[] = [];
+  let offset = 0;
+  let total = 0;
+  let received = 0;
+
+  do {
+    const page = await adminApi.listOrganizations({ limit: ORGANIZATION_OPTIONS_PAGE_SIZE, offset });
+    organizations.push(...page.items);
+    total = page.total;
+    received = page.items.length;
+    offset += received;
+  } while (offset < total && received > 0);
+
+  return [...new Map(organizations.map((organization) => [organization.organization_id, organization])).values()]
+    .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+}
+
+function useCompanyOptions() {
+  const [organizations, setOrganizations] = useState<PlatformOrganizationSummary[]>([]);
+  const [organizationOptionsState, setOrganizationOptionsState] = useState<RequestState>("loading");
+
+  const refreshOrganizations = useCallback(async () => {
+    setOrganizationOptionsState("loading");
+    try {
+      setOrganizations(await listAllOrganizations());
+      setOrganizationOptionsState("ready");
+    } catch {
+      setOrganizations([]);
+      setOrganizationOptionsState("error");
+    }
+  }, []);
+
+  useEffect(() => { void refreshOrganizations(); }, [refreshOrganizations]);
+
+  const organizationNames = useMemo(
+    () => new Map(organizations.map((organization) => [organization.organization_id, organization.name.trim() || "未命名公司"])),
+    [organizations],
+  );
+  const companyName = useCallback((organizationId: string | null | undefined) => {
+    if (!organizationId) return "—";
+    return organizationNames.get(organizationId)
+      ?? (organizationOptionsState === "loading" ? "正在加载公司信息…" : organizationOptionsState === "error" ? "公司信息暂不可用" : "已归档公司");
+  }, [organizationNames, organizationOptionsState]);
+
+  return {
+    companyName,
+    organizationOptionsState,
+    organizations,
+    refreshOrganizations,
+  };
+}
+
+function CompanyFilterField({
+  selectedOrganizationId,
+  onChange,
+  onRetry,
+  organizations,
+  state,
+}: {
+  selectedOrganizationId: string;
+  onChange: (organizationId: string) => void;
+  onRetry: () => void;
+  organizations: PlatformOrganizationSummary[];
+  state: RequestState;
+}) {
+  const selectedOrganizationIsUnavailable = Boolean(selectedOrganizationId)
+    && !organizations.some((organization) => organization.organization_id === selectedOrganizationId);
+  const unavailableLabel = state === "error" || state === "loading" ? "当前筛选公司" : "已归档公司";
+  const isDisabled = state === "loading" || state === "error" || organizations.length === 0;
+
+  return (
+    <>
+      <label className="admin-model-scope-field">
+        <span>公司</span>
+        <select
+          aria-label="公司"
+          className="select-field"
+          disabled={isDisabled}
+          onChange={(event) => onChange(event.target.value)}
+          value={selectedOrganizationId}
+        >
+          {state === "loading" && <option value="">正在加载公司…</option>}
+          {state === "error" && <option value="">公司列表暂不可用</option>}
+          {state === "ready" && !organizations.length && <option value="">暂无可选公司</option>}
+          {selectedOrganizationIsUnavailable && <option value={selectedOrganizationId}>{unavailableLabel}</option>}
+          {state === "ready" && organizations.length > 0 && <>
+            <option value="">全部公司</option>
+            {organizations.map((organization) => (
+              <option key={organization.organization_id} value={organization.organization_id}>{organization.name || "未命名公司"}</option>
+            ))}
+          </>}
+        </select>
+      </label>
+      {state === "error" && <button className="button button-ghost" onClick={onRetry} type="button">重新加载公司</button>}
+    </>
+  );
+}
 
 const PLAN_FEATURE_LABELS: Record<string, string> = {
   resume_library: "简历库",
@@ -492,6 +593,12 @@ export function AdminAiPage() {
   const [providers, setProviders] = useState<AiProviderProfile[]>([]);
   const [models, setModels] = useState<AiModelProfile[]>([]);
   const [routes, setRoutes] = useState<AiRoutePolicy[]>([]);
+  const {
+    companyName,
+    organizationOptionsState,
+    organizations,
+    refreshOrganizations,
+  } = useCompanyOptions();
 
   const refreshData = useCallback(async () => {
     const selectedModelScope = parseModelScope(modelScope);
@@ -677,7 +784,13 @@ export function AdminAiPage() {
       </div>
       {(tab === "runs" || tab === "usage") && (
         <form className="admin-filter-bar" onSubmit={apply}>
-          <label className="admin-search-field"><span className="sr-only">工作区 ID</span><Icon name="briefcase" size={16} /><input onChange={(event) => setOrganizationDraft(event.target.value)} placeholder="工作区 ID" value={organizationDraft} /></label>
+          <CompanyFilterField
+            onChange={setOrganizationDraft}
+            onRetry={() => void refreshOrganizations()}
+            organizations={organizations}
+            selectedOrganizationId={organizationDraft}
+            state={organizationOptionsState}
+          />
           <label className="admin-model-scope-field"><span>AI 功能</span><select className="select-field" onChange={(event) => setFeatureDraft(event.target.value)} value={featureDraft}><option value="">全部功能</option>{featureFilterOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
           {tab === "usage" && <>
             <label className="admin-date-field"><span>开始日期</span><input className="field" onChange={(event) => { setUsageStartDraft(event.target.value); setFilterError(""); }} type="date" value={usageStartDraft} /></label>
@@ -702,7 +815,7 @@ export function AdminAiPage() {
       {state === "ready" && tab === "runs" && (
         <div className="admin-table-panel">
           <div className="admin-table-note"><span>最近 {runs.length} 条运行</span><small>不含提示词、简历或模型输出；模型 Token 请在「Token 用量」按模型服务和模型查看。</small></div>
-          {runs.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>开始时间</th><th>工作区</th><th>功能</th><th>服务</th><th>状态</th><th>调用</th></tr></thead><tbody>{runs.map((run) => <tr key={run.run_id}><td>{formatDate(run.started_at, true)}</td><td title={run.organization_id}>{shortId(run.organization_id)}</td><td>{featureName(run.feature)}</td><td>{serviceKindDisplayName(run.service_kind)}</td><td><AdminStatus status={run.status} /></td><td>{numberFormat(run.invocation_count)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有 AI 运行记录。" />}
+          {runs.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>开始时间</th><th>公司</th><th>功能</th><th>服务</th><th>状态</th><th>调用</th></tr></thead><tbody>{runs.map((run) => <tr key={run.run_id}><td>{formatDate(run.started_at, true)}</td><td>{companyName(run.organization_id)}</td><td>{featureName(run.feature)}</td><td>{serviceKindDisplayName(run.service_kind)}</td><td><AdminStatus status={run.status} /></td><td>{numberFormat(run.invocation_count)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有 AI 运行记录。" />}
         </div>
       )}
       {state === "ready" && tab === "usage" && (
@@ -716,8 +829,8 @@ export function AdminAiPage() {
           {usageTrendState === "error" && <section className="admin-token-trend-panel"><AdminError message={usageTrendError} onRetry={() => void refreshUsageTrend()} /></section>}
           {usageTrendState === "ready" && <TokenUsageTrendChart buckets={usageTrend} granularity={usageTrendGranularity} rangeEnd={usageEnd} rangeLabel={usageRange} rangeStart={usageStart} scopeLabel={tokenUsageScopeLabel} />}
           <div className="admin-table-panel">
-            <div className="admin-table-note"><span>按工作区、功能与模型拆分</span><small>仅统计模型实际返回的 Token。</small></div>
-            {usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table admin-token-usage-table"><thead><tr><th>工作区</th><th>功能</th><th>模型服务</th><th>模型</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th></tr></thead><tbody>{usage.map((item, index) => <tr key={`${item.organization_id}-${item.feature}-${item.provider_slug}-${item.model_slug}-${index}`}><td title={item.organization_id}>{shortId(item.organization_id)}</td><td>{featureName(item.feature)}</td><td><strong>{providerNames.get(item.provider_slug) ?? "模型服务"}</strong></td><td><strong>{modelNames.get(item.model_slug) ?? "已归档模型"}</strong></td><td>{numberFormat(item.invocation_count)}</td><td><TokenUsageCell cachedReadInputTokens={item.cached_read_input_tokens} cachedWriteInputTokens={item.cached_write_input_tokens} inputTokens={item.input_tokens} invocationCount={item.invocation_count} outputTokens={item.output_tokens} reasoningTokens={item.reasoning_tokens} tokenUsageInvocationCount={item.token_usage_invocation_count} totalTokens={item.total_tokens} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前时间区间内没有可汇总的模型 Token 用量。" />}
+            <div className="admin-table-note"><span>按公司、功能与模型拆分</span><small>仅统计模型实际返回的 Token。</small></div>
+            {usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table admin-token-usage-table"><thead><tr><th>公司</th><th>功能</th><th>模型服务</th><th>模型</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th></tr></thead><tbody>{usage.map((item, index) => <tr key={`${item.organization_id}-${item.feature}-${item.provider_slug}-${item.model_slug}-${index}`}><td>{companyName(item.organization_id)}</td><td>{featureName(item.feature)}</td><td><strong>{providerNames.get(item.provider_slug) ?? "模型服务"}</strong></td><td><strong>{modelNames.get(item.model_slug) ?? "已归档模型"}</strong></td><td>{numberFormat(item.invocation_count)}</td><td><TokenUsageCell cachedReadInputTokens={item.cached_read_input_tokens} cachedWriteInputTokens={item.cached_write_input_tokens} inputTokens={item.input_tokens} invocationCount={item.invocation_count} outputTokens={item.output_tokens} reasoningTokens={item.reasoning_tokens} tokenUsageInvocationCount={item.token_usage_invocation_count} totalTokens={item.total_tokens} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前时间区间内没有可汇总的模型 Token 用量。" />}
           </div>
         </>
       )}
@@ -759,6 +872,12 @@ export function AdminAuditPage() {
   const [actionDraft, setActionDraft] = useState("");
   const [organizationId, setOrganizationId] = useState("");
   const [action, setAction] = useState("");
+  const {
+    companyName,
+    organizationOptionsState,
+    organizations,
+    refreshOrganizations,
+  } = useCompanyOptions();
 
   const load = useCallback(async () => {
     setState("loading"); setError("");
@@ -771,11 +890,11 @@ export function AdminAuditPage() {
   return (
     <section className="admin-page-frame admin-page-frame-wide" aria-labelledby="admin-audit-title">
       <AdminPageHeader actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新审计</button>} description="追踪跨工作区的平台变更，核对操作原因和前后状态。" title="操作审计" />
-      <form className="admin-filter-bar" onSubmit={apply}><label className="admin-search-field"><span className="sr-only">工作区 ID</span><Icon name="briefcase" size={16} /><input onChange={(event) => setOrganizationDraft(event.target.value)} placeholder="工作区 ID" value={organizationDraft} /></label><label className="admin-search-field"><span className="sr-only">操作名称</span><Icon name="history" size={16} /><input onChange={(event) => setActionDraft(event.target.value)} placeholder="操作代码，例如 organization.updated" value={actionDraft} /></label><button className="button button-primary" type="submit">筛选审计</button>{(organizationId || action) && <button className="button button-ghost" onClick={() => { setOrganizationDraft(""); setActionDraft(""); setOrganizationId(""); setAction(""); setOffset(0); }} type="button">清除条件</button>}</form>
+      <form className="admin-filter-bar" onSubmit={apply}><CompanyFilterField onChange={setOrganizationDraft} onRetry={() => void refreshOrganizations()} organizations={organizations} selectedOrganizationId={organizationDraft} state={organizationOptionsState} /><label className="admin-search-field"><span className="sr-only">操作名称</span><Icon name="history" size={16} /><input onChange={(event) => setActionDraft(event.target.value)} placeholder="操作代码，例如 organization.updated" value={actionDraft} /></label><button className="button button-primary" type="submit">筛选审计</button>{(organizationId || action) && <button className="button button-ghost" onClick={() => { setOrganizationDraft(""); setActionDraft(""); setOrganizationId(""); setAction(""); setOffset(0); }} type="button">清除条件</button>}</form>
       {state === "loading" && <div className="admin-panel"><AdminLoading label="正在读取操作审计…" /></div>}
       {state === "error" && <div className="admin-panel"><AdminError message={error} onRetry={() => void load()} /></div>}
       {state === "ready" && !items.length && <div className="admin-panel"><AdminEmpty description="当前筛选范围内没有平台变更记录。" title="没有审计记录" /></div>}
-      {state === "ready" && !!items.length && <div className="admin-table-panel"><div className="admin-data-table-scroll"><table className="admin-data-table admin-audit-table"><thead><tr><th>时间</th><th>操作人</th><th>操作</th><th>目标</th><th>工作区</th><th>原因</th><th>变更</th></tr></thead><tbody>{items.map((item) => <tr key={item.audit_id}><td>{formatDate(item.created_at,true)}</td><td title={item.actor_user_id || undefined}>{shortId(item.actor_user_id)}</td><td>{auditActionName(item.action)}</td><td><strong>{item.target_type}</strong><small title={item.target_id || undefined}>{shortId(item.target_id)}</small></td><td title={item.organization_id || undefined}>{shortId(item.organization_id)}</td><td className="admin-audit-reason">{item.reason || "未填写"}</td><td><details className="admin-audit-change"><summary>查看变更</summary><div><section><h3>修改前</h3><pre>{statePreview(item.before_state)}</pre></section><section><h3>修改后</h3><pre>{statePreview(item.after_state)}</pre></section><p>请求编号：{item.request_id || "—"}</p></div></details></td></tr>)}</tbody></table></div><AdminPagination limit={PAGE_SIZE} offset={offset} onChange={setOffset} total={total} /></div>}
+      {state === "ready" && !!items.length && <div className="admin-table-panel"><div className="admin-data-table-scroll"><table className="admin-data-table admin-audit-table"><thead><tr><th>时间</th><th>操作人</th><th>操作</th><th>目标</th><th>公司</th><th>原因</th><th>变更</th></tr></thead><tbody>{items.map((item) => <tr key={item.audit_id}><td>{formatDate(item.created_at,true)}</td><td title={item.actor_user_id || undefined}>{shortId(item.actor_user_id)}</td><td>{auditActionName(item.action)}</td><td><strong>{item.target_type}</strong><small title={item.target_id || undefined}>{shortId(item.target_id)}</small></td><td>{companyName(item.organization_id)}</td><td className="admin-audit-reason">{item.reason || "未填写"}</td><td><details className="admin-audit-change"><summary>查看变更</summary><div><section><h3>修改前</h3><pre>{statePreview(item.before_state)}</pre></section><section><h3>修改后</h3><pre>{statePreview(item.after_state)}</pre></section><p>请求编号：{item.request_id || "—"}</p></div></details></td></tr>)}</tbody></table></div><AdminPagination limit={PAGE_SIZE} offset={offset} onChange={setOffset} total={total} /></div>}
     </section>
   );
 }

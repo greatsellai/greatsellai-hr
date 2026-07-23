@@ -623,6 +623,9 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
         back_populates="resume",
         cascade="all, delete-orphan",
     )
+    # Legacy summary records remain only so existing installations can delete
+    # their historic candidate data without a destructive schema migration.
+    # No active service or API creates or reads them.
     summaries: Mapped[list["ResumeSummary"]] = relationship(
         back_populates="resume",
         cascade="all, delete-orphan",
@@ -2057,6 +2060,7 @@ class ResumeScoreBatchItem(OrganizationScoped, Base):
 
 
 class ResumeSummary(OrganizationScoped, Base):
+    """Retired AI-summary records retained solely for legacy-data purging."""
     __tablename__ = "resume_summaries"
     __table_args__ = (
         Index(

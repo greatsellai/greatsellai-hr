@@ -139,8 +139,6 @@ from app.schemas import (
     ResumeScoreBatchResponse,
     ResumeScoreOverride,
     ResumeScoreResponse,
-    ResumeSummaryManualCreate,
-    ResumeSummaryResponse,
     SavedFilterCreate,
     SavedFilterResponse,
     ScoreTemplateCreate,
@@ -294,15 +292,6 @@ from app.services.resume_score_batch_service import (
     enqueue_resume_score_batch,
     get_resume_score_batch,
     list_resume_score_batch_items,
-)
-from app.services.summary_service import (
-    DeepSeekProviderError as SummaryDeepSeekProviderError,
-    ResumeSummaryNotFoundError,
-    SummaryServiceError,
-    create_manual_summary_version,
-    generate_resume_summary,
-    get_resume_summary,
-    list_resume_summaries,
 )
 from app.services.job_service import (
     DeepSeekProviderError as JobDeepSeekProviderError,
@@ -3891,107 +3880,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=str(exc),
             ) from exc
-        _commit_or_raise(session)
-        return response
-
-    @app.post(
-        "/v1/resumes/{resume_id}/summaries",
-        response_model=ResumeSummaryResponse,
-        dependencies=[Depends(require_single_admin)],
-    )
-    def post_resume_summary(
-        resume_id: str,
-        session: Session = Depends(get_session),
-    ) -> ResumeSummaryResponse:
-        try:
-            response = generate_resume_summary(
-                session,
-                resume_id=resume_id,
-                settings=settings,
-            )
-        except SummaryServiceError as exc:
-            session.rollback()
-            response_status = (
-                status.HTTP_503_SERVICE_UNAVAILABLE
-                if str(exc) == "deepseek_api_key_not_configured"
-                else (
-                    status.HTTP_404_NOT_FOUND
-                    if str(exc) == "resume_not_found"
-                    else status.HTTP_409_CONFLICT
-                )
-            )
-            raise HTTPException(status_code=response_status, detail=str(exc)) from exc
-        except SummaryDeepSeekProviderError as exc:
-            session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="summary_provider_failed",
-            ) from exc
-        _commit_or_raise(session)
-        return response
-
-    @app.get(
-        "/v1/resume-summaries/{summary_id}",
-        response_model=ResumeSummaryResponse,
-        dependencies=[Depends(require_single_admin)],
-    )
-    def get_summary(
-        summary_id: str,
-        session: Session = Depends(get_session),
-    ) -> ResumeSummaryResponse:
-        try:
-            return get_resume_summary(session, summary_id=summary_id)
-        except ResumeSummaryNotFoundError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-    @app.get(
-        "/v1/resumes/{resume_id}/summaries",
-        response_model=list[ResumeSummaryResponse],
-        dependencies=[Depends(require_single_admin)],
-    )
-    def get_resume_summary_versions(
-        resume_id: str,
-        session: Session = Depends(get_session),
-    ) -> list[ResumeSummaryResponse]:
-        try:
-            return list_resume_summaries(session, resume_id=resume_id)
-        except SummaryServiceError as exc:
-            raise HTTPException(
-                status_code=(
-                    status.HTTP_404_NOT_FOUND
-                    if str(exc) == "resume_not_found"
-                    else status.HTTP_409_CONFLICT
-                ),
-                detail=str(exc),
-            ) from exc
-
-    @app.post(
-        "/v1/resume-summaries/{summary_id}/manual-versions",
-        response_model=ResumeSummaryResponse,
-        dependencies=[Depends(require_single_admin)],
-    )
-    def post_manual_summary_version(
-        summary_id: str,
-        payload: ResumeSummaryManualCreate,
-        session: Session = Depends(get_session),
-    ) -> ResumeSummaryResponse:
-        try:
-            response = create_manual_summary_version(
-                session,
-                summary_id=summary_id,
-                payload=payload,
-            )
-        except ResumeSummaryNotFoundError as exc:
-            session.rollback()
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-        except SummaryServiceError as exc:
-            session.rollback()
-            response_status = (
-                status.HTTP_404_NOT_FOUND
-                if str(exc) == "resume_not_found"
-                else status.HTTP_409_CONFLICT
-            )
-            raise HTTPException(status_code=response_status, detail=str(exc)) from exc
         _commit_or_raise(session)
         return response
 

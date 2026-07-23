@@ -496,6 +496,8 @@ def _purge_database_rows(
     match_ids = tuple(
         session.scalars(select(JobMatch.id).where(JobMatch.resume_id.in_(resume_ids))).all()
     )
+    # The AI-summary feature is retired, but legacy rows still contain
+    # candidate data and must be included in a physical-purge request.
     summary_ids = tuple(
         session.scalars(select(ResumeSummary.id).where(ResumeSummary.resume_id.in_(resume_ids))).all()
     )

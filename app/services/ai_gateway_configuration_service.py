@@ -154,7 +154,13 @@ def create_model_price_version(
 
 
 def list_route_policies(session: Session) -> list[AiRoutePolicyResponse]:
-    policies = list(session.scalars(select(AiRoutePolicy).order_by(AiRoutePolicy.feature)))
+    policies = list(
+        session.scalars(
+            select(AiRoutePolicy)
+            .where(AiRoutePolicy.feature.in_(SUPPORTED_AI_FEATURES))
+            .order_by(AiRoutePolicy.feature)
+        )
+    )
     return [_route_policy_response(policy) for policy in policies]
 
 
@@ -163,6 +169,8 @@ def list_route_policy_versions(
     *,
     feature: str,
 ) -> list[AiRoutePolicyVersionResponse]:
+    if feature not in SUPPORTED_AI_FEATURES:
+        raise AiGatewayConfigurationError("ai_route_policy_not_found")
     policy = session.scalar(select(AiRoutePolicy).where(AiRoutePolicy.feature == feature))
     if policy is None:
         raise AiGatewayConfigurationError("ai_route_policy_not_found")

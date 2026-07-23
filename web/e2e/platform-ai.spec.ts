@@ -69,7 +69,7 @@ test("平台 AI 运营按公司选择并保持内部工作区筛选", async ({ p
     {
       run_id: "run-alpha",
       organization_id: organizationId,
-      feature: "ai_summary",
+      feature: "resume_score",
       service_kind: "model",
       status: "succeeded",
       started_at: "2026-07-23T00:00:00Z",

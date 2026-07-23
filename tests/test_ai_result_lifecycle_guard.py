@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from app.models import JobMatch, Resume, ResumeFactSnapshot, ResumeScore, ResumeSummary
+from app.models import JobMatch, Resume, ResumeFactSnapshot, ResumeScore
 from app.schemas import JobCreate, JobRequirements
 from app.services import job_match_batch_service, job_service
 from app.services.candidate_data_lifecycle_service import delete_resume
 from test_filter_mvp_contract import _save_ready_resume
 from test_job_match_batches import _batch_match_output
 from test_score_service import _fake_score_provider, _template_payload
-from test_summary_service import _fake_summary_provider
 
 
 def _delete_resume_in_separate_session(client, *, resume_id: str) -> None:
@@ -117,33 +116,6 @@ def test_score_result_is_not_written_after_facts_change_during_provider_call(
     with ai_client.app.state.database.session_factory() as session:
         assert session.scalar(
             select(ResumeScore.id).where(ResumeScore.resume_id == resume_id)
-        ) is None
-
-
-def test_summary_result_is_not_written_after_resume_is_deleted_during_provider_call(
-    ai_client,
-    monkeypatch,
-) -> None:
-    _, resume_id = _save_ready_resume(
-        ai_client,
-        source_text="Education 清华大学 计算机 工作经历 Acme Python Engineer Skills Python SQL",
-    )
-
-    def delete_then_summarize(**kwargs: object) -> dict[str, object]:
-        _delete_resume_in_separate_session(ai_client, resume_id=resume_id)
-        return _fake_summary_provider(**kwargs)
-
-    monkeypatch.setattr(
-        "app.services.summary_service.summarize_resume_fact_snapshot",
-        delete_then_summarize,
-    )
-    response = ai_client.post(f"/v1/resumes/{resume_id}/summaries")
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"] == "resume_changed_before_summary_completed"
-
-    with ai_client.app.state.database.session_factory() as session:
-        assert session.scalar(
-            select(ResumeSummary.id).where(ResumeSummary.resume_id == resume_id)
         ) is None
 
 

@@ -125,7 +125,6 @@ LEGACY_FACT_SNAPSHOT_SCHEMA_VERSIONS = {
 }
 FACTS_SCHEMA_VERSION = "resume_facts.v2"
 SCORE_SCHEMA_VERSION = "resume_score.v1"
-SUMMARY_SCHEMA_VERSION = "resume_summary.v1"
 JD_REQUIREMENTS_SCHEMA_VERSION = "jd_requirements.v1"
 JD_MATCH_SCHEMA_VERSION = "jd_match.v1"
 JD_GENERATION_SCHEMA_VERSION = "jd_generation.v1"
@@ -270,19 +269,6 @@ _RESUME_FACTS_CORRECTION_ERRORS = frozenset(
         "deepseek_arguments_missing",
     }
 )
-
-# Stored and rendered in this order.  Keeping the set fixed prevents the
-# model from silently omitting a required part of the recruiter-facing summary.
-SUMMARY_SECTION_KEYS = (
-    "candidate_positioning",
-    "education_background",
-    "work_and_internship",
-    "core_skills",
-    "representative_projects",
-    "strengths",
-    "verification_items",
-)
-
 
 def _contract_error(code: str) -> DeepSeekProviderError:
     return DeepSeekProviderError(f"deepseek_contract_{code}")
@@ -1149,43 +1135,6 @@ def resume_score_tool_schema(
     }
 
 
-def resume_summary_tool_schema(*, fact_ids: Sequence[str]) -> dict[str, Any]:
-    """Build the strict tool schema for the fixed recruiter-facing summary."""
-
-    normalized_fact_ids = _require_string_list(
-        fact_ids,
-        code="fact_ids",
-        allow_empty=False,
-    )
-    if any(not _FACT_ID_PATTERN.fullmatch(fact_id) for fact_id in normalized_fact_ids):
-        raise _contract_error("fact_ids")
-    section = {
-        "type": "object",
-        "properties": {
-            "content": {"type": "string"},
-            "fact_ids": _fact_id_array_schema(normalized_fact_ids),
-        },
-        "required": ["content", "fact_ids"],
-        "additionalProperties": False,
-    }
-    return {
-        "type": "object",
-        "properties": {
-            "schema_version": {"type": "string", "enum": [SUMMARY_SCHEMA_VERSION]},
-            "sections": {
-                "type": "object",
-                "properties": {
-                    section_key: section for section_key in SUMMARY_SECTION_KEYS
-                },
-                "required": list(SUMMARY_SECTION_KEYS),
-                "additionalProperties": False,
-            },
-        },
-        "required": ["schema_version", "sections"],
-        "additionalProperties": False,
-    }
-
-
 def _validate_fact_references(
     value: object,
     *,
@@ -1353,68 +1302,6 @@ def validate_resume_score_output(
     }
 
 
-def validate_resume_summary_output(
-    payload: Mapping[str, Any],
-    *,
-    fact_ids: Sequence[str],
-    require_simplified_chinese: bool = False,
-) -> dict[str, Any]:
-    """Reject incomplete summary sections or citations outside the fact snapshot."""
-
-    normalized_fact_ids = _require_string_list(
-        fact_ids,
-        code="fact_ids",
-        allow_empty=False,
-    )
-    if any(not _FACT_ID_PATTERN.fullmatch(fact_id) for fact_id in normalized_fact_ids):
-        raise _contract_error("fact_ids")
-    if not isinstance(payload, Mapping):
-        raise _contract_error("summary_response")
-    _require_exact_keys(
-        payload,
-        {"schema_version", "sections"},
-        code="summary_response_fields",
-    )
-    if payload.get("schema_version") != SUMMARY_SCHEMA_VERSION:
-        raise _contract_error("summary_schema_version")
-    sections = payload["sections"]
-    if not isinstance(sections, Mapping):
-        raise _contract_error("summary_sections")
-    _require_exact_keys(
-        sections,
-        set(SUMMARY_SECTION_KEYS),
-        code="summary_section_keys",
-    )
-    fact_id_set = set(normalized_fact_ids)
-    normalized_sections: dict[str, dict[str, Any]] = {}
-    for section_key in SUMMARY_SECTION_KEYS:
-        section = sections[section_key]
-        if not isinstance(section, Mapping):
-            raise _contract_error("summary_section")
-        _require_exact_keys(
-            section,
-            {"content", "fact_ids"},
-            code="summary_section_fields",
-        )
-        content = section["content"]
-        if not isinstance(content, str) or not content.strip():
-            raise _contract_error("summary_section_content")
-        if require_simplified_chinese and not re.search(r"[\u4e00-\u9fff]", content):
-            raise _contract_error("summary_section_language")
-        normalized_sections[section_key] = {
-            "content": content.strip(),
-            "fact_ids": _validate_fact_references(
-                section["fact_ids"],
-                fact_ids=fact_id_set,
-                code="summary_section_fact_ids",
-            ),
-        }
-    return {
-        "schema_version": SUMMARY_SCHEMA_VERSION,
-        "sections": normalized_sections,
-    }
-
-
 def score_resume_fact_snapshot(
     *,
     api_key: str,
@@ -1488,74 +1375,6 @@ def score_resume_fact_snapshot(
         }:
             raise
         return request_score(correction_pass=True)
-
-
-def summarize_resume_fact_snapshot(
-    *,
-    api_key: str,
-    model: str,
-    timeout_seconds: int,
-    fact_snapshot: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Call DeepSeek for the fixed, source-cited summary of a fact snapshot."""
-
-    snapshot, fact_ids = _validate_fact_snapshot(fact_snapshot)
-
-    def request_summary(*, correction_pass: bool) -> dict[str, Any]:
-        correction = (
-            " This is a correction pass: the previous response was not valid Chinese "
-            "function arguments. Follow every schema and output-language requirement exactly."
-            if correction_pass
-            else ""
-        )
-        result = call_strict_function(
-            api_key=api_key,
-            model=model,
-            timeout_seconds=timeout_seconds,
-            function_name="submit_resume_summary",
-            function_description=(
-                "Submit a fixed-section recruiter summary grounded in structured resume facts."
-            ),
-            parameters_schema=resume_summary_tool_schema(fact_ids=fact_ids),
-            system_prompt=(
-                "Summarize only the supplied structured resume facts. Do not infer, invent, "
-                "or output names, contact details, age, gender, photos, or other nonessential "
-                "personal data. Every factual statement must cite supplied fact IDs. When a "
-                "section has no supporting fact, state that information is unavailable and use "
-                "an empty fact_ids array. Write every sections.*.content value in concise "
-                "Simplified Chinese (zh-CN), while retaining proper names and technical terms in "
-                "their original language when translation reduces accuracy. Each content value "
-                "must be one plain paragraph with no Markdown, literal newlines, or quotation "
-                "marks. Return valid JSON function arguments only; schema field names and fact "
-                "IDs must remain unchanged."
-                + correction
-            ),
-            user_prompt=(
-                "Produce every required fixed summary section from this structured resume fact "
-                "snapshot:\n"
-                + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
-                + "\n\n输出语言要求：sections 中每个 content 都必须为简体中文。即使输入信息是英文，"
-                "也必须使用中文句子概述；只有必要的公司名、学校名、职位名或技术名词可以保留英文。"
-            ),
-            max_tokens=1600,
-        )
-        return validate_resume_summary_output(
-            result,
-            fact_ids=fact_ids,
-            require_simplified_chinese=True,
-        )
-
-    try:
-        return request_summary(correction_pass=False)
-    except DeepSeekProviderError as exc:
-        if str(exc) not in {
-            "deepseek_contract_summary_section_language",
-            "deepseek_invalid_structured_response",
-            "deepseek_tool_call_missing",
-            "deepseek_arguments_missing",
-        }:
-            raise
-        return request_summary(correction_pass=True)
 
 
 def render_evidence_blocks(

@@ -37,7 +37,6 @@ from app.models import (
     Resume,
     ResumeFactSnapshot,
     ResumeScore,
-    ResumeSummary,
 )
 from app.schemas import CandidateDataExportListResponse, CandidateDataExportResponse
 from app.services.candidate_data_lifecycle_service import (
@@ -136,7 +135,6 @@ class _ExportCandidatePayload:
     facts_version: int
     fact_snapshot_id: str
     facts: dict[str, object]
-    summaries: list[dict[str, object]]
     scores: list[dict[str, object]]
     job_matches: list[dict[str, object]]
     original_path: Path | None
@@ -297,30 +295,11 @@ def _snapshot_selection(
 
     resume_ids = [row[1].id for row in by_candidate_id.values()]
     fact_snapshot_ids = [row[2].id for row in by_candidate_id.values()]
-    summaries_by_resume: dict[str, list[str]] = {resume_id: [] for resume_id in resume_ids}
     scores_by_resume: dict[str, list[str]] = {resume_id: [] for resume_id in resume_ids}
     matches_by_resume: dict[str, list[str]] = {resume_id: [] for resume_id in resume_ids}
     if resume_ids:
         snapshots_by_resume = {resume.id: fact_snapshot.id for _, resume, fact_snapshot in by_candidate_id.values()}
         versions_by_resume = {resume.id: fact_snapshot.facts_version for _, resume, fact_snapshot in by_candidate_id.values()}
-        summaries = session.scalars(
-            select(ResumeSummary).where(
-                ResumeSummary.resume_id.in_(resume_ids),
-                ResumeSummary.is_current.is_(True),
-            )
-        ).all()
-        for summary in summaries:
-            expected_snapshot = snapshots_by_resume.get(summary.resume_id)
-            expected_version = versions_by_resume.get(summary.resume_id)
-            if expected_snapshot is not None and (
-                summary.fact_snapshot_id == expected_snapshot
-                or (
-                    summary.fact_snapshot_id is None
-                    and summary.facts_version == expected_version
-                )
-            ):
-                summaries_by_resume[summary.resume_id].append(summary.id)
-
         scores = session.scalars(
             select(ResumeScore).where(ResumeScore.resume_id.in_(resume_ids))
         ).all()
@@ -352,7 +331,6 @@ def _snapshot_selection(
                 "resume_id": resume.id,
                 "fact_snapshot_id": fact_snapshot.id,
                 "facts_version": fact_snapshot.facts_version,
-                "summary_ids": sorted(summaries_by_resume[resume.id]),
                 "score_ids": sorted(scores_by_resume[resume.id]),
                 "job_match_ids": sorted(matches_by_resume[resume.id]),
             }
@@ -714,14 +692,8 @@ def _load_export_build_payload(
         candidate, resume, fact_snapshot = row
         if resume.facts_version != facts_version:
             raise CandidateDataExportError("candidate_data_export_snapshot_unavailable")
-        summary_ids = _snapshot_entry_ids(entry, "summary_ids")
         score_ids = _snapshot_entry_ids(entry, "score_ids")
         job_match_ids = _snapshot_entry_ids(entry, "job_match_ids")
-        summaries = session.scalars(
-            select(ResumeSummary)
-            .join(Resume, Resume.id == ResumeSummary.resume_id)
-            .where(ResumeSummary.id.in_(summary_ids), ResumeSummary.resume_id == resume.id)
-        ).all() if summary_ids else []
         scores = session.scalars(
             select(ResumeScore)
             .join(Resume, Resume.id == ResumeScore.resume_id)
@@ -752,17 +724,6 @@ def _load_export_build_payload(
                 facts_version=fact_snapshot.facts_version,
                 fact_snapshot_id=fact_snapshot.id,
                 facts=_load_snapshot_facts(fact_snapshot),
-                summaries=[
-                    {
-                        "summary_id": summary.id,
-                        "facts_version": summary.facts_version,
-                        "source": summary.source,
-                        "status": summary.status,
-                        "model_name": summary.model_name,
-                        "content": _safe_export_value(summary.content or {}),
-                    }
-                    for summary in summaries
-                ],
                 scores=[
                     {
                         "score_id": score.id,
@@ -816,7 +777,7 @@ def _spreadsheet_cell(value: object) -> object:
     return value
 
 
-def _summary_rows(payload: _ExportBuildPayload) -> list[list[object]]:
+def _candidate_rows(payload: _ExportBuildPayload) -> list[list[object]]:
     rows: list[list[object]] = []
     for item in payload.candidates:
         derived = item.facts.get("derived")
@@ -838,7 +799,6 @@ def _summary_rows(payload: _ExportBuildPayload) -> list[list[object]]:
                 derived_values.get("employment_months"),
                 derived_values.get("employment_or_internship_months"),
                 skill_names,
-                len(item.summaries),
                 len(item.scores),
                 len(item.job_matches),
             ]
@@ -846,7 +806,7 @@ def _summary_rows(payload: _ExportBuildPayload) -> list[list[object]]:
     return rows
 
 
-_SUMMARY_HEADERS = [
+_CANDIDATE_HEADERS = [
     "candidate_id",
     "candidate_name",
     "resume_id",
@@ -856,7 +816,6 @@ _SUMMARY_HEADERS = [
     "employment_months",
     "employment_or_internship_months",
     "skills",
-    "summary_count",
     "score_count",
     "job_match_count",
 ]
@@ -865,7 +824,7 @@ _SUMMARY_HEADERS = [
 def _csv_bytes(rows: list[list[object]]) -> bytes:
     stream = io.StringIO(newline="")
     writer = csv.writer(stream, lineterminator="\n")
-    writer.writerow([_spreadsheet_cell(value) for value in _SUMMARY_HEADERS])
+    writer.writerow([_spreadsheet_cell(value) for value in _CANDIDATE_HEADERS])
     for row in rows:
         writer.writerow([_spreadsheet_cell(value) for value in row])
     return stream.getvalue().encode("utf-8-sig")
@@ -875,7 +834,7 @@ def _xlsx_bytes(rows: list[list[object]]) -> bytes:
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Candidates"
-    worksheet.append([_spreadsheet_cell(value) for value in _SUMMARY_HEADERS])
+    worksheet.append([_spreadsheet_cell(value) for value in _CANDIDATE_HEADERS])
     for row in rows:
         worksheet.append([_spreadsheet_cell(value) for value in row])
     worksheet.freeze_panes = "A2"
@@ -897,7 +856,6 @@ def _json_bytes(value: object) -> bytes:
 
 def _archive_documents(payload: _ExportBuildPayload) -> dict[str, object]:
     facts: list[dict[str, object]] = []
-    summaries: list[dict[str, object]] = []
     scores: list[dict[str, object]] = []
     job_matches: list[dict[str, object]] = []
     original_manifest: list[dict[str, object]] = []
@@ -910,7 +868,6 @@ def _archive_documents(payload: _ExportBuildPayload) -> dict[str, object]:
             "facts_version": item.facts_version,
         }
         facts.append({**root, "facts": item.facts})
-        summaries.extend({**root, **summary} for summary in item.summaries)
         scores.extend({**root, **score} for score in item.scores)
         job_matches.extend({**root, **job_match} for job_match in item.job_matches)
         if item.original_path is not None:
@@ -929,7 +886,6 @@ def _archive_documents(payload: _ExportBuildPayload) -> dict[str, object]:
             )
     return {
         "facts": facts,
-        "summaries": summaries,
         "scores": scores,
         "job_matches": job_matches,
         "original_manifest": original_manifest,
@@ -959,11 +915,10 @@ def _write_export_archive(
             compression=zipfile.ZIP_DEFLATED,
             allowZip64=True,
         ) as archive:
-            summary_rows = _summary_rows(payload)
-            archive.writestr("candidates.csv", _csv_bytes(summary_rows))
-            archive.writestr("candidates.xlsx", _xlsx_bytes(summary_rows))
+            candidate_rows = _candidate_rows(payload)
+            archive.writestr("candidates.csv", _csv_bytes(candidate_rows))
+            archive.writestr("candidates.xlsx", _xlsx_bytes(candidate_rows))
             archive.writestr("facts.json", _json_bytes(documents["facts"]))
-            archive.writestr("summaries.json", _json_bytes(documents["summaries"]))
             archive.writestr("scores.json", _json_bytes(documents["scores"]))
             archive.writestr("job_matches.json", _json_bytes(documents["job_matches"]))
             if payload.include_originals:
@@ -992,7 +947,6 @@ def _write_export_archive(
                     "candidates.csv",
                     "candidates.xlsx",
                     "facts.json",
-                    "summaries.json",
                     "scores.json",
                     "job_matches.json",
                     *( ["originals/"] if payload.include_originals else [] ),

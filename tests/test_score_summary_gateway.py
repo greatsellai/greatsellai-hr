@@ -51,26 +51,7 @@ def _score_provider_inside_gateway(**kwargs: object) -> dict[str, object]:
     }
 
 
-def _summary_provider_inside_gateway(**kwargs: object) -> dict[str, object]:
-    assert active_legacy_payload_executor() is not None
-    snapshot = kwargs["fact_snapshot"]
-    assert isinstance(snapshot, dict)
-    fact_id = snapshot["skills"][0]["fact_id"]
-    return {
-        "schema_version": "resume_summary.v1",
-        "sections": {
-            "candidate_positioning": {"content": "候选人具备明确技能事实。", "fact_ids": [fact_id]},
-            "education_background": {"content": "学历信息以简历事实为准。", "fact_ids": []},
-            "work_and_internship": {"content": "工作经历以简历事实为准。", "fact_ids": []},
-            "core_skills": {"content": "已提取到明确技能。", "fact_ids": [fact_id]},
-            "representative_projects": {"content": "暂未提取到可引用项目事实。", "fact_ids": []},
-            "strengths": {"content": "技能信息可用于后续筛选。", "fact_ids": [fact_id]},
-            "verification_items": {"content": "其余信息建议在面试中核实。", "fact_ids": []},
-        },
-    }
-
-
-def test_score_and_summary_create_gateway_runs(ai_client, monkeypatch) -> None:
+def test_score_creates_a_gateway_run(ai_client, monkeypatch) -> None:
     _, resume_id = _save_ready_resume(
         ai_client,
         source_text="Education 清华大学 计算机 工作经历 Acme Python Engineer Skills Python SQL",
@@ -79,11 +60,6 @@ def test_score_and_summary_create_gateway_runs(ai_client, monkeypatch) -> None:
         "app.services.score_service.score_resume_fact_snapshot",
         _score_provider_inside_gateway,
     )
-    monkeypatch.setattr(
-        "app.services.summary_service.summarize_resume_fact_snapshot",
-        _summary_provider_inside_gateway,
-    )
-
     template = ai_client.post("/v1/score-templates", json=_template_payload())
     assert template.status_code == 200, template.text
     score = ai_client.post(
@@ -91,23 +67,17 @@ def test_score_and_summary_create_gateway_runs(ai_client, monkeypatch) -> None:
         json={"template_id": template.json()["template_id"]},
     )
     assert score.status_code == 200, score.text
-    summary = ai_client.post(f"/v1/resumes/{resume_id}/summaries")
-    assert summary.status_code == 200, summary.text
-
     database = ai_client.app.state.database
     with database.session_factory() as session:
         runs = session.scalars(
             select(AiRun)
-            .where(AiRun.feature.in_(("resume_score", "resume_summary")))
+            .where(AiRun.feature == "resume_score")
             .order_by(AiRun.feature)
         ).all()
-    assert [run.feature for run in runs] == ["resume_score", "resume_summary"]
+    assert [run.feature for run in runs] == ["resume_score"]
     assert all(run.status == "succeeded" for run in runs)
     assert all(run.route_policy_version_id for run in runs)
-    assert {run.contract_version for run in runs} == {
-        "resume_score.v1",
-        "resume_summary.v1",
-    }
+    assert {run.contract_version for run in runs} == {"resume_score.v1"}
 
 
 def test_score_batch_keeps_enqueue_route_when_active_policy_changes(

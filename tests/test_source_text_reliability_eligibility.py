@@ -73,10 +73,6 @@ def test_unreliable_source_blocks_direct_score_and_jd_match(ai_client) -> None:
     assert score.status_code == 409
     assert score.json()["detail"] == "resume_source_text_unreliable"
 
-    summary = ai_client.post(f"/v1/resumes/{resume_id}/summaries")
-    assert summary.status_code == 409
-    assert summary.json()["detail"] == "resume_source_text_unreliable"
-
     job = ai_client.post(
         "/v1/jobs",
         json=JobCreate(

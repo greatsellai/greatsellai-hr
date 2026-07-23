@@ -27,7 +27,6 @@ from app.models import (
     ResumeEducation,
     ResumeScore,
     ResumeSourceBlock,
-    ResumeSummary,
     ScoreTemplate,
 )
 from app.schemas import CandidateSearchRequest
@@ -229,16 +228,6 @@ def _seed_workspace_b_private_resources(
             status="succeeded",
             model_name="tenant-test-fixture",
         )
-        summary = ResumeSummary(
-            resume_id=task_resume.id,
-            fact_snapshot_id=None,
-            facts_version=0,
-            content={},
-            source="manual",
-            is_current=False,
-            status="succeeded",
-            model_name="tenant-test-fixture",
-        )
         extraction_job = ResumeAiExtractionJob(
             resume_id=task_resume.id,
             job_kind="initial",
@@ -261,7 +250,7 @@ def _seed_workspace_b_private_resources(
             encrypted_password="fixture-ciphertext",
             enabled=True,
         )
-        session.add_all((score, summary, extraction_job, job, mailbox_config))
+        session.add_all((score, extraction_job, job, mailbox_config))
         session.flush()
 
         mailbox_alert = MailboxSyncFailureAlert(
@@ -307,7 +296,6 @@ def _seed_workspace_b_private_resources(
             "search_resume_id": search_resume.id,
             "score_id": score.id,
             "score_template_id": score_template.id,
-            "summary_id": summary.id,
             "job_id": job.id,
             "job_version_id": job_version.id,
             "mailbox_config_id": mailbox_config.id,
@@ -519,7 +507,7 @@ def test_workspaces_can_reuse_candidate_names_without_cross_tenant_access(
     assert foreign_original.status_code == 404, foreign_original.text
 
 
-def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
+def test_workspace_scopes_jd_score_tasks_and_mailbox_configuration(
     workspace_clients: tuple[TestClient, TestClient],
 ) -> None:
     client_a, client_b = workspace_clients
@@ -548,7 +536,6 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert client_b.get(f"/v1/jobs/{private['job_id']}/versions").status_code == 200
     assert client_b.get(f"/v1/job-versions/{private['job_version_id']}").status_code == 200
     assert client_b.get(f"/v1/resume-scores/{private['score_id']}").status_code == 200
-    assert client_b.get(f"/v1/resume-summaries/{private['summary_id']}").status_code == 200
     assert client_b.get("/v1/mailbox/config").json()["configured"] is True
     b_mailboxes = client_b.get("/v1/mailboxes")
     assert b_mailboxes.status_code == 200, b_mailboxes.text
@@ -574,18 +561,10 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     foreign_score = client_a.get(f"/v1/resume-scores/{private['score_id']}")
     assert foreign_score.status_code == 404, foreign_score.text
 
-    foreign_summary = client_a.get(f"/v1/resume-summaries/{private['summary_id']}")
-    assert foreign_summary.status_code == 404, foreign_summary.text
-
     foreign_score_history = client_a.get(
         f"/v1/resumes/{private['task_resume_id']}/scores"
     )
     assert foreign_score_history.status_code == 404, foreign_score_history.text
-
-    foreign_summary_history = client_a.get(
-        f"/v1/resumes/{private['task_resume_id']}/summaries"
-    )
-    assert foreign_summary_history.status_code == 404, foreign_summary_history.text
 
     b_review_queue = client_b.get("/v1/resumes/review-queue")
     a_review_queue = client_a.get("/v1/resumes/review-queue")

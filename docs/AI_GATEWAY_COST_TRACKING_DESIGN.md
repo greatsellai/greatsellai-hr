@@ -428,7 +428,6 @@ resume_extract_rich
 resume_extract_core
 candidate_name_backfill
 resume_score
-resume_summary
 jd_generate
 jd_requirements_extract
 jd_match

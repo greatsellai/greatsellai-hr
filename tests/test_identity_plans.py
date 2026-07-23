@@ -330,16 +330,28 @@ def test_platform_ai_route_cannot_publish_with_unconfigured_provider_credential(
     assert model.status_code == 201, model.text
 
     published = identity_client.put(
-        "/v1/platform/ai/routes/resume_summary",
+        "/v1/platform/ai/routes/resume_score",
         json={
             "display_name": "Unconfigured route",
             "description": "Must not become a runtime failure.",
             "targets": [{"model_slug": "unconfigured-model"}],
-            "prompt_revision": "resume-summary.prompt.v1",
+            "prompt_revision": "resume-score.prompt.v1",
         },
     )
     assert published.status_code == 422, published.text
     assert published.json()["detail"] == "ai_route_credential_not_configured"
+
+    retired_route = identity_client.put(
+        "/v1/platform/ai/routes/resume_summary",
+        json={
+            "display_name": "Retired route",
+            "description": "Retired product features cannot be reconfigured.",
+            "targets": [{"model_slug": "unconfigured-model"}],
+            "prompt_revision": "retired-summary.prompt.v1",
+        },
+    )
+    assert retired_route.status_code == 422, retired_route.text
+    assert retired_route.json()["detail"] == "unsupported_ai_feature"
 
     routes = identity_client.get("/v1/platform/ai/routes")
     assert routes.status_code == 200, routes.text

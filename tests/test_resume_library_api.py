@@ -6,10 +6,9 @@ from app.models import Resume, ResumeAiExtractionJob
 from app.services.resume_service import reconcile_legacy_completed_ai_resumes
 from test_filter_mvp_contract import _save_ready_resume
 from test_score_service import _fake_score_provider, _template_payload
-from test_summary_service import _fake_summary_provider
 
 
-def test_resume_library_returns_current_ai_summary_preview_and_score(
+def test_resume_library_returns_current_score_without_retired_summary_fields(
     ai_client,
     monkeypatch,
 ) -> None:
@@ -21,16 +20,10 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
         ),
     )
     monkeypatch.setattr(
-        "app.services.summary_service.summarize_resume_fact_snapshot",
-        _fake_summary_provider,
-    )
-    monkeypatch.setattr(
         "app.services.score_service.score_resume_fact_snapshot",
         _fake_score_provider,
     )
 
-    summary = ai_client.post(f"/v1/resumes/{resume_id}/summaries")
-    assert summary.status_code == 200, summary.text
     template = ai_client.post("/v1/score-templates", json=_template_payload())
     assert template.status_code == 200, template.text
     score = ai_client.post(
@@ -60,8 +53,6 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
         "source_mailbox_config_id",
         "source_mailbox_label",
         "quality_flags",
-        "summary_preview",
-        "summary_created_at",
         "score_total",
         "score_status",
         "score_template_name",
@@ -80,8 +71,6 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["source_mailbox_config_id"] is None
     assert item["source_mailbox_label"] is None
     assert item["quality_flags"] == []
-    assert item["summary_preview"] == "Backend-oriented candidate."
-    assert item["summary_created_at"] == summary.json()["created_at"]
     # All scoring dimensions now use a fixed 100-point scale: 40 * 60% +
     # 50 * 40% = 44.
     assert item["score_total"] == 44.0
@@ -111,8 +100,19 @@ def test_resume_library_keeps_pending_upload_visible_without_ai_outputs(client) 
     assert item["display_name"] is None
     assert item["original_filename"] == "pending.pdf"
     assert item["is_active"] is False
-    assert item["summary_preview"] is None
     assert item["score_total"] is None
+
+
+def test_retired_resume_summary_routes_are_absent_from_api_contract(ai_client) -> None:
+    paths = ai_client.get("/openapi.json")
+    assert paths.status_code == 200, paths.text
+    documented_paths = paths.json()["paths"]
+    assert "/v1/resumes/{resume_id}/summaries" not in documented_paths
+    assert "/v1/resume-summaries/{summary_id}" not in documented_paths
+    assert "/v1/resume-summaries/{summary_id}/manual-versions" not in documented_paths
+
+    removed_endpoint = ai_client.post("/v1/resumes/retired-summary/summaries")
+    assert removed_endpoint.status_code == 404, removed_endpoint.text
 
 
 def test_resume_library_exposes_source_quality_flags_for_an_active_version(

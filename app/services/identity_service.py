@@ -186,11 +186,18 @@ def digest_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+_RETIRED_PLAN_FEATURE_FLAGS = frozenset({"ai_summary"})
+
+
 def _feature_flags(plan: ProductPlan | None) -> dict[str, bool]:
     raw_flags = plan.feature_flags if plan else {}
     if not isinstance(raw_flags, dict):
         return {}
-    return {str(key): bool(value) for key, value in raw_flags.items()}
+    return {
+        str(key): bool(value)
+        for key, value in raw_flags.items()
+        if str(key) not in _RETIRED_PLAN_FEATURE_FLAGS
+    }
 
 
 def _seed_plan_rows(session: Session) -> None:
@@ -198,7 +205,6 @@ def _seed_plan_rows(session: Session) -> None:
         "resume_library": True,
         "candidate_filtering": True,
         "ai_scoring": True,
-        "ai_summary": True,
         "jd_matching": True,
         "recruiting_agent": True,
     }
@@ -692,7 +698,11 @@ def update_product_plan(
         if field in updates:
             setattr(plan, field, updates[field])
     if "feature_flags" in updates:
-        plan.feature_flags = {str(key): bool(value) for key, value in updates["feature_flags"].items()}
+        plan.feature_flags = {
+            str(key): bool(value)
+            for key, value in updates["feature_flags"].items()
+            if str(key) not in _RETIRED_PLAN_FEATURE_FLAGS
+        }
     if updates.get("is_default_trial") is True:
         for other in session.scalars(select(ProductPlan).where(ProductPlan.id != plan.id)).all():
             other.is_default_trial = False

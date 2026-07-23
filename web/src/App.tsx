@@ -71,7 +71,6 @@ import type {
   ResumeScore,
   ResumeScoreBatch,
   ResumeScoreBatchItem,
-  ResumeSummary,
   ResumeUploadResponse,
   RegistrationOffer,
   RecruitingAgentAction,
@@ -88,7 +87,7 @@ import { Icon, type IconName } from "./icons";
 const AdminApp = lazy(() => import("./admin/AdminApp"));
 
 type View = "library" | "filter" | "upload" | "inbox" | "score" | "match" | "data";
-type DrawerTab = "original" | "summary" | "score" | "evidence";
+type DrawerTab = "original" | "score" | "evidence";
 type MatchMode = "all" | "any";
 type KeywordMode = "broad" | "precise";
 type ToastKind = "success" | "error";
@@ -769,7 +768,7 @@ function humanizeError(error: unknown): string {
       resume_source_text_unavailable:
         "这份简历没有可用的提取文字，暂时不能由 AI 提取。",
       resume_source_text_unreliable:
-        "这份简历的提取文本待校正，暂不能用于筛选、评分、总结或 JD 匹配。",
+        "这份简历的提取文本待校正，暂不能用于筛选、评分或 JD 匹配。",
       completed_resume_cannot_be_reextracted:
         "这份简历已启用，不能被后台 AI 任务覆盖。",
       resume_must_be_active_and_ready_for_source_reparse:
@@ -1460,8 +1459,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfDownloadLoading, setPdfDownloadLoading] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
-  const [summaries, setSummaries] = useState<ResumeSummary[]>([]);
-  const [summaryLoading, setSummaryLoading] = useState(false);
   const [drawerScores, setDrawerScores] = useState<ResumeScore[]>([]);
   const [drawerScoreLoading, setDrawerScoreLoading] = useState(false);
   const [drawerScoreError, setDrawerScoreError] = useState<string | null>(null);
@@ -1482,7 +1479,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const searchRequestRef = useRef(0);
   const scheduledFilterSearchRef = useRef<number | null>(null);
   const reviewRequestRef = useRef(0);
-  const summaryRequestRef = useRef(0);
   const drawerScoreRequestRef = useRef(0);
   const originalFileRequestRef = useRef(0);
   const originalFileRevokeRef = useRef<(() => void) | null>(null);
@@ -1695,25 +1691,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     [notify],
   );
 
-  const loadSummaries = useCallback(
-    async (resumeId: string) => {
-      const requestId = ++summaryRequestRef.current;
-      setSummaryLoading(true);
-      try {
-        const response = await api.listSummaries(resumeId);
-        if (requestId === summaryRequestRef.current) setSummaries(response);
-      } catch (error) {
-        if (requestId === summaryRequestRef.current) {
-          setSummaries([]);
-          notify("error", humanizeError(error));
-        }
-      } finally {
-        if (requestId === summaryRequestRef.current) setSummaryLoading(false);
-      }
-    },
-    [notify],
-  );
-
   const loadDrawerScores = useCallback(
     async (resumeId: string) => {
       const requestId = ++drawerScoreRequestRef.current;
@@ -1810,22 +1787,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   useEffect(() => {
     if (
       !drawerOpen ||
-      drawerTab !== "summary" ||
-      !selectedResumeId ||
-      !review ||
-      review.resume_id !== selectedResumeId
-    )
-      return;
-    if (hasSourceTextQualityIssue(review.quality_flags)) {
-      setSummaries([]);
-      return;
-    }
-    void loadSummaries(selectedResumeId);
-  }, [drawerOpen, drawerTab, loadSummaries, review, selectedResumeId]);
-
-  useEffect(() => {
-    if (
-      !drawerOpen ||
       drawerTab !== "score" ||
       !selectedResumeId ||
       !review ||
@@ -1846,7 +1807,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   useEffect(() => {
     drawerScoreRequestRef.current += 1;
-    setSummaries([]);
     setDrawerScores([]);
     setDrawerScoreError(null);
     setDrawerScoreLoading(false);
@@ -1890,10 +1850,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   }, [canManageMailbox, view]);
 
   const openCandidate = useCallback(
-    (item: CandidateSearchItem, tab: DrawerTab = "summary") => {
-      summaryRequestRef.current += 1;
+    (item: CandidateSearchItem, tab: DrawerTab = "original") => {
       setReview(null);
-      setSummaries([]);
       setSelectedResume({
         resumeId: item.resume_id,
         candidateId: item.candidate_id,
@@ -1908,15 +1866,13 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   const openUploadedResume = useCallback(
     (resumeId: string, candidateId: string) => {
-      summaryRequestRef.current += 1;
       setReview(null);
-      setSummaries([]);
       setSelectedResume({
         resumeId,
         candidateId,
         candidateName: "未命名候选人",
       });
-      setDrawerTab("summary");
+      setDrawerTab("original");
       setDrawerOpen(true);
       setView("library");
       setLibraryRefreshToken((current) => current + 1);
@@ -1927,15 +1883,13 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   const openLibraryResume = useCallback(
     (item: ResumeLibraryItem) => {
-      summaryRequestRef.current += 1;
       setReview(null);
-      setSummaries([]);
       setSelectedResume({
         resumeId: item.resume_id,
         candidateId: item.candidate_id,
         candidateName: item.display_name?.trim() || "未命名候选人",
       });
-      setDrawerTab("summary");
+      setDrawerTab("original");
       setDrawerOpen(true);
       void refreshReview(item.resume_id);
     },
@@ -1944,15 +1898,13 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   const openMatchedResume = useCallback(
     (match: JobMatch) => {
-      summaryRequestRef.current += 1;
       setReview(null);
-      setSummaries([]);
       setSelectedResume({
         resumeId: match.resume_id,
         candidateId: match.candidate_id,
         candidateName: match.candidate_display_name?.trim() || "未命名候选人",
       });
-      setDrawerTab("summary");
+      setDrawerTab("original");
       setDrawerOpen(true);
       void refreshReview(match.resume_id);
     },
@@ -1961,16 +1913,14 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   const openAgentResume = useCallback(
     (item: RecruitingAgentCandidate) => {
-      summaryRequestRef.current += 1;
       setReview(null);
-      setSummaries([]);
       setSelectedResume({
         resumeId: item.resume_id,
         candidateId: item.candidate_id,
         candidateName: item.display_name?.trim() || "未命名候选人",
       });
       setAgentOpen(false);
-      setDrawerTab("summary");
+      setDrawerTab("original");
       setDrawerOpen(true);
       void refreshReview(item.resume_id);
     },
@@ -2119,59 +2069,12 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     }
   };
 
-  const generateSummary = async () => {
-    if (!selectedResumeId) {
-      notify("error", "请先从筛选结果中打开一份简历。");
-      return;
-    }
-    setSummaryLoading(true);
-    try {
-      const summary = await api.generateSummary(selectedResumeId);
-      setSummaries((current) => [
-        summary,
-        ...current
-          .filter((item) => item.summary_id !== summary.summary_id)
-          .map((item) => ({ ...item, is_current: false })),
-      ]);
-      setLibraryRefreshToken((current) => current + 1);
-      notify("success", "AI 简历总结已生成。");
-    } catch (error) {
-      notify("error", humanizeError(error));
-    } finally {
-      setSummaryLoading(false);
-    }
-  };
-
-  const createManualSummary = async (
-    summaryId: string,
-    content: Record<string, string>,
-  ) => {
-    try {
-      const summary = await api.createManualSummaryVersion(summaryId, {
-        content,
-      });
-      setSummaries((current) => [
-        summary,
-        ...current
-          .filter((item) => item.summary_id !== summary.summary_id)
-          .map((item) => ({ ...item, is_current: false })),
-      ]);
-      setLibraryRefreshToken((current) => current + 1);
-      notify("success", "人工总结已保存为新的可追溯版本。");
-    } catch (error) {
-      notify("error", humanizeError(error));
-      throw error;
-    }
-  };
-
   const reparseSelectedSource = useCallback(async () => {
     if (!selectedResumeId || reparsingSource) return;
     setReparsingSource(true);
     try {
       const parsed = await api.reparseSource(selectedResumeId);
-      summaryRequestRef.current += 1;
       setReview(null);
-      setSummaries([]);
       setSelectedResume((current) => ({
         resumeId: parsed.resume_id,
         candidateId: parsed.candidate_id,
@@ -2217,9 +2120,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           other_note: "simple_resume_delete",
         });
         releaseOriginalFile();
-        summaryRequestRef.current += 1;
         setReview(null);
-        setSummaries([]);
         setSelectedResume(null);
         setDrawerOpen(false);
         setLibraryRefreshToken((current) => current + 1);
@@ -2537,13 +2438,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         scoreError={drawerScoreError}
         scoreLoading={drawerScoreLoading}
         scores={drawerScores}
-        summaries={summaries}
-        summaryLoading={summaryLoading}
         onClose={() => setDrawerOpen(false)}
-        onCreateManualSummary={createManualSummary}
         onDeleteResume={deleteSelectedResumeData}
         onDownloadOriginal={downloadOriginalFile}
-        onGenerateSummary={() => void generateSummary()}
         onReparseSource={() => void reparseSelectedSource()}
         onEnrichFacts={() => void enrichSelectedFacts()}
         onPreviewOriginal={() => void previewOriginalFile()}
@@ -5251,7 +5148,7 @@ function ResumeLibraryPage({
         <div>
           <h1>简历库</h1>
           <p>
-            一眼查看入库进度、AI 总结和 AI 评分；打开后可继续查看原始文件与提取依据。
+            一眼查看入库进度和 AI 评分；打开后可继续查看原始文件与提取依据。
           </p>
         </div>
         <div className="resume-library-actions">
@@ -5333,7 +5230,6 @@ function ResumeLibraryPage({
               <thead>
                 <tr>
                   <th scope="col">候选人</th>
-                  <th scope="col">AI 总结</th>
                   <th scope="col">AI 评分</th>
                   <th scope="col">状态</th>
                   <th scope="col">上传时间</th>
@@ -5351,7 +5247,7 @@ function ResumeLibraryPage({
                   );
                   return (
                     <tr
-                      aria-label={`打开 ${item.display_name?.trim() || "未命名候选人"} 的 AI 总结和原始简历`}
+                      aria-label={`打开 ${item.display_name?.trim() || "未命名候选人"} 的原始简历与评分详情`}
                       className={[
                         selectedResumeId === item.resume_id ? "is-selected" : "",
                         sourceTextIssue ? "has-source-quality-issue" : "",
@@ -5380,30 +5276,6 @@ function ResumeLibraryPage({
                               : "手动上传"}
                           </span>
                         </div>
-                      </td>
-                      <td className="library-summary-cell">
-                        {sourceTextIssue ? (
-                          <span className="library-quality-copy">
-                            提取文本疑似乱码，暂不展示 AI 总结。
-                          </span>
-                        ) : supersededReparse ? (
-                          <span className="library-quality-copy">
-                            此解析版本已过期，不展示旧结论。
-                          </span>
-                        ) : item.summary_preview ? (
-                          <p
-                            className="library-summary-preview"
-                            title={item.summary_preview}
-                          >
-                            {item.summary_preview}
-                          </p>
-                        ) : (
-                          <span className="library-empty-copy">
-                            {item.is_active
-                              ? "尚未生成，打开后可生成"
-                              : "完成提取后可生成"}
-                          </span>
-                        )}
                       </td>
                       <td>
                         {sourceTextIssue ? (
@@ -5474,7 +5346,7 @@ function ResumeLibraryPage({
               </span>
               <h2>简历库还是空的</h2>
               <p>
-                上传简历后，它会立即出现在这里；AI 提取、总结和评分会逐步更新。
+                上传简历后，它会立即出现在这里；AI 提取和评分会逐步更新。
               </p>
               <button
                 className="button button-primary"
@@ -5999,13 +5871,9 @@ function CandidateDrawer({
   pdfLoading,
   pdfDownloadLoading,
   pdfError,
-  summaries,
-  summaryLoading,
   scores,
   scoreLoading,
   scoreError,
-  onGenerateSummary,
-  onCreateManualSummary,
   onReparseSource,
   reparsingSource,
   onEnrichFacts,
@@ -6027,16 +5895,9 @@ function CandidateDrawer({
   pdfLoading: boolean;
   pdfDownloadLoading: boolean;
   pdfError: string | null;
-  summaries: ResumeSummary[];
-  summaryLoading: boolean;
   scores: ResumeScore[];
   scoreLoading: boolean;
   scoreError: string | null;
-  onGenerateSummary: () => void;
-  onCreateManualSummary: (
-    summaryId: string,
-    content: Record<string, string>,
-  ) => Promise<void>;
   onReparseSource: () => void;
   reparsingSource: boolean;
   onEnrichFacts: () => void;
@@ -6049,8 +5910,6 @@ function CandidateDrawer({
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [deleting, setDeleting] = useState(false);
-  const currentSummary =
-    summaries.find((item) => item.is_current) ?? summaries[0] ?? null;
   const sourceTextIssue = hasSourceTextQualityIssue(review?.quality_flags);
   const supersededReparse = hasSupersededReparseVersion(review?.quality_flags);
   useEffect(() => {
@@ -6139,7 +5998,6 @@ function CandidateDrawer({
           {(
             [
               ["original", "原始文件"],
-              ["summary", "AI 总结"],
               ["score", "评分详情"],
               ["evidence", "提取依据"],
             ] as Array<[DrawerTab, string]>
@@ -6169,27 +6027,6 @@ function CandidateDrawer({
               pdfUrl={pdfUrl}
               review={review}
             />
-          ) : drawerTab === "summary" ? (
-            sourceTextIssue ? (
-              <SourceTextQualityBlockedSummary
-                busy={reparsingSource}
-                onOpenEvidence={() => onTabChange("evidence")}
-                onReparse={onReparseSource}
-              />
-            ) : supersededReparse ? (
-              <SupersededReparseBlockedSummary
-                onOpenEvidence={() => onTabChange("evidence")}
-              />
-            ) : (
-              <DrawerSummary
-                currentSummary={currentSummary}
-                loading={summaryLoading}
-                onCreateManual={onCreateManualSummary}
-                onGenerate={onGenerateSummary}
-                onOpenEvidence={() => onTabChange("evidence")}
-                summaries={summaries}
-              />
-            )
           ) : drawerTab === "score" ? (
             sourceTextIssue ? (
               <ScoreDetailsUnavailable
@@ -6429,12 +6266,12 @@ function ScoreDetailsUnavailable({
   onReparse?: () => void;
 }) {
   return (
-    <div className="empty-state source-quality-blocked-summary">
+    <div className="empty-state source-quality-blocked-analysis">
       <div className="empty-state-inner">
         <span className="empty-glyph"><Icon name="layers" size={23} /></span>
         <h2>评分详情暂不可用</h2>
         <p>{reason}</p>
-        <div className="source-quality-summary-actions">
+        <div className="source-quality-analysis-actions">
           {onReparse && (
             <button
               className="button button-primary"
@@ -6469,7 +6306,7 @@ function SourceTextQualityNotice({
       <div className="source-quality-notice-copy">
         <strong>提取文本疑似乱码</strong>
         <p>
-          当前版本的 AI 总结、评分和 JD 匹配不应作为筛选依据。请从原件创建新的解析版本，旧版本会保留供追溯。
+          当前版本的评分和 JD 匹配不应作为筛选依据。请从原件创建新的解析版本，旧版本会保留供追溯。
         </p>
       </div>
       <button
@@ -6492,51 +6329,6 @@ function SourceTextQualityNotice({
   );
 }
 
-function SourceTextQualityBlockedSummary({
-  busy,
-  onOpenEvidence,
-  onReparse,
-}: {
-  busy: boolean;
-  onOpenEvidence: () => void;
-  onReparse: () => void;
-}) {
-  return (
-    <div className="empty-state source-quality-blocked-summary">
-      <div className="empty-state-inner">
-        <span className="empty-glyph">
-          <Icon name="document" size={23} />
-        </span>
-        <h2>AI 总结已暂停展示</h2>
-        <p>
-          这份简历的提取文本疑似乱码。为避免误导，本版本的 AI 结论不会在这里展示。
-        </p>
-        <div className="source-quality-summary-actions">
-          <button
-            className="button button-primary"
-            disabled={busy}
-            onClick={onReparse}
-            type="button"
-          >
-            {busy ? (
-              <>
-                <i className="spinner" />正在创建
-              </>
-            ) : (
-              <>
-                <Icon name="refresh" size={16} />重新解析为新版本
-              </>
-            )}
-          </button>
-          <button className="button button-ghost" onClick={onOpenEvidence} type="button">
-            查看提取依据
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function SupersededReparseNotice() {
   return (
     <section className="source-quality-notice source-quality-notice-stale" role="status">
@@ -6550,31 +6342,6 @@ function SupersededReparseNotice() {
         </p>
       </div>
     </section>
-  );
-}
-
-function SupersededReparseBlockedSummary({
-  onOpenEvidence,
-}: {
-  onOpenEvidence: () => void;
-}) {
-  return (
-    <div className="empty-state source-quality-blocked-summary">
-      <div className="empty-state-inner">
-        <span className="empty-glyph">
-          <Icon name="history" size={23} />
-        </span>
-        <h2>此解析版本未启用</h2>
-        <p>
-          候选人已有更新版本。为避免旧解析结果覆盖当前版本，本版本的 AI 结论不会在这里展示。
-        </p>
-        <div className="source-quality-summary-actions">
-          <button className="button button-ghost" onClick={onOpenEvidence} type="button">
-            查看提取依据
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -6697,272 +6464,6 @@ function OriginalDocumentTab({
         )}
       </div>
     </div>
-  );
-}
-
-function DrawerSummary({
-  currentSummary,
-  summaries,
-  loading,
-  onGenerate,
-  onCreateManual,
-  onOpenEvidence,
-}: {
-  currentSummary: ResumeSummary | null;
-  summaries: ResumeSummary[];
-  loading: boolean;
-  onGenerate: () => void;
-  onCreateManual: (
-    summaryId: string,
-    content: Record<string, string>,
-  ) => Promise<void>;
-  onOpenEvidence: () => void;
-}) {
-  const [selectedSummaryId, setSelectedSummaryId] = useState("");
-  const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState<Record<string, string>>({});
-  const selectedSummary =
-    summaries.find((item) => item.summary_id === selectedSummaryId) ??
-    currentSummary;
-
-  useEffect(() => {
-    if (!currentSummary) {
-      setSelectedSummaryId("");
-      setEditing(false);
-      setDraft({});
-      return;
-    }
-    setSelectedSummaryId(currentSummary.summary_id);
-    setEditing(false);
-    setDraft(summaryContentToDraft(currentSummary.content));
-  }, [currentSummary?.summary_id]);
-
-  if (loading) return <TableSkeleton />;
-  if (!currentSummary) {
-    return (
-      <div className="empty-state">
-        <div className="empty-state-inner">
-          <span className="empty-glyph">
-            <Icon name="spark" size={23} />
-          </span>
-          <h2>还没有 AI 总结</h2>
-          <p>生成后会保存在这份简历中，之后可随时回看。</p>
-          <button
-            className="button button-primary"
-            onClick={onGenerate}
-            type="button"
-          >
-            <Icon name="spark" size={16} />
-            生成 AI 总结
-          </button>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="detail-summary">
-      <div className="panel-heading">
-        <div>
-          <h2>{selectedSummary?.is_current ? "当前总结" : "历史总结"}</h2>
-          <p>
-            {selectedSummary?.source === "manual" ? "人工版本" : "AI 版本"} ·
-            生成于 {selectedSummary ? formatLibraryDate(selectedSummary.created_at) : "—"}
-          </p>
-        </div>
-        <div className="drawer-summary-actions">
-          <button className="button" onClick={onGenerate} type="button">
-            <Icon name="refresh" size={15} />
-            重新生成
-          </button>
-          <button
-            className="button button-ghost"
-            onClick={() => {
-              setDraft(summaryContentToDraft(selectedSummary?.content ?? {}));
-              setEditing((current) => !current);
-            }}
-            type="button"
-          >
-            {editing ? "取消编辑" : "人工编辑"}
-          </button>
-        </div>
-      </div>
-      {summaries.length > 1 && (
-        <div className="summary-history-control">
-          <label className="field-label" htmlFor="summary-history">
-            总结版本
-          </label>
-          <div className="select-wrap">
-            <select
-              className="select-field"
-              id="summary-history"
-              onChange={(event) => {
-                const next = summaries.find(
-                  (item) => item.summary_id === event.target.value,
-                );
-                if (!next) return;
-                setSelectedSummaryId(next.summary_id);
-                setDraft(summaryContentToDraft(next.content));
-                setEditing(false);
-              }}
-              value={selectedSummary?.summary_id ?? ""}
-            >
-              {summaries.map((item) => (
-                <option key={item.summary_id} value={item.summary_id}>
-                  {item.is_current ? "当前 · " : "历史 · "}
-                  {item.source === "manual" ? "人工" : "AI"} · {formatLibraryDate(item.created_at)}
-                </option>
-              ))}
-            </select>
-            <Icon name="chevron-down" size={16} />
-          </div>
-        </div>
-      )}
-      {editing && selectedSummary ? (
-        <form
-          className="summary-editor"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const content = Object.fromEntries(
-              Object.entries(draft).filter(([, value]) => value.trim()),
-            );
-            if (!Object.keys(content).length) return;
-            setSaving(true);
-            void onCreateManual(selectedSummary.summary_id, content)
-              .then(() => setEditing(false))
-              .catch(() => undefined)
-              .finally(() => setSaving(false));
-          }}
-        >
-          {summarySectionOrder.map((key) => (
-            <label className="field-stack" key={key}>
-              <span className="field-label">{summarySectionLabels[key]}</span>
-              <textarea
-                className="textarea-field summary-editor-textarea"
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    [key]: event.target.value,
-                  }))
-                }
-                value={draft[key] ?? ""}
-              />
-            </label>
-          ))}
-          <div className="review-actions">
-            <button
-              className="button button-primary"
-              disabled={saving}
-              type="submit"
-            >
-              {saving ? <><i className="spinner" />正在保存</> : <><Icon name="check" size={16} />保存人工版本</>}
-            </button>
-          </div>
-        </form>
-      ) : selectedSummary ? (
-        <SummaryContent
-          content={selectedSummary.content}
-          onOpenEvidence={onOpenEvidence}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-const summarySectionLabels: Record<string, string> = {
-  candidate_positioning: "候选人定位",
-  education_background: "教育背景",
-  work_and_internship: "工作与实习",
-  core_skills: "核心技能",
-  representative_projects: "代表项目",
-  strengths: "优势亮点",
-  verification_items: "建议核验",
-};
-
-const summarySectionOrder = Object.keys(summarySectionLabels);
-
-function summaryContentToDraft(content: Record<string, unknown>): Record<string, string> {
-  const sections = summarySections(content);
-  return Object.fromEntries(
-    summarySectionOrder.map((key) => [
-      key,
-      sections.find((section) => section.key === key)?.rendered ?? "",
-    ]),
-  );
-}
-
-function summaryFactIds(value: unknown): string[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-  const rawFactIds = (value as Record<string, unknown>).fact_ids;
-  return Array.isArray(rawFactIds)
-    ? rawFactIds.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
-function summarySections(content: Record<string, unknown>) {
-  const source =
-    content.sections &&
-    typeof content.sections === "object" &&
-    !Array.isArray(content.sections)
-      ? (content.sections as Record<string, unknown>)
-      : content;
-  return Object.entries(source)
-    .filter(([key]) => key !== "schema_version")
-    .flatMap(([key, value]) => {
-      const rendered =
-        typeof value === "string"
-          ? value.trim()
-          : value &&
-              typeof value === "object" &&
-              !Array.isArray(value) &&
-              typeof (value as Record<string, unknown>).content === "string"
-            ? ((value as Record<string, unknown>).content as string).trim()
-            : "";
-      return rendered
-        ? [
-            {
-              key,
-              label: summarySectionLabels[key] ?? key.replace(/_/g, " "),
-              rendered,
-              factIds: summaryFactIds(value),
-            },
-          ]
-        : [];
-    });
-}
-
-function SummaryContent({
-  content,
-  onOpenEvidence,
-}: {
-  content: Record<string, unknown>;
-  onOpenEvidence?: () => void;
-}) {
-  const entries = summarySections(content);
-  return (
-    <article className="summary-card">
-      {entries.length ? (
-        <dl>
-          {entries.flatMap((section) => [
-            <dt key={`${section.key}-dt`}>{section.label}</dt>,
-            <dd key={`${section.key}-dd`}>
-              <p>{section.rendered}</p>
-              {section.factIds.length > 0 && (
-                <button
-                  className="summary-evidence-link"
-                  onClick={onOpenEvidence}
-                  type="button"
-                >
-                  依据 {section.factIds.join("、")}
-                </button>
-              )}
-            </dd>,
-          ])}
-        </dl>
-      ) : (
-        <p className="candidate-meta">AI 没有返回可展示的总结内容。</p>
-      )}
-    </article>
   );
 }
 

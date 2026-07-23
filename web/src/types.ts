@@ -885,7 +885,6 @@ export interface CandidateSearchItem {
   latest_experience_organization: string | null;
   latest_experience_type: string | null;
   skill_highlights: string[];
-  summary_preview: string | null;
   score_id: string | null;
   score_template_id: string | null;
   score_total: number | null;
@@ -920,8 +919,6 @@ export interface ResumeLibraryItem {
   source_mailbox_label: string | null;
   /** Source extraction warnings. These take precedence over an old active state. */
   quality_flags: string[];
-  summary_preview: string | null;
-  summary_created_at: string | null;
   score_total: number | null;
   score_status: string | null;
   score_template_name: string | null;
@@ -1094,24 +1091,6 @@ export interface ResumeScoreBatchItem {
 export interface ResumeScoreOverride {
   raw_score: number;
   reason: string;
-}
-
-export interface ResumeSummary {
-  summary_id: string;
-  resume_id: string;
-  fact_snapshot_id: string | null;
-  facts_version: number;
-  content: JsonObject;
-  source: string;
-  supersedes_id: string | null;
-  is_current: boolean;
-  status: string;
-  model_name: string | null;
-  created_at: string;
-}
-
-export interface ResumeSummaryManualCreate {
-  content: Record<string, string>;
 }
 
 export interface JobRequirements {

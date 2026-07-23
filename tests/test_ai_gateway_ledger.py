@@ -379,7 +379,7 @@ def test_gateway_does_not_cross_targets_without_explicit_fallback_allowlist(
     with database.session_factory() as session:
         _seed_two_target_route(
             session,
-            feature="resume_summary",
+            feature="jd_match",
             allow_fallback_on=None,
         )
         with pytest.raises(DeepSeekProviderError, match="ai_provider_timeout"):
@@ -387,7 +387,7 @@ def test_gateway_does_not_cross_targets_without_explicit_fallback_allowlist(
                 session,
                 settings=settings,
                 spec=AiExecutionSpec(
-                    feature="resume_summary",
+                    feature="jd_match",
                     business_ref_type="test_resume",
                     business_ref_id="fallback-default-deny",
                 ),
@@ -420,14 +420,14 @@ def test_gateway_crosses_targets_only_for_an_allowlisted_failure(
     with database.session_factory() as session:
         _seed_two_target_route(
             session,
-            feature="resume_summary",
+            feature="jd_match",
             allow_fallback_on=["timeout"],
         )
         with ai_gateway_execution(
             session,
             settings=settings,
             spec=AiExecutionSpec(
-                feature="resume_summary",
+                feature="jd_match",
                 business_ref_type="test_resume",
                 business_ref_id="fallback-explicit-allow",
             ),
@@ -525,7 +525,7 @@ def test_legacy_bootstrap_handles_a_duplicate_race_without_committing_outer_work
         _bootstrap_legacy_route_if_available(
             session,
             settings=settings,
-            feature="resume_summary",
+            feature="jd_match",
         )
 
         assert session.in_transaction()
@@ -541,7 +541,7 @@ def test_legacy_bootstrap_handles_a_duplicate_race_without_committing_outer_work
                 )
             ) is None
             assert observer.scalar(
-                select(AiRoutePolicy).where(AiRoutePolicy.feature == "resume_summary")
+                select(AiRoutePolicy).where(AiRoutePolicy.feature == "jd_match")
             ) is None
         session.commit()
 
@@ -552,7 +552,7 @@ def test_legacy_bootstrap_handles_a_duplicate_race_without_committing_outer_work
             )
         ) is not None
         policy = observer.scalar(
-            select(AiRoutePolicy).where(AiRoutePolicy.feature == "resume_summary")
+            select(AiRoutePolicy).where(AiRoutePolicy.feature == "jd_match")
         )
         assert policy is not None
         assert policy.active_version_id is not None

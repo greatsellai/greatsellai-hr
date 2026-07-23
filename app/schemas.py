@@ -1844,7 +1844,6 @@ class CandidateSearchItem(ApiModel):
     latest_experience_organization: str | None = None
     latest_experience_type: str | None = None
     skill_highlights: list[str] = Field(default_factory=list)
-    summary_preview: str | None = None
     score_id: str | None = None
     score_template_id: str | None = None
     score_total: float | None = None
@@ -1903,8 +1902,6 @@ class ResumeLibraryItem(ApiModel):
     # identified as unreliable, so the client must not infer trust from
     # ``is_active`` alone.
     quality_flags: list[str] = Field(default_factory=list)
-    summary_preview: str | None = None
-    summary_created_at: str | None = None
     score_total: float | None = None
     score_status: str | None = None
     score_template_name: str | None = None
@@ -2117,32 +2114,6 @@ class ResumeScoreBatchItemResponse(ApiModel):
 class ResumeScoreOverride(ApiModel):
     raw_score: float = Field(ge=0, le=100)
     reason: str = Field(min_length=1, max_length=1000)
-
-
-class ResumeSummaryResponse(ApiModel):
-    summary_id: str
-    resume_id: str
-    fact_snapshot_id: str | None
-    facts_version: int
-    content: dict[str, object]
-    source: str
-    supersedes_id: str | None
-    is_current: bool
-    status: str
-    model_name: str | None
-    created_at: str
-
-
-class ResumeSummaryManualCreate(ApiModel):
-    content: dict[str, str]
-
-    @model_validator(mode="after")
-    def non_empty_content(self) -> "ResumeSummaryManualCreate":
-        if not self.content or not any(value.strip() for value in self.content.values()):
-            raise ValueError("manual_summary_content_must_not_be_empty")
-        if any(not key.strip() or not value.strip() for key, value in self.content.items()):
-            raise ValueError("manual_summary_sections_must_not_be_blank")
-        return self
 
 
 class JobRequirements(ApiModel):

@@ -22,7 +22,6 @@ from app.models import (
     ResumeScholarship,
     ResumeSkill,
     ResumeSourceBlock,
-    ResumeSummary,
     ResumeUploadIdempotencyKey,
     utcnow,
 )
@@ -1831,20 +1830,6 @@ def _replace_facts(
     session.flush()
 
     _create_fact_snapshot(session, resume=resume, created_by=created_by)
-    # A current summary is only meaningful for the exact immutable fact
-    # snapshot it was generated from.  Saving facts always creates a new
-    # snapshot, so leave old summaries as history instead of presenting one as
-    # current for changed candidate data.
-    session.execute(
-        update(ResumeSummary)
-        .where(
-            ResumeSummary.resume_id == resume.id,
-            ResumeSummary.organization_id == resume.organization_id,
-            ResumeSummary.is_current.is_(True),
-        )
-        .values(is_current=False, status="stale")
-    )
-
     session.add(
         ResumeReviewAction(
             resume_id=resume.id,

@@ -15,7 +15,6 @@ from app.models import (
     CandidateDataExport,
     Resume,
     ResumeFactSnapshot,
-    ResumeSummary,
 )
 from app.services.candidate_data_export_service import (
     CandidateDataExportError,
@@ -91,17 +90,6 @@ def _seed_exportable_candidate(client) -> tuple[str, str]:
         )
         session.add(snapshot)
         session.flush()
-        summary = ResumeSummary(
-            resume_id=resume.id,
-            fact_snapshot_id=snapshot.id,
-            facts_version=1,
-            content={"summary": "safe", "raw_text": "must-not-export"},
-            source="ai",
-            is_current=True,
-            status="succeeded",
-            model_name="test",
-        )
-        session.add(summary)
         session.commit()
         return candidate.id, resume.id
 
@@ -161,17 +149,15 @@ def test_export_worker_builds_safe_archive_and_download_grant(client) -> None:
             "candidates.csv",
             "candidates.xlsx",
             "facts.json",
-            "summaries.json",
             "scores.json",
             "job_matches.json",
             "manifest.json",
         }
+        assert "summaries.json" not in archive.namelist()
         assert not any(name.startswith("originals/") for name in archive.namelist())
         facts = archive.read("facts.json").decode("utf-8")
-        summaries = archive.read("summaries.json").decode("utf-8")
         csv_text = archive.read("candidates.csv").decode("utf-8-sig")
         assert "must-not-export" not in facts
-        assert "must-not-export" not in summaries
         assert "private-resume.pdf" not in archive.read("manifest.json").decode("utf-8")
         assert "'=FormulaLikeName" in csv_text
         assert "'=FormulaLikeSkill" in csv_text

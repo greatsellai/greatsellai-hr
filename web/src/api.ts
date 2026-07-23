@@ -60,8 +60,6 @@ import type {
   ResumeScoreBatchItem,
   ResumeScoreCreate,
   ResumeScoreOverride,
-  ResumeSummary,
-  ResumeSummaryManualCreate,
   ResumeUploadResponse,
   RecruitingAgentTurn,
   RecruitingAgentTurnInput,
@@ -700,25 +698,6 @@ export function createApiClient(options: ApiClientOptions = {}) {
         `/resume-scores/${resourcePath(scoreId)}/dimensions/${resourcePath(dimensionKey)}/override`,
         { method: "POST", body: input },
       );
-    },
-
-    generateSummary(resumeId: string): Promise<ResumeSummary> {
-      return request<ResumeSummary>(`/resumes/${resourcePath(resumeId)}/summaries`, { method: "POST" });
-    },
-
-    getSummary(summaryId: string): Promise<ResumeSummary> {
-      return request<ResumeSummary>(`/resume-summaries/${resourcePath(summaryId)}`);
-    },
-
-    listSummaries(resumeId: string): Promise<ResumeSummary[]> {
-      return request<ResumeSummary[]>(`/resumes/${resourcePath(resumeId)}/summaries`);
-    },
-
-    createManualSummaryVersion(summaryId: string, input: ResumeSummaryManualCreate): Promise<ResumeSummary> {
-      return request<ResumeSummary>(`/resume-summaries/${resourcePath(summaryId)}/manual-versions`, {
-        method: "POST",
-        body: input,
-      });
     },
 
     createJob(input: JobCreate): Promise<JobVersion> {

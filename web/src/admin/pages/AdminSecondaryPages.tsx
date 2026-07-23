@@ -145,7 +145,6 @@ const PLAN_FEATURE_LABELS: Record<string, string> = {
   resume_library: "简历库",
   candidate_filtering: "候选人筛选",
   ai_scoring: "AI 简历评分",
-  ai_summary: "AI 简历总结",
   jd_matching: "JD 匹配",
   recruiting_agent: "招聘智能助手",
   mailbox_import: "邮箱简历入库",

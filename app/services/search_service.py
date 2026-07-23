@@ -20,7 +20,6 @@ from app.models import (
     Resume,
     ResumeLanguageCredential,
     ResumeScore,
-    ResumeSummary,
     ScoreTemplate,
 )
 from app.schemas import (
@@ -46,7 +45,6 @@ from app.services.resume_eligibility import is_resume_screening_eligible
 # it from search/library results makes newly completed batch work look as if no
 # score exists at all.
 _CURRENT_SCORE_STATUSES = {"succeeded", "needs_review", "overridden"}
-_SUMMARY_PREVIEW_MAX_CHARS = 180
 _AMBIGUOUS_LANGUAGE_SOURCE_ALIASES = {
     normalized_key("四级"),
     normalized_key("六级"),
@@ -89,42 +87,6 @@ _DISPLAY_FIELD_ORDER = (
     "leadership",
     "keywords",
 )
-
-
-def _summary_preview(summary: ResumeSummary | None) -> str | None:
-    """Return one compact, recruiter-safe line from the current summary."""
-
-    if summary is None or not isinstance(summary.content, dict):
-        return None
-    sections = summary.content.get("sections")
-    if not isinstance(sections, dict):
-        return None
-    for key in (
-        "candidate_positioning",
-        "work_and_internship",
-        "core_skills",
-        "strengths",
-    ):
-        value = sections.get(key)
-        rendered = value.get("content") if isinstance(value, dict) else value
-        if not isinstance(rendered, str) or not rendered.strip():
-            continue
-        normalized = " ".join(rendered.split())
-        if len(normalized) <= _SUMMARY_PREVIEW_MAX_CHARS:
-            return normalized
-        return f"{normalized[: _SUMMARY_PREVIEW_MAX_CHARS - 1].rstrip()}…"
-    return None
-
-
-def _current_summary(resume: Resume) -> ResumeSummary | None:
-    candidates = [
-        summary
-        for summary in resume.summaries
-        if summary.is_current
-        and summary.status == "succeeded"
-        and summary.facts_version == resume.facts_version
-    ]
-    return max(candidates, key=lambda item: (item.created_at, item.id), default=None)
 
 
 def _latest_score(
@@ -818,7 +780,6 @@ def search_candidates(
             selectinload(Resume.scholarships),
             selectinload(Resume.source_blocks),
             selectinload(Resume.candidate),
-            selectinload(Resume.summaries),
             selectinload(Resume.scores).selectinload(ResumeScore.template),
         )
         .where(Resume.is_active.is_(True), Resume.extraction_status == "ready")
@@ -1511,7 +1472,6 @@ def search_candidates(
             )
 
         candidate: Candidate = resume.candidate
-        summary = _current_summary(resume)
         score = _latest_score(
             resume,
             template_id=score_template.id if score_template is not None else None,
@@ -1567,7 +1527,6 @@ def search_candidates(
                     else None
                 ),
                 skill_highlights=skill_highlights,
-                summary_preview=_summary_preview(summary),
                 score_id=score.id if score else None,
                 score_template_id=score.template_id if score else None,
                 score_total=score.total_score if score else None,

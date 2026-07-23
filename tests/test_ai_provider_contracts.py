@@ -8,15 +8,10 @@ from app.services.deepseek_provider import (
     FACT_SNAPSHOT_SCHEMA_VERSION,
     DeepSeekProviderError,
     SCORE_SCHEMA_VERSION,
-    SUMMARY_SCHEMA_VERSION,
-    SUMMARY_SECTION_KEYS,
     _validate_fact_snapshot,
     resume_score_tool_schema,
-    resume_summary_tool_schema,
     score_resume_fact_snapshot,
-    summarize_resume_fact_snapshot,
     validate_resume_score_output,
-    validate_resume_summary_output,
 )
 
 
@@ -188,39 +183,6 @@ def _english_score_output() -> dict[str, object]:
     risk_flag = risk_flags[0]
     assert isinstance(risk_flag, dict)
     risk_flag["message"] = "Domain relevance needs verification."
-    return payload
-
-
-def _valid_summary_output() -> dict[str, object]:
-    sections = {
-        section_key: {
-            "content": "Information is unavailable in the fact snapshot.",
-            "fact_ids": [],
-        }
-        for section_key in SUMMARY_SECTION_KEYS
-    }
-    sections["candidate_positioning"] = {
-        "content": "Python-oriented candidate with one recorded role.",
-        "fact_ids": ["experience-001", "skill-001"],
-    }
-    sections["education_background"] = {
-        "content": "Bachelor degree in Computer Science.",
-        "fact_ids": ["education-001"],
-    }
-    return {"schema_version": SUMMARY_SCHEMA_VERSION, "sections": sections}
-
-
-def _valid_chinese_summary_output() -> dict[str, object]:
-    payload = _valid_summary_output()
-    sections = payload["sections"]
-    assert isinstance(sections, dict)
-    for section in sections.values():
-        assert isinstance(section, dict)
-        section["content"] = "简历信息不足。"
-    sections["candidate_positioning"] = {
-        "content": "候选人具备 Python 相关能力和一段明确工作经历。",
-        "fact_ids": ["experience-001", "skill-001"],
-    }
     return payload
 
 
@@ -420,63 +382,6 @@ def test_score_rejects_two_english_outputs_after_one_correction(monkeypatch) -> 
             dimensions=_dimensions(),
         )
     assert len(calls) == 2
-
-
-def test_summary_schema_and_output_require_fixed_sections_and_known_citations() -> None:
-    schema = resume_summary_tool_schema(fact_ids=_fact_ids())
-    assert schema["properties"]["sections"]["required"] == list(SUMMARY_SECTION_KEYS)
-
-    validated = validate_resume_summary_output(
-        _valid_summary_output(),
-        fact_ids=_fact_ids(),
-    )
-    assert set(validated["sections"]) == set(SUMMARY_SECTION_KEYS)
-
-    missing_section = _valid_summary_output()
-    del missing_section["sections"]["strengths"]  # type: ignore[index]
-    with pytest.raises(DeepSeekProviderError, match="summary_section_keys"):
-        validate_resume_summary_output(missing_section, fact_ids=_fact_ids())
-
-    unknown_fact = _valid_summary_output()
-    unknown_fact["sections"]["core_skills"]["fact_ids"] = ["skill-999"]  # type: ignore[index]
-    with pytest.raises(DeepSeekProviderError, match="summary_section_fact_ids"):
-        validate_resume_summary_output(unknown_fact, fact_ids=_fact_ids())
-
-    with pytest.raises(DeepSeekProviderError, match="summary_section_language"):
-        validate_resume_summary_output(
-            _valid_summary_output(),
-            fact_ids=_fact_ids(),
-            require_simplified_chinese=True,
-        )
-    chinese_validated = validate_resume_summary_output(
-        _valid_chinese_summary_output(),
-        fact_ids=_fact_ids(),
-        require_simplified_chinese=True,
-    )
-    assert chinese_validated["sections"]["candidate_positioning"]["content"].startswith("候选人")
-
-
-def test_summary_prompt_requires_simplified_chinese_content(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_provider_call(**kwargs):
-        captured.update(kwargs)
-        return _valid_chinese_summary_output()
-
-    monkeypatch.setattr(
-        "app.services.deepseek_provider.call_strict_function",
-        fake_provider_call,
-    )
-
-    summarize_resume_fact_snapshot(
-        api_key="not-used",
-        model="not-used",
-        timeout_seconds=1,
-        fact_snapshot=_fact_snapshot(),
-    )
-
-    assert "Simplified Chinese" in str(captured["system_prompt"])
-    assert "每个 content 都必须为简体中文" in str(captured["user_prompt"])
 
 
 def test_score_helper_rejects_raw_pdf_like_input_before_any_provider_call() -> None:

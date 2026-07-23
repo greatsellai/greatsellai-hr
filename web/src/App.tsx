@@ -7647,27 +7647,117 @@ function MailboxPage({
         displayName: item.mailbox_display_name || "已归档收件通道",
       })),
   ].filter((item, index, entries) => entries.findIndex((candidate) => candidate.mailboxId === item.mailboxId) === index);
+  const hasMailboxChannels = mailboxes.length > 0;
+  const showMailboxSetup = !loading && !hasMailboxChannels;
+
+  const mailboxConnectionFields = (
+    <div className="mailbox-connection-form">
+      <section className="mailbox-form-section" aria-labelledby="mailbox-identity-heading">
+        <div className="mailbox-form-section-heading">
+          <div>
+            <h3 id="mailbox-identity-heading">收件身份</h3>
+            <p>用于区分简历来源；不会向候选人发送邮件。</p>
+          </div>
+        </div>
+        <div className="form-grid mailbox-form-grid">
+          <div className="field-stack">
+            <label className="field-label" htmlFor="mailbox-display-name">通道名称</label>
+            <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="mailbox-display-name" maxLength={32} onChange={(event) => updateDraft("displayName", event.target.value)} placeholder="例如：招聘邮箱" value={draft.displayName} />
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="imap-address">接收简历的邮箱</label>
+            <input autoComplete="email" className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-address" onChange={(event) => updateDraft("emailAddress", event.target.value)} type="email" value={draft.emailAddress} />
+          </div>
+        </div>
+      </section>
+
+      <section className="mailbox-form-section" aria-labelledby="mailbox-connection-heading">
+        <div className="mailbox-form-section-heading">
+          <div>
+            <h3 id="mailbox-connection-heading">服务器连接</h3>
+            <p>仅支持已批准的加密 IMAPS 服务商地址与 993 端口。</p>
+          </div>
+        </div>
+        <div className="form-grid mailbox-form-grid">
+          <div className="field-stack">
+            <label className="field-label" htmlFor="imap-host">IMAP 地址</label>
+            <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-host" onChange={(event) => updateDraft("imapHost", event.target.value)} value={draft.imapHost} />
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="imap-port">端口</label>
+            <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-port" inputMode="numeric" onChange={(event) => updateDraft("imapPort", event.target.value)} value={draft.imapPort} />
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="imap-folder">邮箱文件夹</label>
+            <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-folder" onChange={(event) => updateDraft("mailbox", event.target.value)} value={draft.mailbox} />
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="imap-password">邮箱授权码</label>
+            <input
+              aria-describedby="imap-password-hint"
+              autoComplete="new-password"
+              className="field"
+              disabled={selectedMailboxArchived || selectedSyncInProgress}
+              id="imap-password"
+              onChange={(event) => updateDraft("password", event.target.value)}
+              placeholder={isCreating ? "首次保存必填" : "留空则保持原授权码"}
+              type="password"
+              value={draft.password}
+            />
+            <p className="field-help" id="imap-password-hint">授权码仅用于连接这个收件通道，不会在页面中回显。</p>
+          </div>
+          <label className="choice-row span-full mailbox-sync-toggle">
+            <input checked={draft.enabled} disabled={selectedMailboxArchived || selectedSyncInProgress} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
+            <span>
+              <strong>启用后台定时同步</strong>
+              <small>你也可以在保存后随时手动同步这个通道。</small>
+            </span>
+          </label>
+        </div>
+      </section>
+    </div>
+  );
+
+  const mailboxFormActions = (
+    <div className="review-actions mailbox-form-actions">
+      {!isCreating && selectedConfig && (
+        <button className="button button-ghost" disabled={archiving || saving || selectedSyncInProgress || !selectedConfig.enabled || Boolean(selectedConfig.archived_at)} onClick={() => void syncMailbox(selectedConfig)} type="button">
+          {enqueuingMailboxId === selectedConfig.mailbox_id ? <><i className="spinner" />正在加入队列</> : selectedSyncJob ? <><i className="spinner" />后台同步中</> : <><Icon name="refresh" size={16} />同步此通道</>}
+        </button>
+      )}
+      {!isCreating && selectedConfig && !selectedConfig.archived_at && (
+        <button className="button button-danger-ghost" disabled={archiving || saving || selectedSyncInProgress} onClick={() => void archiveMailbox()} type="button">
+          {archiving ? <><i className="spinner" />正在归档</> : "归档通道"}
+        </button>
+      )}
+      <button className="button button-primary" disabled={loading || saving || archiving || selectedSyncInProgress || (!isCreating && selectedMailboxArchived)} onClick={() => void saveMailbox()} type="button">
+        {saving ? <><i className="spinner" />正在保存</> : <><Icon name="check" size={16} />{isCreating ? "创建并开始接收" : selectedMailboxArchived ? "已归档" : "保存通道"}</>}
+      </button>
+    </div>
+  );
 
   return (
     <div className="page-frame mailbox-page">
       <header className="page-heading">
         <div>
           <h1>邮箱附件入库</h1>
-          <p>每个收件通道独立保存绑定位置和同步状态，只接收绑定之后到达的附件。</p>
+          <p>连接招聘邮箱后，系统只接收绑定之后到达的附件。</p>
         </div>
-        <div className="mailbox-heading-actions">
-          <button className="button" disabled={loading || saving || enqueuingAll} onClick={startCreatingMailbox} type="button">
-            <Icon name="plus" size={16} />新建收件通道
-          </button>
-          <button
-            className="button button-primary"
-            disabled={loading || saving || enqueuingAll || !mailboxes.some((item) => item.enabled && !item.archived_at)}
-            onClick={() => void syncAllMailboxes()}
-            type="button"
-          >
-            {enqueuingAll ? <><i className="spinner" />正在加入队列</> : activeSyncMailboxIds.size ? <><i className="spinner" />后台同步中</> : <><Icon name="refresh" size={16} />同步全部</>}
-          </button>
-        </div>
+        {hasMailboxChannels && (
+          <div className="mailbox-heading-actions">
+            <button className="button" disabled={loading || saving || enqueuingAll} onClick={startCreatingMailbox} type="button">
+              <Icon name="plus" size={16} />新建收件通道
+            </button>
+            <button
+              className="button button-primary"
+              disabled={loading || saving || enqueuingAll || !mailboxes.some((item) => item.enabled && !item.archived_at)}
+              onClick={() => void syncAllMailboxes()}
+              type="button"
+            >
+              {enqueuingAll ? <><i className="spinner" />正在加入队列</> : activeSyncMailboxIds.size ? <><i className="spinner" />后台同步中</> : <><Icon name="refresh" size={16} />同步全部</>}
+            </button>
+          </div>
+        )}
       </header>
 
       {activeSyncAlerts.length > 0 && (
@@ -7712,10 +7802,45 @@ function MailboxPage({
         </section>
       )}
 
+      {showMailboxSetup ? (
+        <section className="mailbox-setup-shell" aria-label="绑定招聘收件邮箱">
+          <section className="panel mailbox-setup-form-panel">
+            <div className="mailbox-setup-heading">
+              <span className="mailbox-setup-kicker"><Icon name="inbox" size={16} />首次接入</span>
+              <h2>绑定招聘收件邮箱</h2>
+              <p>保存时会记录当前邮箱位置。只有此刻之后到达的附件会进入简历库，历史邮件不会入库。</p>
+            </div>
+            {mailboxConnectionFields}
+            {mailboxFormActions}
+          </section>
+
+          <aside className="panel mailbox-setup-aside">
+            <div className="mailbox-setup-aside-heading">
+              <h2>接入后如何工作</h2>
+              <p>连接配置、同步状态和处理记录都只属于当前工作区。</p>
+            </div>
+            <ol className="mailbox-setup-steps">
+              <li>
+                <span>1</span>
+                <div><strong>保存连接</strong><p>系统记录当前收件位置，不回扫已有邮件。</p></div>
+              </li>
+              <li>
+                <span>2</span>
+                <div><strong>后台同步</strong><p>按计划检查新附件，也可以随时手动触发。</p></div>
+              </li>
+              <li>
+                <span>3</span>
+                <div><strong>附件入库</strong><p>支持 PDF、Word、图片、Excel 和 HTML，处理结果会留在本页。</p></div>
+              </li>
+            </ol>
+            <p className="mailbox-setup-footnote"><Icon name="check" size={15} />连接完成后，可在这里查看入库记录、同步异常和内容保留策略。</p>
+          </aside>
+        </section>
+      ) : (
       <div className="mailbox-workspace">
         <aside className="panel mailbox-channel-panel" aria-label="收件通道">
           <div className="panel-heading mailbox-channel-heading">
-            <div><h2>收件通道</h2><p>各通道独立同步；同一工作区内的相同附件统一去重。</p></div>
+            <div><h2>收件通道</h2><p>每个通道独立保存接收起点与同步状态。</p></div>
             <span className="tiny-badge">{mailboxes.length}</span>
           </div>
           {loading ? <TableSkeleton /> : mailboxes.length ? (
@@ -7753,78 +7878,20 @@ function MailboxPage({
 
         <div className="mailbox-detail">
           <div className="mailbox-detail-grid">
-            <section className="panel">
+            <section className="panel mailbox-config-panel">
               <div className="panel-heading">
                 <div>
-                  <h2>{isCreating ? "新建收件通道" : selectedConfig?.display_name || "收件通道"}</h2>
-                  <p>{isCreating ? "保存时会记录当前邮箱位置，历史邮件不会入库。" : "授权码始终保持隐藏，留空则继续使用已保存的值。"}</p>
+                  <h2>{isCreating ? "新建收件通道" : "收件通道设置"}</h2>
+                  <p>{isCreating ? "保存时会记录当前邮箱位置，历史邮件不会入库。" : "授权码始终保持隐藏；留空则继续使用已保存的值。"}</p>
                 </div>
                 {selectedConfig && <span className={`status-pill${mailboxChannelStatusClass(selectedConfig)}`}>{mailboxChannelStatus(selectedConfig)}</span>}
               </div>
-              {loading ? <TableSkeleton /> : (
-                <div className="form-grid">
-                  <div className="field-stack span-full">
-                    <label className="field-label" htmlFor="mailbox-display-name">通道名称</label>
-                    <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="mailbox-display-name" maxLength={32} onChange={(event) => updateDraft("displayName", event.target.value)} placeholder="例如：招聘邮箱" value={draft.displayName} />
-                  </div>
-                  <div className="field-stack">
-                    <label className="field-label" htmlFor="imap-host">IMAP 地址</label>
-                    <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-host" onChange={(event) => updateDraft("imapHost", event.target.value)} value={draft.imapHost} />
-                    <p className="field-help">仅可连接服务端已批准的 IMAPS 服务商地址。</p>
-                  </div>
-                  <div className="field-stack">
-                    <label className="field-label" htmlFor="imap-port">端口</label>
-                    <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-port" inputMode="numeric" onChange={(event) => updateDraft("imapPort", event.target.value)} value={draft.imapPort} />
-                    <p className="field-help">系统仅接受加密 IMAPS 的 993 端口。</p>
-                  </div>
-                  <div className="field-stack span-full">
-                    <label className="field-label" htmlFor="imap-address">接收简历的邮箱</label>
-                    <input autoComplete="email" className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-address" onChange={(event) => updateDraft("emailAddress", event.target.value)} type="email" value={draft.emailAddress} />
-                  </div>
-                  <div className="field-stack">
-                    <label className="field-label" htmlFor="imap-folder">邮箱文件夹</label>
-                    <input className="field" disabled={selectedMailboxArchived || selectedSyncInProgress} id="imap-folder" onChange={(event) => updateDraft("mailbox", event.target.value)} value={draft.mailbox} />
-                  </div>
-                  <div className="field-stack">
-                    <label className="field-label" htmlFor="imap-password">邮箱授权码</label>
-                    <input
-                      aria-describedby="imap-password-hint"
-                      autoComplete="new-password"
-                      className="field"
-                      disabled={selectedMailboxArchived || selectedSyncInProgress}
-                      id="imap-password"
-                      onChange={(event) => updateDraft("password", event.target.value)}
-                      placeholder={isCreating ? "首次保存必填" : "留空则保持原授权码"}
-                      type="password"
-                      value={draft.password}
-                    />
-                    <p className="field-help" id="imap-password-hint">授权码仅用于连接该收件通道，不会在页面中回显。</p>
-                  </div>
-                  <label className="choice-row span-full">
-                    <input checked={draft.enabled} disabled={selectedMailboxArchived || selectedSyncInProgress} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
-                    启用后台定时同步
-                  </label>
-                </div>
-              )}
-              <div className="review-actions mailbox-form-actions">
-                {!isCreating && selectedConfig && (
-                  <button className="button button-ghost" disabled={archiving || saving || selectedSyncInProgress || !selectedConfig.enabled || Boolean(selectedConfig.archived_at)} onClick={() => void syncMailbox(selectedConfig)} type="button">
-                    {enqueuingMailboxId === selectedConfig.mailbox_id ? <><i className="spinner" />正在加入队列</> : selectedSyncJob ? <><i className="spinner" />后台同步中</> : <><Icon name="refresh" size={16} />同步此通道</>}
-                  </button>
-                )}
-                {!isCreating && selectedConfig && !selectedConfig.archived_at && (
-                  <button className="button button-danger-ghost" disabled={archiving || saving || selectedSyncInProgress} onClick={() => void archiveMailbox()} type="button">
-                    {archiving ? <><i className="spinner" />正在归档</> : "归档通道"}
-                  </button>
-                )}
-                <button className="button button-primary" disabled={loading || saving || archiving || selectedSyncInProgress || (!isCreating && selectedMailboxArchived)} onClick={() => void saveMailbox()} type="button">
-                  {saving ? <><i className="spinner" />正在保存</> : <><Icon name="check" size={16} />{isCreating ? "创建并开始接收" : selectedMailboxArchived ? "已归档" : "保存通道"}</>}
-                </button>
-              </div>
+              {loading ? <TableSkeleton /> : mailboxConnectionFields}
+              {mailboxFormActions}
             </section>
 
             <aside className="panel mailbox-status-panel">
-              <div className="panel-heading"><div><h2>同步与保留状态</h2><p>各通道独立同步与清理；同一工作区内已处理邮件或相同内容附件不会重复创建候选人，每封邮件仍保留一条处理记录。</p></div></div>
+              <div className="panel-heading"><div><h2>运行状态</h2><p>同步、异常和内容保留都按当前通道独立管理；相同内容附件不会重复创建候选人。</p></div></div>
               {selectedConfig ? (
                 <>
                   {selectedConfig.active_sync_alert && (
@@ -8074,6 +8141,7 @@ function MailboxPage({
           </section>
         </div>
       </div>
+      )}
     </div>
   );
 }

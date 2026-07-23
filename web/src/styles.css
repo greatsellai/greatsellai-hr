@@ -4339,9 +4339,182 @@ button {
   align-items: start;
 }
 
+.mailbox-setup-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 22rem);
+  gap: var(--space-xl);
+  max-width: 76rem;
+  align-items: start;
+}
+
+.mailbox-setup-form-panel {
+  padding: clamp(1.25rem, 2.4vw, 2rem);
+}
+
+.mailbox-setup-heading {
+  padding-bottom: var(--space-lg);
+  margin-bottom: var(--space-lg);
+  border-bottom: 1px solid var(--line);
+}
+
+.mailbox-setup-kicker {
+  display: inline-flex;
+  gap: 0.375rem;
+  align-items: center;
+  margin-bottom: 0.625rem;
+  color: var(--red-pressed);
+  font-size: 0.75rem;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+}
+
+.mailbox-setup-heading h2,
+.mailbox-setup-aside h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.125rem;
+  font-weight: 720;
+  letter-spacing: -0.025em;
+}
+
+.mailbox-setup-heading p,
+.mailbox-setup-aside-heading p {
+  max-width: 60ch;
+  margin: 0.375rem 0 0;
+  color: var(--ink-muted);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.mailbox-connection-form {
+  display: grid;
+  gap: var(--space-lg);
+}
+
+.mailbox-form-section + .mailbox-form-section {
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--line);
+}
+
+.mailbox-form-section-heading {
+  margin-bottom: var(--space-md);
+}
+
+.mailbox-form-section-heading h3 {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  font-weight: 720;
+}
+
+.mailbox-form-section-heading p {
+  margin: 0.1875rem 0 0;
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.mailbox-form-grid {
+  column-gap: var(--space-lg);
+}
+
+.mailbox-sync-toggle {
+  min-height: 3.125rem;
+  align-items: flex-start;
+  padding: 0.625rem 0.75rem;
+}
+
+.mailbox-sync-toggle > span {
+  display: grid;
+  gap: 0.125rem;
+}
+
+.mailbox-sync-toggle strong {
+  color: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.mailbox-sync-toggle small {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.mailbox-setup-aside {
+  display: grid;
+  gap: var(--space-lg);
+  align-content: start;
+  background: var(--surface-muted);
+  box-shadow: none;
+}
+
+.mailbox-setup-steps {
+  display: grid;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+
+.mailbox-setup-steps li {
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
+  gap: 0.625rem;
+  align-items: start;
+  padding: 0.875rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.mailbox-setup-steps li > span {
+  display: grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  place-items: center;
+  color: var(--ink-soft);
+  font-size: 0.6875rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+}
+
+.mailbox-setup-steps strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 720;
+}
+
+.mailbox-setup-steps p {
+  margin: 0.1875rem 0 0;
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.mailbox-setup-footnote {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  padding: 0.75rem;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.mailbox-setup-footnote svg {
+  flex: 0 0 auto;
+  margin-top: 0.0625rem;
+  color: var(--green);
+}
+
 .mailbox-channel-panel {
   display: flex;
-  min-height: 31rem;
   flex-direction: column;
 }
 
@@ -4431,7 +4604,7 @@ button {
 
 .mailbox-add-channel {
   width: 100%;
-  margin-top: auto;
+  margin-top: var(--space-md);
   justify-content: flex-start;
 }
 
@@ -5824,6 +5997,10 @@ button {
   }
 
   .mailbox-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .mailbox-setup-shell {
     grid-template-columns: 1fr;
   }
 

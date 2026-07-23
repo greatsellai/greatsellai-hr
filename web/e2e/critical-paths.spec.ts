@@ -413,6 +413,9 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "mailbox");
     await page.getByRole("button", { name: "邮箱入库", exact: true }).click();
     await expect(page.getByRole("heading", { name: "邮箱附件入库" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "绑定招聘收件邮箱" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "收件通道" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "附件入库记录" })).toHaveCount(0);
     await page.locator("#mailbox-display-name").fill("E2E 收件通道");
     await page.locator("#imap-address").fill("e2e-inbox@example.test");
     await page.locator("#imap-password").fill("e2e-local-imap-authorization-code");

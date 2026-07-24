@@ -12,6 +12,7 @@
     "test:e2e:headed": "playwright test --config=playwright.config.ts --headed"
   },
   "dependencies": {
+    "@douyinfe/semi-ui-19": "^2.101.1",
     "echarts": "^6.1.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",

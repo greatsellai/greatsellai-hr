@@ -1,0 +1,54 @@
+.backoffice-ui-root {
+  --semi-color-primary: var(--red);
+  --semi-color-primary-hover: var(--red-pressed);
+  --semi-color-primary-active: #8e0c0e;
+  --semi-color-primary-disabled: #efb2af;
+  --semi-color-primary-light-default: var(--red-tint);
+  --semi-color-primary-light-hover: #f8d2cf;
+  --semi-color-primary-light-active: #efc0bc;
+  --semi-color-text-0: var(--ink-strong);
+  --semi-color-text-1: var(--ink);
+  --semi-color-text-2: var(--ink-soft);
+  --semi-color-text-3: var(--ink-muted);
+  --semi-color-bg-0: var(--surface);
+  --semi-color-bg-1: var(--paper);
+  --semi-color-bg-2: var(--surface-muted);
+  --semi-color-border: var(--line);
+  --semi-color-border-tertiary: var(--line);
+  --semi-border-radius-small: var(--radius-sm);
+  --semi-border-radius-medium: var(--radius-md);
+  --semi-border-radius-large: var(--radius-lg);
+  min-height: 100dvh;
+}
+
+.backoffice-ui-boot {
+  display: grid;
+  min-height: 100dvh;
+  gap: 0.625rem;
+  place-content: center;
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+}
+
+.backoffice-ui-root .backoffice-action-button {
+  min-height: 2.5rem;
+  padding: 0 0.875rem;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 680;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+}
+
+.backoffice-ui-root .backoffice-action-button.semi-button-primary.semi-button-solid {
+  box-shadow: 0 0.5rem 1.125rem rgb(215 22 24 / 0.16);
+}
+
+.backoffice-ui-root .backoffice-action-button.semi-button-primary.semi-button-solid:hover {
+  box-shadow: 0 0.625rem 1.375rem rgb(215 22 24 / 0.22);
+}
+
+.backoffice-ui-root .backoffice-action-button.semi-button-tertiary.semi-button-outline,
+.backoffice-ui-root .backoffice-action-button.semi-button-danger.semi-button-outline {
+  background: var(--surface);
+}

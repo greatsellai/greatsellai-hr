@@ -164,7 +164,17 @@ jobs:
             scripts/create-production-tag.sh "$tag"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Deploy tagged release
+      - name: Transfer CI-verified production images
+        if: steps.ready.outputs.deploy == 'true'
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          scripts/transfer-production-images.sh "$RELEASE_SHA" \
+            --host "$PROD_DEPLOY_HOST" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"
+      - name: Deploy tagged release from prebuilt images
         if: steps.ready.outputs.deploy == 'true'
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
@@ -180,4 +190,11 @@ jobs:
             --host "$PROD_DEPLOY_HOST" \
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy" \
+            --prebuilt-images
+      - name: Remove retained CI images from the release runner
+        if: ${{ always() && (steps.ready.outputs.deploy != 'true' || success()) }}
+        run: |
+          set -Eeuo pipefail
+          docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true
+          docker image rm -f "greatsellai-hr-caddy:$RELEASE_SHA" || true

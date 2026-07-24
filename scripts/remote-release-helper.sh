@@ -22,6 +22,14 @@ die() {
   exit 1
 }
 
+release_phase() {
+  printf '::group::Production release: %s\n' "$1"
+}
+
+release_phase_end() {
+  printf '%s\n' '::endgroup::'
+}
+
 normalize_optional() {
   [[ "$1" == "__none__" ]] && printf '' || printf '%s' "$1"
 }
@@ -378,18 +386,38 @@ stage_target_source() {
   printf '%s/%s' "$source_root" "$target_commit"
 }
 
+require_prebuilt_image() {
+  local image="$1" target_commit="$2" revision
+  revision="$(sudo -n docker image inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" || \
+    die "CI-transferred image is unavailable: $image"
+  [[ "$revision" == "$target_commit" ]] || \
+    die "CI-transferred image revision does not match the selected release: $image"
+}
+
 prepare_target_images() {
-  local target_source_dir="$1" environment_dir="$2" history_dir="$3" target_commit="$4"
+  local target_source_dir="$1" environment_dir="$2" history_dir="$3" target_commit="$4" image_mode="$5"
   validate_source_dir "$target_source_dir" "$environment_dir" "$history_dir"
   compose_run "$target_source_dir" "$environment_dir" "$target_commit" config --quiet
-  compose_run "$target_source_dir" "$environment_dir" "$target_commit" build api caddy
+  case "$image_mode" in
+    build)
+      compose_run "$target_source_dir" "$environment_dir" "$target_commit" build api caddy
+      ;;
+    prebuilt)
+      require_prebuilt_image "greatsellai-hr-api:$target_commit" "$target_commit"
+      require_prebuilt_image "greatsellai-hr-caddy:$target_commit" "$target_commit"
+      ;;
+    *)
+      die "Invalid production image mode."
+      ;;
+  esac
   sudo -n docker image inspect "greatsellai-hr-api:$target_commit" >/dev/null
   sudo -n docker image inspect "greatsellai-hr-caddy:$target_commit" >/dev/null
 }
 
 write_release_records() {
   local history_dir="$1" tag="$2" target_commit="$3" target_source_dir="$4"
-  local mode="$5" skip_migrate="$6" backup_state="$7" backup_id="$8"
+  local mode="$5" skip_migrate="$6" backup_state="$7" backup_id="$8" image_mode="$9"
   local timestamp record temporary_record temporary_current api_image_id caddy_image_id
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
   record="$history_dir/releases/$timestamp-$tag.env"
@@ -407,6 +435,7 @@ previous_tag=$current_tag
 previous_commit=$current_commit
 previous_source_dir=$current_source_dir
 mode=$mode
+image_mode=$image_mode
 database_schema_action=$([[ "$skip_migrate" == "1" ]] && printf preserved || printf migrate_checked)
 backup_state=$backup_state
 backup_id=$backup_id
@@ -433,7 +462,7 @@ EOF
 
 deploy_target() {
   local environment_dir="$1" history_dir="$2" tag="$3" target_commit="$4" target_source_dir="$5"
-  local mode="$6" migration_changed="$7" skip_migrate="$8" stage_tool="$9"
+  local mode="$6" migration_changed="$7" skip_migrate="$8" stage_tool="$9" image_mode="${10}"
   local backup_id backup_state deployment_succeeded=0
   backup_id="$(record_value "$history_dir/pending-release.env" backup_id)"
   backup_state="$(record_value "$history_dir/pending-release.env" backup_state)"
@@ -460,7 +489,7 @@ deploy_target() {
   verify_public_runtime "$environment_dir"
 
   write_release_records "$history_dir" "$tag" "$target_commit" "$target_source_dir" \
-    "$mode" "$skip_migrate" "$backup_state" "$backup_id"
+    "$mode" "$skip_migrate" "$backup_state" "$backup_id" "$image_mode"
   # ``current-release.env`` is the source of truth for an active deployment.
   # The symlink is only an operator convenience, so it cannot undo a healthy
   # target if that optional update fails.
@@ -477,7 +506,7 @@ deploy_target() {
 release_unlocked() {
   local environment_dir="$1" history_dir="$2" tag="$3" target_commit="$4"
   local expected_previous_tag="$5" expected_previous_commit="$6" mode="$7"
-  local migration_changed="$8" skip_migrate="$9" archive_sha256="${10}" stage_tool="${11}"
+  local migration_changed="$8" skip_migrate="$9" archive_sha256="${10}" stage_tool="${11}" image_mode="${12:-build}"
   local target_source_dir backup_id backup_state
 
   validate_environment_dir "$environment_dir"
@@ -486,13 +515,22 @@ release_unlocked() {
   [[ "$mode" == "deploy" || "$mode" == "rollback" ]] || die "Invalid release mode."
   [[ "$migration_changed" == "0" || "$migration_changed" == "1" ]] || die "Invalid migration flag."
   [[ "$skip_migrate" == "0" || "$skip_migrate" == "1" ]] || die "Invalid skip-migrate flag."
+  [[ "$image_mode" == "build" || "$image_mode" == "prebuilt" ]] || die "Invalid production image mode."
   mkdir -p "$history_dir/releases" "$history_dir/backups"
   chmod 700 "$history_dir" "$history_dir/releases" "$history_dir/backups"
 
   load_current_runtime "$environment_dir" "$history_dir"
   resolve_pending_release "$history_dir"
+  release_phase "Stage immutable source"
   target_source_dir="$(stage_target_source "$history_dir" "$target_commit" "$archive_sha256" "$stage_tool")"
-  prepare_target_images "$target_source_dir" "$environment_dir" "$history_dir" "$target_commit"
+  release_phase_end
+  if [[ "$image_mode" == "prebuilt" ]]; then
+    release_phase "Verify CI-transferred images"
+  else
+    release_phase "Build compatibility images on the production host"
+  fi
+  prepare_target_images "$target_source_dir" "$environment_dir" "$history_dir" "$target_commit" "$image_mode"
+  release_phase_end
   load_current_runtime "$environment_dir" "$history_dir"
   [[ "$current_tag" == "$(normalize_optional "$expected_previous_tag")" ]] || \
     die "Current release changed during preparation; retry the deployment."
@@ -509,6 +547,7 @@ release_unlocked() {
     backup_id=""
     backup_state="initial_empty"
   else
+    release_phase "Create verified production backup"
     backup_id="$(create_backup_bundle "$current_source_dir" "$environment_dir" "$history_dir" \
       "$tag" "$target_commit" "$current_tag" "$current_commit" "$mode")"
     if [[ "$backup_id" == "initial-empty" ]]; then
@@ -517,6 +556,7 @@ release_unlocked() {
     else
       backup_state="complete"
     fi
+    release_phase_end
   fi
 
   umask 077
@@ -532,11 +572,14 @@ previous_source_dir=$current_source_dir
 mode=$mode
 backup_state=$backup_state
 backup_id=$backup_id
+image_mode=$image_mode
 prepared_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   mv -f "$history_dir/.pending-release.$$.tmp" "$history_dir/pending-release.env"
+  release_phase "Run migrations, start services, and verify health"
   deploy_target "$environment_dir" "$history_dir" "$tag" "$target_commit" "$target_source_dir" \
-    "$mode" "$migration_changed" "$skip_migrate" "$stage_tool"
+    "$mode" "$migration_changed" "$skip_migrate" "$stage_tool" "$image_mode"
+  release_phase_end
 }
 
 with_release_lock() {

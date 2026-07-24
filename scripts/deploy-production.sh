@@ -15,6 +15,7 @@ Options:
   --project-dir <path>      Required live project directory (or RESUME_V3_REMOTE_DIR)
   --history-dir <path>      Required release-record/backup directory (or RESUME_V3_DEPLOY_HISTORY_DIR)
   --ssh-key <path>          Optional SSH private-key path; never committed
+  --prebuilt-images         Require CI-transferred API/Caddy images; never build on the server
   --rollback                Deploy a prior tag as an application rollback
   --allow-schema-ahead      Required for rollback across migration changes;
                             keeps the current database schema and skips migrate
@@ -49,6 +50,7 @@ history_dir="${RESUME_V3_DEPLOY_HISTORY_DIR:-}"
 ssh_key="${RESUME_V3_SSH_KEY:-}"
 mode="deploy"
 allow_schema_ahead=0
+image_mode="build"
 
 while (($#)); do
   case "$1" in
@@ -56,6 +58,7 @@ while (($#)); do
     --project-dir) project_dir="${2:?--project-dir requires a value}"; shift 2 ;;
     --history-dir) history_dir="${2:?--history-dir requires a value}"; shift 2 ;;
     --ssh-key) ssh_key="${2:?--ssh-key requires a value}"; shift 2 ;;
+    --prebuilt-images) image_mode="prebuilt"; shift ;;
     --rollback) mode="rollback"; shift ;;
     --allow-schema-ahead) allow_schema_ahead=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -149,6 +152,9 @@ fi
 if [[ "$mode" != "rollback" && "$allow_schema_ahead" -eq 1 ]]; then
   die "--allow-schema-ahead is only valid for an explicit rollback."
 fi
+if [[ "$mode" == "rollback" && "$image_mode" == "prebuilt" ]]; then
+  die "--prebuilt-images is only valid for a forward production deployment."
+fi
 
 previous_tag_arg="${previous_tag:-__none__}"
 previous_commit_arg="${previous_commit:-__none__}"
@@ -176,6 +182,6 @@ if [[ "$mode" == "rollback" && "$migration_changed" -eq 1 ]]; then
 fi
 
 git archive --format=tar "$tag" | ssh "${ssh_options[@]}" "$remote_host" \
-  "bash $(shell_quote "$remote_helper") release $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$migration_changed") $(shell_quote "$skip_migrate") $(shell_quote "$archive_sha256") $(shell_quote "$remote_stage_tool")"
+  "bash $(shell_quote "$remote_helper") release $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$migration_changed") $(shell_quote "$skip_migrate") $(shell_quote "$archive_sha256") $(shell_quote "$remote_stage_tool") $(shell_quote "$image_mode")"
 
 echo "Deployment succeeded: $tag ($release_commit)"

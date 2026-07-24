@@ -19,11 +19,15 @@ def test_automatic_release_preflights_the_candidate_before_creating_a_tag() -> N
 
     preflight = workflow.index("Preflight production configuration before tagging")
     create_tag = workflow.index("Create immutable production tag")
-    deploy = workflow.index("Deploy tagged release")
-    assert preflight < create_tag < deploy
+    transfer = workflow.index("Transfer CI-verified production images")
+    deploy = workflow.index("Deploy tagged release from prebuilt images")
+    assert preflight < create_tag < transfer < deploy
     assert 'scripts/preflight-production-release.sh "$RELEASE_SHA"' in workflow
     assert "Reconfirm release target after preflight" in workflow
     assert "steps.ready.outputs.deploy == 'true'" in workflow
+    assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' in workflow
+    assert "--prebuilt-images" in workflow
+    assert "Remove retained CI images from the release runner" in workflow
 
 
 def test_retry_deploy_is_manual_and_uses_current_reviewed_tooling() -> None:
@@ -106,6 +110,94 @@ def test_automatic_release_waits_for_encoding_validation_in_its_ci_gate() -> Non
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     assert 'python scripts/check_text_encoding.py --github-event "$GITHUB_EVENT_PATH"' in ci
+
+
+def test_main_ci_retains_only_labeled_images_that_the_release_workflow_can_transfer() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    transfer = (ROOT / "scripts" / "transfer-production-images.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '--tag "greatsellai-hr-api:${{ github.sha }}"' in ci
+    assert '--tag "greatsellai-hr-caddy:${{ github.sha }}"' in ci
+    assert 'org.opencontainers.image.revision=${{ github.sha }}' in ci
+    assert 'org.opencontainers.image.source=https://github.com/${{ github.repository }}' in ci
+    assert '--image "greatsellai-hr-api:${{ github.sha }}"' in ci
+    assert '"$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main"' in ci
+    assert 'docker image save "$api_image" "$caddy_image" | gzip -1' in transfer
+    assert "StrictHostKeyChecking=yes" in transfer
+    assert "org.opencontainers.image.revision" in transfer
+    assert "docker image build" not in transfer
+
+
+def test_image_transfer_script_loads_and_rechecks_the_ci_images(tmp_path: Path) -> None:
+    """Exercise the encrypted-stream command shape without a real Docker host."""
+
+    if os.name != "posix":
+        pytest.skip("the image transfer shell harness is exercised in Linux CI")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required for the image transfer contract")
+
+    release_commit = "a" * 40
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "docker").write_text(
+        """#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+  printf '%s\\n' "$EXPECTED_RELEASE_COMMIT"
+elif [[ "$1" == "image" && "$2" == "save" ]]; then
+  printf 'image archive stream\\n'
+elif [[ "$1" == "image" && "$2" == "load" ]]; then
+  cat >/dev/null
+  printf 'loaded CI image stream\\n'
+else
+  printf 'unexpected docker call: %s\\n' "$*" >&2
+  exit 1
+fi
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "sudo").write_text(
+        """#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$1" == "-n" ]] && shift
+exec "$@"
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "ssh").write_text(
+        """#!/usr/bin/env bash
+set -Eeuo pipefail
+command="${!#}"
+exec bash -c "$command"
+""",
+        encoding="utf-8",
+    )
+    for command in fake_bin.iterdir():
+        command.chmod(0o755)
+
+    completed = subprocess.run(
+        [
+            bash,
+            str(ROOT / "scripts" / "transfer-production-images.sh"),
+            release_commit,
+            "--host",
+            "ubuntu@example.test",
+        ],
+        text=True,
+        capture_output=True,
+        env=os.environ
+        | {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "EXPECTED_RELEASE_COMMIT": release_commit,
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Production images transferred and verified" in completed.stdout
 
 
 def test_remote_preflight_template_uses_its_stdin_compose_and_removes_it(

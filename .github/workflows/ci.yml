@@ -139,7 +139,9 @@ jobs:
           for attempt in 1 2; do
             if docker build --build-arg DEBIAN_MIRROR=deb.debian.org \
               --build-arg PIP_INDEX_URL=https://pypi.org/simple \
-              --tag "greatsellai-hr-ci:${{ github.sha }}" .; then
+              --label "org.opencontainers.image.revision=${{ github.sha }}" \
+              --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+              --tag "greatsellai-hr-api:${{ github.sha }}" .; then
               exit 0
             fi
 
@@ -159,7 +161,9 @@ jobs:
           for attempt in 1 2; do
             if docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org/ \
               --file deploy/Caddy.Dockerfile \
-              --tag "greatsellai-hr-caddy-ci:${{ github.sha }}" .; then
+              --label "org.opencontainers.image.revision=${{ github.sha }}" \
+              --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+              --tag "greatsellai-hr-caddy:${{ github.sha }}" .; then
               exit 0
             fi
 
@@ -177,7 +181,7 @@ jobs:
       - name: Run Docker release runtime regression
         run: >-
           python scripts/run_release_regression.py --all
-          --image "greatsellai-hr-ci:${{ github.sha }}"
+          --image "greatsellai-hr-api:${{ github.sha }}"
       - name: Remove temporary release regression resources
         if: always()
         run: |
@@ -186,5 +190,9 @@ jobs:
           docker network ls -q --filter "$filter" | xargs -r docker network rm || true
           docker volume ls -q --filter "$filter" | xargs -r docker volume rm || true
           docker image ls -q --filter "$filter" | sort -u | xargs -r docker image rm || true
-          docker image rm -f "greatsellai-hr-ci:${{ github.sha }}" || true
-          docker image rm -f "greatsellai-hr-caddy-ci:${{ github.sha }}" || true
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+            echo "Retaining CI-verified images for the production-release workflow."
+          else
+            docker image rm -f "greatsellai-hr-api:${{ github.sha }}" || true
+            docker image rm -f "greatsellai-hr-caddy:${{ github.sha }}" || true
+          fi

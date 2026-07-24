@@ -935,6 +935,10 @@ def test_release_transaction_prepares_target_before_quiescing_current_runtime() 
     )[0]
 
     assert transaction.index("prepare_target_images") < transaction.index("create_backup_bundle")
+    assert 'image_mode="${12:-build}"' in helper
+    assert 'release_phase "Verify CI-transferred images"' in transaction
+    assert 'require_prebuilt_image "greatsellai-hr-api:$target_commit" "$target_commit"' in helper
+    assert 'require_prebuilt_image "greatsellai-hr-caddy:$target_commit" "$target_commit"' in helper
     assert "compose_run \"$target_source_dir\" \"$environment_dir\" \"$target_commit\" build api caddy" in helper
     assert "up -d --no-build api worker caddy" in helper
     assert "flock -n 9" in helper
@@ -994,6 +998,7 @@ def test_release_transaction_passes_all_double_digit_arguments_to_the_source_sta
 
     history_dir = tmp_path / "history"
     captured_arguments = tmp_path / "captured-stage-arguments.txt"
+    captured_image_mode = tmp_path / "captured-image-mode.txt"
     checksum = "a" * 64
     stage_tool = "/tmp/release-stage.py"
     harness = tmp_path / "release-helper-arguments.sh"
@@ -1007,7 +1012,9 @@ stage_target_source() {{
   printf '%s|%s\\n' "$3" "$4" > {captured_arguments.as_posix()!r}
   printf '%s/source' "$1"
 }}
-prepare_target_images() {{ :; }}
+prepare_target_images() {{
+  printf '%s\n' "$5" > {captured_image_mode.as_posix()!r}
+}}
 load_current_runtime() {{
   current_tag=""
   current_commit=""
@@ -1027,7 +1034,8 @@ release_unlocked \
   0 \
   0 \
   {checksum} \
-  {stage_tool}
+  {stage_tool} \
+  prebuilt
 """,
         encoding="utf-8",
     )
@@ -1040,3 +1048,4 @@ release_unlocked \
     )
     assert completed.returncode == 0, completed.stderr
     assert captured_arguments.read_text(encoding="utf-8").strip() == f"{checksum}|{stage_tool}"
+    assert captured_image_mode.read_text(encoding="utf-8").strip() == "prebuilt"

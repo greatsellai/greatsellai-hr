@@ -17,6 +17,13 @@ Runner 离线时，工作流会排队而非自动回退到 GitHub 托管 Runner�
 四项检查全部成功后，才会先对服务器既有环境执行无副作用 Compose 预检，通过后自动创建
 不可变的 `prod-*` 标签并部署。
 
+成功的 `main` CI 会保留已经完成运行时回归的 API 与 Caddy 镜像，并以完整 commit SHA 与 OCI
+revision label 标记。**Production release** 在同一受信任 Runner 上校验这两份镜像、通过
+受验证的 SSH 通道传输到生产机，再由生产机只做镜像 label 校验、备份、迁移、启动与健康检查；
+不会在生产机重新下载 LibreOffice/Tesseract 依赖或重建镜像。这避免把生产服务器的 CPU、磁盘
+和网络压力变成发布瓶颈。当前实现依赖 `greatsell-ci` 是同一受信任 Docker Runner；若将来拆分
+多个发布 Runner，应改为受控镜像仓库并使用不可变 digest，而不是静默回退到服务器构建。
+
 ## 已提供的工作流
 
 - **Continuous integration**：在向 `main` 提交 PR、合并到 `main` 或手动触发时运行。
@@ -25,8 +32,12 @@ Runner 离线时，工作流会排队而非自动回退到 GitHub 托管 Runner�
 - **Production release**：监听 `main` 上一次成功的 CI `push` 运行。它只接受本仓库
   的 `main` 提交，先用该提交的 Compose 文件和服务器既有 `.env.production` 做只读预检，
   再次确认 `main` 未前进后，创建不可变的 `prod-YYYYMMDD-<commit>` 标签并在同一次工作流中
-  部署。若预检失败，不会创建标签；若预检期间 `main` 前进，它会停止，等待更新提交自己的
-  CI 成功后再发布。保留从 `main` 手动运行并输入 `RELEASE` 的应急入口。
+  部署。发布日志会明确显示镜像传输、不可变源码准备、备份、迁移/启动和健康验证阶段。若预检
+  失败，不会创建标签；若预检期间 `main` 前进，它会停止，等待更新提交自己的 CI 成功后再发布。
+  保留从 `main` 手动运行并输入 `RELEASE` 的应急入口；该入口同样只接受本地已有、带匹配
+  revision label 的 CI 镜像，缺失时会快速失败而不会在服务器上偷偷重建。
+  若镜像传输或发布步骤失败，Runner 会暂留该两份已验证镜像，便于从 `main` 使用同一目标提交
+  重试；成功或明确跳过发布后才清理它们。
 - **Production deploy**：只用于手动重部署已有 `prod-*` 标签，必须输入 `DEPLOY`；不再
   监听任意标签推送，避免受保护流程外的标签绕过预检。
 - **Production rollback**：只能手动触发，且只接受已有 `prod-*` 标签。默认拒绝
@@ -82,7 +93,8 @@ Runner 离线时，工作流会排队而非自动回退到 GitHub 托管 Runner�
 1. PR 合并到 `main`。
 2. `main` CI 的四项检查全部变绿。
 3. **Production release** 先做服务器配置预检；通过后自动创建标签、部署、验证并保留发布
-   记录，无需手动操作。`prod-*` 是发布候选，只有服务器的 `current-release.env` 和工作流
+   记录，无需手动操作。它先传输 CI 已验证的镜像，生产机只加载和校验镜像，随后执行备份、
+   迁移、启动和健康验证。`prod-*` 是发布候选，只有服务器的 `current-release.env` 和工作流
    成功才表示已部署。
 4. 若部署因 GitHub runner 中断而未完成，可在 **Production deploy** 中输入同一个
    已创建的标签与确认词 `DEPLOY` 重试；不会创建第二个版本。

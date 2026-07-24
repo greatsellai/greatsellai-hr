@@ -7,12 +7,17 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 
 import app.main as main_module
 from app.config import AppSettings
 from app.main import create_app
 from app.models import PasswordResetToken
-from app.services.identity_service import digest_token, utcnow
+from app.services.identity_service import (
+    _password_reset_completion_statement,
+    digest_token,
+    utcnow,
+)
 from app.services.transactional_email_outbox_service import (
     TransactionalEmailOutboxError,
     run_transactional_email_outbox_worker_once,
@@ -77,6 +82,28 @@ def _request_reset(client: TestClient, email: str) -> tuple[dict[str, object], s
     assert parsed.path == "/reset-password"
     token = parse_qs(parsed.query)["token"][0]
     return response.json(), token
+
+
+def test_password_reset_completion_locks_only_the_reset_row_on_postgresql() -> None:
+    """Avoid locking the nullable side of the eager-loaded user join.
+
+    PostgreSQL rejects a bare ``FOR UPDATE`` when SQLAlchemy's default
+    ``joinedload`` emits a LEFT OUTER JOIN.  This assertion protects the
+    production query shape even though the fast functional suite uses SQLite.
+    """
+
+    statement = _password_reset_completion_statement(token_digest="fixture-token-digest")
+
+    compiled = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "LEFT OUTER JOIN" in compiled
+    assert "FOR UPDATE OF password_reset_tokens" in compiled
+    assert not compiled.rstrip().endswith("FOR UPDATE")
 
 
 def test_password_reset_delivers_link_changes_password_and_rejects_reuse(

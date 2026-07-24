@@ -895,12 +895,23 @@ def issue_password_reset(
     )
 
 
-def complete_password_reset(session: Session, *, token: str, password: str) -> None:
-    reset = session.scalar(
+def _password_reset_completion_statement(*, token_digest: str):
+    return (
         select(PasswordResetToken)
         .options(joinedload(PasswordResetToken.user))
-        .where(PasswordResetToken.token_digest == digest_token(token))
-        .with_for_update()
+        .where(PasswordResetToken.token_digest == token_digest)
+        # ``joinedload`` uses a LEFT OUTER JOIN for the user relationship.
+        # PostgreSQL rejects a bare ``FOR UPDATE`` on that query because it
+        # would also attempt to lock the nullable joined side.  The reset row
+        # is the only record that needs serialization here, so scope the lock
+        # explicitly to it.
+        .with_for_update(of=PasswordResetToken)
+    )
+
+
+def complete_password_reset(session: Session, *, token: str, password: str) -> None:
+    reset = session.scalar(
+        _password_reset_completion_statement(token_digest=digest_token(token))
     )
     if (
         reset is None

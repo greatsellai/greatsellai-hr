@@ -17,6 +17,7 @@ from app.schemas import (
     CANDIDATE_NAME_LABEL_PATTERN,
     CANDIDATE_NAME_UNSAFE_CHARACTER_PATTERN,
     ResumeFactsSubmission,
+    TalentSearchEvidencePolicy,
     TalentSearchHardFilters,
     TalentSearchProfileRequirement,
 )
@@ -265,6 +266,7 @@ _CONFIRMED_REQUIREMENT_KEYS = {
     "priority",
     "clause_ids",
 }
+_MATCH_REQUIREMENT_OPTIONAL_KEYS = {"evidence_hint", "evidence_policy"}
 _JD_GENERATION_KEYS = {"schema_version", "title", "jd_text", "requirements"}
 _JD_GENERATION_REQUIREMENTS_KEYS = {"must_have", "preferred"}
 _JD_REQUIREMENT_PRIORITIES = {"must_have", "preferred"}
@@ -2377,6 +2379,43 @@ def talent_search_profile_tool_schema() -> dict[str, Any]:
         ],
         "additionalProperties": False,
     }
+    evidence_policy = {
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["any_fact", "experience_detail_terms"],
+            },
+            "allowed_experience_types": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "employment",
+                        "internship",
+                        "project",
+                        "research",
+                        "competition",
+                        "campus",
+                        "club",
+                        "volunteer",
+                        "entrepreneurship",
+                        "training",
+                        "other",
+                        "unknown",
+                    ],
+                },
+                "maxItems": 12,
+            },
+            "terms_all_of": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 120},
+                "maxItems": 12,
+            },
+        },
+        "required": ["kind", "allowed_experience_types", "terms_all_of"],
+        "additionalProperties": False,
+    }
     profile_requirement = {
         "type": "object",
         "properties": {
@@ -2388,8 +2427,9 @@ def talent_search_profile_tool_schema() -> dict[str, Any]:
             },
             "label": {"type": "string", "minLength": 1, "maxLength": 500},
             "evidence_hint": {"type": "string", "minLength": 1, "maxLength": 800},
+            "evidence_policy": evidence_policy,
         },
-        "required": ["key", "label", "evidence_hint"],
+        "required": ["key", "label", "evidence_hint", "evidence_policy"],
         "additionalProperties": False,
     }
     return {
@@ -2479,7 +2519,7 @@ def _validate_talent_profile_requirements(
     value: object,
     *,
     code: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise _contract_error(code)
     if len(value) > 12:
@@ -2502,6 +2542,7 @@ def _validate_talent_profile_requirements(
             code=code,
             max_length=800,
         )
+        policy = requirement.evidence_policy.model_dump(mode="json")
         label_key = " ".join(label.casefold().split())
         if requirement.key in seen_keys or label_key in seen_labels:
             raise _contract_error(code)
@@ -2512,6 +2553,7 @@ def _validate_talent_profile_requirements(
                 "key": requirement.key,
                 "label": label,
                 "evidence_hint": hint,
+                "evidence_policy": policy,
             }
         )
     return normalized
@@ -2559,6 +2601,10 @@ def validate_talent_search_profile_output(payload: Mapping[str, Any]) -> dict[st
         entry["evidence_hint"]
         for entry in [*verification_requirements, *preferred_requirements]
     ]
+    all_requirement_policy_text = [
+        json.dumps(entry["evidence_policy"], ensure_ascii=False)
+        for entry in [*verification_requirements, *preferred_requirements]
+    ]
     normalized_labels = {" ".join(label.casefold().split()) for label in all_requirement_labels}
     if len(normalized_labels) != len(all_requirement_labels):
         raise _contract_error("talent_profile_requirement_duplicate")
@@ -2581,6 +2627,7 @@ def validate_talent_search_profile_output(payload: Mapping[str, Any]) -> dict[st
             json.dumps(hard_filters.model_dump(mode="json"), ensure_ascii=False),
             *all_requirement_labels,
             *all_requirement_hints,
+            *all_requirement_policy_text,
             *aliases,
             *questions,
         ]
@@ -2655,7 +2702,13 @@ def generate_talent_search_profile(
             "skill as a hard condition. If the request says project, internship, work, research, or "
             "competition experience (for example LangChain/RAG/Agent project experience), put it in "
             "verification_requirements with a concrete evidence hint instead; it must not become an "
-            "exact skill hard filter. Formal employment "
+            "exact skill hard filter. Every profile requirement must include an evidence_policy. Use "
+            "any_fact with empty arrays for a requirement that can be proven by any explicit resume "
+            "fact. Use experience_detail_terms only when the recruiter asks for named terms in a "
+            "specific experience context. For that policy, set allowed_experience_types exactly to the "
+            "experience types the recruiter accepts and terms_all_of to the named terms that must be "
+            "explicitly used in the same experience. A skill list, a related technology, or a different "
+            "experience type is not enough to prove that policy. Formal employment "
             "months must use only explicit formal work duration; projects, contests, research and "
             "internships may evidence ability but must never be counted as formal work months. State "
             "what a recruiter should verify from resume facts. Do not include age, gender, ethnicity, "
@@ -2767,11 +2820,11 @@ def _normalize_confirmed_requirements(
     for entry in entries:
         if not isinstance(entry, dict):
             raise _contract_error("confirmed_requirement")
-        _require_exact_keys(
-            entry,
-            _CONFIRMED_REQUIREMENT_KEYS,
-            code="confirmed_requirement_fields",
-        )
+        entry_keys = set(entry)
+        if not _CONFIRMED_REQUIREMENT_KEYS.issubset(entry_keys) or not entry_keys.issubset(
+            _CONFIRMED_REQUIREMENT_KEYS | _MATCH_REQUIREMENT_OPTIONAL_KEYS
+        ):
+            raise _contract_error("confirmed_requirement_fields")
         requirement_id = entry["requirement_id"]
         if (
             not isinstance(requirement_id, str)
@@ -2796,14 +2849,28 @@ def _normalize_confirmed_requirements(
         )
         if len(clause_ids) > 20:
             raise _contract_error("confirmed_requirement_clause_ids")
-        normalized.append(
-            {
-                "requirement_id": requirement_id,
-                "requirement_text": requirement_text,
-                "priority": priority,
-                "clause_ids": clause_ids,
-            }
-        )
+        normalized_entry: dict[str, Any] = {
+            "requirement_id": requirement_id,
+            "requirement_text": requirement_text,
+            "priority": priority,
+            "clause_ids": clause_ids,
+        }
+        if "evidence_hint" in entry:
+            normalized_entry["evidence_hint"] = _normalize_contract_text(
+                entry["evidence_hint"],
+                code="confirmed_requirement_evidence_hint",
+                max_length=800,
+            )
+        if "evidence_policy" in entry:
+            try:
+                normalized_entry["evidence_policy"] = (
+                    TalentSearchEvidencePolicy.model_validate(
+                        entry["evidence_policy"]
+                    ).model_dump(mode="json")
+                )
+            except ValidationError as exc:
+                raise _contract_error("confirmed_requirement_evidence_policy") from exc
+        normalized.append(normalized_entry)
         requirement_ids.append(requirement_id)
         seen_requirement_ids.add(requirement_id)
         seen_requirement_texts.add(normalized_text)
@@ -3247,6 +3314,199 @@ def _sanitize_jd_match_evidence_ids(
     return sanitized
 
 
+def _term_is_explicitly_negated(text: str, term: str) -> bool:
+    """Whether a source fact says the named term was not used.
+
+    This deliberately recognizes only direct, local negation.  It is used to
+    stop a false positive from becoming a recommendation; ambiguous wording
+    remains ``unknown`` for recruiter review rather than being treated as a
+    rejection signal.
+    """
+
+    normalized_term = term.strip()
+    if not normalized_term:
+        return False
+    escaped_term = re.escape(normalized_term)
+    patterns = (
+        rf"(?:without|not\s+using|never\s+used|did\s+not\s+use|didn't\s+use|no\s+use\s+of)"
+        rf".{{0,28}}{escaped_term}",
+        rf"{escaped_term}.{{0,28}}(?:was\s+not\s+used|not\s+used|not\s+using|without)",
+        rf"(?:未|没有|無|不|并未|從未|从未|未曾).{{0,16}}{escaped_term}",
+        rf"{escaped_term}.{{0,16}}(?:未使用|没有使用|無使用|不使用|未采用|未採用|未落地)",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL) for pattern in patterns)
+
+
+def _experience_policy_evidence_fact_ids(
+    snapshot: Mapping[str, Any],
+    *,
+    evidence_policy: Mapping[str, Any],
+) -> tuple[set[str], set[str]]:
+    """Return affirmative and explicitly-negated facts for one strict policy."""
+
+    if evidence_policy.get("kind") != "experience_detail_terms":
+        return set(), set()
+    allowed_types = evidence_policy.get("allowed_experience_types")
+    terms = evidence_policy.get("terms_all_of")
+    if not isinstance(allowed_types, list) or not isinstance(terms, list):
+        return set(), set()
+    allowed = {value for value in allowed_types if isinstance(value, str)}
+    required_terms = [value for value in terms if isinstance(value, str) and value.strip()]
+    if not allowed or not required_terms:
+        return set(), set()
+
+    affirmative_fact_ids: set[str] = set()
+    negated_fact_ids: set[str] = set()
+    experiences = snapshot.get("experiences")
+    if not isinstance(experiences, list):
+        return affirmative_fact_ids, negated_fact_ids
+    for experience in experiences:
+        if not isinstance(experience, Mapping):
+            continue
+        fact_id = experience.get("fact_id")
+        if (
+            not isinstance(fact_id, str)
+            or experience.get("experience_type") not in allowed
+        ):
+            continue
+        text_parts = [
+            value
+            for value in (
+                experience.get("experience_name_raw"),
+                experience.get("organization_name_raw"),
+                experience.get("title_raw"),
+            )
+            if isinstance(value, str) and value.strip()
+        ]
+        detail_items = experience.get("detail_items")
+        if isinstance(detail_items, list):
+            text_parts.extend(
+                detail.get("detail_raw")
+                for detail in detail_items
+                if isinstance(detail, Mapping)
+                and isinstance(detail.get("detail_raw"), str)
+                and detail["detail_raw"].strip()
+            )
+        positive_terms = {
+            term
+            for term in required_terms
+            if any(
+                normalized_contains(text_part, term)
+                and not _term_is_explicitly_negated(text_part, term)
+                for text_part in text_parts
+            )
+        }
+        negated_terms = {
+            term
+            for term in required_terms
+            if any(
+                normalized_contains(text_part, term)
+                and _term_is_explicitly_negated(text_part, term)
+                for text_part in text_parts
+            )
+        }
+        if len(positive_terms) == len(required_terms):
+            affirmative_fact_ids.add(fact_id)
+        elif len(negated_terms) == len(required_terms) and not positive_terms:
+            negated_fact_ids.add(fact_id)
+    return affirmative_fact_ids, negated_fact_ids
+
+
+def _enforce_experience_evidence_policies(
+    payload: dict[str, Any],
+    *,
+    snapshot: Mapping[str, Any],
+    confirmed_requirements: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Keep a model from treating weak facts as proof of practical experience.
+
+    This is a post-model guard, not a new scoring rule.  It applies only to a
+    recruiter-confirmed ``experience_detail_terms`` policy.  The guard can
+    move a result into review, or preserve a source-grounded contradiction;
+    it never invents a candidate fit or silently rejects a candidate because
+    evidence is absent.
+    """
+
+    policies = {
+        requirement.get("requirement_id"): requirement.get("evidence_policy")
+        for requirement in confirmed_requirements
+        if isinstance(requirement.get("requirement_id"), str)
+        and isinstance(requirement.get("evidence_policy"), Mapping)
+        and requirement["evidence_policy"].get("kind") == "experience_detail_terms"
+    }
+    if not policies:
+        return payload
+    raw_matches = payload.get("requirement_matches")
+    if not isinstance(raw_matches, list):
+        return payload
+
+    adjusted_matches: list[object] = []
+    changed = False
+    for raw_match in raw_matches:
+        if not isinstance(raw_match, dict):
+            adjusted_matches.append(raw_match)
+            continue
+        match = dict(raw_match)
+        requirement_id = match.get("requirement_id")
+        evidence_policy = policies.get(requirement_id)
+        if not isinstance(evidence_policy, Mapping):
+            adjusted_matches.append(match)
+            continue
+        affirmative_fact_ids, negated_fact_ids = _experience_policy_evidence_fact_ids(
+            snapshot,
+            evidence_policy=evidence_policy,
+        )
+        cited_fact_ids = match.get("fact_ids")
+        cited = (
+            [fact_id for fact_id in cited_fact_ids if isinstance(fact_id, str)]
+            if isinstance(cited_fact_ids, list)
+            else []
+        )
+        cited_affirmative = set(cited) & affirmative_fact_ids
+        status = match.get("status")
+        if status == "met" and not cited_affirmative:
+            if negated_fact_ids and not affirmative_fact_ids:
+                match["status"] = "not_met"
+                match["fact_ids"] = sorted(negated_fact_ids)
+                match["rationale"] = (
+                    "A permitted experience fact explicitly states that the required term was not used."
+                )
+                match["uncertainties"] = []
+            elif cited:
+                match["status"] = "partial"
+                match["uncertainties"] = [
+                    "The cited facts do not prove affirmative use of every required term in an allowed experience type.",
+                ]
+            else:
+                match["status"] = "unknown"
+                match["fact_ids"] = []
+                match["uncertainties"] = [
+                    "No allowed experience fact proves affirmative use of every required term.",
+                ]
+            changed = True
+        elif status == "not_met" and not (set(cited) & negated_fact_ids):
+            if negated_fact_ids and not affirmative_fact_ids:
+                match["fact_ids"] = sorted(negated_fact_ids)
+                match["rationale"] = (
+                    "A permitted experience fact explicitly states that the required term was not used."
+                )
+                match["uncertainties"] = []
+            else:
+                match["status"] = "unknown"
+                match["fact_ids"] = []
+                match["uncertainties"] = [
+                    "No source-grounded contradiction is available for this experience requirement.",
+                ]
+            changed = True
+        adjusted_matches.append(match)
+    enforced = dict(payload)
+    enforced["requirement_matches"] = adjusted_matches
+    if changed:
+        # Any server correction should stay transparent to the recruiter.
+        enforced["needs_human_review"] = True
+    return enforced
+
+
 def match_resume_fact_snapshot_against_requirements(
     *,
     api_key: str,
@@ -3281,7 +3541,12 @@ def match_resume_fact_snapshot_against_requirements(
             "when the facts explicitly establish incompatibility, and unknown when the snapshot "
             "does not establish an answer. A requirement merely absent from the facts is always "
             "unknown, never not_met. Every not_met must cite an explicit contradictory fact. For "
-            "partial and unknown, name the uncertainty. Do not "
+            "partial and unknown, name the uncertainty. When a requirement includes an "
+            "experience_detail_terms evidence_policy, it is binding: met must cite an experience-* "
+            "fact of an allowed experience_type whose name, title, or detail explicitly shows "
+            "affirmative use of every terms_all_of value. A skill list, a related technology, or an "
+            "experience of a different type cannot prove met. Explicit wording such as 'without "
+            "using', 'not used', '未使用', or '未采用' is contradictory rather than affirmative use. Do not "
             "calculate or output any total score, percentage, ranking, or hiring recommendation."
         ),
         user_prompt=(
@@ -3296,8 +3561,14 @@ def match_resume_fact_snapshot_against_requirements(
         ),
         max_tokens=2200,
     )
+    sanitized_result = _sanitize_jd_match_evidence_ids(result, fact_ids=fact_ids)
+    enforced_result = _enforce_experience_evidence_policies(
+        sanitized_result,
+        snapshot=snapshot,
+        confirmed_requirements=normalized_requirements,
+    )
     return validate_jd_match_output(
-        _sanitize_jd_match_evidence_ids(result, fact_ids=fact_ids),
+        enforced_result,
         confirmed_requirements=normalized_requirements,
         fact_ids=fact_ids,
     )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.models import JobVersion
+from app.models import JobRequirement, JobVersion
 from app.schemas import JobCreate, JobMatchCreate, JobRequirements
 from app.services import job_service
 from app.services.deepseek_provider import FACT_SNAPSHOT_SCHEMA_VERSION
@@ -30,6 +30,42 @@ def _create_job(ai_client, *, requirements: JobRequirements | None = None) -> di
         )
         session.commit()
         return response.model_dump()
+
+
+def test_private_match_requirement_payload_keeps_evidence_metadata() -> None:
+    requirement = JobRequirement(
+        job_version_id="job-version-1",
+        requirement_key="profile-001",
+        priority="must_have",
+        category="other",
+        raw_requirement="WidgetFlow project delivery experience",
+        normalized_value={
+            "terms": ["WidgetFlow project delivery experience"],
+            "evidence_hint": "Verify WidgetFlow use in a project record.",
+            "evidence_policy": {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": ["WidgetFlow"],
+            },
+        },
+        minimum_months=None,
+        weight=10000,
+        clause_ids=["clause-001"],
+        sort_order=0,
+    )
+
+    assert job_service._match_requirement_payload(requirement) == {
+        "requirement_id": "profile-001",
+        "requirement_text": "WidgetFlow project delivery experience",
+        "priority": "must_have",
+        "clause_ids": ["clause-001"],
+        "evidence_hint": "Verify WidgetFlow use in a project record.",
+        "evidence_policy": {
+            "kind": "experience_detail_terms",
+            "allowed_experience_types": ["project"],
+            "terms_all_of": ["WidgetFlow"],
+        },
+    }
 
 
 def test_manual_requirements_are_clause_grounded_and_confirmed(ai_client) -> None:

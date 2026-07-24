@@ -932,10 +932,18 @@ export interface TalentSearchHardFilters {
   language_credentials_all_of: LanguageCredentialFilter[];
 }
 
+export interface TalentSearchEvidencePolicy {
+  kind: "any_fact" | "experience_detail_terms";
+  allowed_experience_types: ExperienceType[];
+  terms_all_of: string[];
+}
+
 export interface TalentSearchProfileRequirement {
   key: string;
   label: string;
   evidence_hint: string;
+  /** Older saved drafts may not have been generated with an executable policy. */
+  evidence_policy?: TalentSearchEvidencePolicy;
 }
 
 export interface TalentSearchProfileRevision {

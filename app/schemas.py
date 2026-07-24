@@ -1952,10 +1952,62 @@ class TalentSearchHardFilters(ApiModel):
         return self
 
 
+class TalentSearchEvidencePolicy(ApiModel):
+    """The source-fact boundary for one talent-profile requirement.
+
+    ``any_fact`` preserves ordinary semantic requirements.  A recruiter who
+    asks for a named technology *in a specific kind of experience* needs the
+    stricter ``experience_detail_terms`` policy: a skill list or adjacent
+    project is useful context, but cannot itself prove the requirement.
+    """
+
+    kind: Literal["any_fact", "experience_detail_terms"] = "any_fact"
+    allowed_experience_types: list[ExperienceType] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+    terms_all_of: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("allowed_experience_types")
+    @classmethod
+    def valid_allowed_experience_types(
+        cls,
+        value: list[ExperienceType],
+    ) -> list[ExperienceType]:
+        if len(value) != len(set(value)):
+            raise ValueError("evidence policy experience types must be unique")
+        return value
+
+    @field_validator("terms_all_of")
+    @classmethod
+    def valid_terms_all_of(cls, value: list[str]) -> list[str]:
+        cleaned = clean_string_list(value)
+        if any(len(term) > 120 or "\x00" in term for term in cleaned):
+            raise ValueError("evidence policy terms must be safe and at most 120 characters")
+        return cleaned
+
+    @model_validator(mode="after")
+    def valid_scope(self) -> "TalentSearchEvidencePolicy":
+        if self.kind == "any_fact":
+            if self.allowed_experience_types or self.terms_all_of:
+                raise ValueError("any_fact policy cannot constrain experience evidence")
+            return self
+        if not self.allowed_experience_types or not self.terms_all_of:
+            raise ValueError(
+                "experience_detail_terms policy requires experience types and terms"
+            )
+        return self
+
+
 class TalentSearchProfileRequirement(ApiModel):
     key: str = Field(min_length=2, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     label: str = Field(min_length=1, max_length=500)
     evidence_hint: str = Field(min_length=1, max_length=800)
+    # Older confirmed drafts did not persist a machine-enforceable scope.
+    # Keep them readable while new drafts always receive an explicit policy.
+    evidence_policy: TalentSearchEvidencePolicy = Field(
+        default_factory=TalentSearchEvidencePolicy
+    )
 
 
 class TalentSearchProfileGenerateRequest(ApiModel):

@@ -133,6 +133,49 @@ _PROJECT_EVIDENCE_MARKERS = (
     "shipped",
     "built",
 )
+_EXPERIENCE_POLICY_TYPE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("项目", "project"),
+    ("project", "project"),
+    ("projects", "project"),
+    ("落地", "project"),
+    ("交付", "project"),
+    ("delivery", "project"),
+    ("shipped", "project"),
+    ("built", "project"),
+    ("实习", "internship"),
+    ("internship", "internship"),
+    ("工作经历", "employment"),
+    ("工作职责", "employment"),
+    ("正式工作", "employment"),
+    ("employment", "employment"),
+    ("workexperience", "employment"),
+    ("workhistory", "employment"),
+    ("科研", "research"),
+    ("研究", "research"),
+    ("research", "research"),
+    ("竞赛", "competition"),
+    ("competition", "competition"),
+)
+_PRACTICAL_EXPERIENCE_MARKERS = (
+    "实践",
+    "实战",
+    "practicalexperience",
+    "practice",
+)
+_EXPERIENCE_POLICY_TYPE_ORDER = (
+    "project",
+    "internship",
+    "employment",
+    "research",
+    "competition",
+)
+_EXPERIENCE_POLICY_TYPE_LABELS = {
+    "project": "项目",
+    "internship": "实习",
+    "employment": "工作",
+    "research": "科研",
+    "competition": "竞赛",
+}
 _BACHELOR_INSTITUTION_MARKERS = (
     "本科院校",
     "普通本科",
@@ -195,10 +238,61 @@ def _message_requests_project_evidence(message: str, *, term: str) -> bool:
         start = index + len(term_key)
 
 
+def _experience_types_for_explicit_term(message: str, *, term: str) -> list[str]:
+    """Compile only the recruiter's stated acceptable experience contexts.
+
+    This policy is deliberately derived from the same narrow window that
+    proved the named term is an experience request.  ``research`` and
+    ``competition`` remain valid only when the recruiter explicitly names
+    them; they never become a substitute for a requested project, internship,
+    or employment record.
+    """
+
+    message_key = normalized_key(message)
+    term_key = normalized_key(term)
+    if not message_key or not term_key:
+        return ["project", "internship", "employment"]
+    found_types: set[str] = set()
+    found_practical_marker = False
+    start = 0
+    while True:
+        index = message_key.find(term_key, start)
+        if index < 0:
+            break
+        window = message_key[max(0, index - 36) : index + len(term_key) + 36]
+        for marker, experience_type in _EXPERIENCE_POLICY_TYPE_MARKERS:
+            if marker in window:
+                found_types.add(experience_type)
+        if any(marker in window for marker in _PRACTICAL_EXPERIENCE_MARKERS):
+            found_practical_marker = True
+        start = index + len(term_key)
+    if not found_types and found_practical_marker:
+        found_types.update({"project", "internship", "employment"})
+    if not found_types:
+        # The caller has already established that the request is practical
+        # experience. Preserve recall for wording such as "真实实战" while
+        # keeping research and contests out unless they were named.
+        found_types.update({"project", "internship", "employment"})
+    return [
+        experience_type
+        for experience_type in _EXPERIENCE_POLICY_TYPE_ORDER
+        if experience_type in found_types
+    ]
+
+
+def _experience_detail_policy(*, term: str, allowed_types: list[str]) -> dict[str, object]:
+    return {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": allowed_types,
+        "terms_all_of": [term],
+    }
+
+
 def _ensure_project_verification_requirement(
     requirements: list[object],
     *,
     term: str,
+    allowed_types: list[str],
 ) -> list[object]:
     """Keep an explicit project-practice requirement visible to HR.
 
@@ -209,7 +303,7 @@ def _ensure_project_verification_requirement(
     """
 
     term_key = normalized_key(term)
-    for value in requirements:
+    for index, value in enumerate(requirements):
         if not isinstance(value, Mapping):
             continue
         text = " ".join(
@@ -217,7 +311,15 @@ def _ensure_project_verification_requirement(
             for field in ("label", "evidence_hint")
         )
         if term_key and term_key in normalized_key(text):
-            return requirements
+            updated = dict(value)
+            # The source request is more precise than a provider draft. Keep
+            # its visible wording, but make the required evidence executable
+            # so a skill-only fact cannot later become a hard pass.
+            updated["evidence_policy"] = _experience_detail_policy(
+                term=term,
+                allowed_types=allowed_types,
+            )
+            return [*requirements[:index], updated, *requirements[index + 1 :]]
 
     used_keys = {
         str(value.get("key"))
@@ -227,14 +329,22 @@ def _ensure_project_verification_requirement(
     suffix = 1
     while f"project_evidence_{suffix}" in used_keys:
         suffix += 1
+    experience_label = "、".join(
+        _EXPERIENCE_POLICY_TYPE_LABELS.get(value, value)
+        for value in allowed_types
+    )
     return [
         *requirements,
         {
             "key": f"project_evidence_{suffix}",
-            "label": f"具备 {term} 的项目、实习或工作实践",
+            "label": f"具备 {term} 的{experience_label}实践",
             "evidence_hint": (
-                f"核验项目、实习或工作职责中是否明确提及 {term}，"
+                f"核验{experience_label}经历的名称、职责或结果中是否明确、正向使用 {term}，"
                 "以及候选人的具体实现、贡献或结果。"
+            ),
+            "evidence_policy": _experience_detail_policy(
+                term=term,
+                allowed_types=allowed_types,
             ),
         },
     ]
@@ -334,6 +444,10 @@ def _normalize_explicit_profile_intent(
             verification_requirements = _ensure_project_verification_requirement(
                 verification_requirements,
                 term=term,
+                allowed_types=_experience_types_for_explicit_term(
+                    request_message,
+                    term=term,
+                ),
             )
 
     try:

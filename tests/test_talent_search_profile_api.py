@@ -12,6 +12,7 @@ from app.models import (
     JobMatchBatch,
     JobMatchBatchItem,
     JobMatchRequirementResult,
+    JobRequirement,
     JobVersion,
     ResumeFactSnapshot,
     TalentSearchProfileRevision,
@@ -554,6 +555,26 @@ def test_project_experience_term_is_not_forced_into_exact_skill_recall(
         f"/v1/talent-search-profiles/{profile_id}/confirm",
         json={"revision_id": revision["revision_id"]},
     ).status_code == 200
+
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            revision_row = session.get(TalentSearchProfileRevision, revision["revision_id"])
+            assert revision_row is not None
+            assert revision_row.match_job_version_id is not None
+            private_requirement = session.scalar(
+                select(JobRequirement)
+                .where(JobRequirement.job_version_id == revision_row.match_job_version_id)
+                .where(JobRequirement.raw_requirement.contains("LangChain"))
+            )
+            assert private_requirement is not None
+            metadata = private_requirement.normalized_value
+            assert metadata["evidence_hint"]
+            assert metadata["evidence_policy"] == {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": ["LangChain"],
+            }
 
     def fake_enqueue(session, **kwargs: object) -> SimpleNamespace:
         job_version = session.get(JobVersion, kwargs["job_version_id"])

@@ -146,6 +146,41 @@ def _match_output() -> dict[str, object]:
     }
 
 
+def _profile_project_requirement() -> list[dict[str, object]]:
+    return [
+        {
+            "requirement_id": "requirement-001",
+            "requirement_text": "Documented WidgetFlow project delivery experience",
+            "priority": "must_have",
+            "clause_ids": ["clause-001"],
+            "evidence_hint": (
+                "Verify affirmative WidgetFlow use in a project, internship, or employment record."
+            ),
+            "evidence_policy": {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project", "internship", "employment"],
+                "terms_all_of": ["WidgetFlow"],
+            },
+        }
+    ]
+
+
+def _single_match_output(*, status: str, fact_ids: list[str]) -> dict[str, object]:
+    return {
+        "schema_version": provider.JD_MATCH_SCHEMA_VERSION,
+        "requirement_matches": [
+            {
+                "requirement_id": "requirement-001",
+                "status": status,
+                "rationale": "Model supplied a source-cited result.",
+                "fact_ids": fact_ids,
+                "uncertainties": [],
+            }
+        ],
+        "needs_human_review": False,
+    }
+
+
 def test_jd_extraction_schema_and_validation_require_complete_clause_coverage() -> None:
     schema = provider.jd_requirements_tool_schema(
         clause_ids=["clause-001", "clause-002", "clause-003"]
@@ -334,6 +369,111 @@ def test_invalid_model_fact_ids_are_safely_downgraded_to_unknown() -> None:
     assert validated["requirement_matches"][0]["status"] == "unknown"
     assert validated["requirement_matches"][0]["fact_ids"] == []
     assert validated["requirement_matches"][0]["uncertainties"]
+
+
+def test_experience_policy_preserves_a_matching_project_fact_and_reaches_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    snapshot = _fact_snapshot()
+    experience = snapshot["experiences"][0]
+    assert isinstance(experience, dict)
+    experience["experience_type"] = "project"
+    experience["title_raw"] = "Built a WidgetFlow orchestration project"
+    experience["title_key"] = "built a widgetflow orchestration project"
+
+    def fake_call(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return _single_match_output(status="met", fact_ids=["experience-001"])
+
+    monkeypatch.setattr(provider, "call_strict_function", fake_call)
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "met"
+    assert result["requirement_matches"][0]["fact_ids"] == ["experience-001"]
+    assert "evidence_policy" in str(captured["user_prompt"])
+    assert "experience_detail_terms" in str(captured["system_prompt"])
+
+
+@pytest.mark.parametrize(
+    ("experience_type", "title_raw", "fact_ids"),
+    [
+        ("employment", "Backend Engineer", ["skill-001"]),
+        ("research", "WidgetFlow research assistant", ["experience-001"]),
+        ("project", "Built an adjacent RAG workflow", ["experience-001"]),
+    ],
+)
+def test_experience_policy_downgrades_skill_or_nonqualifying_evidence_to_review(
+    monkeypatch: pytest.MonkeyPatch,
+    experience_type: str,
+    title_raw: str,
+    fact_ids: list[str],
+) -> None:
+    snapshot = _fact_snapshot()
+    experience = snapshot["experiences"][0]
+    assert isinstance(experience, dict)
+    experience["experience_type"] = experience_type
+    experience["title_raw"] = title_raw
+    experience["title_key"] = title_raw.casefold()
+    skills = snapshot["skills"]
+    assert isinstance(skills, list)
+    assert isinstance(skills[0], dict)
+    skills[0]["skill_key"] = "widgetflow"
+    skills[0]["skill_display"] = "WidgetFlow"
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="met", fact_ids=fact_ids),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "partial"
+    assert result["needs_human_review"] is True
+
+
+def test_experience_policy_uses_explicit_negated_project_fact_for_not_met(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _fact_snapshot()
+    experience = snapshot["experiences"][0]
+    assert isinstance(experience, dict)
+    experience["experience_type"] = "project"
+    experience["title_raw"] = "Built a RAG project without using WidgetFlow"
+    experience["title_key"] = "built a rag project without using widgetflow"
+    skills = snapshot["skills"]
+    assert isinstance(skills, list)
+    assert isinstance(skills[0], dict)
+    skills[0]["skill_key"] = "widgetflow"
+    skills[0]["skill_display"] = "WidgetFlow"
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="met", fact_ids=["skill-001"]),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "not_met"
+    assert result["requirement_matches"][0]["fact_ids"] == ["experience-001"]
 
 
 def test_jd_match_helper_rejects_raw_pdf_like_snapshot_before_provider_call(

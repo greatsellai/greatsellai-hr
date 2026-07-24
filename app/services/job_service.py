@@ -34,6 +34,7 @@ from app.schemas import (
     JobRequirementResponse,
     JobVersionRequirementsUpdate,
     JobVersionResponse,
+    TalentSearchEvidencePolicy,
 )
 from app.services.deepseek_provider import (
     DeepSeekProviderError,
@@ -158,6 +159,27 @@ def _requirement_response(requirement: JobRequirement) -> JobRequirementResponse
         clause_ids=requirement.clause_ids or [],
         sort_order=requirement.sort_order,
     )
+
+
+def _match_requirement_payload(requirement: JobRequirement) -> dict[str, object]:
+    """Return the internal matcher contract without widening normal JD APIs."""
+
+    payload: dict[str, object] = {
+        "requirement_id": requirement.requirement_key,
+        "requirement_text": requirement.raw_requirement,
+        "priority": requirement.priority,
+        "clause_ids": requirement.clause_ids or [],
+    }
+    metadata = requirement.normalized_value or {}
+    if not isinstance(metadata, Mapping):
+        return payload
+    evidence_hint = metadata.get("evidence_hint")
+    if isinstance(evidence_hint, str) and evidence_hint.strip():
+        payload["evidence_hint"] = evidence_hint
+    evidence_policy = metadata.get("evidence_policy")
+    if isinstance(evidence_policy, Mapping):
+        payload["evidence_policy"] = dict(evidence_policy)
+    return payload
 
 
 def _version_response(job_version: JobVersion) -> JobVersionResponse:
@@ -429,8 +451,8 @@ def create_talent_search_match_job_version(
         values: Sequence[Mapping[str, object]],
         *,
         priority: str,
-    ) -> list[tuple[str, str]]:
-        entries: list[tuple[str, str]] = []
+    ) -> list[tuple[str, str, str | None, dict[str, object]]]:
+        entries: list[tuple[str, str, str | None, dict[str, object]]] = []
         seen_labels: set[str] = set()
         for value in values:
             label = value.get("label")
@@ -441,7 +463,19 @@ def create_talent_search_match_job_version(
             if not cleaned or key in seen_labels:
                 continue
             seen_labels.add(key)
-            entries.append((priority, cleaned))
+            raw_hint = value.get("evidence_hint")
+            evidence_hint = (
+                " ".join(raw_hint.split())
+                if isinstance(raw_hint, str) and raw_hint.strip()
+                else None
+            )
+            try:
+                evidence_policy = TalentSearchEvidencePolicy.model_validate(
+                    value.get("evidence_policy") or {}
+                ).model_dump(mode="json")
+            except ValueError as exc:
+                raise JobServiceError("talent_search_profile_evidence_policy_invalid") from exc
+            entries.append((priority, cleaned, evidence_hint, evidence_policy))
         return entries
 
     entries = [
@@ -454,15 +488,23 @@ def create_talent_search_match_job_version(
     private_title = f"人才画像：{title.strip()}"[:200]
     raw_lines = [
         ("必须核验：" if priority == "must_have" else "优先考虑：") + label
-        for priority, label in entries
+        for priority, label, _, _ in entries
     ]
     job = Job(
         kind="talent_search_profile",
         title=private_title,
         jd_text="\n".join(raw_lines),
         requirements={
-            "must_have": [label for priority, label in entries if priority == "must_have"],
-            "preferred": [label for priority, label in entries if priority == "preferred"],
+            "must_have": [
+                label
+                for priority, label, _, _ in entries
+                if priority == "must_have"
+            ],
+            "preferred": [
+                label
+                for priority, label, _, _ in entries
+                if priority == "preferred"
+            ],
         },
         version=1,
     )
@@ -487,13 +529,33 @@ def create_talent_search_match_job_version(
             terms=[label],
             clause_ids=[clauses[index - 1].clause_id],
         )
-        for index, (priority, label) in enumerate(entries, start=1)
+        for index, (priority, label, _, _) in enumerate(entries, start=1)
     ]
     _persist_requirements(
         session,
         job_version=job_version,
         requirements=requirements,
     )
+    persisted_requirements = session.scalars(
+        select(JobRequirement)
+        .where(JobRequirement.job_version_id == job_version.id)
+        .order_by(JobRequirement.sort_order)
+    ).all()
+    if len(persisted_requirements) != len(entries):
+        raise JobServiceError("talent_search_profile_requirement_persist_failed")
+    for persisted, (_, label, evidence_hint, evidence_policy) in zip(
+        persisted_requirements,
+        entries,
+        strict=True,
+    ):
+        # Keep the recruiter-facing label unmodified. The private matcher
+        # carries its richer scope in existing JSON metadata, which avoids a
+        # migration and keeps normal JD views free of profile-only detail.
+        persisted.normalized_value = {
+            "terms": [label],
+            "evidence_hint": evidence_hint,
+            "evidence_policy": evidence_policy,
+        }
     job_version.status = "confirmed"
     job_version.confirmed_at = _utcnow()
     session.flush()
@@ -980,12 +1042,7 @@ def run_job_match(
                 timeout_seconds=timeout_seconds,
                 fact_snapshot=fact_snapshot,
                 confirmed_requirements=[
-                    {
-                        "requirement_id": requirement.requirement_key,
-                        "requirement_text": requirement.raw_requirement,
-                        "priority": requirement.priority,
-                        "clause_ids": requirement.clause_ids or [],
-                    }
+                    _match_requirement_payload(requirement)
                     for requirement in requirements
                 ],
             )

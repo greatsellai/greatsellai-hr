@@ -23,13 +23,14 @@ def oauth_client(tmp_path: Path) -> Iterator[TestClient]:
         database_url="sqlite://",
         allow_unauthenticated=True,
         min_text_chars_per_page=20,
+        public_app_url="https://testserver",
         mailbox_imap_allowed_hosts=("imap.gmail.com",),
         mailbox_google_oauth_client_id="google-client-id-for-tests",
         mailbox_google_oauth_client_secret="google-client-secret-for-tests",
-        mailbox_google_oauth_redirect_uri="http://testserver/v1/mailbox-oauth/callback",
+        mailbox_google_oauth_redirect_uri="https://testserver/v1/mailbox-oauth/callback",
     )
     app = create_app(settings)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
         yield client
 
 
@@ -68,16 +69,16 @@ def oauth_workspace_clients(tmp_path: Path) -> Iterator[tuple[TestClient, TestCl
         session_secret="mailbox-oauth-tenant-test-session-secret",
         min_text_chars_per_page=20,
         transactional_email_provider="test",
-        public_app_url="http://testserver",
+        public_app_url="https://testserver",
         mailbox_imap_allowed_hosts=("imap.gmail.com",),
         mailbox_google_oauth_client_id="google-client-id-for-tests",
         mailbox_google_oauth_client_secret="google-client-secret-for-tests",
-        mailbox_google_oauth_redirect_uri="http://testserver/v1/mailbox-oauth/callback",
+        mailbox_google_oauth_redirect_uri="https://testserver/v1/mailbox-oauth/callback",
     )
     app = create_app(settings)
     with TestClient(app):
-        client_a = TestClient(app)
-        client_b = TestClient(app)
+        client_a = TestClient(app, base_url="https://testserver")
+        client_b = TestClient(app, base_url="https://testserver")
         try:
             yield client_a, client_b
         finally:
@@ -267,6 +268,15 @@ def test_google_oauth_connection_is_one_time_and_never_returns_tokens(
     assert "google-client-secret-for-tests" not in start.text
     assert "refresh-token-for-test-only" not in start.text
     assert "access-token-for-test-only" not in start.text
+    assert start.headers["cache-control"] == "no-store, private"
+    assert start.headers["referrer-policy"] == "no-referrer"
+    assert any(
+        "__Secure-resume_v3_mailbox_oauth=" in header
+        and "httponly" in header.casefold()
+        and "secure" in header.casefold()
+        and "samesite=lax" in header.casefold()
+        for header in start.headers.get_list("set-cookie")
+    )
 
     with oauth_client.app.state.database.session_factory() as session:
         intent = session.scalar(select(MailboxOAuthConnectIntent))
@@ -286,6 +296,17 @@ def test_google_oauth_connection_is_one_time_and_never_returns_tokens(
     assert "provider-authorization-code" not in callback.headers["location"]
     assert "refresh-token-for-test-only" not in callback.headers["location"]
     assert "access-token-for-test-only" not in callback.headers["location"]
+    assert callback.headers["cache-control"] == "no-store, private"
+    assert callback.headers["referrer-policy"] == "no-referrer"
+    assert any(
+        "resume_v3_session=" in header and "samesite=strict" in header.casefold()
+        for header in callback.headers.get_list("set-cookie")
+    )
+    assert any(
+        "__Secure-resume_v3_mailbox_oauth=" in header
+        and "max-age=0" in header.casefold()
+        for header in callback.headers.get_list("set-cookie")
+    )
     assert b"auth=Bearer access-token-for-test-only" in OAuthImap.authentication_payload
 
     listed = oauth_client.get("/v1/mailboxes")
@@ -313,6 +334,157 @@ def test_google_oauth_connection_is_one_time_and_never_returns_tokens(
     )
     assert replay.status_code == 303, replay.text
     assert "mailbox_oauth=failed" in replay.headers["location"]
+
+
+def test_oauth_callback_requires_signed_correlation_cookie(
+    oauth_client: TestClient,
+    monkeypatch,
+) -> None:
+    exchanges: list[str] = []
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "exchange_authorization_code",
+        lambda *args, **kwargs: exchanges.append(str(kwargs["code"]))
+        or "refresh-token-for-missing-cookie-test",
+    )
+
+    started = oauth_client.post(
+        "/v1/mailbox-oauth/start",
+        json={
+            "provider_key": "gmail_oauth",
+            "display_name": "Google callback binding test",
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+        },
+    )
+    assert started.status_code == 200, started.text
+    state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
+
+    # A provider callback is deliberately unauthenticated by the normal strict
+    # session cookie. Removing the short-lived signed binding must therefore
+    # fail before the authorization code exchange or intent consumption.
+    oauth_client.cookies.clear()
+    callback = oauth_client.get(
+        "/v1/mailbox-oauth/callback",
+        params={"state": state, "code": "must-not-be-exchanged"},
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 303, callback.text
+    assert "mailbox_oauth=failed" in callback.headers["location"]
+    assert exchanges == []
+    with oauth_client.app.state.database.session_factory() as session:
+        intent = session.scalar(select(MailboxOAuthConnectIntent))
+        assert intent is not None
+        assert intent.consumed_at is None
+    assert callback.headers["cache-control"] == "no-store, private"
+    assert callback.headers["referrer-policy"] == "no-referrer"
+    assert any(
+        "__Secure-resume_v3_mailbox_oauth=" in header
+        and "max-age=0" in header.casefold()
+        for header in callback.headers.get_list("set-cookie")
+    )
+
+
+def test_oauth_start_rejects_callback_origin_mismatch(oauth_client: TestClient) -> None:
+    response = oauth_client.post(
+        "/v1/mailbox-oauth/start",
+        headers={"host": "wrong.example.test"},
+        json={
+            "provider_key": "gmail_oauth",
+            "display_name": "Invalid callback origin",
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "mailbox_oauth_callback_origin_invalid"
+    with oauth_client.app.state.database.session_factory() as session:
+        assert session.scalar(select(MailboxOAuthConnectIntent)) is None
+
+
+def test_oauth_compatibility_entry_can_finish_on_canonical_callback_host(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A parent compatibility host may safely hand off to the canonical host."""
+
+    class OAuthImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def authenticate(self, mechanism: str, callback) -> tuple[str, list[bytes]]:
+            assert mechanism == "XOAUTH2"
+            assert callback(b"").startswith(b"user=")
+            return "OK", [b"authenticated"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    settings = AppSettings(
+        project_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        upload_dir=tmp_path / "data" / "uploads",
+        database_url="sqlite://",
+        allow_unauthenticated=True,
+        min_text_chars_per_page=20,
+        public_app_url="https://hr.greatsellai.net",
+        mailbox_imap_allowed_hosts=("imap.gmail.com",),
+        mailbox_google_oauth_client_id="google-client-id-for-compat-test",
+        mailbox_google_oauth_client_secret="google-client-secret-for-compat-test",
+        mailbox_google_oauth_redirect_uri=(
+            "https://hr.greatsellai.net/v1/mailbox-oauth/callback"
+        ),
+    )
+    app = create_app(settings)
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", OAuthImap)
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "exchange_authorization_code",
+        lambda *args, **kwargs: "refresh-token-for-compat-test",
+    )
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "refresh_access_token",
+        lambda *args, **kwargs: "access-token-for-compat-test",
+    )
+
+    with TestClient(app, base_url="https://greatsellai.net") as client:
+        started = client.post(
+            "/v1/mailbox-oauth/start",
+            json={
+                "provider_key": "gmail_oauth",
+                "display_name": "Compatibility mailbox",
+                "email_address": "recruiting@example.test",
+                "mailbox": "INBOX",
+            },
+        )
+        assert started.status_code == 200, started.text
+        assert any(
+            "__Secure-resume_v3_mailbox_oauth=" in header
+            and "domain=greatsellai.net" in header.casefold()
+            for header in started.headers.get_list("set-cookie")
+        )
+        state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
+
+        callback = client.get(
+            "https://hr.greatsellai.net/v1/mailbox-oauth/callback",
+            params={"state": state, "code": "compat-provider-code"},
+            follow_redirects=False,
+        )
+
+    assert callback.status_code == 303, callback.text
+    assert callback.headers["location"].startswith(
+        "https://hr.greatsellai.net/?mailbox_oauth=connected"
+    )
+    assert any(
+        "resume_v3_session=" in header and "samesite=strict" in header.casefold()
+        for header in callback.headers.get_list("set-cookie")
+    )
 
 
 def test_oauth_state_cannot_cross_workspaces_or_consume_another_admin_intent(

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Callable, Iterator, Literal
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import and_, desc, exists, func, or_, select, update
+from sqlalchemy import and_, delete, desc, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -129,6 +129,8 @@ class _MailboxCredential:
 _RETRY_LEASE_SECONDS = 180
 _SYNC_LEASE_SECONDS = 600
 _CONTENT_CLAIM_LEASE_SECONDS = 180
+_OAUTH_INTENT_CLEANUP_BATCH_SIZE = 200
+_OAUTH_INTENT_CONSUMED_RETENTION = timedelta(hours=1)
 _IMAP_NZ_NUMBER_MAX = (1 << 32) - 1
 _IMAP_CANONICAL_NZ_NUMBER_PATTERN = re.compile(rb"[1-9][0-9]{0,9}\Z")
 _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
@@ -261,9 +263,12 @@ def _authenticate_imap_client(
             "mailbox_oauth_not_configured",
             "mailbox_provider_oauth_not_supported",
             "mailbox_provider_not_supported",
+            "mailbox_oauth_reauthorization_required",
         }:
             raise MailboxImportError(error_code) from exc
-        raise MailboxImportError("mailbox_oauth_reauthorization_required") from exc
+        # Network, timeout and 5xx token endpoint failures are retryable.
+        # Do not turn a temporary provider outage into a recruiter action.
+        raise MailboxImportError("mailbox_oauth_token_exchange_failed") from exc
     try:
         login_status, login_data = _login_imap_client_with_oauth(
             client,
@@ -342,6 +347,70 @@ def _fernet(settings: AppSettings) -> Fernet:
     material = settings.session_signing_secret()
     derived = base64.urlsafe_b64encode(hashlib.sha256(material.encode("utf-8")).digest())
     return Fernet(derived)
+
+
+def _mailbox_credential_storage_available(settings: AppSettings) -> bool:
+    """Return whether this deployment can safely persist mailbox secrets."""
+
+    try:
+        _fernet(settings)
+    except MailboxImportError:
+        return False
+    return True
+
+
+def cleanup_expired_mailbox_oauth_intents(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    limit: int = _OAUTH_INTENT_CLEANUP_BATCH_SIZE,
+) -> int:
+    """Delete a bounded batch of OAuth intents that can no longer be used.
+
+    OAuth ``state`` values are single-use and short-lived.  The database only
+    stores their digest and an encrypted PKCE verifier, but retaining abandoned
+    browser attempts forever still creates avoidable sensitive metadata and
+    unbounded table growth. A consumed record gets a short safety window: the
+    callback commits the one-use claim before it finishes exchanging the code,
+    so deleting it immediately could expire the ORM object mid-callback.
+    A scheduler calls this with a globally-scoped system session; ordinary
+    request sessions may call it safely too.
+    """
+
+    if limit < 1:
+        raise ValueError("mailbox_oauth_intent_cleanup_limit_must_be_positive")
+    current_time = now or _utcnow()
+    intent_ids = session.scalars(
+        select(MailboxOAuthConnectIntent.id)
+        .where(
+            or_(
+                and_(
+                    MailboxOAuthConnectIntent.consumed_at.is_(None),
+                    MailboxOAuthConnectIntent.expires_at <= current_time,
+                ),
+                (
+                    MailboxOAuthConnectIntent.consumed_at
+                    <= current_time - _OAUTH_INTENT_CONSUMED_RETENTION
+                ),
+            )
+        )
+        .order_by(
+            MailboxOAuthConnectIntent.expires_at,
+            MailboxOAuthConnectIntent.created_at,
+            MailboxOAuthConnectIntent.id,
+        )
+        .limit(limit)
+        .execution_options(skip_organization_scope=True)
+    ).all()
+    if not intent_ids:
+        return 0
+    deleted = session.execute(
+        delete(MailboxOAuthConnectIntent)
+        .where(MailboxOAuthConnectIntent.id.in_(intent_ids))
+        .execution_options(skip_organization_scope=True)
+    )
+    session.commit()
+    return int(deleted.rowcount or 0)
 
 
 def _safe_filename(value: str | None) -> str:
@@ -547,6 +616,8 @@ def _authorization_status(
 ) -> Literal[
     "not_connected", "connected", "reauthorization_required", "unavailable"
 ]:
+    if settings is not None and not _mailbox_credential_storage_available(settings):
+        return "unavailable"
     if config.authentication_mode == "oauth2":
         if settings is not None:
             try:
@@ -824,13 +895,17 @@ def _mark_oauth_reauthorization_required(
 def mailbox_provider_list(settings: AppSettings) -> MailboxProviderListResponse:
     """Expose reviewed provider metadata, never hosts supplied by a user."""
 
+    credential_storage_available = _mailbox_credential_storage_available(settings)
     return MailboxProviderListResponse(
         items=[
             MailboxProviderResponse(
                 provider_key=provider.key,
                 display_name=provider.display_name,
                 authentication_mode=provider.authentication_mode,
-                available=provider_is_available(settings, provider),
+                available=(
+                    credential_storage_available
+                    and provider_is_available(settings, provider)
+                ),
                 imap_host=provider.imap_host,
                 imap_port=provider.imap_port,
                 default_mailbox=provider.default_mailbox,
@@ -943,6 +1018,12 @@ def _update_config_values(
 ) -> MailboxConfig:
     """Persist one source after validating its identity, auth mode and watermark."""
 
+    # Fail before opening an IMAP connection if this operation would need to
+    # persist a newly supplied app password or OAuth refresh token.  That
+    # keeps a missing production encryption key from looking like a provider
+    # connectivity error after we have already contacted the mailbox.
+    if credential is not None:
+        _fernet(settings)
     normalized_name, display_name_key = _normalized_display_name(display_name)
     _ensure_display_name_available(
         session,
@@ -1229,6 +1310,10 @@ def _start_mailbox_oauth_intent(
     target_mailbox_config_id: str | None,
 ) -> MailboxOAuthStartResponse:
     provider = _oauth_provider_or_error(settings, provider_key=provider_key)
+    # A browser authorization start writes the PKCE verifier server-side.
+    # Check this deployment prerequisite before issuing a URL that cannot be
+    # completed safely.
+    _fernet(settings)
     normalized_name, display_name_key = _normalized_display_name(display_name)
     _ensure_display_name_available(
         session,

@@ -158,7 +158,32 @@ def _post_form_json(
             # The endpoint is a fixed, code-owned OAuth token endpoint. No
             # workspace value influences this URL.
             payload = response.read()
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+    except HTTPError as exc:
+        # OAuth providers use a structured ``invalid_grant`` response when a
+        # refresh token was revoked or expired.  That is materially different
+        # from a temporary 5xx, timeout or transport failure: only the former
+        # needs a person to reconnect the mailbox.  Never surface the body,
+        # because it can contain provider diagnostics or identifiers.
+        error_code = ""
+        try:
+            error_payload = json.loads(exc.read(64 * 1024).decode("utf-8"))
+        except (
+            AttributeError,
+            OSError,
+            UnicodeDecodeError,
+            ValueError,
+        ):
+            error_payload = None
+        if isinstance(error_payload, dict):
+            raw_error_code = error_payload.get("error")
+            if isinstance(raw_error_code, str):
+                error_code = raw_error_code.strip().casefold()
+        if error_code == "invalid_grant":
+            raise MailboxOAuthError("mailbox_oauth_reauthorization_required") from exc
+        if error_code in {"invalid_client", "unauthorized_client"}:
+            raise MailboxOAuthError("mailbox_oauth_not_configured") from exc
+        raise MailboxOAuthError("mailbox_oauth_token_exchange_failed") from exc
+    except (URLError, TimeoutError, OSError) as exc:
         raise MailboxOAuthError("mailbox_oauth_token_exchange_failed") from exc
     try:
         decoded = json.loads(payload.decode("utf-8"))
@@ -222,7 +247,11 @@ def refresh_access_token(
     )
     access_token = response.get("access_token")
     if not isinstance(access_token, str) or not access_token.strip() or len(access_token) > 16384:
-        raise MailboxOAuthError("mailbox_oauth_reauthorization_required")
+        # A successful response without an access token is not evidence that
+        # the refresh token was revoked. Treat it like another transient token
+        # endpoint failure so the durable worker can retry before asking the
+        # recruiter to authorize again.
+        raise MailboxOAuthError("mailbox_oauth_token_exchange_failed")
     return access_token.strip()
 
 

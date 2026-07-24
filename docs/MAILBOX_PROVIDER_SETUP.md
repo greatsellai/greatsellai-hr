@@ -4,6 +4,8 @@
 
 > 当前交付边界：本轮先交付服务商目录、IMAP/OAuth 后端、迁移和安全测试。邮箱设置前端正在重构，因此“选择服务商”和“Google/Microsoft 授权按钮”会在后续前端 PR 接入；在此之前，现有界面维持原有邮箱配置能力。以下用户流程是前端接入后的正式操作说明，部署管理员可先完成服务端配置与测试。
 
+> 生产启用前提：本 PR 不修改 `compose.yml` 或任何生产环境文件。部署负责人需要在共享的 API/Worker/Migrate 环境中透传本文列出的邮箱变量；否则授权码服务商仍可按现有密钥运行，而 Gmail / Microsoft 会在服务商列表中显示为“不可用”，不会半配置后误发起授权。
+
 ## 使用前须知
 
 - 一个工作区可以创建多个有业务名称的收件通道，例如“算法社招”“校园招聘”。通道之间的邮件起点、同步状态、附件审计和凭据彼此独立。
@@ -12,6 +14,36 @@
 - 授权码、客户端专用密码和 OAuth refresh token 只加密保存在服务端。页面、API 响应、日志和 Agent 工具均不会回显这些内容。
 - 新通道可以修改名称、暂停、恢复或归档。已经产生入库记录的通道不能静默改为另一邮箱，以免把新邮件混入旧来源。
 - 服务商也不能在原通道上切换；请新建目标服务商通道，避免把旧服务商凭据发送到另一服务商。
+
+## 部署前置变量与回调入口
+
+以下变量只保存于部署环境，不能写入仓库、前端构建产物、工单截图或聊天记录。`api`、`worker` 和 `migrate` 必须拿到相同的值：
+
+```text
+RESUME_V3_EMAIL_CREDENTIALS_KEY
+RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS=imap.feishu.cn,imap.exmail.qq.com,imap.qq.com,imap.gmail.com,outlook.office365.com
+RESUME_V3_MAILBOX_GOOGLE_OAUTH_CLIENT_ID
+RESUME_V3_MAILBOX_GOOGLE_OAUTH_CLIENT_SECRET
+RESUME_V3_MAILBOX_GOOGLE_OAUTH_REDIRECT_URI
+RESUME_V3_MAILBOX_MICROSOFT_OAUTH_CLIENT_ID
+RESUME_V3_MAILBOX_MICROSOFT_OAUTH_CLIENT_SECRET
+RESUME_V3_MAILBOX_MICROSOFT_OAUTH_REDIRECT_URI
+```
+
+生产回调统一使用主入口：
+
+```text
+https://hr.greatsellai.net/v1/mailbox-oauth/callback
+```
+
+兼容入口 `https://greatsellai.net/greatsellhr/` 可以发起授权；浏览器会用短期、安全 Cookie 把流程交给上述主入口，完成后落在 `hr.greatsellai.net`。OAuth 不会把授权 code、state、token 或错误详情带回前端 URL。若部署把主入口或回调地址改为不属于同一受控域名的地址，后端会安全拒绝启动，而不是创建无法完成的授权。
+
+前端接入时：
+
+1. 读取 `GET /v1/mailbox-providers`，按 `available` 和 `authentication_mode` 展示服务商。
+2. `POST /v1/mailbox-oauth/start` 或 `POST /v1/mailboxes/{mailbox_id}/oauth/reauthorize` 得到 `authorization_url` 后，使用整页跳转。
+3. 回调完成后会 303 到 `?mailbox_oauth=connected|failed` 和 `#settings/mailbox`；前端刷新 `GET /v1/mailboxes` 后清理 query。
+4. `authorization_status` 的值为 `not_connected`、`connected`、`reauthorization_required` 或 `unavailable`；浏览器永远不接触 refresh token 或授权码。
 
 ## 工作区管理员：创建收件通道
 

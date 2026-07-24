@@ -15,12 +15,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterator, Literal
 
 from sqlalchemy import case, delete, exists, func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import AppSettings
 from app.database import Database
-from app.models import EmailAttachmentImport, MailboxBackgroundJob, MailboxConfig
+from app.models import (
+    EmailAttachmentImport,
+    MailboxBackgroundJob,
+    MailboxConfig,
+    MailboxOAuthCredential,
+)
 from app.schemas import (
     MailboxBackgroundJobBatchResponse,
     MailboxBackgroundJobHistoryResponse,
@@ -28,6 +33,7 @@ from app.schemas import (
 )
 from app.services.mailbox_import_service import (
     MailboxImportError,
+    cleanup_expired_mailbox_oauth_intents,
     get_retryable_mailbox_attachment,
     mailbox_attachment_has_retryable_remote_source,
     mailbox_source_fingerprint,
@@ -546,6 +552,14 @@ def enqueue_due_mailbox_sync_jobs(*, database: Database, settings: AppSettings) 
     now = _utcnow()
     cutoff = now - timedelta(seconds=settings.mailbox_sync_interval_seconds)
     with database.session_factory() as session:
+        # Browser-abandoned authorization attempts contain an encrypted PKCE
+        # verifier. Keep their retention bounded without allowing a cleanup
+        # fault to prevent unrelated mailbox scheduling.
+        try:
+            cleanup_expired_mailbox_oauth_intents(session, now=now)
+        except SQLAlchemyError:
+            session.rollback()
+            logger.warning("mailbox_oauth_intent_cleanup_failed", exc_info=True)
         active_sync_job = exists(
             select(MailboxBackgroundJob.id).where(
                 MailboxBackgroundJob.organization_id == MailboxConfig.organization_id,
@@ -554,11 +568,19 @@ def enqueue_due_mailbox_sync_jobs(*, database: Database, settings: AppSettings) 
                 MailboxBackgroundJob.status.in_(_ACTIVE_JOB_STATUSES),
             )
         )
+        oauth_reauthorization_pending = exists(
+            select(MailboxOAuthCredential.id).where(
+                MailboxOAuthCredential.organization_id == MailboxConfig.organization_id,
+                MailboxOAuthCredential.mailbox_config_id == MailboxConfig.id,
+                MailboxOAuthCredential.reauthorization_required_at.is_not(None),
+            )
+        )
         candidate = session.execute(
             select(MailboxConfig.id, MailboxConfig.organization_id)
             .where(
                 MailboxConfig.enabled.is_(True),
                 MailboxConfig.archived_at.is_(None),
+                ~oauth_reauthorization_pending,
                 or_(
                     MailboxConfig.sync_lease_expires_at.is_(None),
                     MailboxConfig.sync_lease_expires_at <= now,

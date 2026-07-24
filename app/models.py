@@ -1117,11 +1117,27 @@ class MailboxConfig(OrganizationScoped, Base):
         default="默认收件邮箱",
         server_default=text("'默认收件邮箱'"),
     )
+    # A reviewed provider identifier lets the UI describe a connection in
+    # human terms. ``legacy_imap`` preserves old rows whose endpoint does not
+    # map to one of the current presets.
+    provider_key: Mapped[str] = mapped_column(
+        String(64),
+        default="legacy_imap",
+        server_default=text("'legacy_imap'"),
+    )
+    authentication_mode: Mapped[str] = mapped_column(
+        String(16),
+        default="app_password",
+        server_default=text("'app_password'"),
+    )
     imap_host: Mapped[str] = mapped_column(String(255))
     imap_port: Mapped[int] = mapped_column(Integer, default=993)
     email_address: Mapped[str] = mapped_column(String(320))
     mailbox: Mapped[str] = mapped_column(String(255), default="INBOX")
-    encrypted_password: Mapped[str] = mapped_column(Text)
+    # Retained for app-password channels only. OAuth refresh tokens live in a
+    # dedicated one-to-one record so they cannot be confused with a mailbox
+    # password by old operational tooling.
+    encrypted_password: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     # A binding starts at the mailbox's current UIDNEXT.  This makes the
     # inbox an append-only source from the moment the user connects it: mail
@@ -1172,6 +1188,91 @@ class MailboxConfig(OrganizationScoped, Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    oauth_credential: Mapped["MailboxOAuthCredential | None"] = relationship(
+        back_populates="mailbox_config",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class MailboxOAuthCredential(OrganizationScoped, Base):
+    """Encrypted refresh material for one OAuth-backed mailbox.
+
+    Access tokens are intentionally refreshed in memory for each IMAP run and
+    never persisted.  This row contains neither an OAuth client secret nor a
+    user-visible password.
+    """
+
+    __tablename__ = "mailbox_oauth_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "mailbox_config_id",
+            name="uq_mailbox_oauth_credentials_mailbox_config",
+        ),
+        Index(
+            "ix_mailbox_oauth_credentials_organization_mailbox",
+            "organization_id",
+            "mailbox_config_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    mailbox_config_id: Mapped[str] = mapped_column(
+        ForeignKey("mailbox_configs.id"),
+        nullable=False,
+    )
+    encrypted_refresh_token: Mapped[str] = mapped_column(Text, nullable=False)
+    reauthorization_required_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    mailbox_config: Mapped[MailboxConfig] = relationship(
+        back_populates="oauth_credential"
+    )
+
+
+class MailboxOAuthConnectIntent(OrganizationScoped, Base):
+    """One short-lived, account-bound OAuth authorization-code intent.
+
+    The browser and OAuth provider only receive the opaque random state.  Its
+    digest, the encrypted PKCE verifier and the intended workspace are stored
+    here so a callback cannot be replayed or completed by another member.
+    """
+
+    __tablename__ = "mailbox_oauth_connect_intents"
+    __table_args__ = (
+        UniqueConstraint("state_hash", name="uq_mailbox_oauth_connect_intents_state_hash"),
+        Index(
+            "ix_mailbox_oauth_connect_intents_organization_expiry",
+            "organization_id",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"), nullable=False)
+    membership_id: Mapped[str] = mapped_column(
+        ForeignKey("organization_memberships.id"),
+        nullable=False,
+    )
+    target_mailbox_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("mailbox_configs.id"),
+        nullable=True,
+    )
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    email_address: Mapped[str] = mapped_column(String(320), nullable=False)
+    mailbox: Mapped[str] = mapped_column(String(255), nullable=False)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    encrypted_code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class MailboxSyncFailureAlert(OrganizationScoped, Base):

@@ -14,7 +14,7 @@ from email.message import Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Callable, Iterator, Literal
+from typing import TYPE_CHECKING, Callable, Iterator, Literal
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -29,6 +29,8 @@ from app.models import (
     EmailAttachmentImportAttempt,
     MailboxAttachmentContentIdentity,
     MailboxConfig,
+    MailboxOAuthConnectIntent,
+    MailboxOAuthCredential,
     MailboxSyncFailureAlert,
     Resume,
 )
@@ -40,6 +42,10 @@ from app.schemas import (
     MailboxConfigUpdate,
     MailboxImportHistoryResponse,
     MailboxImportResponse,
+    MailboxOAuthStartRequest,
+    MailboxOAuthStartResponse,
+    MailboxProviderListResponse,
+    MailboxProviderResponse,
     MailboxSyncAlertSummary,
     MailboxSyncResponse,
 )
@@ -63,6 +69,24 @@ from app.services.mailbox_imap_transport import (
     create_imap_client,
     validate_imap_endpoint,
 )
+from app.services.mailbox_oauth_service import (
+    MailboxOAuthError,
+    authorization_url,
+    create_oauth_state,
+    create_pkce_code_verifier,
+    exchange_authorization_code,
+    refresh_access_token,
+)
+from app.services.mailbox_provider_catalog import (
+    MailboxProvider,
+    MailboxProviderError,
+    all_mailbox_providers,
+    known_mailbox_provider,
+    mailbox_provider_by_key,
+    provider_endpoint_is_enabled,
+    provider_is_available,
+    resolved_provider_key,
+)
 from app.services.mailbox_sync_alert_service import (
     active_sync_alert,
     resolve_mailbox_sync_alert,
@@ -78,6 +102,9 @@ from app.services.candidate_data_lifecycle_service import (
     mailbox_attachment_is_tombstoned,
 )
 
+if TYPE_CHECKING:
+    from app.services.identity_service import AuthPrincipal
+
 
 class MailboxImportError(RuntimeError):
     pass
@@ -89,6 +116,14 @@ class _RetryClaimLost(MailboxImportError):
 
 class _ContentClaimLost(MailboxImportError):
     """A newer mailbox attachment owns this content identity now."""
+
+
+@dataclass(frozen=True)
+class _MailboxCredential:
+    """One in-memory credential, never serialized into a response or log."""
+
+    authentication_mode: Literal["app_password", "oauth2"]
+    secret: str
 
 
 _RETRY_LEASE_SECONDS = 180
@@ -156,12 +191,12 @@ def _validate_imap_connection_arguments(
     *,
     email_address: str,
     mailbox: str,
-    password: str | None,
+    credential: _MailboxCredential | None,
 ) -> None:
     _validated_imap_text(email_address)
     _validated_imap_text(mailbox)
-    if password is not None:
-        _validated_imap_text(password)
+    if credential is not None and credential.authentication_mode == "app_password":
+        _validated_imap_text(credential.secret)
 
 
 def _login_imap_client(
@@ -176,6 +211,74 @@ def _login_imap_client(
         _quoted_imap_string(email_address),
         _validated_imap_text(password),
     )
+
+
+def _login_imap_client_with_oauth(
+    client: imaplib.IMAP4_SSL,
+    *,
+    email_address: str,
+    access_token: str,
+) -> tuple[str, list[bytes]]:
+    """Authenticate with XOAUTH2 without ever placing a token in IMAP text."""
+
+    _validated_imap_text(email_address)
+    # OAuth bearer tokens are protocol bytes rather than an IMAP command
+    # argument. Bound their size and reject control characters before handing
+    # the callback to ``imaplib``.
+    if not access_token or len(access_token) > 16384 or any(
+        ord(character) < 32 or ord(character) == 127 for character in access_token
+    ):
+        raise MailboxImportError("mailbox_oauth_reauthorization_required")
+    payload = f"user={email_address}\x01auth=Bearer {access_token}\x01\x01".encode("utf-8")
+    return client.authenticate("XOAUTH2", lambda _: payload)
+
+
+def _authenticate_imap_client(
+    client: imaplib.IMAP4_SSL,
+    *,
+    settings: AppSettings,
+    provider_key: str,
+    email_address: str,
+    credential: _MailboxCredential,
+) -> tuple[str, list[bytes]]:
+    """Use login for app passwords and SASL XOAUTH2 for OAuth channels."""
+
+    if credential.authentication_mode == "app_password":
+        return _login_imap_client(
+            client,
+            email_address=email_address,
+            password=credential.secret,
+        )
+    try:
+        access_token = refresh_access_token(
+            settings,
+            provider_key=provider_key,
+            refresh_token=credential.secret,
+        )
+    except MailboxOAuthError as exc:
+        error_code = str(exc)
+        if error_code in {
+            "mailbox_oauth_not_configured",
+            "mailbox_provider_oauth_not_supported",
+            "mailbox_provider_not_supported",
+        }:
+            raise MailboxImportError(error_code) from exc
+        raise MailboxImportError("mailbox_oauth_reauthorization_required") from exc
+    try:
+        login_status, login_data = _login_imap_client_with_oauth(
+            client,
+            email_address=email_address,
+            access_token=access_token,
+        )
+    except (imaplib.IMAP4.error, OSError) as exc:
+        raise MailboxImportError("mailbox_oauth_reauthorization_required") from exc
+    # Most IMAP servers reject a revoked/invalid bearer token with an IMAP
+    # ``NO`` response instead of raising.  Surface that as a reconnect state
+    # here so sync and attachment-retry callers persist a consistent status
+    # rather than treating it as a generic network failure.
+    if login_status != "OK":
+        raise MailboxImportError("mailbox_oauth_reauthorization_required")
+    return login_status, login_data
 
 
 def _select_mailbox_readonly(
@@ -325,11 +428,12 @@ def _read_mailbox_status(
 def _read_initial_mailbox_watermark(
     *,
     settings: AppSettings,
+    provider_key: str,
     imap_host: str,
     imap_port: int,
     email_address: str,
     mailbox: str,
-    password: str,
+    credential: _MailboxCredential,
 ) -> tuple[int, int]:
     """Authenticate once while binding and capture the starting UIDNEXT.
 
@@ -343,17 +447,19 @@ def _read_initial_mailbox_watermark(
         _validate_imap_connection_arguments(
             email_address=email_address,
             mailbox=mailbox,
-            password=password,
+            credential=credential,
         )
         client = create_imap_client(
             settings,
             host=imap_host,
             port=imap_port,
         )
-        login_status, _ = _login_imap_client(
+        login_status, _ = _authenticate_imap_client(
             client,
+            settings=settings,
+            provider_key=provider_key,
             email_address=email_address,
-            password=password,
+            credential=credential,
         )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
@@ -415,14 +521,68 @@ def mailbox_source_fingerprint(config: MailboxConfig) -> str:
     return _mailbox_source_fingerprint(config)
 
 
-def _config_response(config: MailboxConfig | None) -> MailboxConfigResponse:
+def _effective_provider_key(config: MailboxConfig) -> str:
+    return resolved_provider_key(
+        configured_key=config.provider_key,
+        host=config.imap_host,
+        port=config.imap_port,
+    )
+
+
+def _provider_presentation(config: MailboxConfig) -> tuple[str, str]:
+    """Return a stable key and human label for current and legacy channels."""
+
+    provider_key = _effective_provider_key(config)
+    try:
+        provider = mailbox_provider_by_key(provider_key)
+    except MailboxProviderError:
+        return provider_key, "已配置 IMAP 邮箱"
+    return provider_key, provider.display_name
+
+
+def _authorization_status(
+    config: MailboxConfig,
+    *,
+    settings: AppSettings | None = None,
+) -> Literal[
+    "not_connected", "connected", "reauthorization_required", "unavailable"
+]:
+    if config.authentication_mode == "oauth2":
+        if settings is not None:
+            try:
+                provider = mailbox_provider_by_key(_effective_provider_key(config))
+            except MailboxProviderError:
+                return "unavailable"
+            if not provider_is_available(settings, provider):
+                return "unavailable"
+        credential = config.oauth_credential
+        if credential is None:
+            return "not_connected"
+        if credential.reauthorization_required_at is not None:
+            return "reauthorization_required"
+        return "connected"
+    return "connected" if config.encrypted_password else "not_connected"
+
+
+def _config_response(
+    config: MailboxConfig | None,
+    *,
+    settings: AppSettings | None = None,
+) -> MailboxConfigResponse:
     if config is None:
         return MailboxConfigResponse(configured=False)
     alert = active_sync_alert(config.sync_failure_alert)
+    provider_key, provider_display_name = _provider_presentation(config)
     return MailboxConfigResponse(
         configured=True,
         mailbox_id=config.id,
         display_name=config.display_name,
+        provider_key=provider_key,
+        provider_display_name=provider_display_name,
+        authentication_mode=(
+            "oauth2" if config.authentication_mode == "oauth2" else "app_password"
+        ),
+        authorization_status=_authorization_status(config, settings=settings),
         imap_host=config.imap_host,
         imap_port=config.imap_port,
         email_address=config.email_address,
@@ -501,22 +661,31 @@ def list_mailbox_configs(
     session: Session,
     *,
     include_archived: bool = False,
+    settings: AppSettings | None = None,
 ) -> MailboxConfigListResponse:
     statement = select(MailboxConfig)
     if not include_archived:
         statement = statement.where(MailboxConfig.archived_at.is_(None))
     configs = session.scalars(
-        statement.order_by(desc(MailboxConfig.created_at), MailboxConfig.id)
+        statement.options(selectinload(MailboxConfig.oauth_credential)).order_by(
+            desc(MailboxConfig.created_at), MailboxConfig.id
+        )
     ).all()
     return MailboxConfigListResponse(
-        items=[_config_response(config) for config in configs],
+        items=[_config_response(config, settings=settings) for config in configs],
         total=len(configs),
     )
 
 
-def get_mailbox_config_by_id(session: Session, *, config_id: str) -> MailboxConfigResponse:
+def get_mailbox_config_by_id(
+    session: Session,
+    *,
+    config_id: str,
+    settings: AppSettings | None = None,
+) -> MailboxConfigResponse:
     return _config_response(
-        _mailbox_config_or_error(session, config_id=config_id, include_archived=True)
+        _mailbox_config_or_error(session, config_id=config_id, include_archived=True),
+        settings=settings,
     )
 
 
@@ -559,19 +728,203 @@ def _next_legacy_mailbox_label(session: Session) -> str:
         index += 1
 
 
-def get_mailbox_config(session: Session) -> MailboxConfigResponse:
-    return _config_response(_legacy_single_config(session))
+def get_mailbox_config(
+    session: Session,
+    *,
+    settings: AppSettings | None = None,
+) -> MailboxConfigResponse:
+    return _config_response(_legacy_single_config(session), settings=settings)
+
+
+def _encrypt_mailbox_secret(settings: AppSettings, value: str) -> str:
+    return _fernet(settings).encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_mailbox_secret(settings: AppSettings, encrypted_value: str) -> str:
+    try:
+        return _fernet(settings).decrypt(encrypted_value.encode("ascii")).decode("utf-8")
+    except (MailboxImportError, InvalidToken, UnicodeDecodeError) as exc:
+        raise MailboxImportError("mailbox_credentials_unavailable") from exc
 
 
 def _encrypt_password(settings: AppSettings, password: str) -> str:
-    return _fernet(settings).encrypt(password.encode("utf-8")).decode("ascii")
+    """Compatibility name for encrypted app-password channels."""
+
+    return _encrypt_mailbox_secret(settings, password)
 
 
 def _decrypt_password(settings: AppSettings, encrypted_password: str) -> str:
+    """Compatibility name for encrypted app-password channels."""
+
+    return _decrypt_mailbox_secret(settings, encrypted_password)
+
+
+def _oauth_credential_or_error(
+    session: Session,
+    *,
+    config: MailboxConfig,
+) -> MailboxOAuthCredential:
+    credential = config.oauth_credential
+    if credential is None:
+        credential = session.scalar(
+            select(MailboxOAuthCredential).where(
+                MailboxOAuthCredential.mailbox_config_id == config.id,
+                MailboxOAuthCredential.organization_id == config.organization_id,
+            )
+        )
+    if credential is None:
+        raise MailboxImportError("mailbox_oauth_reauthorization_required")
+    return credential
+
+
+def _credential_for_config(
+    session: Session,
+    *,
+    settings: AppSettings,
+    config: MailboxConfig,
+) -> _MailboxCredential:
+    if config.authentication_mode == "oauth2":
+        oauth_credential = _oauth_credential_or_error(session, config=config)
+        if oauth_credential.reauthorization_required_at is not None:
+            raise MailboxImportError("mailbox_oauth_reauthorization_required")
+        refresh_token = _decrypt_mailbox_secret(
+            settings,
+            oauth_credential.encrypted_refresh_token,
+        )
+        return _MailboxCredential(authentication_mode="oauth2", secret=refresh_token)
+    if not config.encrypted_password:
+        raise MailboxImportError("mailbox_password_required")
+    return _MailboxCredential(
+        authentication_mode="app_password",
+        secret=_decrypt_password(settings, config.encrypted_password),
+    )
+
+
+def _mark_oauth_reauthorization_required(
+    session: Session,
+    *,
+    config: MailboxConfig,
+    error_code: str,
+) -> None:
+    """Persist a safe status without retaining an OAuth provider diagnostic."""
+
+    if config.authentication_mode != "oauth2":
+        return
+    credential = session.scalar(
+        select(MailboxOAuthCredential).where(
+            MailboxOAuthCredential.mailbox_config_id == config.id,
+            MailboxOAuthCredential.organization_id == config.organization_id,
+        )
+    )
+    if credential is not None:
+        credential.reauthorization_required_at = _utcnow()
+        credential.last_error_code = error_code
+
+
+def mailbox_provider_list(settings: AppSettings) -> MailboxProviderListResponse:
+    """Expose reviewed provider metadata, never hosts supplied by a user."""
+
+    return MailboxProviderListResponse(
+        items=[
+            MailboxProviderResponse(
+                provider_key=provider.key,
+                display_name=provider.display_name,
+                authentication_mode=provider.authentication_mode,
+                available=provider_is_available(settings, provider),
+                imap_host=provider.imap_host,
+                imap_port=provider.imap_port,
+                default_mailbox=provider.default_mailbox,
+                credential_label=provider.credential_label,
+                help_text=provider.help_text,
+            )
+            for provider in all_mailbox_providers()
+        ]
+    )
+
+
+def _resolve_mailbox_connection(
+    *,
+    settings: AppSettings,
+    config: MailboxConfig | None,
+    provider_key: str | None,
+    imap_host: str | None,
+    imap_port: int | None,
+) -> tuple[str, Literal["app_password", "oauth2"], str, int]:
+    """Resolve a reviewed provider to one exact, server-approved endpoint."""
+
+    if provider_key not in {None, "legacy_imap"}:
+        try:
+            provider = mailbox_provider_by_key(provider_key)
+        except MailboxProviderError as exc:
+            raise MailboxImportError(str(exc)) from exc
+        if not provider_endpoint_is_enabled(settings, provider):
+            raise MailboxImportError("mailbox_provider_not_available")
+        if imap_host is not None and imap_host.strip().rstrip(".").casefold() != provider.imap_host:
+            raise MailboxImportError("mailbox_provider_endpoint_mismatch")
+        if imap_port is not None and imap_port != provider.imap_port:
+            raise MailboxImportError("mailbox_provider_endpoint_mismatch")
+        return (
+            provider.key,
+            provider.authentication_mode,
+            provider.imap_host,
+            provider.imap_port,
+        )
+
+    if imap_host is None:
+        raise MailboxImportError("mailbox_provider_required")
+    port = imap_port if imap_port is not None else 993
     try:
-        return _fernet(settings).decrypt(encrypted_password.encode("ascii")).decode("utf-8")
-    except (MailboxImportError, InvalidToken, UnicodeDecodeError) as exc:
-        raise MailboxImportError("mailbox_credentials_unavailable") from exc
+        normalized_host = validate_imap_endpoint(settings, host=imap_host, port=port)
+    except MailboxImapTransportError as exc:
+        raise MailboxImportError(str(exc)) from exc
+    inferred_provider = known_mailbox_provider(host=normalized_host, port=port)
+    if config is not None:
+        configured_key = _effective_provider_key(config)
+        authentication_mode: Literal["app_password", "oauth2"] = (
+            "oauth2" if config.authentication_mode == "oauth2" else "app_password"
+        )
+        return configured_key, authentication_mode, normalized_host, port
+    if inferred_provider is None:
+        return "legacy_imap", "app_password", normalized_host, port
+    return (
+        inferred_provider.key,
+        inferred_provider.authentication_mode,
+        normalized_host,
+        port,
+    )
+
+
+def _store_oauth_refresh_token(
+    session: Session,
+    *,
+    settings: AppSettings,
+    config: MailboxConfig,
+    refresh_token: str,
+) -> None:
+    """Upsert an OAuth refresh token after a successful connection check."""
+
+    encrypted_refresh_token = _encrypt_mailbox_secret(settings, refresh_token)
+    credential = config.oauth_credential
+    if credential is None:
+        credential = session.scalar(
+            select(MailboxOAuthCredential).where(
+                MailboxOAuthCredential.mailbox_config_id == config.id,
+                MailboxOAuthCredential.organization_id == config.organization_id,
+            )
+        )
+    if credential is None:
+        credential = MailboxOAuthCredential(
+            organization_id=config.organization_id,
+            mailbox_config_id=config.id,
+            encrypted_refresh_token=encrypted_refresh_token,
+            reauthorization_required_at=None,
+            last_error_code=None,
+        )
+        session.add(credential)
+    else:
+        credential.encrypted_refresh_token = encrypted_refresh_token
+        credential.reauthorization_required_at = None
+        credential.last_error_code = None
 
 
 def _update_config_values(
@@ -580,14 +933,15 @@ def _update_config_values(
     settings: AppSettings,
     config: MailboxConfig | None,
     display_name: str,
-    imap_host: str,
-    imap_port: int,
+    provider_key: str | None,
+    imap_host: str | None,
+    imap_port: int | None,
     email_address: str,
     mailbox: str,
-    password: str | None,
+    credential: _MailboxCredential | None,
     enabled: bool,
 ) -> MailboxConfig:
-    """Persist one source after validating its source identity and watermark."""
+    """Persist one source after validating its identity, auth mode and watermark."""
 
     normalized_name, display_name_key = _normalized_display_name(display_name)
     _ensure_display_name_available(
@@ -595,30 +949,59 @@ def _update_config_values(
         display_name_key=display_name_key,
         excluding_config_id=config.id if config is not None else None,
     )
-    try:
-        normalized_host = validate_imap_endpoint(
-            settings,
-            host=imap_host,
-            port=imap_port,
-        )
-    except MailboxImapTransportError as exc:
-        raise MailboxImportError(str(exc)) from exc
+    # Validate the raw browser value before normalizing whitespace.  Calling
+    # ``strip`` first would silently remove a leading CR/LF or trailing tab
+    # and turn an attempted IMAP command injection into a valid connection.
+    # This must happen before any connection is opened.
     _validate_imap_connection_arguments(
         email_address=email_address,
         mailbox=mailbox,
-        password=password,
+        credential=credential,
     )
+    (
+        resolved_provider_key,
+        authentication_mode,
+        normalized_host,
+        resolved_port,
+    ) = _resolve_mailbox_connection(
+        settings=settings,
+        config=config,
+        provider_key=provider_key,
+        imap_host=imap_host,
+        imap_port=imap_port,
+    )
+    if config is not None:
+        existing_authentication_mode: Literal["app_password", "oauth2"] = (
+            "oauth2" if config.authentication_mode == "oauth2" else "app_password"
+        )
+        existing_provider_key = _effective_provider_key(config)
+        # A normal PATCH must never repoint an existing channel to another
+        # provider.  Apart from an app-password → OAuth row becoming enabled
+        # without a refresh credential, a same-mode switch (for example Feishu
+        # → Tencent Exmail) would send the old provider's secret while binding
+        # the new source.  Connect the other provider as a new named mailbox;
+        # OAuth token changes remain on the state-bound callback path.
+        if resolved_provider_key != existing_provider_key:
+            raise MailboxImportError("mailbox_provider_change_requires_new_connection")
+        if authentication_mode != existing_authentication_mode:
+            raise MailboxImportError(
+                "mailbox_provider_authentication_transition_requires_oauth"
+            )
+    if credential is not None and credential.authentication_mode != authentication_mode:
+        raise MailboxImportError("mailbox_provider_authentication_mismatch")
     normalized_email = email_address.strip()
     normalized_mailbox = mailbox.strip()
+    # Keep the normalized values safe too; this mirrors the raw-value check
+    # above and protects service callers that construct values internally.
     _validate_imap_connection_arguments(
         email_address=normalized_email,
         mailbox=normalized_mailbox,
-        password=None,
+        credential=None,
     )
     source_changed = config is None or not _same_mailbox_source(
         config,
         imap_host=normalized_host,
-        imap_port=imap_port,
+        imap_port=resolved_port,
         email_address=normalized_email,
         mailbox=normalized_mailbox,
     )
@@ -631,55 +1014,94 @@ def _update_config_values(
         config is not None
         and (config.import_start_uid is None or config.imap_uidvalidity is None)
     )
-    encrypted_password = config.encrypted_password if config is not None else ""
-    if password is not None:
-        encrypted_password = _encrypt_password(settings, password)
-    if not encrypted_password:
-        raise MailboxImportError("mailbox_password_required")
+    if credential is None and config is None:
+        raise MailboxImportError(
+            "mailbox_oauth_connection_required"
+            if authentication_mode == "oauth2"
+            else "mailbox_password_required"
+        )
+    binding_credential: _MailboxCredential | None
+    if credential is not None:
+        binding_credential = credential
+    elif needs_watermark:
+        assert config is not None
+        binding_credential = _credential_for_config(session, settings=settings, config=config)
+    else:
+        binding_credential = None
     if needs_watermark:
-        binding_password = password or _decrypt_password(settings, encrypted_password)
+        assert binding_credential is not None
         imap_uidvalidity, import_start_uid = _read_initial_mailbox_watermark(
             settings=settings,
+            provider_key=resolved_provider_key,
             imap_host=normalized_host,
-            imap_port=imap_port,
+            imap_port=resolved_port,
             email_address=normalized_email,
             mailbox=normalized_mailbox,
-            password=binding_password,
+            credential=binding_credential,
         )
         import_started_at = _utcnow()
+    else:
+        imap_uidvalidity = import_start_uid = import_started_at = None
 
     if config is None:
         config = MailboxConfig(
             display_name=normalized_name,
             display_name_key=display_name_key,
+            provider_key=resolved_provider_key,
+            authentication_mode=authentication_mode,
             imap_host=normalized_host,
-            imap_port=imap_port,
+            imap_port=resolved_port,
             email_address=normalized_email,
             mailbox=normalized_mailbox,
-            encrypted_password=encrypted_password,
+            encrypted_password=(
+                _encrypt_password(settings, binding_credential.secret)
+                if authentication_mode == "app_password"
+                else None
+            ),
             enabled=enabled,
             import_start_uid=import_start_uid,
             imap_uidvalidity=imap_uidvalidity,
             import_started_at=import_started_at,
         )
         session.add(config)
-        return config
+        # The tenant write guard fills organization_id during this flush. The
+        # OAuth child row must receive that same scoped value explicitly.
+        session.flush()
+    else:
+        config.display_name = normalized_name
+        config.display_name_key = display_name_key
+        config.provider_key = resolved_provider_key
+        config.authentication_mode = authentication_mode
+        config.imap_host = normalized_host
+        config.imap_port = resolved_port
+        config.email_address = normalized_email
+        config.mailbox = normalized_mailbox
+        if authentication_mode == "app_password":
+            if credential is not None:
+                config.encrypted_password = _encrypt_password(
+                    settings,
+                    credential.secret,
+                )
+            if config.oauth_credential is not None:
+                session.delete(config.oauth_credential)
+        else:
+            config.encrypted_password = None
+        config.enabled = enabled
+        if needs_watermark:
+            config.import_start_uid = import_start_uid
+            config.imap_uidvalidity = imap_uidvalidity
+            config.import_started_at = import_started_at
+            # The worker should check a newly bound mailbox immediately. The
+            # stored UIDNEXT keeps that check from importing its history.
+            config.last_synced_at = None
 
-    config.display_name = normalized_name
-    config.display_name_key = display_name_key
-    config.imap_host = normalized_host
-    config.imap_port = imap_port
-    config.email_address = normalized_email
-    config.mailbox = normalized_mailbox
-    config.encrypted_password = encrypted_password
-    config.enabled = enabled
-    if needs_watermark:
-        config.import_start_uid = import_start_uid
-        config.imap_uidvalidity = imap_uidvalidity
-        config.import_started_at = import_started_at
-        # The worker should check a newly bound mailbox immediately.  The
-        # stored UIDNEXT keeps that check from importing its history.
-        config.last_synced_at = None
+    if authentication_mode == "oauth2" and credential is not None:
+        _store_oauth_refresh_token(
+            session,
+            settings=settings,
+            config=config,
+            refresh_token=credential.secret,
+        )
     config.last_sync_error = None
     if not enabled:
         resolve_mailbox_sync_alert(
@@ -707,11 +1129,16 @@ def create_mailbox_config(
         settings=settings,
         config=None,
         display_name=payload.display_name,
+        provider_key=payload.provider_key,
         imap_host=payload.imap_host,
         imap_port=payload.imap_port,
         email_address=payload.email_address,
         mailbox=payload.mailbox,
-        password=payload.password,
+        credential=(
+            _MailboxCredential(authentication_mode="app_password", secret=payload.password)
+            if payload.password is not None
+            else None
+        ),
         enabled=payload.enabled,
     )
     try:
@@ -719,7 +1146,7 @@ def create_mailbox_config(
     except IntegrityError as exc:
         session.rollback()
         raise MailboxImportError("mailbox_duplicate_display_name") from exc
-    return _config_response(config)
+    return _config_response(config, settings=settings)
 
 
 def update_mailbox_config(
@@ -730,18 +1157,40 @@ def update_mailbox_config(
     payload: MailboxConfigPatch,
 ) -> MailboxConfigResponse:
     config = _mailbox_config_or_error(session, config_id=config_id)
+    if payload.provider_key is not None:
+        # Reject a provider switch before forwarding this channel's current
+        # fixed endpoint into the generic resolver.  Otherwise a Feishu → QQ
+        # request would misleadingly fail as an endpoint mismatch, instead of
+        # clearly explaining that a different provider needs a new channel.
+        # Resolve unknown keys first so callers still receive the stable
+        # ``mailbox_provider_not_supported`` validation error.
+        try:
+            requested_provider = mailbox_provider_by_key(payload.provider_key)
+        except MailboxProviderError as exc:
+            raise MailboxImportError(str(exc)) from exc
+        if requested_provider.key != _effective_provider_key(config):
+            raise MailboxImportError("mailbox_provider_change_requires_new_connection")
     config = _update_config_values(
         session,
         settings=settings,
         config=config,
         display_name=payload.display_name if payload.display_name is not None else config.display_name,
+        provider_key=(
+            payload.provider_key
+            if payload.provider_key is not None
+            else _effective_provider_key(config)
+        ),
         imap_host=payload.imap_host if payload.imap_host is not None else config.imap_host,
         imap_port=payload.imap_port if payload.imap_port is not None else config.imap_port,
         email_address=(
             payload.email_address if payload.email_address is not None else config.email_address
         ),
         mailbox=payload.mailbox if payload.mailbox is not None else config.mailbox,
-        password=payload.password,
+        credential=(
+            _MailboxCredential(authentication_mode="app_password", secret=payload.password)
+            if payload.password is not None
+            else None
+        ),
         enabled=payload.enabled if payload.enabled is not None else config.enabled,
     )
     try:
@@ -749,13 +1198,312 @@ def update_mailbox_config(
     except IntegrityError as exc:
         session.rollback()
         raise MailboxImportError("mailbox_duplicate_display_name") from exc
-    return _config_response(config)
+    return _config_response(config, settings=settings)
+
+
+def _oauth_provider_or_error(
+    settings: AppSettings,
+    *,
+    provider_key: str,
+) -> MailboxProvider:
+    try:
+        provider = mailbox_provider_by_key(provider_key)
+    except MailboxProviderError as exc:
+        raise MailboxImportError(str(exc)) from exc
+    if provider.authentication_mode != "oauth2":
+        raise MailboxImportError("mailbox_provider_oauth_not_supported")
+    if not provider_endpoint_is_enabled(settings, provider):
+        raise MailboxImportError("mailbox_provider_not_available")
+    return provider
+
+
+def _start_mailbox_oauth_intent(
+    session: Session,
+    *,
+    settings: AppSettings,
+    principal: "AuthPrincipal",
+    provider_key: str,
+    display_name: str,
+    email_address: str,
+    mailbox: str,
+    target_mailbox_config_id: str | None,
+) -> MailboxOAuthStartResponse:
+    provider = _oauth_provider_or_error(settings, provider_key=provider_key)
+    normalized_name, display_name_key = _normalized_display_name(display_name)
+    _ensure_display_name_available(
+        session,
+        display_name_key=display_name_key,
+        excluding_config_id=target_mailbox_config_id,
+    )
+    normalized_email = email_address.strip()
+    normalized_mailbox = mailbox.strip()
+    _validate_imap_connection_arguments(
+        email_address=normalized_email,
+        mailbox=normalized_mailbox,
+        credential=None,
+    )
+    state = create_oauth_state()
+    code_verifier = create_pkce_code_verifier()
+    try:
+        connect_url = authorization_url(
+            settings,
+            provider_key=provider.key,
+            state=state,
+            code_verifier=code_verifier,
+        )
+    except MailboxOAuthError as exc:
+        raise MailboxImportError(str(exc)) from exc
+    intent = MailboxOAuthConnectIntent(
+        user_id=principal.user.id,
+        membership_id=principal.membership.id,
+        target_mailbox_config_id=target_mailbox_config_id,
+        provider_key=provider.key,
+        display_name=normalized_name,
+        email_address=normalized_email,
+        mailbox=normalized_mailbox,
+        state_hash=hashlib.sha256(state.encode("utf-8")).hexdigest(),
+        encrypted_code_verifier=_encrypt_mailbox_secret(settings, code_verifier),
+        expires_at=_utcnow() + timedelta(seconds=settings.mailbox_oauth_state_ttl_seconds),
+    )
+    session.add(intent)
+    session.commit()
+    return MailboxOAuthStartResponse(authorization_url=connect_url)
+
+
+def start_mailbox_oauth_connection(
+    session: Session,
+    *,
+    settings: AppSettings,
+    principal: "AuthPrincipal",
+    payload: MailboxOAuthStartRequest,
+) -> MailboxOAuthStartResponse:
+    """Create a short-lived, current-workspace-only OAuth connect intent."""
+
+    return _start_mailbox_oauth_intent(
+        session,
+        settings=settings,
+        principal=principal,
+        provider_key=payload.provider_key,
+        display_name=payload.display_name,
+        email_address=payload.email_address,
+        mailbox=payload.mailbox,
+        target_mailbox_config_id=None,
+    )
+
+
+def start_mailbox_oauth_reauthorization(
+    session: Session,
+    *,
+    settings: AppSettings,
+    principal: "AuthPrincipal",
+    config_id: str,
+) -> MailboxOAuthStartResponse:
+    config = _mailbox_config_or_error(session, config_id=config_id)
+    if config.archived_at is not None:
+        raise MailboxImportError("mailbox_config_archived")
+    if config.authentication_mode != "oauth2":
+        raise MailboxImportError("mailbox_provider_oauth_not_supported")
+    return _start_mailbox_oauth_intent(
+        session,
+        settings=settings,
+        principal=principal,
+        provider_key=_effective_provider_key(config),
+        display_name=config.display_name,
+        email_address=config.email_address,
+        mailbox=config.mailbox,
+        target_mailbox_config_id=config.id,
+    )
+
+
+def _verify_mailbox_connection(
+    *,
+    settings: AppSettings,
+    provider_key: str,
+    imap_host: str,
+    imap_port: int,
+    email_address: str,
+    mailbox: str,
+    credential: _MailboxCredential,
+) -> None:
+    """Validate a reauthorization without altering its original watermark."""
+
+    client: imaplib.IMAP4_SSL | None = None
+    try:
+        _validate_imap_connection_arguments(
+            email_address=email_address,
+            mailbox=mailbox,
+            credential=credential,
+        )
+        client = create_imap_client(settings, host=imap_host, port=imap_port)
+        login_status, _ = _authenticate_imap_client(
+            client,
+            settings=settings,
+            provider_key=provider_key,
+            email_address=email_address,
+            credential=credential,
+        )
+        if login_status != "OK":
+            raise MailboxImportError("mailbox_connection_failed")
+        _read_mailbox_status(client, mailbox=mailbox)
+    except MailboxImportError:
+        raise
+    except (imaplib.IMAP4.error, OSError, MailboxImapTransportError) as exc:
+        if isinstance(exc, MailboxImapTransportError):
+            raise MailboxImportError(str(exc)) from exc
+        raise MailboxImportError("mailbox_connection_failed") from exc
+    finally:
+        if client is not None:
+            try:
+                client.logout()
+            except (imaplib.IMAP4.error, OSError):
+                pass
+
+
+def _consume_oauth_intent(
+    session: Session,
+    *,
+    principal: "AuthPrincipal",
+    state: str,
+) -> MailboxOAuthConnectIntent:
+    if not state or len(state) > 512:
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
+    now = _utcnow()
+    state_hash = hashlib.sha256(state.encode("utf-8")).hexdigest()
+    # Consume via one conditional database write instead of a read-then-write
+    # sequence.  Two concurrent callbacks must never both exchange the same
+    # code; unlike ``SELECT ... FOR UPDATE``, this also has deterministic
+    # behaviour on SQLite test/development databases.  ORM tenant criteria do
+    # not apply to Core UPDATE statements, so every principal binding is
+    # deliberately repeated here.
+    claimed = session.execute(
+        update(MailboxOAuthConnectIntent)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxOAuthConnectIntent.state_hash == state_hash,
+            MailboxOAuthConnectIntent.consumed_at.is_(None),
+            MailboxOAuthConnectIntent.expires_at > now,
+            MailboxOAuthConnectIntent.organization_id == principal.organization_id,
+            MailboxOAuthConnectIntent.user_id == principal.user.id,
+            MailboxOAuthConnectIntent.membership_id == principal.membership.id,
+        )
+        .values(consumed_at=now)
+    )
+    if claimed.rowcount != 1:
+        session.rollback()
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
+    intent = session.scalar(
+        select(MailboxOAuthConnectIntent).where(
+            MailboxOAuthConnectIntent.state_hash == state_hash,
+            MailboxOAuthConnectIntent.organization_id == principal.organization_id,
+            MailboxOAuthConnectIntent.user_id == principal.user.id,
+            MailboxOAuthConnectIntent.membership_id == principal.membership.id,
+        )
+    )
+    if intent is None:
+        session.rollback()
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
+    # A state must be one-use even if the remote exchange fails or the user
+    # closes their browser halfway through the callback.
+    session.commit()
+    return intent
+
+
+def abandon_mailbox_oauth_connection(
+    session: Session,
+    *,
+    principal: "AuthPrincipal",
+    state: str,
+) -> None:
+    """Consume a provider-error callback without revealing provider details."""
+
+    _consume_oauth_intent(session, principal=principal, state=state)
+
+
+def complete_mailbox_oauth_connection(
+    session: Session,
+    *,
+    settings: AppSettings,
+    principal: "AuthPrincipal",
+    state: str,
+    code: str,
+) -> MailboxConfigResponse:
+    """Exchange, verify and persist an OAuth connection in its workspace."""
+
+    intent = _consume_oauth_intent(session, principal=principal, state=state)
+    try:
+        code_verifier = _decrypt_mailbox_secret(settings, intent.encrypted_code_verifier)
+        refresh_token = exchange_authorization_code(
+            settings,
+            provider_key=intent.provider_key,
+            code=code,
+            code_verifier=code_verifier,
+        )
+    except MailboxOAuthError as exc:
+        raise MailboxImportError(str(exc)) from exc
+
+    credential = _MailboxCredential(authentication_mode="oauth2", secret=refresh_token)
+    if intent.target_mailbox_config_id is None:
+        config = _update_config_values(
+            session,
+            settings=settings,
+            config=None,
+            display_name=intent.display_name,
+            provider_key=intent.provider_key,
+            imap_host=None,
+            imap_port=None,
+            email_address=intent.email_address,
+            mailbox=intent.mailbox,
+            credential=credential,
+            enabled=True,
+        )
+    else:
+        config = _mailbox_config_or_error(
+            session,
+            config_id=intent.target_mailbox_config_id,
+        )
+        if (
+            config.archived_at is not None
+            or config.authentication_mode != "oauth2"
+            or _effective_provider_key(config) != intent.provider_key
+            or config.email_address.casefold() != intent.email_address.casefold()
+            or config.mailbox != intent.mailbox
+        ):
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
+        _verify_mailbox_connection(
+            settings=settings,
+            provider_key=intent.provider_key,
+            imap_host=config.imap_host,
+            imap_port=config.imap_port,
+            email_address=config.email_address,
+            mailbox=config.mailbox,
+            credential=credential,
+        )
+        config = _update_config_values(
+            session,
+            settings=settings,
+            config=config,
+            display_name=config.display_name,
+            provider_key=intent.provider_key,
+            imap_host=None,
+            imap_port=None,
+            email_address=config.email_address,
+            mailbox=config.mailbox,
+            credential=credential,
+            enabled=config.enabled,
+        )
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise MailboxImportError("mailbox_duplicate_display_name") from exc
+    return _config_response(config, settings=settings)
 
 
 def archive_mailbox_config(
     session: Session,
     *,
     config_id: str,
+    settings: AppSettings | None = None,
 ) -> MailboxConfigResponse:
     config = _mailbox_config_or_error(session, config_id=config_id)
     config.enabled = False
@@ -768,7 +1516,7 @@ def archive_mailbox_config(
         resolution="archived",
     )
     session.commit()
-    return _config_response(config)
+    return _config_response(config, settings=settings)
 
 
 def save_mailbox_config(
@@ -2620,19 +3368,27 @@ def retry_mailbox_attachment(
                 )
             message_uid, raw_uid = canonical_uid
             try:
-                password = _fernet(settings).decrypt(
-                    config.encrypted_password.encode("ascii")
-                ).decode("utf-8")
-            except (MailboxImportError, InvalidToken, UnicodeDecodeError):
+                credential = _credential_for_config(
+                    session,
+                    settings=settings,
+                    config=config,
+                )
+            except MailboxImportError as exc:
+                if str(exc) == "mailbox_oauth_reauthorization_required":
+                    _mark_oauth_reauthorization_required(
+                        session,
+                        config=config,
+                        error_code=str(exc),
+                    )
                 return complete(
                     status="failed",
-                    error="mailbox_credentials_unavailable",
+                    error=str(exc),
                     resume_id=None,
                 )
             _validate_imap_connection_arguments(
                 email_address=config.email_address,
                 mailbox=config.mailbox,
-                password=password,
+                credential=credential,
             )
             pulse()
             client = create_imap_client(
@@ -2641,10 +3397,12 @@ def retry_mailbox_attachment(
                 port=config.imap_port,
             )
             pulse()
-            login_status, _ = _login_imap_client(
+            login_status, _ = _authenticate_imap_client(
                 client,
+                settings=settings,
+                provider_key=_effective_provider_key(config),
                 email_address=config.email_address,
-                password=password,
+                credential=credential,
             )
             if login_status != "OK":
                 return complete(
@@ -2824,6 +3582,19 @@ def retry_mailbox_attachment(
         discard_retry_resume()
         if str(exc) == "mailbox_workspace_mismatch":
             raise
+        if str(exc) == "mailbox_oauth_reauthorization_required":
+            latest_config = session.scalar(
+                select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id)
+            )
+            if (
+                latest_config is not None
+                and latest_config.organization_id == organization_id
+            ):
+                _mark_oauth_reauthorization_required(
+                    session,
+                    config=latest_config,
+                    error_code=str(exc),
+                )
         return complete(
             status="failed",
             error=str(exc)
@@ -3061,11 +3832,15 @@ def sync_mailbox(
         pulse()
         _recover_expired_content_claims(session, organization_id=organization_id)
         pulse()
-        password = _decrypt_password(settings, config.encrypted_password)
+        credential = _credential_for_config(
+            session,
+            settings=settings,
+            config=config,
+        )
         _validate_imap_connection_arguments(
             email_address=config.email_address,
             mailbox=config.mailbox,
-            password=password,
+            credential=credential,
         )
         pulse()
         client = create_imap_client(
@@ -3074,10 +3849,12 @@ def sync_mailbox(
             port=config.imap_port,
         )
         pulse()
-        login_status, _ = _login_imap_client(
+        login_status, _ = _authenticate_imap_client(
             client,
+            settings=settings,
+            provider_key=_effective_provider_key(config),
             email_address=config.email_address,
-            password=password,
+            credential=credential,
         )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
@@ -3499,6 +4276,12 @@ def sync_mailbox(
         config = session.scalar(select(MailboxConfig).where(MailboxConfig.id == mailbox_config_id))
         if config is not None and config.organization_id == organization_id:
             config.last_sync_error = error_code
+            if error_code == "mailbox_oauth_reauthorization_required":
+                _mark_oauth_reauthorization_required(
+                    session,
+                    config=config,
+                    error_code=error_code,
+                )
             session.commit()
         if isinstance(exc, MailboxImapTransportError):
             raise MailboxImportError(error_code) from exc

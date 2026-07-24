@@ -78,6 +78,14 @@ _TERMINAL_ERROR_CODES = frozenset(
         "mailbox_not_enabled",
         "mailbox_credentials_unavailable",
         "mailbox_credentials_key_invalid",
+        # Refresh credentials cannot be repaired by retrying the same worker
+        # job.  Mark the channel for a user-authorized reconnect instead of
+        # repeatedly contacting the provider with an invalid token.
+        "mailbox_oauth_reauthorization_required",
+        "mailbox_oauth_not_configured",
+        "mailbox_provider_oauth_not_supported",
+        "mailbox_provider_not_supported",
+        "mailbox_provider_not_available",
         "mailbox_imap_host_not_allowed",
         "mailbox_imap_port_not_allowed",
         "mailbox_imap_address_not_allowed",

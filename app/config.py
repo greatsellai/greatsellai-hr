@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from email.utils import parseaddr
 from ipaddress import ip_network
 from pathlib import Path
+from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 
@@ -101,9 +102,26 @@ class AppSettings:
     # IMAP endpoints are deployment-owned infrastructure, never arbitrary
     # destinations supplied by a workspace. The transport resolves these
     # exact names again for every connection and pins the verified address.
-    mailbox_imap_allowed_hosts: tuple[str, ...] = ("imap.feishu.cn",)
+    mailbox_imap_allowed_hosts: tuple[str, ...] = (
+        "imap.feishu.cn",
+        "imap.exmail.qq.com",
+        "imap.qq.com",
+        "imap.gmail.com",
+        "outlook.office365.com",
+    )
     mailbox_imap_connect_timeout_seconds: int = 10
     mailbox_imap_max_resolved_addresses: int = 8
+    # OAuth clients belong to the deployment, never to one workspace.  Their
+    # client secrets remain environment-only while mailbox refresh tokens use
+    # the dedicated Fernet key below.
+    mailbox_oauth_state_ttl_seconds: int = 600
+    mailbox_oauth_http_timeout_seconds: int = 20
+    mailbox_google_oauth_client_id: str | None = None
+    mailbox_google_oauth_client_secret: str | None = field(default=None, repr=False)
+    mailbox_google_oauth_redirect_uri: str | None = None
+    mailbox_microsoft_oauth_client_id: str | None = None
+    mailbox_microsoft_oauth_client_secret: str | None = field(default=None, repr=False)
+    mailbox_microsoft_oauth_redirect_uri: str | None = None
     # Every value below bounds one RFC822 message before MIME parsing or
     # document extraction can allocate unbounded process memory.
     mailbox_max_raw_message_bytes: int = 24 * 1024 * 1024
@@ -350,7 +368,10 @@ class AppSettings:
                 os.getenv("RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT", "20")
             ),
             mailbox_imap_allowed_hosts=_comma_separated_values(
-                os.getenv("RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS", "imap.feishu.cn")
+                os.getenv(
+                    "RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS",
+                    "imap.feishu.cn,imap.exmail.qq.com,imap.qq.com,imap.gmail.com,outlook.office365.com",
+                )
             ),
             mailbox_imap_connect_timeout_seconds=int(
                 os.getenv("RESUME_V3_MAILBOX_IMAP_CONNECT_TIMEOUT_SECONDS", "10")
@@ -358,6 +379,36 @@ class AppSettings:
             mailbox_imap_max_resolved_addresses=int(
                 os.getenv("RESUME_V3_MAILBOX_IMAP_MAX_RESOLVED_ADDRESSES", "8")
             ),
+            mailbox_oauth_state_ttl_seconds=int(
+                os.getenv("RESUME_V3_MAILBOX_OAUTH_STATE_TTL_SECONDS", "600")
+            ),
+            mailbox_oauth_http_timeout_seconds=int(
+                os.getenv("RESUME_V3_MAILBOX_OAUTH_HTTP_TIMEOUT_SECONDS", "20")
+            ),
+            mailbox_google_oauth_client_id=os.getenv(
+                "RESUME_V3_MAILBOX_GOOGLE_OAUTH_CLIENT_ID"
+            )
+            or None,
+            mailbox_google_oauth_client_secret=os.getenv(
+                "RESUME_V3_MAILBOX_GOOGLE_OAUTH_CLIENT_SECRET"
+            )
+            or None,
+            mailbox_google_oauth_redirect_uri=os.getenv(
+                "RESUME_V3_MAILBOX_GOOGLE_OAUTH_REDIRECT_URI"
+            )
+            or None,
+            mailbox_microsoft_oauth_client_id=os.getenv(
+                "RESUME_V3_MAILBOX_MICROSOFT_OAUTH_CLIENT_ID"
+            )
+            or None,
+            mailbox_microsoft_oauth_client_secret=os.getenv(
+                "RESUME_V3_MAILBOX_MICROSOFT_OAUTH_CLIENT_SECRET"
+            )
+            or None,
+            mailbox_microsoft_oauth_redirect_uri=os.getenv(
+                "RESUME_V3_MAILBOX_MICROSOFT_OAUTH_REDIRECT_URI"
+            )
+            or None,
             mailbox_max_raw_message_bytes=int(
                 os.getenv("RESUME_V3_MAILBOX_MAX_RAW_MESSAGE_BYTES", str(24 * 1024 * 1024))
             ),
@@ -693,6 +744,26 @@ class AppSettings:
             raise ValueError(
                 "RESUME_V3_MAILBOX_IMAP_MAX_RESOLVED_ADDRESSES must be between 1 and 32"
             )
+        if not 60 <= self.mailbox_oauth_state_ttl_seconds <= 3600:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_OAUTH_STATE_TTL_SECONDS must be between 60 and 3600"
+            )
+        if not 1 <= self.mailbox_oauth_http_timeout_seconds <= 60:
+            raise ValueError(
+                "RESUME_V3_MAILBOX_OAUTH_HTTP_TIMEOUT_SECONDS must be between 1 and 60"
+            )
+        self._validate_mailbox_oauth_client(
+            provider="GOOGLE",
+            client_id=self.mailbox_google_oauth_client_id,
+            client_secret=self.mailbox_google_oauth_client_secret,
+            redirect_uri=self.mailbox_google_oauth_redirect_uri,
+        )
+        self._validate_mailbox_oauth_client(
+            provider="MICROSOFT",
+            client_id=self.mailbox_microsoft_oauth_client_id,
+            client_secret=self.mailbox_microsoft_oauth_client_secret,
+            redirect_uri=self.mailbox_microsoft_oauth_redirect_uri,
+        )
         if self.mailbox_max_raw_message_bytes < self.max_upload_bytes:
             raise ValueError(
                 "RESUME_V3_MAILBOX_MAX_RAW_MESSAGE_BYTES must cover one uploaded attachment"
@@ -950,6 +1021,36 @@ class AppSettings:
                 raise RuntimeError("production_must_not_use_test_transactional_email_provider")
             if self.public_app_url and not self.public_app_url.startswith("https://"):
                 raise RuntimeError("production_public_app_url_must_use_https")
+
+    def _validate_mailbox_oauth_client(
+        self,
+        *,
+        provider: str,
+        client_id: str | None,
+        client_secret: str | None,
+        redirect_uri: str | None,
+    ) -> None:
+        """Fail closed on a partial or unsafe deployment OAuth setup."""
+
+        configured_values = (client_id, client_secret, redirect_uri)
+        if not any(configured_values):
+            return
+        if not all(configured_values):
+            raise ValueError(
+                f"RESUME_V3_MAILBOX_{provider}_OAUTH_CLIENT_ID, "
+                f"RESUME_V3_MAILBOX_{provider}_OAUTH_CLIENT_SECRET and "
+                f"RESUME_V3_MAILBOX_{provider}_OAUTH_REDIRECT_URI must be configured together"
+            )
+        assert redirect_uri is not None
+        parsed = urlparse(redirect_uri)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+            raise ValueError(
+                f"RESUME_V3_MAILBOX_{provider}_OAUTH_REDIRECT_URI must be an absolute HTTP(S) URL"
+            )
+        if self.environment in {"production", "prod"} and parsed.scheme != "https":
+            raise ValueError(
+                f"RESUME_V3_MAILBOX_{provider}_OAUTH_REDIRECT_URI must use HTTPS in production"
+            )
 
     def session_signing_secret(self) -> str:
         """Return the only key that may sign browser/public-auth state.

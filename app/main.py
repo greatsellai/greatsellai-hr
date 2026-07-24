@@ -11,6 +11,7 @@ import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import (
     Depends,
@@ -23,7 +24,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -76,6 +77,9 @@ from app.schemas import (
     MailboxConfigPatch,
     MailboxConfigResponse,
     MailboxConfigUpdate,
+    MailboxOAuthStartRequest,
+    MailboxOAuthStartResponse,
+    MailboxProviderListResponse,
     MailboxBackgroundJobBatchResponse,
     MailboxBackgroundJobHistoryResponse,
     MailboxBackgroundJobResponse,
@@ -364,13 +368,18 @@ from app.services.job_match_batch_service import (
 )
 from app.services.mailbox_import_service import (
     MailboxImportError,
+    abandon_mailbox_oauth_connection,
     archive_mailbox_config,
+    complete_mailbox_oauth_connection,
     create_mailbox_config,
     get_mailbox_config,
     get_mailbox_config_by_id,
     list_mailbox_configs,
     list_mailbox_imports,
+    mailbox_provider_list,
     save_mailbox_config,
+    start_mailbox_oauth_connection,
+    start_mailbox_oauth_reauthorization,
     update_mailbox_config,
 )
 from app.services.mailbox_background_job_service import (
@@ -558,6 +567,38 @@ def _mailbox_error_http_exception(exc: MailboxImportError) -> HTTPException:
     else:
         response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
     return HTTPException(status_code=response_status, detail=code)
+
+
+def _mailbox_oauth_return_url(
+    settings: AppSettings,
+    *,
+    outcome: Literal["connected", "failed"],
+    provider_key: str | None,
+) -> str:
+    """Return to the app without ever placing OAuth state, code or errors in it."""
+
+    raw_base = (settings.public_app_url or "/").strip() or "/"
+    parsed = urlsplit(raw_base)
+    if raw_base != "/" and (parsed.scheme not in {"http", "https"} or not parsed.netloc):
+        raw_base = "/"
+        parsed = urlsplit(raw_base)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["mailbox_oauth"] = outcome
+    if provider_key:
+        query["mailbox_provider"] = provider_key
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path or "/",
+            urlencode(query),
+            # Keep the completion target compatible with the existing
+            # settings route while the mailbox frontend is being refactored.
+            # The future UI may additionally understand ``#mailbox``, but
+            # the server must not depend on an unmerged frontend change.
+            "settings/mailbox",
+        )
+    )
 
 
 def _mailbox_retention_error_http_exception(exc: MailboxRetentionError) -> HTTPException:
@@ -2265,6 +2306,135 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         ]
 
     @app.get(
+        "/v1/mailbox-providers",
+        response_model=MailboxProviderListResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_mailbox_providers() -> MailboxProviderListResponse:
+        return mailbox_provider_list(settings)
+
+    @app.post(
+        "/v1/mailbox-oauth/start",
+        response_model=MailboxOAuthStartResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox_oauth_start(
+        payload: MailboxOAuthStartRequest,
+        principal: AuthPrincipal = Depends(require_mailbox_feature),
+        session: Session = Depends(get_session),
+    ) -> MailboxOAuthStartResponse:
+        try:
+            return start_mailbox_oauth_connection(
+                session,
+                settings=settings,
+                principal=principal,
+                payload=payload,
+            )
+        except MailboxImportError as exc:
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.get("/v1/mailbox-oauth/callback")
+    def get_mailbox_oauth_callback(
+        request: Request,
+        state_value: str | None = Query(default=None, alias="state", max_length=512),
+        code: str | None = Query(default=None, max_length=8192),
+        provider_error: str | None = Query(default=None, alias="error", max_length=256),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        """Complete a browser OAuth round-trip without rendering token data."""
+
+        principal: AuthPrincipal | None
+        if settings.allow_unauthenticated:
+            principal = legacy_principal(session)
+        else:
+            principal = principal_from_session(session, request.session)
+            if principal is None:
+                principal = legacy_principal_from_session(session, request.session)
+        if (
+            principal is None
+            or not principal.email_verified
+            or principal.role != "admin"
+            or not require_feature(principal, "mailbox_import")
+        ):
+            return RedirectResponse(
+                _mailbox_oauth_return_url(
+                    settings,
+                    outcome="failed",
+                    provider_key=None,
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        set_organization_context(session, principal.organization_id)
+        provider_key: str | None = None
+        try:
+            if provider_error is not None or not code:
+                if state_value:
+                    abandon_mailbox_oauth_connection(
+                        session,
+                        principal=principal,
+                        state=state_value,
+                    )
+                return RedirectResponse(
+                    _mailbox_oauth_return_url(
+                        settings,
+                        outcome="failed",
+                        provider_key=None,
+                    ),
+                    status_code=status.HTTP_303_SEE_OTHER,
+                )
+            result = complete_mailbox_oauth_connection(
+                session,
+                settings=settings,
+                principal=principal,
+                state=state_value or "",
+                code=code,
+            )
+            provider_key = result.provider_key
+            return RedirectResponse(
+                _mailbox_oauth_return_url(
+                    settings,
+                    outcome="connected",
+                    provider_key=provider_key,
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        except MailboxImportError:
+            session.rollback()
+            return RedirectResponse(
+                _mailbox_oauth_return_url(
+                    settings,
+                    outcome="failed",
+                    provider_key=provider_key,
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+    # Keep these static routes before ``/{mailbox_id}`` so IDs can never
+    # shadow an OAuth reauthorization action.
+    @app.post(
+        "/v1/mailboxes/{mailbox_id}/oauth/reauthorize",
+        response_model=MailboxOAuthStartResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox_oauth_reauthorize(
+        mailbox_id: str,
+        principal: AuthPrincipal = Depends(require_mailbox_feature),
+        session: Session = Depends(get_session),
+    ) -> MailboxOAuthStartResponse:
+        try:
+            return start_mailbox_oauth_reauthorization(
+                session,
+                settings=settings,
+                principal=principal,
+                config_id=mailbox_id,
+            )
+        except MailboxImportError as exc:
+            session.rollback()
+            raise _mailbox_error_http_exception(exc) from exc
+
+    @app.get(
         "/v1/mailboxes",
         response_model=MailboxConfigListResponse,
         dependencies=[Depends(require_mailbox_feature)],
@@ -2273,7 +2443,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         include_archived: bool = False,
         session: Session = Depends(get_session),
     ) -> MailboxConfigListResponse:
-        return list_mailbox_configs(session, include_archived=include_archived)
+        return list_mailbox_configs(
+            session,
+            include_archived=include_archived,
+            settings=settings,
+        )
 
     @app.post(
         "/v1/mailboxes",
@@ -2318,7 +2492,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> MailboxConfigResponse:
         try:
-            return get_mailbox_config_by_id(session, config_id=mailbox_id)
+            return get_mailbox_config_by_id(
+                session,
+                config_id=mailbox_id,
+                settings=settings,
+            )
         except MailboxImportError as exc:
             raise _mailbox_error_http_exception(exc) from exc
 
@@ -2373,7 +2551,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> MailboxConfigResponse:
         try:
-            return archive_mailbox_config(session, config_id=mailbox_id)
+            return archive_mailbox_config(
+                session,
+                config_id=mailbox_id,
+                settings=settings,
+            )
         except MailboxImportError as exc:
             session.rollback()
             raise _mailbox_error_http_exception(exc) from exc
@@ -2487,7 +2669,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> MailboxConfigResponse:
         try:
-            return get_mailbox_config(session)
+            return get_mailbox_config(session, settings=settings)
         except MailboxImportError as exc:
             raise _mailbox_error_http_exception(exc) from exc
 
@@ -2597,7 +2779,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> MailboxBackgroundJobResponse:
         try:
-            config = get_mailbox_config(session)
+            config = get_mailbox_config(session, settings=settings)
         except MailboxImportError as exc:
             session.rollback()
             raise _mailbox_error_http_exception(exc) from exc

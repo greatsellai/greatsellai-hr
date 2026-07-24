@@ -820,14 +820,20 @@ class AiUsageTrendBucketResponse(ApiModel):
 
 
 class MailboxConfigCreate(ApiModel):
-    """Create one independently named IMAP ingestion source."""
+    """Create one independently named ingestion source.
+
+    New product clients select a reviewed ``provider_key``.  The raw IMAPS
+    fields remain optional only for one compatibility release of older
+    integrations and are still checked against the deployment allowlist.
+    """
 
     display_name: str = Field(min_length=1, max_length=32)
-    imap_host: str = Field(min_length=1, max_length=255)
-    imap_port: int = Field(default=993, ge=1, le=65535)
+    provider_key: str | None = Field(default=None, min_length=1, max_length=64)
+    imap_host: str | None = Field(default=None, min_length=1, max_length=255)
+    imap_port: int | None = Field(default=None, ge=1, le=65535)
     email_address: str = Field(min_length=3, max_length=320)
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=512)
+    password: str | None = Field(default=None, min_length=1, max_length=512)
     enabled: bool = True
 
 
@@ -835,6 +841,7 @@ class MailboxConfigPatch(ApiModel):
     """Update a named IMAP source without ever returning its password."""
 
     display_name: str | None = Field(default=None, min_length=1, max_length=32)
+    provider_key: str | None = Field(default=None, min_length=1, max_length=64)
     imap_host: str | None = Field(default=None, min_length=1, max_length=255)
     imap_port: int | None = Field(default=None, ge=1, le=65535)
     email_address: str | None = Field(default=None, min_length=3, max_length=320)
@@ -873,6 +880,12 @@ class MailboxConfigResponse(ApiModel):
     configured: bool
     mailbox_id: str | None = None
     display_name: str | None = None
+    provider_key: str | None = None
+    provider_display_name: str | None = None
+    authentication_mode: Literal["app_password", "oauth2"] | None = None
+    authorization_status: Literal[
+        "not_connected", "connected", "reauthorization_required", "unavailable"
+    ] | None = None
     imap_host: str | None = None
     imap_port: int | None = None
     email_address: str | None = None
@@ -885,6 +898,37 @@ class MailboxConfigResponse(ApiModel):
     last_synced_at: datetime | None = None
     last_sync_error: str | None = None
     active_sync_alert: MailboxSyncAlertSummary | None = None
+
+
+class MailboxProviderResponse(ApiModel):
+    """A reviewed provider presentation record, never a credential record."""
+
+    provider_key: str
+    display_name: str
+    authentication_mode: Literal["app_password", "oauth2"]
+    available: bool
+    imap_host: str
+    imap_port: int
+    default_mailbox: str
+    credential_label: str
+    help_text: str
+
+
+class MailboxProviderListResponse(ApiModel):
+    items: list[MailboxProviderResponse]
+
+
+class MailboxOAuthStartRequest(ApiModel):
+    """Begin an OAuth mailbox connection without exposing a token to the UI."""
+
+    provider_key: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=32)
+    email_address: str = Field(min_length=3, max_length=320)
+    mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
+
+
+class MailboxOAuthStartResponse(ApiModel):
+    authorization_url: str
 
 
 class MailboxConfigListResponse(ApiModel):

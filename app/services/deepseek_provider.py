@@ -3484,7 +3484,11 @@ def _enforce_experience_evidence_policies(
                     "No allowed experience fact proves affirmative use of every required term.",
                 ]
             changed = True
-        elif status == "not_met" and not (set(cited) & negated_fact_ids):
+        elif status == "not_met":
+            # A contradiction can support ``not_met`` only when there is no
+            # qualifying affirmative experience in the same immutable
+            # snapshot. Otherwise the candidate has conflicting evidence and
+            # must stay in recruiter review rather than being screened out.
             if negated_fact_ids and not affirmative_fact_ids:
                 match["fact_ids"] = sorted(negated_fact_ids)
                 match["rationale"] = (

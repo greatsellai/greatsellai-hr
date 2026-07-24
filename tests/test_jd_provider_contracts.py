@@ -476,6 +476,47 @@ def test_experience_policy_uses_explicit_negated_project_fact_for_not_met(
     assert result["requirement_matches"][0]["fact_ids"] == ["experience-001"]
 
 
+def test_experience_policy_never_keeps_not_met_when_positive_project_evidence_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _fact_snapshot()
+    experiences = snapshot["experiences"]
+    assert isinstance(experiences, list)
+    assert isinstance(experiences[0], dict)
+    experiences[0].update(
+        {
+            "experience_type": "project",
+            "title_raw": "RAG project without using WidgetFlow",
+            "title_key": "rag project without using widgetflow",
+        }
+    )
+    experiences.append(
+        {
+            **deepcopy(experiences[0]),
+            "fact_id": "experience-002",
+            "title_raw": "Built a WidgetFlow orchestration project",
+            "title_key": "built a widgetflow orchestration project",
+        }
+    )
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="not_met", fact_ids=["experience-001"]),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "unknown"
+    assert result["requirement_matches"][0]["fact_ids"] == []
+    assert result["needs_human_review"] is True
+
+
 def test_jd_match_helper_rejects_raw_pdf_like_snapshot_before_provider_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

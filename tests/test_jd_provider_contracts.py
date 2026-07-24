@@ -72,6 +72,43 @@ def _generated_jd() -> dict[str, object]:
     }
 
 
+def _generated_talent_profile() -> dict[str, object]:
+    return {
+        "schema_version": provider.TALENT_SEARCH_PROFILE_SCHEMA_VERSION,
+        "title": "AI 应用工程师人才画像",
+        "summary": "先按明确条件召回，再核验简历事实。",
+        "hard_filters": {
+            "institution_classifications_any_of": [],
+            "education_degree_in": [],
+            "highest_degree_in": [],
+            "graduation_status": "any",
+            "fresh_graduate_start_month": None,
+            "fresh_graduate_end_month": None,
+            "min_employment_months": None,
+            "min_employment_or_internship_months": None,
+            "experience_types_all_of": [],
+            "skills_all_of": [],
+            "language_credentials_all_of": [],
+        },
+        "verification_requirements": [
+            {
+                "key": "agent_delivery",
+                "label": "具备 Agent 交付经历",
+                "evidence_hint": "核验项目职责、技术方案和结果。",
+                "evidence_policy": {
+                    "kind": "any_fact",
+                    "allowed_experience_types": [],
+                    "terms_all_of": [],
+                "terms_any_of": [],
+                },
+            }
+        ],
+        "preferred_requirements": [],
+        "aliases": ["AI 应用工程师"],
+        "clarifying_questions": [],
+    }
+
+
 def _fact_snapshot() -> dict[str, object]:
     return {
         "schema_version": "resume_fact_snapshot.v2",
@@ -160,6 +197,7 @@ def _profile_project_requirement() -> list[dict[str, object]]:
                 "kind": "experience_detail_terms",
                 "allowed_experience_types": ["project", "internship", "employment"],
                 "terms_all_of": ["WidgetFlow"],
+            "terms_any_of": [],
             },
         }
     ]
@@ -282,6 +320,131 @@ def test_generated_jd_contract_returns_requirements_grounded_verbatim_in_jd(
     ]
 
 
+def _profile_any_project_requirement() -> list[dict[str, object]]:
+    return [
+        {
+            "requirement_id": "requirement-001",
+            "requirement_text": "Documented LangChain or LlamaIndex project delivery experience",
+            "priority": "must_have",
+            "clause_ids": ["clause-001"],
+            "evidence_hint": "Verify affirmative use of either named framework in one project.",
+            "evidence_policy": {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": [],
+                "terms_any_of": ["LangChain", "LlamaIndex"],
+            },
+        }
+    ]
+
+
+def test_talent_profile_generation_retries_one_invalid_structured_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_call(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {"schema_version": provider.TALENT_SEARCH_PROFILE_SCHEMA_VERSION}
+        return _generated_talent_profile()
+
+    monkeypatch.setattr(provider, "call_strict_function", fake_call)
+    result = provider.generate_talent_search_profile(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        request_message="寻找有 Agent 项目经验的工程师",
+    )
+
+    assert result["title"] == "AI 应用工程师人才画像"
+    assert len(calls) == 2
+    assert calls[1]["max_tokens"] == 3200
+    assert "correction retry" in str(calls[1]["system_prompt"])
+
+
+def test_talent_profile_generation_retries_when_requirement_omits_evidence_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    incomplete = _generated_talent_profile()
+    requirement = incomplete["verification_requirements"][0]
+    assert isinstance(requirement, dict)
+    del requirement["evidence_policy"]
+
+    def fake_call(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return incomplete if len(calls) == 1 else _generated_talent_profile()
+
+    monkeypatch.setattr(provider, "call_strict_function", fake_call)
+    result = provider.generate_talent_search_profile(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        request_message="寻找有 Agent 项目经验的工程师",
+    )
+
+    assert result["verification_requirements"][0]["evidence_policy"]["kind"] == "any_fact"
+    assert len(calls) == 2
+    assert calls[1]["max_tokens"] == 3200
+
+
+def test_talent_profile_generation_retries_when_evidence_policy_omits_term_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    incomplete = _generated_talent_profile()
+    requirement = incomplete["verification_requirements"][0]
+    assert isinstance(requirement, dict)
+    policy = requirement["evidence_policy"]
+    assert isinstance(policy, dict)
+    del policy["terms_any_of"]
+
+    def fake_call(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return incomplete if len(calls) == 1 else _generated_talent_profile()
+
+    monkeypatch.setattr(provider, "call_strict_function", fake_call)
+    result = provider.generate_talent_search_profile(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        request_message="寻找有 Agent 项目经验的工程师",
+    )
+
+    assert result["verification_requirements"][0]["evidence_policy"]["terms_any_of"] == []
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["ai_provider_provider_5xx", "ai_provider_truncated", "ai_provider_structured_invalid"],
+)
+def test_talent_profile_generation_retries_one_transient_gateway_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_call(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise provider.DeepSeekProviderError(error_code)
+        return _generated_talent_profile()
+
+    monkeypatch.setattr(provider, "call_strict_function", fake_call)
+    result = provider.generate_talent_search_profile(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        request_message="寻找有 Agent 项目经验的工程师",
+    )
+
+    assert result["title"] == "AI 应用工程师人才画像"
+    assert len(calls) == 2
+    assert calls[1]["max_tokens"] == 3200
+
+
 def test_long_jd_requirement_extraction_receives_a_bounded_larger_token_budget() -> None:
     clauses = [
         {"clause_id": f"clause-{index:03d}", "text": "x" * 300}
@@ -401,6 +564,127 @@ def test_experience_policy_preserves_a_matching_project_fact_and_reaches_prompt(
     assert "experience_detail_terms" in str(captured["system_prompt"])
 
 
+def test_experience_policy_accepts_matching_detail_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _fact_snapshot()
+    snapshot["schema_version"] = "resume_fact_snapshot.v3"
+    experience = snapshot["experiences"][0]
+    assert isinstance(experience, dict)
+    experience["experience_type"] = "project"
+    experience["title_raw"] = "Backend platform delivery"
+    experience["title_key"] = "backend platform delivery"
+    experience["experience_name_raw"] = "Candidate platform project"
+    experience["experience_name_key"] = "candidate platform project"
+    experience["detail_items"] = [
+        {
+            "detail_raw": "Implemented the WidgetFlow orchestration path and shipped it.",
+            "evidence_block_ids": ["page-001"],
+        }
+    ]
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="met", fact_ids=["experience-001"]),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "met"
+
+
+@pytest.mark.parametrize(
+    "title_raw",
+    [
+        "Built a LangChain orchestration project",
+        "Built a LlamaIndex retrieval project",
+    ],
+)
+def test_experience_policy_any_of_accepts_one_named_term_in_one_project(
+    monkeypatch: pytest.MonkeyPatch,
+    title_raw: str,
+) -> None:
+    snapshot = _fact_snapshot()
+    experience = snapshot["experiences"][0]
+    assert isinstance(experience, dict)
+    experience.update(
+        {
+            "experience_type": "project",
+            "title_raw": title_raw,
+            "title_key": title_raw.casefold(),
+        }
+    )
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="unknown", fact_ids=[]),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_any_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "met"
+    assert result["requirement_matches"][0]["fact_ids"] == ["experience-001"]
+
+
+def test_experience_policy_all_of_requires_one_fact_to_show_every_term(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _fact_snapshot()
+    experiences = snapshot["experiences"]
+    assert isinstance(experiences, list)
+    assert isinstance(experiences[0], dict)
+    experiences[0].update(
+        {
+            "experience_type": "project",
+            "title_raw": "Built a LangChain orchestration project",
+            "title_key": "built a langchain orchestration project",
+        }
+    )
+    experiences.append(
+        {
+            **deepcopy(experiences[0]),
+            "fact_id": "experience-002",
+            "title_raw": "Built a RAG evaluation project",
+            "title_key": "built a rag evaluation project",
+        }
+    )
+    requirements = _profile_project_requirement()
+    requirements[0]["evidence_policy"] = {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": ["project"],
+        "terms_all_of": ["LangChain", "RAG"],
+        "terms_any_of": [],
+    }
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="met", fact_ids=["experience-001"]),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=requirements,
+    )
+
+    assert result["requirement_matches"][0]["status"] == "partial"
+    assert result["needs_human_review"] is True
+
+
 @pytest.mark.parametrize(
     ("experience_type", "title_raw", "fact_ids"),
     [
@@ -444,15 +728,60 @@ def test_experience_policy_downgrades_skill_or_nonqualifying_evidence_to_review(
     assert result["needs_human_review"] is True
 
 
+@pytest.mark.parametrize(
+    "title_raw",
+    [
+        "Built a RAG project without using WidgetFlow",
+        "This was not a WidgetFlow project.",
+        "The project did not adopt WidgetFlow.",
+        "The project did not include WidgetFlow.",
+        "The project never adopted WidgetFlow.",
+        "This project lacks WidgetFlow.",
+        "The project excluded WidgetFlow.",
+        "No WidgetFlow integration was used in the project.",
+        "WidgetFlow is not part of the tech stack.",
+        "WidgetFlow was absent from this project.",
+        "Not a WidgetFlow project.",
+        "WidgetFlow-free project.",
+        "This project has no dependency on WidgetFlow.",
+        "WidgetFlow wasn't used in this project.",
+        "WidgetFlow was never used in this project.",
+        "The project was not built with WidgetFlow.",
+        "The project did not deploy WidgetFlow.",
+        "The project did not rely on WidgetFlow.",
+        "WidgetFlow was not selected.",
+        "WidgetFlow is unsupported in the project.",
+        "WidgetFlow is unavailable for this project.",
+        "WidgetFlow was not enabled for this project.",
+        "WidgetFlow was not configured in this project.",
+        "WidgetFlow was not deployed with this project.",
+        "WidgetFlow was not included in this project.",
+        "WidgetFlow was not utilized by this project.",
+        "The project omitted WidgetFlow.",
+        "The project did not contain WidgetFlow.",
+        "WidgetFlow was never part of this project.",
+        "The project chose not to use WidgetFlow.",
+        "The project doesn't use WidgetFlow.",
+        "WidgetFlow was disabled for this project.",
+        "The project decided against using WidgetFlow.",
+        "The project opted out of using WidgetFlow.",
+        "WidgetFlow was ruled out for this project.",
+        "WidgetFlow was deliberately not used in this project.",
+        "WidgetFlow could not be used in this project.",
+        "Use of WidgetFlow was prohibited in this project.",
+        "WidgetFlow was neither used nor supported in this project.",
+    ],
+)
 def test_experience_policy_uses_explicit_negated_project_fact_for_not_met(
     monkeypatch: pytest.MonkeyPatch,
+    title_raw: str,
 ) -> None:
     snapshot = _fact_snapshot()
     experience = snapshot["experiences"][0]
     assert isinstance(experience, dict)
     experience["experience_type"] = "project"
-    experience["title_raw"] = "Built a RAG project without using WidgetFlow"
-    experience["title_key"] = "built a rag project without using widgetflow"
+    experience["title_raw"] = title_raw
+    experience["title_key"] = title_raw.casefold()
     skills = snapshot["skills"]
     assert isinstance(skills, list)
     assert isinstance(skills[0], dict)
@@ -474,6 +803,190 @@ def test_experience_policy_uses_explicit_negated_project_fact_for_not_met(
 
     assert result["requirement_matches"][0]["status"] == "not_met"
     assert result["requirement_matches"][0]["fact_ids"] == ["experience-001"]
+
+
+@pytest.mark.parametrize(
+    "title_raw",
+    [
+        "不仅使用 WidgetFlow，还完成了项目交付",
+        "不但使用 WidgetFlow，还负责了系统上线",
+    ],
+)
+def test_experience_policy_does_not_treat_not_only_as_negation(
+    monkeypatch: pytest.MonkeyPatch,
+    title_raw: str,
+) -> None:
+    snapshot = _fact_snapshot()
+    experience = snapshot["experiences"][0]
+    assert isinstance(experience, dict)
+    experience["experience_type"] = "project"
+    experience["title_raw"] = title_raw
+    experience["title_key"] = title_raw
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="met", fact_ids=["experience-001"]),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "met"
+
+
+def test_experience_policy_uses_word_safe_named_term_matching() -> None:
+    assert not provider._experience_policy_term_occurs("Maintained email platform", "AI")
+    assert not provider._experience_policy_term_occurs("Built a GraphRAG pipeline", "RAG")
+    assert provider._experience_policy_term_occurs(
+        "Built a Lang Chain project",
+        "LangChain",
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "使用非 WidgetFlow 的 RAG 框架",
+        "The project used a non-WidgetFlow framework.",
+        "Other than WidgetFlow, the project used a custom workflow.",
+        "The project used another framework instead of WidgetFlow.",
+        "WidgetFlow 不是本项目的技术栈。",
+        "The project did not include WidgetFlow.",
+        "The project never adopted WidgetFlow.",
+        "This project lacks WidgetFlow.",
+        "The project excluded WidgetFlow.",
+        "WidgetFlow was absent from this project.",
+        "Not a WidgetFlow project.",
+        "WidgetFlow-free project.",
+        "This project has no dependency on WidgetFlow.",
+        "WidgetFlow wasn't used in this project.",
+        "WidgetFlow was never used in this project.",
+        "The project was not built with WidgetFlow.",
+        "The project did not deploy WidgetFlow.",
+        "The project did not rely on WidgetFlow.",
+        "WidgetFlow was not selected.",
+        "WidgetFlow is unsupported in the project.",
+        "WidgetFlow is unavailable for this project.",
+        "WidgetFlow was not enabled for this project.",
+        "WidgetFlow was not configured in this project.",
+        "WidgetFlow was not deployed with this project.",
+        "WidgetFlow was not included in this project.",
+        "WidgetFlow was not utilized by this project.",
+        "The project omitted WidgetFlow.",
+        "The project did not contain WidgetFlow.",
+        "WidgetFlow was never part of this project.",
+        "The project chose not to use WidgetFlow.",
+        "The project doesn't use WidgetFlow.",
+        "WidgetFlow was disabled for this project.",
+        "The project decided against using WidgetFlow.",
+        "The project opted out of using WidgetFlow.",
+        "WidgetFlow was ruled out for this project.",
+        "WidgetFlow was deliberately not used in this project.",
+        "WidgetFlow could not be used in this project.",
+        "Use of WidgetFlow was prohibited in this project.",
+        "WidgetFlow was neither used nor supported in this project.",
+    ],
+)
+def test_experience_policy_detects_direct_named_term_negation(text: str) -> None:
+    affirmative, negated = provider._experience_term_polarities(text, "WidgetFlow")
+    assert affirmative is False
+    assert negated is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "未使用其他框架，但使用 WidgetFlow 完成交付",
+        "没有使用 RAG，而是使用 WidgetFlow 完成交付",
+        "Without using CrewAI, used WidgetFlow in the project",
+    ],
+)
+def test_experience_policy_does_not_attach_other_technology_negation(text: str) -> None:
+    affirmative, negated = provider._experience_term_polarities(text, "WidgetFlow")
+    assert affirmative is True
+    assert negated is False
+
+
+def test_experience_policy_tracks_mixed_positive_and_negated_occurrences() -> None:
+    affirmative, negated = provider._experience_term_polarities(
+        "未使用 WidgetFlow，后续使用 WidgetFlow 完成上线",
+        "WidgetFlow",
+    )
+    assert affirmative is True
+    assert negated is True
+
+
+def test_experience_policy_does_not_prove_technology_from_organization_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _fact_snapshot()
+    snapshot["schema_version"] = "resume_fact_snapshot.v3"
+    experience = snapshot["experiences"][0]
+    assert isinstance(experience, dict)
+    experience.update(
+        {
+            "experience_type": "project",
+            "experience_name_raw": "Customer service platform",
+            "experience_name_key": "customer service platform",
+            "organization_name_raw": "WidgetFlow Technologies",
+            "title_raw": "Backend Engineer",
+            "title_key": "backend engineer",
+            "detail_items": [],
+        }
+    )
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="met", fact_ids=["experience-001"]),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "partial"
+    assert result["needs_human_review"] is True
+
+
+def test_experience_policy_promotes_server_verified_fact_over_model_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _fact_snapshot()
+    experience = snapshot["experiences"][0]
+    assert isinstance(experience, dict)
+    experience.update(
+        {
+            "experience_type": "project",
+            "title_raw": "WidgetFlow orchestration project",
+            "title_key": "widgetflow orchestration project",
+        }
+    )
+
+    monkeypatch.setattr(
+        provider,
+        "call_strict_function",
+        lambda **_kwargs: _single_match_output(status="unknown", fact_ids=[]),
+    )
+    result = provider.match_resume_fact_snapshot_against_requirements(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        fact_snapshot=snapshot,
+        confirmed_requirements=_profile_project_requirement(),
+    )
+
+    assert result["requirement_matches"][0]["status"] == "met"
+    assert result["requirement_matches"][0]["fact_ids"] == ["experience-001"]
+    assert result["needs_human_review"] is True
 
 
 def test_experience_policy_never_keeps_not_met_when_positive_project_evidence_exists(
@@ -512,8 +1025,8 @@ def test_experience_policy_never_keeps_not_met_when_positive_project_evidence_ex
         confirmed_requirements=_profile_project_requirement(),
     )
 
-    assert result["requirement_matches"][0]["status"] == "unknown"
-    assert result["requirement_matches"][0]["fact_ids"] == []
+    assert result["requirement_matches"][0]["status"] == "met"
+    assert result["requirement_matches"][0]["fact_ids"] == ["experience-002"]
     assert result["needs_human_review"] is True
 
 

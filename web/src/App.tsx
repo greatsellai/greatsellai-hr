@@ -4136,17 +4136,18 @@ function TalentSearchRunPanel({
   loading: boolean;
 }) {
   const isProcessing = run.status === "queued" || run.status === "running";
-  const statusLabel = run.job_match_batch_id
-    ? (run.status === "queued"
+  const isHardFilterRecall = run.result_mode === "hard_filter_recall";
+  const statusLabel = isHardFilterRecall
+    ? "硬筛已命中候选人"
+    : (run.status === "queued"
       ? "已排队，等待 AI 核验"
       : run.status === "running"
         ? "正在依据简历事实核验"
         : run.status === "partial"
           ? "部分候选人的 AI 核验未完成"
           : "已完成依据简历事实的核验")
-    : "已按确认的硬条件完成召回";
   const hasSemanticResults = run.match_results.length > 0;
-  const shouldShowRecall = !run.job_match_batch_id || !hasSemanticResults;
+  const shouldShowRecall = isHardFilterRecall || !hasSemanticResults;
   const appliedHardFilters = talentProfileHardFilterLabels(run.applied_hard_filters);
   const diagnostics = run.recall_diagnostics;
   return (
@@ -4156,9 +4157,11 @@ function TalentSearchRunPanel({
           <strong>{statusLabel}</strong>
           <small>
             严格召回 {run.total_recalled_count} 位候选人
-            {run.job_match_batch_id
-              ? `；已完成 ${run.match_completed_count}/${run.match_total_count} 位 AI 核验。`
-              : "。"}
+            {isHardFilterRecall
+              ? "；本次只有明确硬条件，无需 AI 语义核验。"
+              : run.job_match_batch_id
+                ? `；已完成 ${run.match_completed_count}/${run.match_total_count} 位 AI 核验。`
+                : "；当前没有候选人进入 AI 核验。"}
           </small>
         </div>
         <button

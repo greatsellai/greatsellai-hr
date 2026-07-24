@@ -67,6 +67,12 @@ def _generated_profile(*, skills_all_of: list[str] | None = None) -> dict[str, o
                 "key": "agent_delivery",
                 "label": "具备 Agent 系统的实际交付经历",
                 "evidence_hint": "核验项目经历中的职责、技术方案与结果。",
+                "evidence_policy": {
+                    "kind": "any_fact",
+                    "allowed_experience_types": [],
+                    "terms_all_of": [],
+                "terms_any_of": [],
+                },
             }
         ],
         "preferred_requirements": [
@@ -74,6 +80,12 @@ def _generated_profile(*, skills_all_of: list[str] | None = None) -> dict[str, o
                 "key": "llm_deployment",
                 "label": "有大模型部署或推理优化经验",
                 "evidence_hint": "核验 vLLM、量化或服务部署相关事实。",
+                "evidence_policy": {
+                    "kind": "any_fact",
+                    "allowed_experience_types": [],
+                    "terms_all_of": [],
+                "terms_any_of": [],
+                },
             }
         ],
         "aliases": ["AI 应用工程师", "LLM 应用工程师"],
@@ -481,6 +493,98 @@ def test_bachelor_degree_record_is_distinct_from_highest_degree_in_profile_recal
         master_resume_id,
     }
     assert payload["applied_hard_filters"]["education_degree_in"] == ["bachelor"]
+    assert payload["result_mode"] == "semantic_verification"
+
+
+def test_hard_filter_only_profile_returns_recalled_candidates_without_ai_batch(
+    ai_client,
+    monkeypatch,
+) -> None:
+    bachelor_resume_id = _save_ready_resume(ai_client, skills=["Python"])
+    master_resume_id = _save_ready_resume(
+        ai_client,
+        skills=["Python"],
+        education_degrees=["bachelor", "master"],
+    )
+    generated = _generated_profile()
+    generated["hard_filters"] = _profile_hard_filters(
+        institution_classifications_any_of=[],
+        highest_degree_in=["bachelor"],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+    _install_profile_ai_stub(monkeypatch, generated=generated)
+    created = ai_client.post(
+        "/v1/talent-search-profiles/generate",
+        json={"message": "寻找本科毕业的工程师"},
+    )
+    assert created.status_code == 200, created.text
+    profile_id = created.json()["profile_id"]
+    revision = created.json()["current_revision"]
+
+    confirmed = ai_client.post(
+        f"/v1/talent-search-profiles/{profile_id}/confirm",
+        json={"revision_id": revision["revision_id"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    def enqueue_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a hard-filter-only profile must not create an AI batch")
+
+    monkeypatch.setattr(
+        profile_service,
+        "enqueue_job_version_match_batch",
+        enqueue_must_not_run,
+    )
+    started = ai_client.post(
+        f"/v1/talent-search-profiles/{profile_id}/runs",
+        json={"revision_id": revision["revision_id"], "limit": 10},
+    )
+    assert started.status_code == 200, started.text
+    payload = started.json()
+    assert payload["result_mode"] == "hard_filter_recall"
+    assert payload["job_match_batch_id"] is None
+    assert payload["match_total_count"] == 0
+    assert payload["total_recalled_count"] == 2
+    assert {item["resume_id"] for item in payload["candidate_recall"]["items"]} == {
+        bachelor_resume_id,
+        master_resume_id,
+    }
+
+
+def test_semantic_profile_with_zero_recall_is_not_labeled_hard_filter_only(
+    ai_client,
+    monkeypatch,
+) -> None:
+    _save_ready_resume(ai_client, skills=["Python"])
+    generated = _generated_profile(skills_all_of=["Rust"])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=["Rust"],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    _install_profile_ai_stub(monkeypatch, generated=generated)
+    created = ai_client.post(
+        "/v1/talent-search-profiles/generate",
+        json={"message": "寻找精确技能为 Rust 的工程师"},
+    )
+    assert created.status_code == 200, created.text
+    profile_id = created.json()["profile_id"]
+    revision = created.json()["current_revision"]
+    assert ai_client.post(
+        f"/v1/talent-search-profiles/{profile_id}/confirm",
+        json={"revision_id": revision["revision_id"]},
+    ).status_code == 200
+
+    started = ai_client.post(
+        f"/v1/talent-search-profiles/{profile_id}/runs",
+        json={"revision_id": revision["revision_id"], "limit": 10},
+    )
+    assert started.status_code == 200, started.text
+    payload = started.json()
+    assert payload["result_mode"] == "semantic_verification"
+    assert payload["job_match_batch_id"] is None
+    assert payload["total_recalled_count"] == 0
 
 
 def test_bachelor_profile_normalizer_preserves_mixed_and_negative_degree_requests() -> None:
@@ -540,7 +644,7 @@ def test_project_experience_term_is_not_forced_into_exact_skill_recall(
     _install_profile_ai_stub(monkeypatch, generated=generated)
     created = ai_client.post(
         "/v1/talent-search-profiles/generate",
-        json={"message": "寻找有 LangChain 项目经验的工程师"},
+        json={"message": "寻找有 LangChain 项目经验的工程师，不接受科研或竞赛经历"},
     )
     assert created.status_code == 200, created.text
     profile_id = created.json()["profile_id"]
@@ -574,6 +678,7 @@ def test_project_experience_term_is_not_forced_into_exact_skill_recall(
                 "kind": "experience_detail_terms",
                 "allowed_experience_types": ["project"],
                 "terms_all_of": ["LangChain"],
+            "terms_any_of": [],
             }
 
     def fake_enqueue(session, **kwargs: object) -> SimpleNamespace:
@@ -625,6 +730,582 @@ def test_english_project_experience_term_is_not_forced_into_exact_skill_recall()
         isinstance(item, dict) and "LangChain" in str(item.get("label", ""))
         for item in verification_requirements
     )
+
+
+def test_confirmed_or_project_experience_policy_persists_without_hard_skill_and(
+    ai_client,
+    monkeypatch,
+) -> None:
+    generated = _generated_profile(skills_all_of=["LangChain", "LlamaIndex"])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=["LangChain", "LlamaIndex"],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+    _install_profile_ai_stub(monkeypatch, generated=generated)
+
+    created = ai_client.post(
+        "/v1/talent-search-profiles/generate",
+        json={"message": "LangChain 或 LlamaIndex 项目经验"},
+    )
+    assert created.status_code == 200, created.text
+    profile_id = created.json()["profile_id"]
+    revision = created.json()["current_revision"]
+    assert revision["hard_filters"]["skills_all_of"] == []
+    assert revision["verification_requirements"][0]["evidence_policy"] == {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": ["project"],
+        "terms_all_of": [],
+        "terms_any_of": ["LangChain", "LlamaIndex"],
+    }
+
+    confirmed = ai_client.post(
+        f"/v1/talent-search-profiles/{profile_id}/confirm",
+        json={"revision_id": revision["revision_id"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            revision_row = session.get(TalentSearchProfileRevision, revision["revision_id"])
+            assert revision_row is not None
+            assert revision_row.match_job_version_id is not None
+            private_requirement = session.scalar(
+                select(JobRequirement)
+                .where(JobRequirement.job_version_id == revision_row.match_job_version_id)
+                .where(JobRequirement.raw_requirement.contains("LangChain"))
+            )
+            assert private_requirement is not None
+            assert private_requirement.normalized_value["evidence_policy"] == {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": [],
+                "terms_any_of": ["LangChain", "LlamaIndex"],
+            }
+
+
+def test_project_intent_does_not_upgrade_nearby_exact_skills() -> None:
+    generated = _generated_profile(skills_all_of=["LangChain", "FastAPI", "Docker", "AI"])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=["LangChain", "FastAPI", "Docker", "AI"],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message="只找有 LangChain 项目经验，熟悉 FastAPI、Docker 的 AI 工程师",
+    )
+
+    hard_filters = normalized["hard_filters"]
+    assert isinstance(hard_filters, dict)
+    assert hard_filters["skills_all_of"] == ["FastAPI", "Docker", "AI"]
+    verification_requirements = normalized["verification_requirements"]
+    assert isinstance(verification_requirements, list)
+    assert len(verification_requirements) == 1
+    requirement = verification_requirements[0]
+    assert isinstance(requirement, dict)
+    assert requirement["evidence_policy"] == {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": ["project"],
+        "terms_all_of": ["LangChain"],
+    "terms_any_of": [],
+    }
+
+
+def test_exact_skill_and_unrelated_project_duration_stay_separate() -> None:
+    generated = _generated_profile(skills_all_of=["LangChain"])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=["LangChain"],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message="精通 LangChain，并需要 3 年项目经验",
+    )
+
+    hard_filters = normalized["hard_filters"]
+    assert isinstance(hard_filters, dict)
+    assert hard_filters["skills_all_of"] == ["LangChain"]
+    assert normalized["verification_requirements"] == []
+
+
+def test_preferred_project_experience_remains_preferred() -> None:
+    generated = _generated_profile(skills_all_of=["LangChain"])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=["LangChain"],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = [
+        {
+            "key": "langchain_project",
+            "label": "优先有 LangChain 项目交付经历",
+            "evidence_hint": "核验候选人的 LangChain 项目事实。",
+            "evidence_policy": {
+                "kind": "any_fact",
+                "allowed_experience_types": [],
+                "terms_all_of": [],
+            "terms_any_of": [],
+            },
+        }
+    ]
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message="优先寻找有 LangChain 项目经验的人，不是必须",
+    )
+
+    hard_filters = normalized["hard_filters"]
+    assert isinstance(hard_filters, dict)
+    assert hard_filters["skills_all_of"] == []
+    assert normalized["verification_requirements"] == []
+    preferred_requirements = normalized["preferred_requirements"]
+    assert isinstance(preferred_requirements, list)
+    assert len(preferred_requirements) == 1
+    requirement = preferred_requirements[0]
+    assert isinstance(requirement, dict)
+    assert requirement["evidence_policy"] == {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": ["project"],
+        "terms_all_of": ["LangChain"],
+    "terms_any_of": [],
+    }
+
+
+def test_source_excluded_experience_requirement_is_not_persisted_as_a_filter() -> None:
+    generated = _generated_profile(skills_all_of=["LangChain"])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=["LangChain"],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = [
+        {
+            "key": "langchain_project",
+            "label": "具备 LangChain 项目经历",
+            "evidence_hint": "核验项目事实。",
+            "evidence_policy": {
+                "kind": "any_fact",
+                "allowed_experience_types": [],
+                "terms_all_of": [],
+            "terms_any_of": [],
+            },
+        }
+    ]
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message="不要 LangChain 项目经验",
+    )
+
+    hard_filters = normalized["hard_filters"]
+    assert isinstance(hard_filters, dict)
+    assert hard_filters["skills_all_of"] == []
+    assert normalized["verification_requirements"] == []
+
+
+def test_chinese_custom_project_term_becomes_strict_evidence_requirement() -> None:
+    generated = _generated_profile(skills_all_of=[])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=[],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message="寻找有大模型应用项目经验的人",
+    )
+
+    verification_requirements = normalized["verification_requirements"]
+    assert isinstance(verification_requirements, list)
+    assert len(verification_requirements) == 1
+    requirement = verification_requirements[0]
+    assert isinstance(requirement, dict)
+    assert requirement["evidence_policy"] == {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": ["project"],
+        "terms_all_of": ["大模型应用"],
+    "terms_any_of": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("request_message", "expected_types"),
+    [
+        ("寻找有 LangChain 项目经验，研究方向不限", ["project"]),
+        ("寻找有 LangChain 项目经验，不接受科研或竞赛经历", ["project"]),
+        ("寻找有 LangChain 项目或实习经验", ["project", "internship"]),
+        ("有 LangChain 工作经验", ["employment"]),
+        ("Java 项目经验，LangChain 实习经验", ["internship"]),
+        ("Python 科研经历，LangChain 项目经验", ["project"]),
+        ("不接受 LangChain 项目，只接受实习", ["internship"]),
+        ("不接受 LangChain 研究项目，只要项目经验", ["project"]),
+        ("No LangChain project experience, only internship", ["internship"]),
+        ("Do not require LangChain project experience", []),
+        ("Exclude LangChain research project, require project experience", ["project"]),
+        ("Do not accept LangChain project experience, only internship", ["internship"]),
+        ("Reject LangChain project experience", []),
+        ("Without LangChain project experience", []),
+    ],
+)
+def test_explicit_experience_types_keep_only_recruiter_accepted_contexts(
+    request_message: str,
+    expected_types: list[str],
+) -> None:
+    assert profile_service._experience_types_for_explicit_term(
+        request_message,
+        term="LangChain",
+    ) == expected_types
+
+
+def test_project_request_upgrades_an_any_fact_verification_requirement() -> None:
+    generated = _generated_profile(skills_all_of=[])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=[],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = [
+        {
+            "key": "langchain_project",
+            "label": "具备 LangChain 项目交付经历",
+            "evidence_hint": "核验候选人是否提到 LangChain。",
+            "evidence_policy": {
+                "kind": "any_fact",
+                "allowed_experience_types": [],
+                "terms_all_of": [],
+            "terms_any_of": [],
+            },
+        }
+    ]
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message="只找有 LangChain 项目经验的工程师",
+    )
+
+    requirement = normalized["verification_requirements"][0]
+    assert isinstance(requirement, dict)
+    assert requirement["evidence_policy"] == {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": ["project"],
+        "terms_all_of": ["LangChain"],
+    "terms_any_of": [],
+    }
+
+
+def test_project_request_promotes_preferred_requirement_to_verification() -> None:
+    generated = _generated_profile(skills_all_of=[])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=[],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = [
+        {
+            "key": "langchain_project",
+            "label": "优先有 LangChain 项目交付经历",
+            "evidence_hint": "核验候选人是否提到 LangChain。",
+            "evidence_policy": {
+                "kind": "any_fact",
+                "allowed_experience_types": [],
+                "terms_all_of": [],
+            "terms_any_of": [],
+            },
+        }
+    ]
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message="只找有 LangChain 项目经验的工程师",
+    )
+
+    verification_requirements = normalized["verification_requirements"]
+    preferred_requirements = normalized["preferred_requirements"]
+    assert isinstance(verification_requirements, list)
+    assert isinstance(preferred_requirements, list)
+    assert len(verification_requirements) == 1
+    assert preferred_requirements == []
+    requirement = verification_requirements[0]
+    assert isinstance(requirement, dict)
+    assert requirement["evidence_policy"] == {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": ["project"],
+        "terms_all_of": ["LangChain"],
+        "terms_any_of": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("request_message", "skills", "expected_policy"),
+    [
+        (
+            "LangChain 和 LlamaIndex 项目经验",
+            ["LangChain", "LlamaIndex"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": ["LangChain", "LlamaIndex"],
+                "terms_any_of": [],
+            },
+        ),
+        (
+            "LangChain 或 LlamaIndex 项目经验",
+            ["LangChain", "LlamaIndex"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": [],
+                "terms_any_of": ["LangChain", "LlamaIndex"],
+            },
+        ),
+        (
+            "LangChain/LlamaIndex 项目经验",
+            ["LangChain", "LlamaIndex"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": [],
+                "terms_any_of": ["LangChain", "LlamaIndex"],
+            },
+        ),
+        (
+            "LangChain、LlamaIndex 任一项目经验",
+            ["LangChain", "LlamaIndex"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": [],
+                "terms_any_of": ["LangChain", "LlamaIndex"],
+            },
+        ),
+        (
+            "大模型应用或 RAG 项目经验",
+            ["大模型应用", "RAG"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": [],
+                "terms_any_of": ["大模型应用", "RAG"],
+            },
+        ),
+        (
+            "AI Agent 项目经验",
+            ["AI Agent", "Agent"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": ["AI Agent"],
+                "terms_any_of": [],
+            },
+        ),
+        (
+            "Large Language Model 项目经验",
+            ["Large Language Model", "Model"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": ["Large Language Model"],
+                "terms_any_of": [],
+            },
+        ),
+        (
+            "多智能体 Agent 项目经验",
+            ["多智能体 Agent", "Agent"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": ["多智能体 Agent"],
+                "terms_any_of": [],
+            },
+        ),
+        (
+            "LLM 应用与 RAG 项目经验",
+            ["LLM 应用", "RAG"],
+            {
+                "kind": "experience_detail_terms",
+                "allowed_experience_types": ["project"],
+                "terms_all_of": ["LLM 应用", "RAG"],
+                "terms_any_of": [],
+            },
+        ),
+    ],
+)
+def test_experience_term_groups_do_not_leak_into_exact_skill_recall(
+    request_message: str,
+    skills: list[str],
+    expected_policy: dict[str, object],
+) -> None:
+    generated = _generated_profile(skills_all_of=skills)
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=skills,
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message=request_message,
+    )
+
+    assert normalized["hard_filters"]["skills_all_of"] == []
+    requirements = normalized["verification_requirements"]
+    assert isinstance(requirements, list)
+    assert [item["evidence_policy"] for item in requirements] == [expected_policy]
+
+
+@pytest.mark.parametrize(
+    "request_message",
+    [
+        "优先考虑强业务背景且必须有 LangChain 项目经验",
+        "不接受无经验者且必须有 LangChain 项目经验",
+        "不接受没有 LangChain 项目经验的候选人",
+        "不是不要 LangChain 项目经验",
+    ],
+)
+def test_relation_local_priority_keeps_langchain_project_as_must_have(
+    request_message: str,
+) -> None:
+    generated = _generated_profile(skills_all_of=["LangChain"])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=["LangChain"],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message=request_message,
+    )
+
+    assert normalized["hard_filters"]["skills_all_of"] == []
+    assert normalized["preferred_requirements"] == []
+    requirement = normalized["verification_requirements"][0]
+    assert requirement["evidence_policy"] == {
+        "kind": "experience_detail_terms",
+        "allowed_experience_types": ["project"],
+        "terms_all_of": ["LangChain"],
+        "terms_any_of": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "request_message",
+    [
+        "只找同一项目中同时使用 LangChain 和 RAG 的人",
+        "在同一个项目里使用 LangChain 和 RAG",
+        "同一个项目内使用 LangChain 和 RAG",
+        "In the same project, used LangChain and RAG",
+    ],
+)
+def test_same_project_terms_compile_to_one_all_of_evidence_policy(
+    request_message: str,
+) -> None:
+    generated = _generated_profile(skills_all_of=["LangChain", "RAG"])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=["LangChain", "RAG"],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message=request_message,
+    )
+
+    assert normalized["hard_filters"]["skills_all_of"] == []
+    requirements = normalized["verification_requirements"]
+    assert isinstance(requirements, list)
+    assert [item["evidence_policy"] for item in requirements] == [
+        {
+            "kind": "experience_detail_terms",
+            "allowed_experience_types": ["project"],
+            "terms_all_of": ["LangChain", "RAG"],
+            "terms_any_of": [],
+        }
+    ]
+
+
+def test_generic_project_experience_does_not_create_a_fake_technology_requirement() -> None:
+    generated = _generated_profile(skills_all_of=[])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=[],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message="不接受无项目经验的候选人，要求 LangChain 项目经验；需要具备相关项目经验",
+    )
+
+    requirements = normalized["verification_requirements"]
+    assert isinstance(requirements, list)
+    assert [item["evidence_policy"] for item in requirements] == [
+        {
+            "kind": "experience_detail_terms",
+            "allowed_experience_types": ["project"],
+            "terms_all_of": ["langchain"],
+            "terms_any_of": [],
+        }
+    ]
+    assert all("不接受无" not in str(item) and "需要具备" not in str(item) for item in requirements)
+
+
+@pytest.mark.parametrize(
+    "request_message",
+    [
+        "要求有丰富项目经验",
+        "需要有较强项目经验",
+        "具有项目实施经验",
+        "有开发项目经验",
+        "具备企业级项目经验",
+    ],
+)
+def test_generic_project_modifiers_do_not_become_unverifiable_terms(
+    request_message: str,
+) -> None:
+    generated = _generated_profile(skills_all_of=[])
+    generated["hard_filters"] = _profile_hard_filters(
+        skills_all_of=[],
+        institution_classifications_any_of=[],
+        highest_degree_in=[],
+    )
+    generated["verification_requirements"] = []
+    generated["preferred_requirements"] = []
+
+    normalized = profile_service._normalize_explicit_profile_intent(
+        generated,
+        request_message=request_message,
+    )
+
+    assert normalized["verification_requirements"] == []
+    assert normalized["preferred_requirements"] == []
 
 
 def test_profile_output_deduplicates_nonsemantic_aliases_and_questions() -> None:

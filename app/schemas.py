@@ -1967,6 +1967,7 @@ class TalentSearchEvidencePolicy(ApiModel):
         max_length=12,
     )
     terms_all_of: list[str] = Field(default_factory=list, max_length=12)
+    terms_any_of: list[str] = Field(default_factory=list, max_length=12)
 
     @field_validator("allowed_experience_types")
     @classmethod
@@ -1986,15 +1987,33 @@ class TalentSearchEvidencePolicy(ApiModel):
             raise ValueError("evidence policy terms must be safe and at most 120 characters")
         return cleaned
 
+    @field_validator("terms_any_of")
+    @classmethod
+    def valid_terms_any_of(cls, value: list[str]) -> list[str]:
+        cleaned = clean_string_list(value)
+        if any(len(term) > 120 or "\x00" in term for term in cleaned):
+            raise ValueError("evidence policy terms must be safe and at most 120 characters")
+        return cleaned
+
     @model_validator(mode="after")
     def valid_scope(self) -> "TalentSearchEvidencePolicy":
         if self.kind == "any_fact":
-            if self.allowed_experience_types or self.terms_all_of:
+            if (
+                self.allowed_experience_types
+                or self.terms_all_of
+                or self.terms_any_of
+            ):
                 raise ValueError("any_fact policy cannot constrain experience evidence")
             return self
-        if not self.allowed_experience_types or not self.terms_all_of:
+        if not self.allowed_experience_types or not (
+            self.terms_all_of or self.terms_any_of
+        ):
             raise ValueError(
                 "experience_detail_terms policy requires experience types and terms"
+            )
+        if self.terms_all_of and self.terms_any_of:
+            raise ValueError(
+                "experience_detail_terms policy cannot combine all-of and any-of terms"
             )
         return self
 
@@ -2635,6 +2654,10 @@ class TalentSearchRunResponse(ApiModel):
     profile_id: str
     revision_id: str
     status: Literal["queued", "running", "completed", "partial"]
+    # A pure hard-filter profile intentionally has no semantic match batch.
+    # Expose that distinction so an empty AI-match list is never rendered as
+    # “zero candidates found”.
+    result_mode: Literal["hard_filter_recall", "semantic_verification"]
     total_recalled_count: int = Field(ge=0)
     job_match_batch_id: str | None = None
     match_total_count: int = Field(default=0, ge=0)

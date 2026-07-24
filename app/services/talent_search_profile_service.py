@@ -9,7 +9,10 @@ snapshot.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
+import unicodedata
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -106,61 +109,242 @@ _EXPERIENCE_TYPE_LABELS = {
     "other": "其他经历",
     "unknown": "待识别经历",
 }
-_PROJECT_EVIDENCE_MARKERS = (
-    "项目",
-    "实践",
-    "落地",
-    "实习",
-    "工作经历",
-    "工作职责",
-    "职责",
-    "科研",
-    "研究",
-    "竞赛",
-    "project",
-    "projects",
-    "projectexperience",
-    "practicalexperience",
-    "practice",
-    "internship",
-    "workexperience",
-    "workhistory",
-    "responsibility",
-    "responsibilities",
-    "research",
-    "competition",
-    "delivery",
-    "shipped",
-    "built",
-)
+# These phrases are purposefully concrete.  A nearby broad word such as
+# ``experience`` or a separate project-duration condition must never turn an
+# unrelated exact skill into a project-proof requirement.
 _EXPERIENCE_POLICY_TYPE_MARKERS: tuple[tuple[str, str], ...] = (
-    ("项目", "project"),
-    ("project", "project"),
-    ("projects", "project"),
-    ("落地", "project"),
-    ("交付", "project"),
-    ("delivery", "project"),
-    ("shipped", "project"),
-    ("built", "project"),
-    ("实习", "internship"),
-    ("internship", "internship"),
+    ("科研项目", "research"),
+    ("研究项目", "research"),
+    ("科研经历", "research"),
+    ("研究经历", "research"),
+    ("research project", "research"),
+    ("research experience", "research"),
+    ("researchproject", "research"),
+    ("researchexperience", "research"),
+    ("竞赛项目", "competition"),
+    ("竞赛经历", "competition"),
+    ("competition project", "competition"),
+    ("competition experience", "competition"),
+    ("competitionproject", "competition"),
+    ("competitionexperience", "competition"),
+    ("项目经验", "project"),
+    ("项目经历", "project"),
+    ("project experience", "project"),
+    ("projectexperience", "project"),
+    ("实习经验", "internship"),
+    ("实习经历", "internship"),
+    ("internship experience", "internship"),
+    ("internshipexperience", "internship"),
+    ("工作经验", "employment"),
     ("工作经历", "employment"),
     ("工作职责", "employment"),
     ("正式工作", "employment"),
-    ("employment", "employment"),
+    ("work experience", "employment"),
     ("workexperience", "employment"),
+    ("work history", "employment"),
     ("workhistory", "employment"),
+    ("employment", "employment"),
+    ("项目", "project"),
+    ("project", "project"),
+    ("实习", "internship"),
+    ("internship", "internship"),
     ("科研", "research"),
     ("研究", "research"),
     ("research", "research"),
     ("竞赛", "competition"),
     ("competition", "competition"),
 )
-_PRACTICAL_EXPERIENCE_MARKERS = (
-    "实践",
+_EXPERIENCE_POLICY_TYPE_ORDER = (
+    "project",
+    "internship",
+    "employment",
+    "research",
+    "competition",
+)
+_EXPERIENCE_POLICY_TYPE_LABELS = {
+    "project": "项目",
+    "internship": "实习",
+    "employment": "工作",
+    "research": "科研",
+    "competition": "竞赛",
+}
+_EXPERIENCE_CLAUSE_BREAKS = "，,；;。.!！？?\n"
+_EXPERIENCE_DIRECT_BEFORE_MARKER_GAPS = {
+    "",
+    "的",
+    "相关",
+    "相关的",
+    "实际",
+    "实际的",
     "实战",
-    "practicalexperience",
-    "practice",
+    "实践",
+    "有",
+    "具备",
+    "拥有",
+    "做过",
+    "参与",
+}
+_EXPERIENCE_DIRECT_AFTER_MARKER_GAPS = {
+    "",
+    "中",
+    "里",
+    "中使用",
+    "中用",
+    "中同时使用",
+    "中同时用",
+    "中使用了",
+    "中采用",
+    "中应用",
+    "中集成",
+    "中实现",
+    "里使用",
+    "内使用",
+    "里同时使用",
+    "内同时使用",
+    "中基于",
+    "基于",
+    "使用",
+    "采用",
+    "with",
+    "using",
+    "used",
+    "in",
+}
+_EXPERIENCE_AFTER_MARKER_TERM_PREFIXES = (
+    "中同时使用",
+    "中同时用",
+    "中使用了",
+    "中使用",
+    "中采用",
+    "中应用",
+    "中集成",
+    "中实现",
+    "里使用",
+    "内使用",
+    "里同时使用",
+    "内同时使用",
+    "中基于",
+    "基于",
+    "中用",
+    "使用",
+    "采用",
+    "应用",
+    "集成",
+    "实现",
+    "with",
+    "using",
+    "used",
+    "in",
+)
+_EXPERIENCE_OPTIONAL_MARKERS = (
+    "优先",
+    "加分",
+    "非必须",
+    "不是必须",
+    "可选",
+    "preferred",
+    "nicetohave",
+    "bonus",
+)
+_EXPERIENCE_EXCLUDED_MARKERS = (
+    "不要求",
+    "无需",
+    "不要",
+    "不需要",
+    "不接受",
+    "排除",
+    "不考虑",
+    "notrequired",
+    "donotrequire",
+    "norequirement",
+    "withoutrequiring",
+    "exclude",
+    "donotaccept",
+    "reject",
+    "without",
+)
+_EXPERIENCE_ONLY_ACCEPTANCE_MARKERS = (
+    "只要",
+    "只接受",
+    "仅接受",
+    "only",
+    "onlyaccept",
+    "require",
+    "accept",
+    "需要",
+    "要求",
+    "接受",
+)
+_EXPERIENCE_TERM_PREFIXES = (
+    # Keep the longest forms first: this parser removes prefixes repeatedly,
+    # so a generic phrase such as "需要具备相关项目经验" never becomes a fake
+    # technology requirement.
+    "不接受没有",
+    "不考虑没有",
+    "不接受无",
+    "不考虑无",
+    "优先寻找有",
+    "优先找有",
+    "只寻找有",
+    "只找有",
+    "只寻找",
+    "只找",
+    "寻找有",
+    "找有",
+    "需要有",
+    "要求有",
+    "希望有",
+    "不要求",
+    "不需要",
+    "不接受",
+    "不考虑",
+    "排除",
+    "拒绝",
+    "不要",
+    "无需",
+    "需要",
+    "要求",
+    "寻找",
+    "找",
+    "具备",
+    "具有",
+    "拥有",
+    "做过",
+    "参与过",
+    "熟悉",
+    "有",
+)
+_EXPERIENCE_NON_TERMS = {
+    "and",
+    "or",
+    "only",
+    "onlyaccept",
+    "no",
+    "优先",
+    "只要",
+    "只接受",
+    "仅接受",
+    "寻找",
+    "找",
+    "需要",
+    "要求",
+    "项目",
+    "实习",
+    "工作",
+    "科研",
+    "竞赛",
+    "经验",
+    "经历",
+}
+_EXPERIENCE_LIST_CONNECTORS = re.compile(r"(?:或|和|及|与|以及|、|/|and|or)")
+_EXPERIENCE_ANY_TERM_CONNECTORS = re.compile(r"(?:或|/|\bor\b)")
+_EXPERIENCE_GROUP_ANY_SUFFIX = re.compile(
+    r"\s*(?:任一|任意|任何一个|任选其一|即可|either)\s*$"
+)
+_EXPERIENCE_CHINESE_TERM = re.compile(r"[\u4e00-\u9fff]{2,30}$")
+_EXPERIENCE_ASCII_TERM_LIST = re.compile(
+    r"[a-z][a-z0-9+.#/_-]*(?:\s*(?:、|,|/|and|or|和|及|与|以及|或)\s*"
+    r"[a-z][a-z0-9+.#/_-]*)*$"
 )
 _EXPERIENCE_POLICY_TYPE_ORDER = (
     "project",
@@ -215,64 +399,256 @@ def _require_ai_gateway_credentials(settings: AppSettings) -> None:
         raise TalentSearchProfileServiceError("deepseek_api_key_not_configured")
 
 
-def _message_requests_project_evidence(message: str, *, term: str) -> bool:
-    """Return whether one explicit term is requested as practical experience.
+@dataclass(frozen=True)
+class _ExplicitExperienceIntent:
+    terms_all_of: tuple[str, ...]
+    terms_any_of: tuple[str, ...]
+    allowed_types: tuple[str, ...]
+    priority: str
 
-    This is intentionally a narrow guard, not a hidden semantic taxonomy.  It
-    only corrects an unsafe AI draft when the recruiter's own wording places a
-    named technology close to an experience marker such as “项目” or “实习”.
+    @property
+    def terms(self) -> tuple[str, ...]:
+        return self.terms_all_of or self.terms_any_of
+
+
+@dataclass(frozen=True)
+class _SourceExperienceTermGroup:
+    """A direct ``terms + typed experience`` phrase from the recruiter's text."""
+
+    terms: tuple[str, ...]
+    match_mode: str
+    allowed_types: tuple[str, ...]
+    priority: str
+
+
+def _normalized_source_text(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).casefold()
+
+
+def _source_term_occurrences(source: str, term: str) -> list[tuple[int, int]]:
+    """Find one source term without allowing ``AI`` inside ``LangChain``."""
+
+    normalized_term = _normalized_source_text(term).strip()
+    if not normalized_term:
+        return []
+    body = re.escape(normalized_term)
+    if re.fullmatch(r"[a-z0-9]+", normalized_term):
+        pattern = re.compile(rf"(?<![a-z0-9]){body}(?![a-z0-9])")
+    else:
+        pattern = re.compile(body)
+    return [(match.start(), match.end()) for match in pattern.finditer(source)]
+
+
+def _source_clause_bounds(source: str, position: int) -> tuple[int, int]:
+    start = max((source.rfind(marker, 0, position) for marker in _EXPERIENCE_CLAUSE_BREAKS), default=-1) + 1
+    following = [
+        index
+        for marker in _EXPERIENCE_CLAUSE_BREAKS
+        if (index := source.find(marker, position)) >= 0
+    ]
+    return start, min(following) if following else len(source)
+
+
+def _marker_hits_in_clause(
+    source: str,
+    *,
+    clause_start: int,
+    clause_end: int,
+) -> list[tuple[int, int, str]]:
+    raw_hits: list[tuple[int, int, str]] = []
+    for marker, experience_type in _EXPERIENCE_POLICY_TYPE_MARKERS:
+        start = source.find(marker, clause_start, clause_end)
+        while start >= 0:
+            end = start + len(marker)
+            if not (
+                experience_type == "research"
+                and source[end:clause_end].startswith(("方向", "领域", "课题", "主题", " direction", " field", " topic"))
+            ):
+                raw_hits.append((start, end, experience_type))
+            start = source.find(marker, start + len(marker), clause_end)
+    raw_hits.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    hits: list[tuple[int, int, str]] = []
+    for hit in raw_hits:
+        if any(hit[0] < existing[1] and existing[0] < hit[1] for existing in hits):
+            continue
+        hits.append(hit)
+    return hits
+
+
+def _compact_experience_gap(value: str) -> str:
+    return re.sub(r"[\s,，;；:：()（）\[\]【】\-—]", "", value.casefold())
+
+
+def _is_direct_experience_relation(
+    source: str,
+    *,
+    term_start: int,
+    term_end: int,
+    marker_start: int,
+    marker_end: int,
+) -> bool:
+    if term_end <= marker_start:
+        return _compact_experience_gap(source[term_end:marker_start]) in _EXPERIENCE_DIRECT_BEFORE_MARKER_GAPS
+    if marker_end <= term_start:
+        return _compact_experience_gap(source[marker_end:term_start]) in _EXPERIENCE_DIRECT_AFTER_MARKER_GAPS
+    return False
+
+
+def _last_marker_position(value: str, markers: tuple[str, ...]) -> int:
+    return max((value.rfind(marker) for marker in markers), default=-1)
+
+
+def _experience_priority_for_relation(
+    source: str,
+    *,
+    clause_start: int,
+    term_start: int,
+) -> str:
+    """Classify language that modifies *this* term, not an entire clause.
+
+    A recruiter can write “优先业务背景且必须有 LangChain 项目经验”.  The
+    earlier preference applies to business background, while the later “必须”
+    applies to LangChain.  Looking at the whole comma clause silently weakens
+    the condition and makes recall/matching misleading.
     """
 
-    message_key = normalized_key(message)
-    term_key = normalized_key(term)
-    if not message_key or not term_key:
-        return False
-    start = 0
-    while True:
-        index = message_key.find(term_key, start)
-        if index < 0:
-            return False
-        window = message_key[max(0, index - 18) : index + len(term_key) + 18]
-        if any(marker in window for marker in _PROJECT_EVIDENCE_MARKERS):
-            return True
-        start = index + len(term_key)
+    before = source[max(clause_start, term_start - 160) : term_start]
+    compact = normalized_key(before)
+
+    # “不接受没有 / 不考虑没有 X 项目经验” and “不是不要 X” are double
+    # negatives: the candidate must have the named experience.  Check these
+    # before generic exclusion language.
+    if re.search(
+        r"(?:不接受|不考虑|拒绝|排除)(?:没有|无|未|缺少)$",
+        compact,
+    ) or re.search(r"(?:不是|并非)(?:不要|不要求|不需要|不接受|不考虑)$", compact):
+        return "must_have"
+    if re.search(
+        r"(?:donotaccept|reject|exclude).*(?:without|no)$",
+        compact,
+    ):
+        return "must_have"
+
+    # A directly adjacent exclusion wins for this relation.  It deliberately
+    # runs before broad marker ranking so ``不要求`` is not mistaken for a
+    # positive ``要求``.
+    excluded_tail = re.compile(
+        r"(?:不要求|无需|不需要|不要|不接受|排除|不考虑|拒绝|"
+        r"notrequired|donotrequire|norequirement|withoutrequiring|"
+        r"exclude|donotaccept|reject|without|no)(?:有|具备|拥有)?$"
+    )
+    if excluded_tail.search(compact):
+        return "excluded"
+
+    must_markers = (
+        "必须",
+        "只找",
+        "只接受",
+        "仅",
+        "需要",
+        "要求",
+        "must",
+        "require",
+        "only",
+    )
+    must_position = _last_marker_position(compact, must_markers)
+    optional_position = _last_marker_position(compact, _EXPERIENCE_OPTIONAL_MARKERS)
+    excluded_position = _last_marker_position(compact, _EXPERIENCE_EXCLUDED_MARKERS)
+    if must_position >= max(optional_position, excluded_position):
+        return "must_have"
+    if excluded_position > optional_position or re.search(r"^\s*no\s+", before):
+        return "excluded"
+    if optional_position >= 0:
+        return "preferred"
+    return "must_have"
+
+
+def _linked_experience_types(
+    source: str,
+    *,
+    marker_hits: list[tuple[int, int, str]],
+    marker_index: int,
+) -> list[str]:
+    """Include ``项目或实习`` but never another clause's type marker."""
+
+    _, previous_end, experience_type = marker_hits[marker_index]
+    types = [experience_type]
+    for next_start, next_end, next_type in marker_hits[marker_index + 1 :]:
+        connector = normalized_key(source[previous_end:next_start])
+        if connector not in {"或", "和", "及", "与", "以及", "and", "or"}:
+            break
+        types.append(next_type)
+        previous_end = next_end
+    return types
+
+
+def _explicit_experience_relations(
+    source: str,
+    *,
+    term: str,
+) -> list[tuple[str, str]]:
+    """Return directly stated (type, priority) relations for one source term."""
+
+    relations: list[tuple[str, str]] = []
+    for term_start, term_end in _source_term_occurrences(source, term):
+        clause_start, clause_end = _source_clause_bounds(source, term_start)
+        marker_hits = _marker_hits_in_clause(
+            source,
+            clause_start=clause_start,
+            clause_end=clause_end,
+        )
+        for marker_index, (marker_start, marker_end, _) in enumerate(marker_hits):
+            if not _is_direct_experience_relation(
+                source,
+                term_start=term_start,
+                term_end=term_end,
+                marker_start=marker_start,
+                marker_end=marker_end,
+            ):
+                continue
+            priority = _experience_priority_for_relation(
+                source,
+                clause_start=clause_start,
+                term_start=term_start,
+            )
+            relations.extend(
+                (experience_type, priority)
+                for experience_type in _linked_experience_types(
+                    source,
+                    marker_hits=marker_hits,
+                    marker_index=marker_index,
+                )
+            )
+            if priority == "excluded":
+                next_clause_start = clause_end + 1
+                if next_clause_start < len(source):
+                    _, next_clause_end = _source_clause_bounds(source, next_clause_start)
+                    next_clause = source[next_clause_start:next_clause_end]
+                    if any(
+                        marker in normalized_key(next_clause)
+                        for marker in _EXPERIENCE_ONLY_ACCEPTANCE_MARKERS
+                    ):
+                        relations.extend(
+                            (experience_type, "must_have")
+                            for _, _, experience_type in _marker_hits_in_clause(
+                                source,
+                                clause_start=next_clause_start,
+                                clause_end=next_clause_end,
+                            )
+                        )
+            break
+    return relations
 
 
 def _experience_types_for_explicit_term(message: str, *, term: str) -> list[str]:
-    """Compile only the recruiter's stated acceptable experience contexts.
+    """Compile only the source term's directly stated acceptable contexts."""
 
-    This policy is deliberately derived from the same narrow window that
-    proved the named term is an experience request.  ``research`` and
-    ``competition`` remain valid only when the recruiter explicitly names
-    them; they never become a substitute for a requested project, internship,
-    or employment record.
-    """
-
-    message_key = normalized_key(message)
-    term_key = normalized_key(term)
-    if not message_key or not term_key:
-        return ["project", "internship", "employment"]
-    found_types: set[str] = set()
-    found_practical_marker = False
-    start = 0
-    while True:
-        index = message_key.find(term_key, start)
-        if index < 0:
-            break
-        window = message_key[max(0, index - 36) : index + len(term_key) + 36]
-        for marker, experience_type in _EXPERIENCE_POLICY_TYPE_MARKERS:
-            if marker in window:
-                found_types.add(experience_type)
-        if any(marker in window for marker in _PRACTICAL_EXPERIENCE_MARKERS):
-            found_practical_marker = True
-        start = index + len(term_key)
-    if not found_types and found_practical_marker:
-        found_types.update({"project", "internship", "employment"})
-    if not found_types:
-        # The caller has already established that the request is practical
-        # experience. Preserve recall for wording such as "真实实战" while
-        # keeping research and contests out unless they were named.
-        found_types.update({"project", "internship", "employment"})
+    source = _normalized_source_text(message)
+    found_types = {
+        experience_type
+        for experience_type, priority in _explicit_experience_relations(source, term=term)
+        if priority != "excluded"
+    }
     return [
         experience_type
         for experience_type in _EXPERIENCE_POLICY_TYPE_ORDER
@@ -280,74 +656,782 @@ def _experience_types_for_explicit_term(message: str, *, term: str) -> list[str]
     ]
 
 
-def _experience_detail_policy(*, term: str, allowed_types: list[str]) -> dict[str, object]:
+def _experience_detail_policy(
+    *,
+    terms_all_of: list[str],
+    terms_any_of: list[str],
+    allowed_types: list[str],
+) -> dict[str, object]:
     return {
         "kind": "experience_detail_terms",
         "allowed_experience_types": allowed_types,
-        "terms_all_of": [term],
+        "terms_all_of": terms_all_of,
+        "terms_any_of": terms_any_of,
     }
 
 
-def _ensure_project_verification_requirement(
+def _text_mentions_term(text: str, term: str) -> bool:
+    return bool(_source_term_occurrences(_normalized_source_text(text), term))
+
+
+def _term_is_covered_by_group_term(term: str, group_term: str) -> bool:
+    """Whether a standalone draft term is already part of a promoted phrase.
+
+    This is intentionally word-safe for ASCII.  ``AI`` is not a subterm of
+    ``LangChain``, while ``Agent`` is a subterm of ``AI Agent`` and must not
+    remain as a separate hard filter after the phrase becomes project evidence.
+    """
+
+    term_normalized = _normalized_source_text(term).strip()
+    group_normalized = _normalized_source_text(group_term).strip()
+    if not term_normalized or not group_normalized:
+        return False
+    if term_normalized == group_normalized:
+        return True
+    if re.fullmatch(r"[a-z0-9]+", term_normalized):
+        return re.search(
+            rf"(?<![a-z0-9]){re.escape(term_normalized)}(?![a-z0-9])",
+            group_normalized,
+        ) is not None
+    return normalized_key(term) in normalized_key(group_term)
+
+
+def _profile_requirement_mentions_term(value: Mapping[str, object], *, term: str) -> bool:
+    text_parts = [value.get("label"), value.get("evidence_hint")]
+    evidence_policy = value.get("evidence_policy")
+    if isinstance(evidence_policy, Mapping):
+        for policy_key in ("terms_all_of", "terms_any_of"):
+            terms = evidence_policy.get(policy_key)
+            if isinstance(terms, list):
+                text_parts.extend(terms)
+    return any(
+        _text_mentions_term(text, term)
+        for text in text_parts
+        if isinstance(text, str)
+    )
+
+
+def _profile_requirement_mentions_any_term(
+    value: Mapping[str, object],
+    *,
+    terms: tuple[str, ...],
+) -> bool:
+    return any(_profile_requirement_mentions_term(value, term=term) for term in terms)
+
+
+def _clean_source_experience_term(value: str) -> str | None:
+    cleaned = " ".join(value.split()).strip("：:，,、/ ")
+    while True:
+        prefix = next(
+            (item for item in _EXPERIENCE_TERM_PREFIXES if cleaned.startswith(item)),
+            None,
+        )
+        if prefix is None:
+            break
+        cleaned = cleaned[len(prefix) :].strip("：:，,、/ ")
+    generic_terms = {
+        "无",
+        "没有",
+        "未",
+        "相关",
+        "实际",
+        "实战",
+        "具备",
+        "需要具备",
+        "丰富",
+        "较强",
+        "具有",
+        "开发",
+        "企业级",
+        "大型",
+        "成熟",
+        "完整",
+        "项目实施",
+        "同一",
+        "同一个",
+        "在同一个",
+        "same",
+        "thesame",
+        "inthesame",
+    }
+    if (
+        not cleaned
+        or len(cleaned) > 120
+        or re.search(r"\d|[一二三四五六七八九十两]+年", cleaned)
+        or normalized_key(cleaned) in _EXPERIENCE_NON_TERMS
+        or normalized_key(cleaned) in generic_terms
+    ):
+        return None
+    return cleaned
+
+
+def _source_group_parts_from_raw(
+    raw_group: str,
+    *,
+    group_start: int,
+    is_any: bool,
+) -> tuple[tuple[str, ...], str, int] | None:
+    raw_terms = _EXPERIENCE_LIST_CONNECTORS.split(raw_group)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw_term in raw_terms:
+        cleaned = _clean_source_experience_term(raw_term)
+        key = normalized_key(cleaned)
+        if cleaned and key and key not in seen:
+            seen.add(key)
+            terms.append(cleaned)
+    if not terms:
+        return None
+    match_mode = (
+        "any_of"
+        if is_any or _EXPERIENCE_ANY_TERM_CONNECTORS.search(raw_group)
+        else "all_of"
+    )
+    return tuple(terms), match_mode, group_start
+
+
+def _source_group_parts_before_marker(
+    source: str,
+    *,
+    clause_start: int,
+    marker_start: int,
+    marker_end: int,
+    clause_end: int,
+) -> tuple[tuple[str, ...], str, int] | None:
+    """Read a terminal technical term list immediately before an experience marker."""
+
+    # In “同一项目中同时使用 LangChain”, the text before 项目 describes the
+    # context, not a technology.  The terms come after the marker instead.
+    marker_suffix = source[marker_end:clause_end].lstrip()
+    if any(marker_suffix.startswith(prefix) for prefix in _EXPERIENCE_AFTER_MARKER_TERM_PREFIXES):
+        return None
+    prefix = source[clause_start:marker_start].rstrip()
+    any_suffix = _EXPERIENCE_GROUP_ANY_SUFFIX.search(prefix)
+    is_any = any_suffix is not None
+    if any_suffix is not None:
+        prefix = prefix[: any_suffix.start()].rstrip()
+    for suffix in ("相关的", "实际的", "相关", "实际", "的"):
+        if prefix.endswith(suffix):
+            prefix = prefix[: -len(suffix)].rstrip()
+            break
+    ascii_match = _EXPERIENCE_ASCII_TERM_LIST.search(prefix)
+    if ascii_match:
+        raw_group = ascii_match.group(0)
+        group_start = clause_start + ascii_match.start()
+    else:
+        chinese_match = _EXPERIENCE_CHINESE_TERM.search(prefix)
+        if chinese_match is None:
+            return None
+        raw_group = chinese_match.group(0)
+        group_start = clause_start + chinese_match.start()
+
+    return _source_group_parts_from_raw(
+        raw_group,
+        group_start=group_start,
+        is_any=is_any,
+    )
+
+
+def _source_group_parts_after_marker(
+    source: str,
+    *,
+    marker_end: int,
+    clause_end: int,
+) -> tuple[tuple[str, ...], str, int] | None:
+    """Read ``项目中使用 LangChain 和 RAG`` as one same-experience group."""
+
+    suffix = source[marker_end:clause_end]
+    leading_whitespace = len(suffix) - len(suffix.lstrip())
+    suffix = suffix.lstrip()
+    prefix = next(
+        (value for value in _EXPERIENCE_AFTER_MARKER_TERM_PREFIXES if suffix.startswith(value)),
+        None,
+    )
+    if prefix is None:
+        return None
+    suffix_start = marker_end + leading_whitespace + len(prefix)
+    remaining = source[suffix_start:clause_end].lstrip()
+    suffix_start += len(source[suffix_start:clause_end]) - len(remaining)
+    ascii_match = re.match(
+        r"[a-z][a-z0-9+.#/_-]*(?:\s*(?:、|,|/|and|or|和|及|与|以及|或)\s*"
+        r"[a-z][a-z0-9+.#/_-]*)*",
+        remaining,
+    )
+    if ascii_match is None:
+        return None
+    raw_group = ascii_match.group(0)
+    after_group = remaining[ascii_match.end() :]
+    is_any = _EXPERIENCE_GROUP_ANY_SUFFIX.match(after_group) is not None
+    return _source_group_parts_from_raw(
+        raw_group,
+        group_start=suffix_start,
+        is_any=is_any,
+    )
+
+
+_EXPERIENCE_TERM_CONNECTOR_KEYS = {"或", "和", "及", "与", "以及", "and", "or", "/", "、"}
+_EXPERIENCE_ANY_CONNECTOR_KEYS = {"或", "or", "/"}
+
+
+def _known_term_occurrences_in_range(
+    source: str,
+    *,
+    candidate_terms: tuple[str, ...],
+    start: int,
+    end: int,
+) -> list[tuple[int, int, str]]:
+    """Find visible draft terms, preferring a full phrase over its substring."""
+
+    occurrences: list[tuple[int, int, str]] = []
+    seen: set[tuple[int, int, str]] = set()
+    for term in candidate_terms:
+        key = normalized_key(term)
+        if not key:
+            continue
+        for term_start, term_end in _source_term_occurrences(source, term):
+            if term_start < start or term_end > end:
+                continue
+            occurrence = (term_start, term_end, term)
+            occurrence_key = (term_start, term_end, key)
+            if occurrence_key not in seen:
+                seen.add(occurrence_key)
+                occurrences.append(occurrence)
+    return occurrences
+
+
+def _best_known_occurrence(
+    occurrences: list[tuple[int, int, str]],
+    *,
+    sort_key: str,
+) -> tuple[int, int, str] | None:
+    if not occurrences:
+        return None
+    if sort_key == "last":
+        return max(occurrences, key=lambda item: (item[1], item[1] - item[0]))
+    return min(occurrences, key=lambda item: (item[0], -(item[1] - item[0])))
+
+
+def _known_term_group_before_marker(
+    source: str,
+    *,
+    candidate_terms: tuple[str, ...],
+    clause_start: int,
+    marker_start: int,
+) -> tuple[tuple[str, ...], str, int] | None:
+    """Use draft terms to retain mixed and multi-word source term lists."""
+
+    prefix = source[clause_start:marker_start]
+    any_suffix = _EXPERIENCE_GROUP_ANY_SUFFIX.search(prefix)
+    term_limit = marker_start
+    if any_suffix is not None:
+        term_limit = clause_start + any_suffix.start()
+    occurrences = _known_term_occurrences_in_range(
+        source,
+        candidate_terms=candidate_terms,
+        start=clause_start,
+        end=term_limit,
+    )
+    last = _best_known_occurrence(
+        [
+            occurrence
+            for occurrence in occurrences
+            if _compact_experience_gap(source[occurrence[1] : term_limit])
+            in _EXPERIENCE_DIRECT_BEFORE_MARKER_GAPS
+        ],
+        sort_key="last",
+    )
+    if last is None:
+        return None
+
+    selected = [last]
+    connectors: list[str] = []
+    current = last
+    while True:
+        previous = _best_known_occurrence(
+            [
+                occurrence
+                for occurrence in occurrences
+                if occurrence[1] <= current[0]
+                and not (occurrence[0] < current[1] and current[0] < occurrence[1])
+                and _compact_experience_gap(source[occurrence[1] : current[0]])
+                in _EXPERIENCE_TERM_CONNECTOR_KEYS
+            ],
+            sort_key="last",
+        )
+        if previous is None:
+            break
+        connectors.append(_compact_experience_gap(source[previous[1] : current[0]]))
+        selected.append(previous)
+        current = previous
+
+    selected.reverse()
+    terms = tuple(item[2] for item in selected)
+    if len({normalized_key(term) for term in terms}) != len(terms):
+        return None
+    match_mode = (
+        "any_of"
+        if any_suffix is not None or any(connector in _EXPERIENCE_ANY_CONNECTOR_KEYS for connector in connectors)
+        else "all_of"
+    )
+    return terms, match_mode, selected[0][0]
+
+
+def _known_term_group_after_marker(
+    source: str,
+    *,
+    candidate_terms: tuple[str, ...],
+    marker_end: int,
+) -> tuple[tuple[str, ...], str, int] | None:
+    """Use a direct `项目中/里/内使用 ...` phrase as one evidence group."""
+
+    search_end = min(len(source), marker_end + 180)
+    occurrences = _known_term_occurrences_in_range(
+        source,
+        candidate_terms=candidate_terms,
+        start=marker_end,
+        end=search_end,
+    )
+    first = _best_known_occurrence(
+        [
+            occurrence
+            for occurrence in occurrences
+            if _compact_experience_gap(source[marker_end : occurrence[0]])
+            in _EXPERIENCE_DIRECT_AFTER_MARKER_GAPS
+        ],
+        sort_key="first",
+    )
+    if first is None:
+        return None
+
+    selected = [first]
+    connectors: list[str] = []
+    current = first
+    while True:
+        following = _best_known_occurrence(
+            [
+                occurrence
+                for occurrence in occurrences
+                if occurrence[0] >= current[1]
+                and not (occurrence[0] < current[1] and current[0] < occurrence[1])
+                and _compact_experience_gap(source[current[1] : occurrence[0]])
+                in _EXPERIENCE_TERM_CONNECTOR_KEYS
+            ],
+            sort_key="first",
+        )
+        if following is None:
+            break
+        connectors.append(_compact_experience_gap(source[current[1] : following[0]]))
+        selected.append(following)
+        current = following
+
+    terms = tuple(item[2] for item in selected)
+    if len({normalized_key(term) for term in terms}) != len(terms):
+        return None
+    trailing = source[selected[-1][1] : min(len(source), selected[-1][1] + 20)]
+    match_mode = (
+        "any_of"
+        if _EXPERIENCE_GROUP_ANY_SUFFIX.match(trailing)
+        or any(connector in _EXPERIENCE_ANY_CONNECTOR_KEYS for connector in connectors)
+        else "all_of"
+    )
+    return terms, match_mode, selected[0][0]
+
+
+def _source_experience_term_groups(
+    source: str,
+    *,
+    candidate_terms: tuple[str, ...] = (),
+) -> list[_SourceExperienceTermGroup]:
+    """Compile direct typed-experience groups without inferring nearby skills."""
+
+    groups: list[_SourceExperienceTermGroup] = []
+    seen: set[tuple[tuple[str, ...], str, tuple[str, ...], str]] = set()
+    marker_hits = _marker_hits_in_clause(source, clause_start=0, clause_end=len(source))
+    for marker_index, (marker_start, _, _) in enumerate(marker_hits):
+        marker_end = marker_hits[marker_index][1]
+        clause_start, clause_end = _source_clause_bounds(source, marker_start)
+        allowed_types = tuple(
+            value
+            for value in _EXPERIENCE_POLICY_TYPE_ORDER
+            if value
+            in _linked_experience_types(
+                source,
+                marker_hits=marker_hits,
+                marker_index=marker_index,
+            )
+        )
+        if not allowed_types:
+            continue
+        known_groups = (
+            _known_term_group_before_marker(
+                source,
+                candidate_terms=candidate_terms,
+                clause_start=clause_start,
+                marker_start=marker_start,
+            ),
+            _known_term_group_after_marker(
+                source,
+                candidate_terms=candidate_terms,
+                marker_end=marker_end,
+            ),
+        )
+        parsed_groups = (
+            known_groups
+            if any(group is not None for group in known_groups)
+            else (
+                _source_group_parts_before_marker(
+                    source,
+                    clause_start=clause_start,
+                    marker_start=marker_start,
+                    marker_end=marker_end,
+                    clause_end=clause_end,
+                ),
+                _source_group_parts_after_marker(
+                    source,
+                    marker_end=marker_end,
+                    clause_end=clause_end,
+                ),
+            )
+        )
+        for parsed in parsed_groups:
+            if parsed is None:
+                continue
+            terms, match_mode, group_start = parsed
+            priority = _experience_priority_for_relation(
+                source,
+                clause_start=clause_start,
+                term_start=group_start,
+            )
+            group = _SourceExperienceTermGroup(
+                terms=terms,
+                match_mode=match_mode,
+                allowed_types=allowed_types,
+                priority=priority,
+            )
+            group_key = (
+                tuple(normalized_key(term) for term in group.terms),
+                group.match_mode,
+                group.allowed_types,
+                group.priority,
+            )
+            if group_key not in seen:
+                seen.add(group_key)
+                groups.append(group)
+    return groups
+
+
+def _source_terms_before_experience_markers(source: str) -> list[str]:
+    """Compatibility helper used by focused parser tests and diagnostics."""
+
+    return [term for group in _source_experience_term_groups(source) for term in group.terms]
+
+
+def _requirement_term_spelling(
+    term: str,
+    requirements: list[object],
+) -> str:
+    """Prefer the reviewable spelling already visible in an AI draft."""
+
+    for requirement in requirements:
+        if not isinstance(requirement, Mapping):
+            continue
+        for field in ("label", "evidence_hint"):
+            value = requirement.get(field)
+            if not isinstance(value, str):
+                continue
+            occurrences = _source_term_occurrences(_normalized_source_text(value), term)
+            if occurrences:
+                start, end = occurrences[0]
+                return value[start:end]
+    return term
+
+
+def _source_term_display_spelling(
+    term: str,
+    *,
+    hard_values: Mapping[str, object],
+    requirements: list[object],
+) -> str:
+    """Use the draft's stable spelling where it names the same source term."""
+
+    skills = hard_values.get("skills_all_of")
+    if isinstance(skills, list):
+        for skill in skills:
+            if isinstance(skill, str) and normalized_key(skill) == normalized_key(term):
+                return skill
+    return _requirement_term_spelling(term, requirements)
+
+
+def _term_is_in_source_alternative(source: str, *, term: str) -> bool:
+    """Leave term alternatives untouched until the policy can express OR."""
+
+    for term_start, _ in _source_term_occurrences(source, term):
+        clause_start, clause_end = _source_clause_bounds(source, term_start)
+        for marker_start, _, _ in _marker_hits_in_clause(
+            source,
+            clause_start=clause_start,
+            clause_end=clause_end,
+        ):
+            prefix = source[clause_start:marker_start]
+            if ("或" in prefix or re.search(r"\bor\b", prefix)) and _text_mentions_term(prefix, term):
+                return True
+    return False
+
+
+def _append_explicit_experience_candidate(
+    candidates: dict[str, str],
+    *,
+    value: object,
+    source: str,
+) -> None:
+    if not isinstance(value, str):
+        return
+    cleaned = " ".join(value.split())
+    key = normalized_key(cleaned)
+    if not key or len(key) > 120 or not _source_term_occurrences(source, cleaned):
+        return
+    candidates.setdefault(key, cleaned)
+
+
+def _explicit_experience_intents_from_profile(
+    *,
+    request_message: str,
+    hard_values: Mapping[str, object],
+    verification_requirements: list[object],
+    preferred_requirements: list[object],
+) -> list[_ExplicitExperienceIntent]:
+    """Compile source-grounded project/experience conditions without a broad window.
+
+    AI labels can help locate a condition, but only the recruiter's own direct
+    ``term + 项目/实习/工作`` relationship decides whether it becomes an
+    executable evidence policy.
+    """
+
+    source = _normalized_source_text(request_message)
+    all_requirements = [*verification_requirements, *preferred_requirements]
+    intents: list[_ExplicitExperienceIntent] = []
+    seen_intents: set[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], str]] = set()
+
+    def append_intent(intent: _ExplicitExperienceIntent) -> None:
+        key = (
+            tuple(normalized_key(term) for term in intent.terms_all_of),
+            tuple(normalized_key(term) for term in intent.terms_any_of),
+            intent.allowed_types,
+            intent.priority,
+        )
+        if key not in seen_intents:
+            seen_intents.add(key)
+            intents.append(intent)
+
+    # Use the AI draft only to retain the recruiter's original multi-word or
+    # mixed-language spelling.  A term still has to be directly tied to a
+    # typed experience phrase in the source below.
+    candidates: dict[str, str] = {}
+    skills = hard_values.get("skills_all_of")
+    if isinstance(skills, list):
+        for skill in skills:
+            _append_explicit_experience_candidate(candidates, value=skill, source=source)
+    for requirement in all_requirements:
+        if not isinstance(requirement, Mapping):
+            continue
+        policy = requirement.get("evidence_policy")
+        if not isinstance(policy, Mapping):
+            continue
+        for policy_key in ("terms_all_of", "terms_any_of"):
+            policy_terms = policy.get(policy_key)
+            if isinstance(policy_terms, list):
+                for term in policy_terms:
+                    _append_explicit_experience_candidate(candidates, value=term, source=source)
+
+    source_groups = _source_experience_term_groups(
+        source,
+        candidate_terms=tuple(candidates.values()),
+    )
+    for group in source_groups:
+        terms = tuple(
+            _source_term_display_spelling(
+                term,
+                hard_values=hard_values,
+                requirements=all_requirements,
+            )
+            for term in group.terms
+        )
+        append_intent(
+            _ExplicitExperienceIntent(
+                terms_all_of=terms if group.match_mode == "all_of" else (),
+                terms_any_of=terms if group.match_mode == "any_of" else (),
+                allowed_types=group.allowed_types if group.priority != "excluded" else (),
+                priority=group.priority,
+            )
+        )
+
+    # The AI draft can still express a direct post-marker relation such as
+    # “项目中使用 LangChain”.  It may not broaden a nearby skill; only a term
+    # with an exact typed relation from the recruiter's text gets promoted.
+    for term in candidates.values():
+        term_key = normalized_key(term)
+        if term_key and any(
+            _term_is_covered_by_group_term(term, grouped_term)
+            for group in source_groups
+            if group.priority != "excluded"
+            for grouped_term in group.terms
+        ):
+            continue
+        relations = _explicit_experience_relations(source, term=term)
+        must_types = {value for value, priority in relations if priority == "must_have"}
+        preferred_types = {value for value, priority in relations if priority == "preferred"}
+        if must_types:
+            priority = "must_have"
+            allowed_types = must_types
+        elif preferred_types:
+            priority = "preferred"
+            allowed_types = preferred_types
+        elif any(priority == "excluded" for _, priority in relations):
+            append_intent(
+                _ExplicitExperienceIntent(
+                    terms_all_of=(term,),
+                    terms_any_of=(),
+                    allowed_types=(),
+                    priority="excluded",
+                )
+            )
+            continue
+        else:
+            continue
+        append_intent(
+            _ExplicitExperienceIntent(
+                terms_all_of=(term,),
+                terms_any_of=(),
+                allowed_types=tuple(
+                    value
+                    for value in _EXPERIENCE_POLICY_TYPE_ORDER
+                    if value in allowed_types
+                ),
+                priority=priority,
+            )
+        )
+    return intents
+
+
+def _remove_profile_requirements_for_term(
     requirements: list[object],
     *,
     term: str,
-    allowed_types: list[str],
 ) -> list[object]:
-    """Keep an explicit project-practice requirement visible to HR.
-
-    The provider normally produces this itself.  This fallback only applies
-    when the provider incorrectly put a project-experience term in the exact
-    skill checklist, so removing that strict filter never silently removes the
-    recruiter's stated requirement.
-    """
-
-    term_key = normalized_key(term)
-    for index, value in enumerate(requirements):
-        if not isinstance(value, Mapping):
-            continue
-        text = " ".join(
-            str(value.get(field, ""))
-            for field in ("label", "evidence_hint")
-        )
-        if term_key and term_key in normalized_key(text):
-            updated = dict(value)
-            # The source request is more precise than a provider draft. Keep
-            # its visible wording, but make the required evidence executable
-            # so a skill-only fact cannot later become a hard pass.
-            updated["evidence_policy"] = _experience_detail_policy(
-                term=term,
-                allowed_types=allowed_types,
-            )
-            return [*requirements[:index], updated, *requirements[index + 1 :]]
-
-    used_keys = {
-        str(value.get("key"))
+    return [
+        value
         for value in requirements
-        if isinstance(value, Mapping) and isinstance(value.get("key"), str)
-    }
-    suffix = 1
-    while f"project_evidence_{suffix}" in used_keys:
-        suffix += 1
+        if not isinstance(value, Mapping)
+        or not _profile_requirement_mentions_term(value, term=term)
+    ]
+
+
+def _ensure_experience_requirement(
+    verification_requirements: list[object],
+    preferred_requirements: list[object],
+    *,
+    terms_all_of: list[str],
+    terms_any_of: list[str],
+    allowed_types: list[str],
+    priority: str,
+) -> tuple[list[object], list[object]]:
+    """Keep a direct experience condition visible without changing its priority."""
+
+    terms = tuple(terms_all_of or terms_any_of)
+    if not terms:
+        return verification_requirements, preferred_requirements
+    target_is_verification = priority == "must_have"
+    target = verification_requirements if target_is_verification else preferred_requirements
+    other = preferred_requirements if target_is_verification else verification_requirements
+
     experience_label = "、".join(
         _EXPERIENCE_POLICY_TYPE_LABELS.get(value, value)
         for value in allowed_types
     )
-    return [
-        *requirements,
+    term_label = "、".join(terms_all_of) if terms_all_of else " 或 ".join(terms_any_of)
+
+    def normalized_requirement(value: Mapping[str, object]) -> dict[str, object]:
+        updated = dict(value)
+        updated["label"] = f"具备 {term_label} 的{experience_label}实践"
+        updated["evidence_hint"] = (
+            f"核验{experience_label}经历的名称、职责或结果中是否明确、正向使用 {term_label}，"
+            "以及候选人的具体实现、贡献或结果。"
+        )
+        updated["evidence_policy"] = _experience_detail_policy(
+            terms_all_of=terms_all_of,
+            terms_any_of=terms_any_of,
+            allowed_types=allowed_types,
+        )
+        return updated
+
+    def matching_index(values: list[object]) -> int | None:
+        for index, value in enumerate(values):
+            if isinstance(value, Mapping) and _profile_requirement_mentions_any_term(
+                value,
+                terms=terms,
+            ):
+                return index
+        return None
+
+    def without_other_group_terms(
+        values: list[object],
+        *,
+        preserve_index: int | None,
+    ) -> list[object]:
+        return [
+            value
+            for index, value in enumerate(values)
+            if index == preserve_index
+            or not isinstance(value, Mapping)
+            or not _profile_requirement_mentions_any_term(value, terms=terms)
+        ]
+
+    target_index = matching_index(target)
+    if target_index is not None:
+        target = without_other_group_terms(target, preserve_index=target_index)
+        target = [
+            normalized_requirement(value)
+            if index == target_index and isinstance(value, Mapping)
+            else value
+            for index, value in enumerate(target)
+        ]
+        other = without_other_group_terms(other, preserve_index=None)
+        return (target, other) if target_is_verification else (other, target)
+
+    other_index = matching_index(other)
+    if other_index is not None:
+        matched = other[other_index]
+        other = without_other_group_terms(other, preserve_index=None)
+        target = [*without_other_group_terms(target, preserve_index=None)]
+        if isinstance(matched, Mapping):
+            target.append(normalized_requirement(matched))
+        return (target, other) if target_is_verification else (other, target)
+
+    used_keys = {
+        str(value.get("key"))
+        for value in [*verification_requirements, *preferred_requirements]
+        if isinstance(value, Mapping) and isinstance(value.get("key"), str)
+    }
+    suffix = 1
+    while f"experience_evidence_{suffix}" in used_keys:
+        suffix += 1
+    target = [
+        *target,
         {
-            "key": f"project_evidence_{suffix}",
-            "label": f"具备 {term} 的{experience_label}实践",
+            "key": f"experience_evidence_{suffix}",
+            "label": f"具备 {term_label} 的{experience_label}实践",
             "evidence_hint": (
-                f"核验{experience_label}经历的名称、职责或结果中是否明确、正向使用 {term}，"
+                f"核验{experience_label}经历的名称、职责或结果中是否明确、正向使用 {term_label}，"
                 "以及候选人的具体实现、贡献或结果。"
             ),
             "evidence_policy": _experience_detail_policy(
-                term=term,
+                terms_all_of=terms_all_of,
+                terms_any_of=terms_any_of,
                 allowed_types=allowed_types,
             ),
         },
     ]
+    return (target, other) if target_is_verification else (other, target)
 
 
 def _request_unambiguously_requires_any_bachelor_degree(message_key: str) -> bool:
@@ -429,25 +1513,49 @@ def _normalize_explicit_profile_intent(
         if isinstance(generated.get("verification_requirements"), list)
         else []
     )
-    exact_skill_terms = list(hard_values.get("skills_all_of", []))
-    project_terms = [
-        term
-        for term in exact_skill_terms
-        if isinstance(term, str)
-        and _message_requests_project_evidence(request_message, term=term)
-    ]
-    if project_terms:
+    preferred_requirements = list(
+        generated.get("preferred_requirements", [])
+        if isinstance(generated.get("preferred_requirements"), list)
+        else []
+    )
+    experience_intents = _explicit_experience_intents_from_profile(
+        request_message=request_message,
+        hard_values=hard_values,
+        verification_requirements=verification_requirements,
+        preferred_requirements=preferred_requirements,
+    )
+    if experience_intents:
         hard_values["skills_all_of"] = [
-            term for term in exact_skill_terms if term not in project_terms
+            term
+            for term in hard_values.get("skills_all_of", [])
+            if not isinstance(term, str)
+            or not any(
+                _term_is_covered_by_group_term(term, intent_term)
+                for intent in experience_intents
+                for intent_term in intent.terms
+            )
         ]
-        for term in project_terms:
-            verification_requirements = _ensure_project_verification_requirement(
-                verification_requirements,
-                term=term,
-                allowed_types=_experience_types_for_explicit_term(
-                    request_message,
-                    term=term,
-                ),
+        for intent in experience_intents:
+            if intent.priority == "excluded":
+                for term in intent.terms:
+                    verification_requirements = _remove_profile_requirements_for_term(
+                        verification_requirements,
+                        term=term,
+                    )
+                    preferred_requirements = _remove_profile_requirements_for_term(
+                        preferred_requirements,
+                        term=term,
+                    )
+                continue
+            verification_requirements, preferred_requirements = (
+                _ensure_experience_requirement(
+                    verification_requirements,
+                    preferred_requirements,
+                    terms_all_of=list(intent.terms_all_of),
+                    terms_any_of=list(intent.terms_any_of),
+                    allowed_types=list(intent.allowed_types),
+                    priority=intent.priority,
+                )
             )
 
     try:
@@ -457,6 +1565,7 @@ def _normalize_explicit_profile_intent(
     except ValueError:
         return dict(generated)
     normalized["verification_requirements"] = verification_requirements
+    normalized["preferred_requirements"] = preferred_requirements
     return normalized
 
 
@@ -1127,6 +2236,23 @@ def _run_recall_diagnostics(
         ) from exc
 
 
+def _run_result_mode(
+    session: Session,
+    *,
+    run: TalentSearchRun,
+) -> str:
+    """Describe whether this immutable revision required semantic AI matching."""
+
+    revision = session.get(TalentSearchProfileRevision, run.revision_id)
+    if revision is None or revision.profile_id != run.profile_id:
+        raise TalentSearchProfileServiceError("talent_search_run_revision_missing")
+    return (
+        "semantic_verification"
+        if revision.match_job_version_id
+        else "hard_filter_recall"
+    )
+
+
 def _run_response(
     session: Session,
     *,
@@ -1141,6 +2267,7 @@ def _run_response(
         profile_id=run.profile_id,
         revision_id=run.revision_id,
         status=_run_status(run, batch),
+        result_mode=_run_result_mode(session, run=run),
         total_recalled_count=run.total_recalled_count,
         job_match_batch_id=run.job_match_batch_id,
         match_total_count=batch.total_count if batch is not None else 0,

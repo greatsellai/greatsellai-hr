@@ -936,6 +936,7 @@ export interface TalentSearchEvidencePolicy {
   kind: "any_fact" | "experience_detail_terms";
   allowed_experience_types: ExperienceType[];
   terms_all_of: string[];
+  terms_any_of: string[];
 }
 
 export interface TalentSearchProfileRequirement {
@@ -1041,6 +1042,7 @@ export interface TalentSearchRun {
   profile_id: string;
   revision_id: string;
   status: "queued" | "running" | "completed" | "partial";
+  result_mode: "hard_filter_recall" | "semantic_verification";
   total_recalled_count: number;
   job_match_batch_id: string | null;
   match_total_count: number;

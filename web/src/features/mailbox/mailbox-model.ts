@@ -1,4 +1,5 @@
 import type {
+  MailboxAuthenticationMode,
   MailboxBackgroundJob,
   MailboxConfig,
   MailboxRetentionPolicy,
@@ -8,8 +9,7 @@ import type {
 
 export interface MailboxDraft {
   displayName: string;
-  imapHost: string;
-  imapPort: string;
+  providerKey: string;
   emailAddress: string;
   mailbox: string;
   password: string;
@@ -19,8 +19,7 @@ export interface MailboxDraft {
 export function newMailboxDraft(): MailboxDraft {
   return {
     displayName: "",
-    imapHost: "imap.feishu.cn",
-    imapPort: "993",
+    providerKey: "",
     emailAddress: "",
     mailbox: "INBOX",
     password: "",
@@ -31,8 +30,7 @@ export function newMailboxDraft(): MailboxDraft {
 export function mailboxDraftFromConfig(config: MailboxConfig): MailboxDraft {
   return {
     displayName: config.display_name,
-    imapHost: config.imap_host || "imap.feishu.cn",
-    imapPort: String(config.imap_port || 993),
+    providerKey: config.provider_key || "",
     emailAddress: config.email_address || "",
     mailbox: config.mailbox || "INBOX",
     password: "",
@@ -51,8 +49,7 @@ export function mailboxDraftIsDirty(
 
   return (
     draft.displayName !== baseline.displayName
-    || draft.imapHost !== baseline.imapHost
-    || draft.imapPort !== baseline.imapPort
+    || draft.providerKey !== baseline.providerKey
     || draft.emailAddress !== baseline.emailAddress
     || draft.mailbox !== baseline.mailbox
     || draft.enabled !== baseline.enabled
@@ -60,15 +57,39 @@ export function mailboxDraftIsDirty(
   );
 }
 
+export function mailboxAuthenticationModeLabel(mode: MailboxAuthenticationMode | null): string {
+  return mode === "oauth2" ? "OAuth 授权" : "授权码连接";
+}
+
+export function mailboxProviderDisplayName(config: MailboxConfig): string {
+  return config.provider_display_name || "已配置 IMAP 邮箱";
+}
+
+export function mailboxRequiresAuthorization(config: MailboxConfig): boolean {
+  return config.authentication_mode === "oauth2"
+    && (config.authorization_status === "not_connected" || config.authorization_status === "reauthorization_required");
+}
+
+export function mailboxCanSync(config: MailboxConfig): boolean {
+  return config.enabled
+    && !config.archived_at
+    && config.authorization_status === "connected";
+}
+
 export function mailboxChannelStatus(config: MailboxConfig): string {
-  if (config.active_sync_alert) return "需处理";
   if (config.archived_at) return "已归档";
+  if (config.authorization_status === "reauthorization_required") return "需重新授权";
+  if (config.authorization_status === "unavailable") return "服务未启用";
+  if (config.authorization_status === "not_connected") return "待连接";
+  if (config.active_sync_alert) return "需处理";
   return config.enabled ? "已启用" : "已暂停";
 }
 
 export function mailboxChannelStatusClass(config: MailboxConfig): string {
-  if (config.active_sync_alert) return " is-error";
   if (config.archived_at) return "";
+  if (config.authorization_status === "reauthorization_required") return " is-error";
+  if (config.authorization_status === "unavailable" || config.authorization_status === "not_connected") return " is-warning";
+  if (config.active_sync_alert) return " is-error";
   return config.enabled ? " is-success" : " is-warning";
 }
 

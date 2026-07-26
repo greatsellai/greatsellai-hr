@@ -150,6 +150,12 @@ export interface MailboxConfig {
   /** Human-readable source label, unique within the workspace. */
   display_name: string;
   configured: boolean;
+  /** Reviewed mailbox provider selected when the channel was connected. */
+  provider_key: string | null;
+  /** Human-readable provider name. This is safe to show in the workspace. */
+  provider_display_name: string | null;
+  authentication_mode: MailboxAuthenticationMode | null;
+  authorization_status: MailboxAuthorizationStatus | null;
   imap_host: string | null;
   imap_port: number | null;
   email_address: string | null;
@@ -175,23 +181,64 @@ export interface MailboxSyncAlertSummary {
 
 export interface MailboxConfigCreate {
   display_name: string;
-  imap_host: string;
-  imap_port: number;
+  /** New clients always choose a reviewed provider instead of an IMAP host. */
+  provider_key?: string;
+  /** Compatibility fields for one legacy API release. New UI must not send them. */
+  imap_host?: string;
+  imap_port?: number;
   email_address: string;
   mailbox: string;
-  password: string;
+  password?: string;
   enabled: boolean;
 }
 
 /** PATCH payload. Leave the authorization code out to keep the saved value. */
 export interface MailboxConfigPatch {
   display_name?: string;
+  provider_key?: string;
   imap_host?: string;
   imap_port?: number;
   email_address?: string;
   mailbox?: string;
   password?: string;
   enabled?: boolean;
+}
+
+export type MailboxAuthenticationMode = "app_password" | "oauth2";
+
+export type MailboxAuthorizationStatus =
+  | "not_connected"
+  | "connected"
+  | "reauthorization_required"
+  | "unavailable";
+
+/** A reviewed, deployment-owned mailbox provider. It never contains a secret. */
+export interface MailboxProvider {
+  provider_key: string;
+  display_name: string;
+  authentication_mode: MailboxAuthenticationMode;
+  available: boolean;
+  imap_host: string;
+  imap_port: number;
+  default_mailbox: string;
+  credential_label: string;
+  help_text: string;
+}
+
+export interface MailboxProviderList {
+  items: MailboxProvider[];
+}
+
+export interface MailboxOAuthStartRequest {
+  provider_key: string;
+  display_name: string;
+  email_address: string;
+  mailbox: string;
+}
+
+/** The browser immediately navigates to this URL. It must never be persisted. */
+export interface MailboxOAuthStartResponse {
+  authorization_url: string;
 }
 
 export interface MailboxConfigList {

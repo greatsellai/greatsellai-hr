@@ -12,6 +12,7 @@ import type {
   MailboxConfig,
   MailboxImportHistory,
   MailboxImportHistoryItem,
+  MailboxProvider,
   MailboxRetentionOverview,
   MailboxRetentionPolicy,
   MailboxRetentionPreview,
@@ -19,9 +20,12 @@ import type {
   MailboxRetentionRuns,
 } from "../../types";
 import { MailboxChannelList } from "./components/MailboxChannelList";
+import { MailboxProviderPicker } from "./components/MailboxProviderPicker";
 import {
+  mailboxAuthenticationModeLabel,
   mailboxBackgroundJobStatusClass,
   mailboxBackgroundJobStatusLabel,
+  mailboxCanSync,
   mailboxChannelStatus,
   mailboxChannelStatusClass,
   mailboxDraftFromConfig,
@@ -34,6 +38,8 @@ import {
   mailboxRetentionRunErrorLabel,
   mailboxRetentionRunStatusClass,
   mailboxRetentionRunStatusLabel,
+  mailboxProviderDisplayName,
+  mailboxRequiresAuthorization,
   mailboxSyncAlertTitle,
   newMailboxDraft,
   type MailboxDraft,
@@ -59,6 +65,7 @@ export function MailboxPage({
 }: MailboxPageProps) {
   const pageClassName = `mailbox-page${embedded ? " is-embedded" : " page-frame"}`;
   const [mailboxes, setMailboxes] = useState<MailboxConfig[]>([]);
+  const [providers, setProviders] = useState<MailboxProvider[]>([]);
   const [selectedMailboxId, setSelectedMailboxId] = useState<string | null>(null);
   const [historyFilterMailboxId, setHistoryFilterMailboxId] = useState<string | null>(null);
   const [history, setHistory] = useState<MailboxImportHistory | null>(null);
@@ -69,8 +76,11 @@ export function MailboxPage({
   const [retentionRuns, setRetentionRuns] = useState<MailboxRetentionRuns | null>(null);
   const [mailboxJobs, setMailboxJobs] = useState<MailboxBackgroundJobHistory | null>(null);
   const [loading, setLoading] = useState(true);
+  const [providersLoading, setProvidersLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [authorizing, setAuthorizing] = useState(false);
+  const [reauthorizingMailboxId, setReauthorizingMailboxId] = useState<string | null>(null);
   const [enqueuingMailboxId, setEnqueuingMailboxId] = useState<string | null>(null);
   const [enqueuingAll, setEnqueuingAll] = useState(false);
   const [archiving, setArchiving] = useState(false);
@@ -85,10 +95,16 @@ export function MailboxPage({
   const mailboxJobPollInFlightRef = useRef(false);
   const manualMailboxJobIdsRef = useRef(new Set<string>());
   const handledMailboxJobIdsRef = useRef(new Set<string>());
+  const handledOauthReturnRef = useRef(false);
 
   const selectedConfig = selectedMailboxId
     ? mailboxes.find((item) => item.mailbox_id === selectedMailboxId) ?? null
     : null;
+  const draftProvider = providers.find((item) => item.provider_key === draft.providerKey) ?? null;
+  const selectedMailboxRequiresAuthorization = Boolean(
+    selectedConfig && mailboxRequiresAuthorization(selectedConfig),
+  );
+  const selectedMailboxCanSync = Boolean(selectedConfig && mailboxCanSync(selectedConfig));
   const selectedMailboxArchived = Boolean(selectedConfig?.archived_at);
   const activeMailboxJobs = (mailboxJobs?.items ?? []).filter(
     (job) => job.status === "queued" || job.status === "running",
@@ -195,6 +211,15 @@ export function MailboxPage({
     setDraft((current) => ({ ...current, [key]: value }));
   };
 
+  const selectProvider = (provider: MailboxProvider) => {
+    setDraft((current) => ({
+      ...current,
+      providerKey: provider.provider_key,
+      mailbox: provider.default_mailbox,
+      password: "",
+    }));
+  };
+
   const applyMailboxList = (items: MailboxConfig[], preferredMailboxId?: string | null) => {
     setMailboxes(items);
     const desiredMailboxId = preferredMailboxId ?? selectedMailboxId;
@@ -269,20 +294,24 @@ export function MailboxPage({
 
   const loadInitialData = useCallback(async () => {
     setLoading(true);
+    setProvidersLoading(true);
     setHistoryLoading(true);
     try {
-      const [configResponse, historyResponse, jobsResponse] = await Promise.all([
+      const [configResponse, providerResponse, historyResponse, jobsResponse] = await Promise.all([
         api.listMailboxConfigs(true),
+        api.listMailboxProviders(),
         api.listMailboxImports(),
         api.listMailboxBackgroundJobs(),
       ]);
       applyMailboxList(configResponse.items);
+      setProviders(providerResponse.items);
       setHistory(historyResponse);
       setMailboxJobs(jobsResponse);
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
       setLoading(false);
+      setProvidersLoading(false);
       setHistoryLoading(false);
     }
   // The initial fetch intentionally runs once. Actions refresh only the data they change.
@@ -290,6 +319,41 @@ export function MailboxPage({
   }, [humanizeError, notify]);
 
   useEffect(() => { void loadInitialData(); }, [loadInitialData]);
+
+  useEffect(() => {
+    if (loading || handledOauthReturnRef.current) return;
+    const query = new URLSearchParams(window.location.search);
+    const outcome = query.get("mailbox_oauth");
+    if (outcome !== "connected" && outcome !== "failed") return;
+
+    handledOauthReturnRef.current = true;
+    const providerKey = query.get("mailbox_provider");
+    query.delete("mailbox_oauth");
+    query.delete("mailbox_provider");
+    const nextSearch = query.toString();
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`,
+    );
+
+    if (outcome === "failed") {
+      notify("error", "邮箱授权没有完成。你可以检查服务商设置后重新发起授权。");
+      return;
+    }
+
+    void api.listMailboxConfigs(true).then((response) => {
+      setMailboxes(response.items);
+      const connectedMailbox = providerKey
+        ? response.items.find((item) => item.provider_key === providerKey && !item.archived_at)
+        : null;
+      if (connectedMailbox) selectMailbox(connectedMailbox, true);
+      const providerName = providers.find((item) => item.provider_key === providerKey)?.display_name ?? "邮箱服务商";
+      notify("success", `已连接 ${providerName}，系统只会接收绑定之后到达的附件。`);
+    }).catch((error) => {
+      notify("error", humanizeError(error));
+    });
+  }, [humanizeError, loading, notify, providers]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -353,12 +417,24 @@ export function MailboxPage({
       notify("error", "请为这个收件通道填写名称。");
       return;
     }
-    if (!draft.imapHost.trim() || !draft.emailAddress.trim()) {
-      notify("error", "请填写 IMAP 地址和接收简历的邮箱。");
+    if (!draft.emailAddress.trim()) {
+      notify("error", "请填写接收简历的邮箱。");
+      return;
+    }
+    if (isCreating && !draftProvider) {
+      notify("error", "请先选择邮箱服务商。");
+      return;
+    }
+    if (isCreating && !draftProvider?.available) {
+      notify("error", "该邮箱服务商尚未在当前部署启用，请联系部署管理员。");
+      return;
+    }
+    if (isCreating && draftProvider?.authentication_mode === "oauth2") {
+      notify("error", "此服务商需要通过网页授权连接，请点击下方授权按钮。");
       return;
     }
     if (isCreating && !draft.password) {
-      notify("error", "新通道首次保存需要填写邮箱授权码。");
+      notify("error", "新通道首次保存需要填写邮箱专用授权码。");
       return;
     }
     if (!isCreating && !selectedConfig) {
@@ -372,18 +448,18 @@ export function MailboxPage({
 
     setSaving(true);
     try {
-      const connection = {
-        display_name: draft.displayName.trim(),
-        imap_host: draft.imapHost.trim(),
-        imap_port: Number(draft.imapPort) || 993,
-        email_address: draft.emailAddress.trim(),
-        mailbox: draft.mailbox.trim() || "INBOX",
-        enabled: draft.enabled,
-      };
       const saved = isCreating
-        ? await api.createMailboxConfig({ ...connection, password: draft.password })
+        ? await api.createMailboxConfig({
+          display_name: draft.displayName.trim(),
+          provider_key: draftProvider!.provider_key,
+          email_address: draft.emailAddress.trim(),
+          mailbox: draft.mailbox.trim() || draftProvider!.default_mailbox,
+          password: draft.password,
+          enabled: draft.enabled,
+        })
         : await api.updateMailboxConfig(selectedConfig!.mailbox_id, {
-          ...connection,
+          display_name: draft.displayName.trim(),
+          enabled: draft.enabled,
           ...(draft.password ? { password: draft.password } : {}),
         });
       setMailboxes((current) => [
@@ -399,10 +475,59 @@ export function MailboxPage({
     }
   };
 
+  const startMailboxOAuth = async () => {
+    if (!draftProvider || draftProvider.authentication_mode !== "oauth2") {
+      notify("error", "请先选择支持网页授权的邮箱服务商。");
+      return;
+    }
+    if (!draftProvider.available) {
+      notify("error", "该邮箱服务商尚未在当前部署启用，请联系部署管理员。");
+      return;
+    }
+    if (!draft.displayName.trim()) {
+      notify("error", "请为这个收件通道填写名称。");
+      return;
+    }
+    if (!draft.emailAddress.trim()) {
+      notify("error", "请填写接收简历的邮箱。");
+      return;
+    }
+
+    setAuthorizing(true);
+    try {
+      const result = await api.startMailboxOAuth({
+        provider_key: draftProvider.provider_key,
+        display_name: draft.displayName.trim(),
+        email_address: draft.emailAddress.trim(),
+        mailbox: draft.mailbox.trim() || draftProvider.default_mailbox,
+      });
+      window.location.assign(result.authorization_url);
+    } catch (error) {
+      notify("error", humanizeError(error));
+      setAuthorizing(false);
+    }
+  };
+
+  const reauthorizeMailbox = async (config: MailboxConfig) => {
+    if (
+      config.authentication_mode !== "oauth2"
+      || config.archived_at
+      || reauthorizingMailboxId === config.mailbox_id
+    ) return;
+
+    setReauthorizingMailboxId(config.mailbox_id);
+    try {
+      const result = await api.reauthorizeMailboxOAuth(config.mailbox_id);
+      window.location.assign(result.authorization_url);
+    } catch (error) {
+      notify("error", humanizeError(error));
+      setReauthorizingMailboxId(null);
+    }
+  };
+
   const syncMailbox = async (config: MailboxConfig) => {
     if (
-      !config.enabled
-      || config.archived_at
+      !mailboxCanSync(config)
       || enqueuingMailboxId === config.mailbox_id
       || activeSyncMailboxIds.has(config.mailbox_id)
     ) return;
@@ -420,7 +545,7 @@ export function MailboxPage({
   };
 
   const syncAllMailboxes = async () => {
-    if (enqueuingAll || !mailboxes.some((item) => item.enabled && !item.archived_at)) return;
+    if (enqueuingAll || !mailboxes.some(mailboxCanSync)) return;
     setEnqueuingAll(true);
     try {
       const result = await api.syncAllMailboxes();
@@ -556,9 +681,59 @@ export function MailboxPage({
   const hasMailboxChannels = mailboxes.length > 0;
   const showMailboxSetup = !loading && !hasMailboxChannels;
   const showMailboxOverview = Boolean(selectedConfig && !isCreating && !isEditingConnection);
+  const formUsesOAuth = isCreating
+    ? draftProvider?.authentication_mode === "oauth2"
+    : selectedConfig?.authentication_mode === "oauth2";
+  const formProviderName = isCreating
+    ? draftProvider?.display_name ?? "尚未选择"
+    : selectedConfig ? mailboxProviderDisplayName(selectedConfig) : "已配置 IMAP 邮箱";
+  const formCredentialLabel = draftProvider?.credential_label
+    ?? (selectedConfig?.authentication_mode === "app_password" ? "邮箱授权码" : "邮箱授权");
 
   const mailboxConnectionFields = (
     <div className="mailbox-connection-form">
+      <section className="mailbox-form-section" aria-labelledby="mailbox-provider-heading">
+        <div className="mailbox-form-section-heading">
+          <div>
+            <h3 id="mailbox-provider-heading">邮箱服务商</h3>
+            <p>系统固定使用经过审核的加密连接，不开放自定义服务器地址或端口。</p>
+          </div>
+        </div>
+        {isCreating ? (
+          <>
+            <MailboxProviderPicker
+              disabled={saving || authorizing}
+              loading={providersLoading}
+              onChange={selectProvider}
+              providers={providers}
+              value={draft.providerKey}
+            />
+            {draftProvider && (
+              <p className={`mailbox-provider-help${draftProvider.available ? "" : " is-warning"}`} role={draftProvider.available ? undefined : "alert"}>
+                <Icon name={draftProvider.available ? "check" : "activity"} size={15} />
+                <span>{draftProvider.available ? draftProvider.help_text : "该服务商尚未在当前部署启用，请联系部署管理员完成配置。"}</span>
+              </p>
+            )}
+          </>
+        ) : (
+          <div className="mailbox-provider-locked">
+            <div>
+              <strong>{formProviderName}</strong>
+              <span>{mailboxAuthenticationModeLabel(selectedConfig?.authentication_mode ?? null)}</span>
+            </div>
+            <span className={`status-pill${selectedConfig?.authorization_status === "connected" ? " is-success" : selectedConfig?.authorization_status === "reauthorization_required" ? " is-error" : " is-warning"}`}>
+              {selectedConfig?.authorization_status === "connected"
+                ? "已连接"
+                : selectedConfig?.authorization_status === "reauthorization_required"
+                  ? "需重新授权"
+                  : selectedConfig?.authorization_status === "unavailable"
+                    ? "服务未启用"
+                    : "待连接"}
+            </span>
+          </div>
+        )}
+      </section>
+
       <section className="mailbox-form-section" aria-labelledby="mailbox-identity-heading">
         <div className="mailbox-form-section-heading">
           <div>
@@ -582,12 +757,13 @@ export function MailboxPage({
             <label className="field-label" htmlFor="imap-address">接收简历的邮箱</label>
             <BackofficeInput
               autoComplete="email"
-              disabled={selectedMailboxArchived || selectedSyncInProgress}
+              disabled={!isCreating || selectedMailboxArchived || selectedSyncInProgress || authorizing}
               id="imap-address"
               onChange={(value) => updateDraft("emailAddress", value)}
               type="email"
               value={draft.emailAddress}
             />
+            {!isCreating && <p className="field-help">接收邮箱与服务商属于这个通道的来源身份。需要换邮箱时，请新建收件通道。</p>}
           </div>
         </div>
       </section>
@@ -595,55 +771,49 @@ export function MailboxPage({
       <section className="mailbox-form-section" aria-labelledby="mailbox-connection-heading">
         <div className="mailbox-form-section-heading">
           <div>
-            <h3 id="mailbox-connection-heading">服务器连接</h3>
-            <p>仅支持已批准的加密 IMAPS 服务商地址与 993 端口。</p>
+            <h3 id="mailbox-connection-heading">连接与同步</h3>
+            <p>{formUsesOAuth ? "授权将在服务商页面完成，系统不会收集网页登录密码。" : "请使用服务商生成的专用授权码或客户端密码。"}</p>
           </div>
         </div>
         <div className="form-grid mailbox-form-grid">
           <div className="field-stack">
-            <label className="field-label" htmlFor="imap-host">IMAP 地址</label>
-            <BackofficeInput
-              disabled={selectedMailboxArchived || selectedSyncInProgress}
-              id="imap-host"
-              onChange={(value) => updateDraft("imapHost", value)}
-              value={draft.imapHost}
-            />
-          </div>
-          <div className="field-stack">
-            <label className="field-label" htmlFor="imap-port">端口</label>
-            <BackofficeInput
-              disabled={selectedMailboxArchived || selectedSyncInProgress}
-              id="imap-port"
-              inputMode="numeric"
-              onChange={(value) => updateDraft("imapPort", value)}
-              value={draft.imapPort}
-            />
-          </div>
-          <div className="field-stack">
             <label className="field-label" htmlFor="imap-folder">邮箱文件夹</label>
             <BackofficeInput
-              disabled={selectedMailboxArchived || selectedSyncInProgress}
+              disabled={!isCreating || selectedMailboxArchived || selectedSyncInProgress || authorizing}
               id="imap-folder"
               onChange={(value) => updateDraft("mailbox", value)}
               value={draft.mailbox}
             />
+            {!isCreating && <p className="field-help">文件夹会保持当前来源位置，不能直接改写。</p>}
           </div>
-          <div className="field-stack">
-            <label className="field-label" htmlFor="imap-password">邮箱授权码</label>
-            <BackofficeInput
-              aria-describedby="imap-password-hint"
-              autoComplete="new-password"
-              disabled={selectedMailboxArchived || selectedSyncInProgress}
-              id="imap-password"
-              onChange={(value) => updateDraft("password", value)}
-              placeholder={isCreating ? "首次保存必填" : "留空则保持原授权码"}
-              type="password"
-              value={draft.password}
-            />
-            <p className="field-help" id="imap-password-hint">授权码仅用于连接这个收件通道，不会在页面中回显。</p>
-          </div>
+          {isCreating && !draftProvider ? (
+            <p className="mailbox-connection-pending span-full">先选择一个可用的邮箱服务商，再填写连接所需信息。</p>
+          ) : formUsesOAuth ? (
+            <div className="mailbox-oauth-explainer span-full">
+              <span className="mailbox-oauth-explainer-icon"><Icon name="arrow-right" size={16} /></span>
+              <div>
+                <strong>{formProviderName} 网页授权</strong>
+                <p>点击授权后会前往服务商登录页，完成后自动回到这里。系统只保存服务端加密的授权凭据。</p>
+              </div>
+            </div>
+          ) : (
+            <div className="field-stack">
+              <label className="field-label" htmlFor="imap-password">{formCredentialLabel}</label>
+              <BackofficeInput
+                aria-describedby="imap-password-hint"
+                autoComplete="new-password"
+                disabled={selectedMailboxArchived || selectedSyncInProgress || authorizing || (isCreating && !draftProvider?.available)}
+                id="imap-password"
+                onChange={(value) => updateDraft("password", value)}
+                placeholder={isCreating ? "首次连接必填" : "留空则保持原授权码"}
+                type="password"
+                value={draft.password}
+              />
+              <p className="field-help" id="imap-password-hint">{isCreating ? "只用于连接当前通道，不会在页面中回显。" : "更新后只替换服务端加密保存的授权码，不改变收件起点。"}</p>
+            </div>
+          )}
           <label className="choice-row span-full mailbox-sync-toggle">
-            <input checked={draft.enabled} disabled={selectedMailboxArchived || selectedSyncInProgress} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
+            <input checked={draft.enabled} disabled={selectedMailboxArchived || selectedSyncInProgress || authorizing} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
             <span>
               <strong>启用后台定时同步</strong>
               <small>你也可以在保存后随时手动同步这个通道。</small>
@@ -678,14 +848,26 @@ export function MailboxPage({
         </BackofficeButton>
       )}
       {!isCreating && selectedConfig && (
-        <BackofficeButton
-          disabled={archiving || saving || selectedSyncInProgress || !selectedConfig.enabled || Boolean(selectedConfig.archived_at)}
-          icon={selectedSyncJob ? <i className="spinner" /> : <Icon name="refresh" size={16} />}
-          loading={enqueuingMailboxId === selectedConfig.mailbox_id}
-          onClick={() => void syncMailbox(selectedConfig)}
-        >
-          {enqueuingMailboxId === selectedConfig.mailbox_id ? "正在加入队列" : selectedSyncJob ? "后台同步中" : "同步此通道"}
-        </BackofficeButton>
+        selectedMailboxRequiresAuthorization ? (
+          <BackofficeButton
+            disabled={archiving || saving || selectedMailboxArchived}
+            icon={<Icon name="arrow-right" size={16} />}
+            loading={reauthorizingMailboxId === selectedConfig.mailbox_id}
+            onClick={() => void reauthorizeMailbox(selectedConfig)}
+            tone="primary"
+          >
+            {reauthorizingMailboxId === selectedConfig.mailbox_id ? "正在前往授权" : "重新授权"}
+          </BackofficeButton>
+        ) : (
+          <BackofficeButton
+            disabled={archiving || saving || selectedSyncInProgress || !selectedMailboxCanSync}
+            icon={selectedSyncJob ? <i className="spinner" /> : <Icon name="refresh" size={16} />}
+            loading={enqueuingMailboxId === selectedConfig.mailbox_id}
+            onClick={() => void syncMailbox(selectedConfig)}
+          >
+            {enqueuingMailboxId === selectedConfig.mailbox_id ? "正在加入队列" : selectedSyncJob ? "后台同步中" : "同步此通道"}
+          </BackofficeButton>
+        )
       )}
       {!isCreating && selectedConfig && !selectedConfig.archived_at && (
         <BackofficeButton
@@ -697,15 +879,27 @@ export function MailboxPage({
           {archiving ? "正在归档" : "归档通道"}
         </BackofficeButton>
       )}
-      <BackofficeButton
-        disabled={loading || saving || archiving || selectedSyncInProgress || (!isCreating && selectedMailboxArchived)}
-        icon={saving ? undefined : <Icon name="check" size={16} />}
-        loading={saving}
-        onClick={() => void saveMailbox()}
-        tone="primary"
-      >
-        {saving ? "正在保存" : isCreating ? "创建并开始接收" : selectedMailboxArchived ? "已归档" : "保存通道"}
-      </BackofficeButton>
+      {isCreating && formUsesOAuth ? (
+        <BackofficeButton
+          disabled={loading || saving || archiving || authorizing || !draftProvider?.available}
+          icon={authorizing ? undefined : <Icon name="arrow-right" size={16} />}
+          loading={authorizing}
+          onClick={() => void startMailboxOAuth()}
+          tone="primary"
+        >
+          {authorizing ? "正在前往授权" : `前往 ${draftProvider?.display_name ?? "服务商"} 授权`}
+        </BackofficeButton>
+      ) : (
+        <BackofficeButton
+          disabled={loading || saving || archiving || selectedSyncInProgress || authorizing || (isCreating && (!draftProvider || !draftProvider.available)) || (!isCreating && selectedMailboxArchived)}
+          icon={saving ? undefined : <Icon name="check" size={16} />}
+          loading={saving}
+          onClick={() => void saveMailbox()}
+          tone={!isCreating && selectedMailboxRequiresAuthorization ? "default" : "primary"}
+        >
+          {saving ? "正在保存" : isCreating ? "创建并开始接收" : selectedMailboxArchived ? "已归档" : "保存通道"}
+        </BackofficeButton>
+      )}
     </div>
   );
 
@@ -719,19 +913,31 @@ export function MailboxPage({
               <h2>{selectedConfig.display_name}</h2>
               <span className={`status-pill${mailboxChannelStatusClass(selectedConfig)}`}>{mailboxChannelStatus(selectedConfig)}</span>
             </div>
-            <p>{selectedConfig.email_address || "尚未配置接收邮箱"} · {selectedConfig.mailbox || "INBOX"}</p>
+            <p>{mailboxProviderDisplayName(selectedConfig)} · {selectedConfig.email_address || "尚未配置接收邮箱"} · {selectedConfig.mailbox || "INBOX"}</p>
           </div>
         </div>
         <div className="mailbox-operation-actions">
-          <BackofficeButton
-            disabled={!selectedConfig.enabled || Boolean(selectedConfig.archived_at) || selectedSyncInProgress}
-            icon={selectedSyncInProgress ? undefined : <Icon name="refresh" size={16} />}
-            loading={selectedSyncInProgress}
-            onClick={() => void syncMailbox(selectedConfig)}
-            tone="primary"
-          >
-            {selectedSyncInProgress ? "后台同步中" : "同步此通道"}
-          </BackofficeButton>
+          {selectedMailboxRequiresAuthorization ? (
+            <BackofficeButton
+              disabled={Boolean(selectedConfig.archived_at)}
+              icon={<Icon name="arrow-right" size={16} />}
+              loading={reauthorizingMailboxId === selectedConfig.mailbox_id}
+              onClick={() => void reauthorizeMailbox(selectedConfig)}
+              tone="primary"
+            >
+              {reauthorizingMailboxId === selectedConfig.mailbox_id ? "正在前往授权" : "重新授权"}
+            </BackofficeButton>
+          ) : (
+            <BackofficeButton
+              disabled={!selectedMailboxCanSync || selectedSyncInProgress}
+              icon={selectedSyncInProgress ? undefined : <Icon name="refresh" size={16} />}
+              loading={selectedSyncInProgress}
+              onClick={() => void syncMailbox(selectedConfig)}
+              tone="primary"
+            >
+              {selectedSyncInProgress ? "后台同步中" : "同步此通道"}
+            </BackofficeButton>
+          )}
           <BackofficeButton
             disabled={Boolean(selectedConfig.archived_at) || selectedSyncInProgress}
             icon={<Icon name="gear" size={16} />}
@@ -754,6 +960,10 @@ export function MailboxPage({
 
       <div className="mailbox-operation-facts">
         <div>
+          <span>连接方式</span>
+          <strong>{mailboxAuthenticationModeLabel(selectedConfig.authentication_mode)}</strong>
+        </div>
+        <div>
           <span>开始接收</span>
           <strong>{selectedConfig.import_started_at ? formatLibraryDate(selectedConfig.import_started_at) : "正在初始化"}</strong>
         </div>
@@ -763,14 +973,22 @@ export function MailboxPage({
         </div>
         <div>
           <span>后台同步</span>
-          <strong>{selectedSyncJob ? mailboxBackgroundJobStatusLabel(selectedSyncJob) : selectedConfig.enabled ? "已启用" : "已暂停"}</strong>
-        </div>
-        <div>
-          <span>内容保留</span>
-          <strong>{retention ? mailboxRetentionPolicyLabel(retention.retention_policy) : "正在读取"}</strong>
+          <strong>{selectedSyncJob ? mailboxBackgroundJobStatusLabel(selectedSyncJob) : selectedMailboxCanSync ? "已启用" : selectedConfig.enabled ? "等待授权" : "已暂停"}</strong>
         </div>
       </div>
 
+      {selectedConfig.authentication_mode === "oauth2" && selectedConfig.authorization_status === "reauthorization_required" && (
+        <div className="mailbox-operation-alert" role="alert">
+          <Icon name="activity" size={16} />
+          <span>邮箱授权已失效。重新授权后会恢复原通道的同步，历史入库记录与收件起点不会改变。</span>
+        </div>
+      )}
+      {selectedConfig.authorization_status === "unavailable" && (
+        <div className="mailbox-operation-alert is-warning" role="alert">
+          <Icon name="activity" size={16} />
+          <span>该服务商当前未在部署环境启用。系统不会尝试同步，请联系部署管理员完成配置。</span>
+        </div>
+      )}
       {selectedConfig.active_sync_alert && (
         <div className="mailbox-operation-alert" role="alert">
           <Icon name="activity" size={16} />
@@ -797,7 +1015,7 @@ export function MailboxPage({
               新建收件通道
             </BackofficeButton>
             <BackofficeButton
-              disabled={loading || saving || enqueuingAll || !mailboxes.some((item) => item.enabled && !item.archived_at)}
+              disabled={loading || saving || enqueuingAll || !mailboxes.some(mailboxCanSync)}
               icon={activeSyncMailboxIds.size ? <i className="spinner" /> : <Icon name="refresh" size={16} />}
               loading={enqueuingAll}
               onClick={() => void syncAllMailboxes()}
@@ -821,30 +1039,41 @@ export function MailboxPage({
           <div className="mailbox-sync-alert-items">
             {activeSyncAlerts.map((config) => {
               const alert = config.active_sync_alert!;
-              const canSync = config.enabled
-                && !config.archived_at
+              const canSync = mailboxCanSync(config)
                 && enqueuingMailboxId !== config.mailbox_id
                 && !activeSyncMailboxIds.has(config.mailbox_id);
               return (
-                <div className="mailbox-sync-alert-item" key={config.mailbox_id}>
-                  <div>
-                    <strong>{config.display_name}</strong>
-                    <span>{mailboxSyncAlertTitle(config)}，连续失败的后台同步任务 {alert.consecutive_failures} 次，最近一次 {formatLibraryDate(alert.last_failed_at)}。</span>
+              <div className="mailbox-sync-alert-item" key={config.mailbox_id}>
+                <div>
+                  <strong>{config.display_name}</strong>
+                    <span>{config.authorization_status === "reauthorization_required" ? "邮箱授权已失效，重新授权后会恢复同步。" : `${mailboxSyncAlertTitle(config)}，连续失败的后台同步任务 ${alert.consecutive_failures} 次，最近一次 ${formatLibraryDate(alert.last_failed_at)}。`}</span>
                     <small>{mailboxImportErrorLabel(alert.last_error_code)}</small>
                   </div>
-                  <BackofficeButton
-                    disabled={!canSync}
-                    icon={activeSyncMailboxIds.has(config.mailbox_id) ? undefined : <Icon name="refresh" size={16} />}
-                    loading={enqueuingMailboxId === config.mailbox_id || activeSyncMailboxIds.has(config.mailbox_id)}
-                    onClick={() => void syncMailbox(config)}
-                    tone="danger"
-                  >
-                    {enqueuingMailboxId === config.mailbox_id
-                      ? "正在加入队列"
-                      : activeSyncMailboxIds.has(config.mailbox_id)
-                        ? "后台同步中"
-                        : "同步此通道"}
-                  </BackofficeButton>
+                  {mailboxRequiresAuthorization(config) ? (
+                    <BackofficeButton
+                      disabled={Boolean(config.archived_at)}
+                      icon={<Icon name="arrow-right" size={16} />}
+                      loading={reauthorizingMailboxId === config.mailbox_id}
+                      onClick={() => void reauthorizeMailbox(config)}
+                      tone="primary"
+                    >
+                      {reauthorizingMailboxId === config.mailbox_id ? "正在前往授权" : "重新授权"}
+                    </BackofficeButton>
+                  ) : (
+                    <BackofficeButton
+                      disabled={!canSync}
+                      icon={activeSyncMailboxIds.has(config.mailbox_id) ? undefined : <Icon name="refresh" size={16} />}
+                      loading={enqueuingMailboxId === config.mailbox_id || activeSyncMailboxIds.has(config.mailbox_id)}
+                      onClick={() => void syncMailbox(config)}
+                      tone="danger"
+                    >
+                      {enqueuingMailboxId === config.mailbox_id
+                        ? "正在加入队列"
+                        : activeSyncMailboxIds.has(config.mailbox_id)
+                          ? "后台同步中"
+                          : "同步此通道"}
+                    </BackofficeButton>
+                  )}
                 </div>
               );
             })}

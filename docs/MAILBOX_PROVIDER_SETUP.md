@@ -2,7 +2,7 @@
 
 本文说明工作区管理员如何把招聘收件邮箱接入 GreatSell AI 招聘工具，以及部署管理员如何启用 Google 和 Microsoft 的 OAuth。它只涵盖收取简历附件，不涉及自动回复、拒信、邀约或发件邮箱配置。
 
-> 当前交付边界：本轮先交付服务商目录、IMAP/OAuth 后端、迁移和安全测试。邮箱设置前端正在重构，因此“选择服务商”和“Google/Microsoft 授权按钮”会在后续前端 PR 接入；在此之前，现有界面维持原有邮箱配置能力。以下用户流程是前端接入后的正式操作说明，部署管理员可先完成服务端配置与测试。
+> 当前交付边界：服务商目录、IMAP/OAuth 后端、迁移、安全测试与邮箱设置前端均已接入同一变更集。工作区管理员在“设置 → 收件邮箱”中选择服务商，再按页面引导使用授权码或 Google/Microsoft 网页授权；页面不会暴露或接收任意 IMAP 主机、端口或 OAuth 密钥。
 
 > 生产启用前提：本 PR 不修改 `compose.yml` 或任何生产环境文件。部署负责人需要在共享的 API/Worker/Migrate 环境中透传本文列出的邮箱变量；否则授权码服务商仍可按现有密钥运行，而 Gmail / Microsoft 会在服务商列表中显示为“不可用”，不会半配置后误发起授权。
 
@@ -38,7 +38,7 @@ https://hr.greatsellai.net/v1/mailbox-oauth/callback
 
 兼容入口 `https://greatsellai.net/greatsellhr/` 可以发起授权；浏览器会用短期、安全 Cookie 把流程交给上述主入口，完成后落在 `hr.greatsellai.net`。OAuth 不会把授权 code、state、token 或错误详情带回前端 URL。若部署把主入口或回调地址改为不属于同一受控域名的地址，后端会安全拒绝启动，而不是创建无法完成的授权。
 
-前端接入时：
+页面工作方式：
 
 1. 读取 `GET /v1/mailbox-providers`，按 `available` 和 `authentication_mode` 展示服务商。
 2. `POST /v1/mailbox-oauth/start` 或 `POST /v1/mailboxes/{mailbox_id}/oauth/reauthorize` 得到 `authorization_url` 后，使用整页跳转。
@@ -47,8 +47,8 @@ https://hr.greatsellai.net/v1/mailbox-oauth/callback
 
 ## 工作区管理员：创建收件通道
 
-1. 以工作区管理员身份进入“邮箱附件入库”。
-2. 点击“新增收件邮箱”，填写通道名称并选择服务商。
+1. 以工作区管理员身份进入“设置 → 收件邮箱”。
+2. 点击“新建收件通道”，填写通道名称并选择服务商。
 3. 填写接收邮箱和文件夹。通常使用 `INBOX`；如果服务商对文件夹名称有特殊要求，按该服务商显示的实际名称填写。
 4. 按服务商类型完成授权：
    - 授权码服务商：粘贴**专用授权码/客户端专用密码**，不要粘贴网页登录密码。

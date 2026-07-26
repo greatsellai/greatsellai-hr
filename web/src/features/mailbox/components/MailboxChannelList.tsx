@@ -3,8 +3,10 @@ import type { MailboxConfig } from "../../../types";
 import { BackofficeButton } from "../../../backoffice/ui/BackofficeButton";
 import { TableSkeleton } from "../../../backoffice/ui/TableSkeleton";
 import {
+  mailboxAuthenticationModeLabel,
   mailboxChannelStatus,
   mailboxChannelStatusClass,
+  mailboxProviderDisplayName,
 } from "../mailbox-model";
 
 interface MailboxChannelListProps {
@@ -52,6 +54,9 @@ export function MailboxChannelList({
               >
                 <span className="mailbox-channel-copy">
                   <strong>{config.display_name}</strong>
+                  <span className="mailbox-channel-provider">
+                    {mailboxProviderDisplayName(config)} · {mailboxAuthenticationModeLabel(config.authentication_mode)}
+                  </span>
                   <span>{config.email_address || "尚未配置接收邮箱"}</span>
                 </span>
                 <span className={`status-pill${mailboxChannelStatusClass(config)}`}>

@@ -145,6 +145,23 @@ function humanizeError(error: unknown): string {
       mailbox_source_epoch_changed:
         "邮箱来源标识已变化，系统已暂停该通道。请归档后新建收件通道。",
       mailbox_password_required: "首次配置需要填写邮箱授权码。",
+      mailbox_provider_required: "请先选择一个已启用的邮箱服务商。",
+      mailbox_provider_not_supported: "该邮箱服务商当前不受支持，请选择列表中的服务商。",
+      mailbox_provider_not_available: "该邮箱服务商尚未在当前部署启用，请联系部署管理员。",
+      mailbox_provider_endpoint_mismatch: "该服务商的固定连接配置不匹配，请重新选择服务商。",
+      mailbox_provider_change_requires_new_connection:
+        "服务商不能在原通道中切换，请新建一个收件通道。",
+      mailbox_provider_oauth_not_supported: "这个收件通道不支持网页授权。",
+      mailbox_provider_authentication_transition_requires_oauth:
+        "这个通道的授权方式不能直接切换，请新建一个收件通道。",
+      mailbox_oauth_connection_required: "请先完成邮箱网页授权后再同步。",
+      mailbox_oauth_not_configured: "该邮箱服务商尚未在当前部署启用，请联系部署管理员。",
+      mailbox_oauth_callback_origin_invalid:
+        "当前访问入口无法完成授权回调，请从正式招聘工作台重新发起授权。",
+      mailbox_oauth_reauthorization_required:
+        "邮箱授权已失效，请重新授权。历史入库记录不会受影响。",
+      mailbox_oauth_token_exchange_failed: "邮箱授权服务暂时不可用，请稍后重新授权。",
+      mailbox_credentials_key_not_configured: "邮箱凭据服务尚未配置，请联系部署管理员。",
       mailbox_credentials_unavailable: "邮箱授权码无法读取，请重新保存后再同步。",
       mailbox_connection_failed: "无法连接邮箱，请检查 IMAP 地址、端口和授权码。",
       mailbox_select_failed: "无法打开指定的邮箱文件夹。",

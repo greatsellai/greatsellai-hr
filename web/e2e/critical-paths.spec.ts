@@ -953,10 +953,24 @@ test.describe("招聘工作台关键路径", () => {
     expect(await gridTrackCount(".mailbox-setup-shell")).toBe(1);
     await expect(page.getByRole("heading", { name: "收件通道" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "附件入库记录" })).toHaveCount(0);
+    await expect(page.getByText("系统固定使用经过审核的加密连接，不开放自定义服务器地址或端口。"))
+      .toBeVisible();
+    await expect(page.locator("#imap-host")).toHaveCount(0);
+    await expect(page.locator("#imap-port")).toHaveCount(0);
+    await expect(page.getByRole("radio", { name: /Gmail \/ Google Workspace/ })).toBeDisabled();
+    await page.getByRole("radio", { name: /飞书邮箱/ }).click();
     await page.locator("#mailbox-display-name").fill("E2E 收件通道");
     await page.locator("#imap-address").fill("e2e-inbox@example.test");
     await page.locator("#imap-password").fill("e2e-local-imap-authorization-code");
+    const createMailboxRequest = page.waitForRequest((request) => {
+      const { pathname } = new URL(request.url());
+      return request.method() === "POST" && pathname === "/v1/mailboxes";
+    });
     await page.getByRole("button", { name: /^(保存收件通道|创建并开始接收)$/ }).click();
+    const createPayload = createMailboxRequest.then((request) => request.postDataJSON() as Record<string, unknown>);
+    await expect(createPayload).resolves.toMatchObject({ provider_key: "feishu_app_password" });
+    await expect(createPayload).resolves.not.toHaveProperty("imap_host");
+    await expect(createPayload).resolves.not.toHaveProperty("imap_port");
     await expect(page.getByText("收件通道已创建，只会入库从现在起收到的附件。")).toBeVisible();
     await expect(page.getByRole("heading", { name: "E2E 收件通道" })).toBeVisible();
     await expect(page.getByLabel("来源", { exact: true })).toContainText("E2E 收件通道");
@@ -995,5 +1009,70 @@ test.describe("招聘工作台关键路径", () => {
 
     await page.reload();
     await expect(page.getByRole("tab", { name: "收件邮箱", exact: true })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("OAuth 返回失败会保留收件设置定位并清理回调参数", async ({ page }) => {
+    await registerAndVerify(page, "mailbox-oauth-return");
+    await page.goto("/?mailbox_oauth=failed&mailbox_provider=gmail_oauth#settings/mailbox");
+
+    await expect(page.getByRole("heading", { name: "收件邮箱", exact: true })).toBeVisible();
+    await expect(page.getByText("邮箱授权没有完成。你可以检查服务商设置后重新发起授权。")).toBeVisible();
+    await expect(page).toHaveURL(/\/#settings\/mailbox$/);
+  });
+
+  test("OAuth 服务商不显示授权码并通过整页跳转开始授权", async ({ page }) => {
+    const oauthLandingPath = "/__e2e__/mailbox-oauth-provider";
+    await page.route("**/v1/mailbox-providers", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              provider_key: "gmail_oauth",
+              display_name: "Gmail / Google Workspace",
+              authentication_mode: "oauth2",
+              available: true,
+              imap_host: "imap.gmail.com",
+              imap_port: 993,
+              default_mailbox: "INBOX",
+              credential_label: "Google 授权",
+              help_text: "通过 Google 登录授权，不收集或保存 Google 登录密码。",
+            },
+          ],
+        }),
+      });
+    });
+    await page.route("**/v1/mailbox-oauth/start", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ authorization_url: `${new URL(oauthLandingPath, page.url()).toString()}` }),
+      });
+    });
+    await page.route(`**${oauthLandingPath}`, async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<main>Mock OAuth provider</main>" });
+    });
+
+    await registerAndVerify(page, "mailbox-oauth");
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("radio", { name: /Gmail \/ Google Workspace/ }).click();
+    await page.locator("#mailbox-display-name").fill("E2E Google 收件通道");
+    await page.locator("#imap-address").fill("e2e-google@example.test");
+    await expect(page.locator("#imap-password")).toHaveCount(0);
+    await expect(page.getByText("Gmail / Google Workspace 网页授权")).toBeVisible();
+
+    const oauthRequest = page.waitForRequest((request) => {
+      const { pathname } = new URL(request.url());
+      return request.method() === "POST" && pathname === "/v1/mailbox-oauth/start";
+    });
+    await page.getByRole("button", { name: "前往 Gmail / Google Workspace 授权" }).click();
+    const oauthPayload = oauthRequest.then((request) => request.postDataJSON() as Record<string, unknown>);
+    await expect(oauthPayload).resolves.toMatchObject({
+      provider_key: "gmail_oauth",
+      display_name: "E2E Google 收件通道",
+      email_address: "e2e-google@example.test",
+      mailbox: "INBOX",
+    });
+    await expect(oauthPayload).resolves.not.toHaveProperty("password");
+    await expect(page).toHaveURL(new RegExp(`${oauthLandingPath}$`));
   });
 });

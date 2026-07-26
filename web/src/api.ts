@@ -35,6 +35,9 @@ import type {
   MailboxConfigCreate,
   MailboxConfigList,
   MailboxConfigPatch,
+  MailboxOAuthStartRequest,
+  MailboxOAuthStartResponse,
+  MailboxProviderList,
   MailboxBackgroundJob,
   MailboxBackgroundJobBatch,
   MailboxBackgroundJobHistory,
@@ -319,6 +322,24 @@ export function createApiClient(options: ApiClientOptions = {}) {
     listMailboxConfigs(includeArchived = false): Promise<MailboxConfigList> {
       const query = includeArchived ? "?include_archived=true" : "";
       return request<MailboxConfigList>(`/mailboxes${query}`);
+    },
+
+    listMailboxProviders(): Promise<MailboxProviderList> {
+      return request<MailboxProviderList>("/mailbox-providers");
+    },
+
+    startMailboxOAuth(input: MailboxOAuthStartRequest): Promise<MailboxOAuthStartResponse> {
+      return request<MailboxOAuthStartResponse>("/mailbox-oauth/start", {
+        method: "POST",
+        body: input,
+      });
+    },
+
+    reauthorizeMailboxOAuth(mailboxId: string): Promise<MailboxOAuthStartResponse> {
+      return request<MailboxOAuthStartResponse>(
+        `/mailboxes/${resourcePath(mailboxId)}/oauth/reauthorize`,
+        { method: "POST" },
+      );
     },
 
     getMailboxConfig(mailboxId: string): Promise<MailboxConfig> {

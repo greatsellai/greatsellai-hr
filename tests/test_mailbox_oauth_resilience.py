@@ -24,8 +24,13 @@ from app.services.mailbox_background_job_service import (
 from app.services.mailbox_import_service import (
     MailboxImportError,
     cleanup_expired_mailbox_oauth_intents,
+    sync_mailbox,
 )
-from app.services.mailbox_oauth_service import MailboxOAuthError, refresh_access_token
+from app.services.mailbox_oauth_service import (
+    MailboxOAuthError,
+    OAuthAccessTokenRefresh,
+    refresh_access_token,
+)
 from app.tenant_scope import LEGACY_ORGANIZATION_ID, set_organization_context
 
 
@@ -121,6 +126,220 @@ def test_invalid_grant_and_imap_oauth_denial_require_reauthorization(tmp_path, m
             ),
         )
     assert _retryable_error("mailbox_oauth_reauthorization_required") is False
+
+
+def test_refresh_response_preserves_optional_provider_rotated_refresh_token(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = replace(
+        _oauth_settings(tmp_path),
+        mailbox_imap_allowed_hosts=("outlook.office365.com",),
+        mailbox_microsoft_oauth_client_id="microsoft-client-id-for-tests",
+        mailbox_microsoft_oauth_client_secret="microsoft-client-secret-for-tests",
+        mailbox_microsoft_oauth_redirect_uri="http://testserver/v1/mailbox-oauth/callback",
+    )
+
+    class TokenResponse:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.payload
+
+    monkeypatch.setattr(
+        mailbox_oauth_service,
+        "urlopen",
+        lambda *args, **kwargs: TokenResponse(
+            b'{"access_token":"microsoft-access-token","refresh_token":"microsoft-r1"}'
+        ),
+    )
+    rotated = refresh_access_token(
+        settings,
+        provider_key="microsoft_oauth",
+        refresh_token="microsoft-r0",
+    )
+    assert rotated == OAuthAccessTokenRefresh(
+        access_token="microsoft-access-token",
+        replacement_refresh_token="microsoft-r1",
+    )
+
+    monkeypatch.setattr(
+        mailbox_oauth_service,
+        "urlopen",
+        lambda *args, **kwargs: TokenResponse(b'{"access_token":"microsoft-access-token"}'),
+    )
+    unchanged = refresh_access_token(
+        settings,
+        provider_key="microsoft_oauth",
+        refresh_token="microsoft-r1",
+    )
+    assert unchanged.replacement_refresh_token is None
+
+    monkeypatch.setattr(
+        mailbox_oauth_service,
+        "urlopen",
+        lambda *args, **kwargs: TokenResponse(
+            b'{"access_token":"microsoft-access-token","refresh_token":""}'
+        ),
+    )
+    with pytest.raises(MailboxOAuthError, match="mailbox_oauth_token_exchange_failed"):
+        refresh_access_token(
+            settings,
+            provider_key="microsoft_oauth",
+            refresh_token="microsoft-r1",
+        )
+
+
+def test_rotated_refresh_token_survives_sync_imap_failure(client, monkeypatch) -> None:
+    """A post-refresh IMAP failure must not restore a now-revoked token."""
+
+    class DenyingImapClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def authenticate(self, mechanism: str, callback) -> tuple[str, list[bytes]]:
+            assert mechanism == "XOAUTH2"
+            assert callback(b"").startswith(b"user=")
+            return "NO", [b"denied"]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    database = client.app.state.database
+    settings = client.app.state.settings
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        config = MailboxConfig(
+            display_name="Microsoft rotation test",
+            display_name_key="microsoft rotation test",
+            provider_key="microsoft_oauth",
+            authentication_mode="oauth2",
+            imap_host="outlook.office365.com",
+            imap_port=993,
+            email_address="rotation@example.test",
+            mailbox="INBOX",
+            encrypted_password=None,
+            enabled=True,
+            import_start_uid=42,
+            imap_uidvalidity=9,
+        )
+        session.add(config)
+        session.flush()
+        session.add(
+            MailboxOAuthCredential(
+                organization_id=LEGACY_ORGANIZATION_ID,
+                mailbox_config_id=config.id,
+                encrypted_refresh_token=mailbox_import_service._encrypt_mailbox_secret(
+                    settings,
+                    "microsoft-r0",
+                ),
+                reauthorization_required_at=None,
+                last_error_code=None,
+            )
+        )
+        session.commit()
+        config_id = config.id
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", DenyingImapClient)
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "refresh_access_token",
+        lambda *args, **kwargs: OAuthAccessTokenRefresh(
+            access_token="microsoft-access-token",
+            replacement_refresh_token="microsoft-r1",
+        ),
+    )
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        with pytest.raises(MailboxImportError, match="mailbox_oauth_reauthorization_required"):
+            sync_mailbox(session, settings=settings, config_id=config_id)
+
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        credential = session.scalar(
+            select(MailboxOAuthCredential).where(
+                MailboxOAuthCredential.mailbox_config_id == config_id
+            )
+        )
+        assert credential is not None
+        assert (
+            mailbox_import_service._decrypt_mailbox_secret(
+                settings,
+                credential.encrypted_refresh_token,
+            )
+            == "microsoft-r1"
+        )
+        assert credential.reauthorization_required_at is not None
+        assert credential.last_error_code == "mailbox_oauth_reauthorization_required"
+
+
+def test_late_refresh_rotation_cannot_overwrite_newer_persisted_token(client) -> None:
+    database = client.app.state.database
+    settings = client.app.state.settings
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        config = MailboxConfig(
+            display_name="OAuth rotation compare-and-swap test",
+            display_name_key="oauth rotation compare-and-swap test",
+            provider_key="microsoft_oauth",
+            authentication_mode="oauth2",
+            imap_host="outlook.office365.com",
+            imap_port=993,
+            email_address="rotation-cas@example.test",
+            mailbox="INBOX",
+            encrypted_password=None,
+            enabled=True,
+            import_start_uid=42,
+            imap_uidvalidity=9,
+        )
+        session.add(config)
+        session.flush()
+        session.add(
+            MailboxOAuthCredential(
+                organization_id=LEGACY_ORGANIZATION_ID,
+                mailbox_config_id=config.id,
+                encrypted_refresh_token=mailbox_import_service._encrypt_mailbox_secret(
+                    settings,
+                    "microsoft-r2",
+                ),
+                reauthorization_required_at=None,
+                last_error_code=None,
+            )
+        )
+        session.commit()
+        config_id = config.id
+
+        persisted = mailbox_import_service._persist_rotated_oauth_refresh_token(
+            session,
+            settings=settings,
+            config=config,
+            previous_refresh_token="microsoft-r0",
+            replacement_refresh_token="microsoft-r1",
+        )
+        assert persisted is False
+
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        credential = session.scalar(
+            select(MailboxOAuthCredential).where(
+                MailboxOAuthCredential.mailbox_config_id == config_id
+            )
+        )
+        assert credential is not None
+        assert (
+            mailbox_import_service._decrypt_mailbox_secret(
+                settings,
+                credential.encrypted_refresh_token,
+            )
+            == "microsoft-r2"
+        )
 
 
 def test_due_scheduler_skips_oauth_mailbox_waiting_for_reauthorization(client) -> None:

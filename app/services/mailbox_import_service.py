@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import imaplib
 import re
 import unicodedata
@@ -118,9 +119,15 @@ class _ContentClaimLost(MailboxImportError):
     """A newer mailbox attachment owns this content identity now."""
 
 
-@dataclass(frozen=True)
+@dataclass
 class _MailboxCredential:
-    """One in-memory credential, never serialized into a response or log."""
+    """One in-memory credential, never serialized into a response or log.
+
+    An OAuth refresh may rotate this value before the next IMAP operation.
+    The mutable value lets first-connect and reauthorization validation carry
+    the replacement into their final encrypted write without retaining it in a
+    response or log.
+    """
 
     authentication_mode: Literal["app_password", "oauth2"]
     secret: str
@@ -242,6 +249,7 @@ def _authenticate_imap_client(
     provider_key: str,
     email_address: str,
     credential: _MailboxCredential,
+    on_oauth_refresh_token_rotated: Callable[[str, str], None] | None = None,
 ) -> tuple[str, list[bytes]]:
     """Use login for app passwords and SASL XOAUTH2 for OAuth channels."""
 
@@ -252,7 +260,7 @@ def _authenticate_imap_client(
             password=credential.secret,
         )
     try:
-        access_token = refresh_access_token(
+        refresh_result = refresh_access_token(
             settings,
             provider_key=provider_key,
             refresh_token=credential.secret,
@@ -269,6 +277,30 @@ def _authenticate_imap_client(
         # Network, timeout and 5xx token endpoint failures are retryable.
         # Do not turn a temporary provider outage into a recruiter action.
         raise MailboxImportError("mailbox_oauth_token_exchange_failed") from exc
+    # Existing test doubles and plugin integrations returned a bare access
+    # token before refresh-token rotation support landed. Treat that legacy
+    # shape as "no replacement" while the production implementation returns
+    # the structured result below.
+    if isinstance(refresh_result, str):
+        access_token = refresh_result
+        replacement_refresh_token = None
+    else:
+        access_token = refresh_result.access_token
+        replacement_refresh_token = refresh_result.replacement_refresh_token
+    if (
+        replacement_refresh_token is not None
+        and not hmac.compare_digest(replacement_refresh_token, credential.secret)
+    ):
+        previous_refresh_token = credential.secret
+        # This callback intentionally runs before XOAUTH2. Microsoft may
+        # invalidate the previous token at refresh time, so waiting until a
+        # later IMAP status/read succeeds could lose a valid replacement.
+        if on_oauth_refresh_token_rotated is not None:
+            on_oauth_refresh_token_rotated(
+                previous_refresh_token,
+                replacement_refresh_token,
+            )
+        credential.secret = replacement_refresh_token
     try:
         login_status, login_data = _login_imap_client_with_oauth(
             client,
@@ -503,6 +535,7 @@ def _read_initial_mailbox_watermark(
     email_address: str,
     mailbox: str,
     credential: _MailboxCredential,
+    on_oauth_refresh_token_rotated: Callable[[str, str], None] | None = None,
 ) -> tuple[int, int]:
     """Authenticate once while binding and capture the starting UIDNEXT.
 
@@ -529,6 +562,7 @@ def _read_initial_mailbox_watermark(
             provider_key=provider_key,
             email_address=email_address,
             credential=credential,
+            on_oauth_refresh_token_rotated=on_oauth_refresh_token_rotated,
         )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
@@ -1002,6 +1036,135 @@ def _store_oauth_refresh_token(
         credential.last_error_code = None
 
 
+def _persist_rotated_oauth_refresh_token(
+    session: Session,
+    *,
+    settings: AppSettings,
+    config: MailboxConfig,
+    previous_refresh_token: str,
+    replacement_refresh_token: str,
+) -> bool:
+    """Durably replace one provider-rotated OAuth refresh token.
+
+    This is deliberately narrower than ``_store_oauth_refresh_token``: a
+    successful token refresh is not proof that the subsequent IMAP login is
+    healthy, so it must not clear a pending reauthorization state.  The Core
+    update compares the current encrypted value to avoid a late sync or retry
+    overwriting a token that another successful refresh already replaced.
+
+    Callers invoke this before XOAUTH2 while their own lease/claim is already
+    committed.  The immediate commit is intentional: outer sync/retry error
+    handlers roll back failed IMAP work, and must not roll back the only valid
+    replacement refresh token with it.
+    """
+
+    if (
+        config.authentication_mode != "oauth2"
+        or hmac.compare_digest(previous_refresh_token, replacement_refresh_token)
+    ):
+        return False
+    credential = _oauth_credential_or_error(session, config=config)
+    expected_encrypted_refresh_token = credential.encrypted_refresh_token
+    current_refresh_token = _decrypt_mailbox_secret(
+        settings,
+        expected_encrypted_refresh_token,
+    )
+    if not hmac.compare_digest(current_refresh_token, previous_refresh_token):
+        # Another worker has already persisted a newer refresh result. Do not
+        # overwrite it with a late completion from this request.
+        return False
+    persisted = session.execute(
+        update(MailboxOAuthCredential)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxOAuthCredential.id == credential.id,
+            MailboxOAuthCredential.organization_id == config.organization_id,
+            MailboxOAuthCredential.mailbox_config_id == config.id,
+            MailboxOAuthCredential.encrypted_refresh_token
+            == expected_encrypted_refresh_token,
+        )
+        .values(
+            encrypted_refresh_token=_encrypt_mailbox_secret(
+                settings,
+                replacement_refresh_token,
+            ),
+            updated_at=_utcnow(),
+        )
+    )
+    if persisted.rowcount != 1:
+        session.rollback()
+        session.expire_all()
+        return False
+    session.commit()
+    session.expire_all()
+    return True
+
+
+def _persist_pending_oauth_reauthorization_token(
+    session: Session,
+    *,
+    settings: AppSettings,
+    config: MailboxConfig,
+    refresh_token: str,
+) -> bool:
+    """Stage a newly authorized refresh token without declaring IMAP healthy.
+
+    A reauthorization-code exchange produces a new token that is not yet in
+    the credential row. Store it before the verification refresh/login so a
+    provider rotation cannot strand the channel on the prior revoked token if
+    IMAP subsequently fails. The compare-and-swap makes an older callback
+    yield to a newer completed reauthorization instead of overwriting it.
+    """
+
+    if config.authentication_mode != "oauth2":
+        return False
+    credential = session.scalar(
+        select(MailboxOAuthCredential).where(
+            MailboxOAuthCredential.mailbox_config_id == config.id,
+            MailboxOAuthCredential.organization_id == config.organization_id,
+        )
+    )
+    if credential is None:
+        # Older data can contain an OAuth channel that has lost its child
+        # credential row. A freshly completed, state-bound authorization is a
+        # safe recovery path; keep it marked pending until IMAP verifies it.
+        session.add(
+            MailboxOAuthCredential(
+                organization_id=config.organization_id,
+                mailbox_config_id=config.id,
+                encrypted_refresh_token=_encrypt_mailbox_secret(settings, refresh_token),
+                reauthorization_required_at=_utcnow(),
+                last_error_code="mailbox_oauth_reauthorization_required",
+            )
+        )
+        session.commit()
+        session.expire_all()
+        return True
+    expected_encrypted_refresh_token = credential.encrypted_refresh_token
+    persisted = session.execute(
+        update(MailboxOAuthCredential)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxOAuthCredential.id == credential.id,
+            MailboxOAuthCredential.organization_id == config.organization_id,
+            MailboxOAuthCredential.mailbox_config_id == config.id,
+            MailboxOAuthCredential.encrypted_refresh_token
+            == expected_encrypted_refresh_token,
+        )
+        .values(
+            encrypted_refresh_token=_encrypt_mailbox_secret(settings, refresh_token),
+            updated_at=_utcnow(),
+        )
+    )
+    if persisted.rowcount != 1:
+        session.rollback()
+        session.expire_all()
+        return False
+    session.commit()
+    session.expire_all()
+    return True
+
+
 def _update_config_values(
     session: Session,
     *,
@@ -1111,6 +1274,20 @@ def _update_config_values(
         binding_credential = None
     if needs_watermark:
         assert binding_credential is not None
+
+        def persist_binding_refresh_rotation(
+            previous_refresh_token: str,
+            replacement_refresh_token: str,
+        ) -> None:
+            if config is not None:
+                _persist_rotated_oauth_refresh_token(
+                    session,
+                    settings=settings,
+                    config=config,
+                    previous_refresh_token=previous_refresh_token,
+                    replacement_refresh_token=replacement_refresh_token,
+                )
+
         imap_uidvalidity, import_start_uid = _read_initial_mailbox_watermark(
             settings=settings,
             provider_key=resolved_provider_key,
@@ -1119,6 +1296,7 @@ def _update_config_values(
             email_address=normalized_email,
             mailbox=normalized_mailbox,
             credential=binding_credential,
+            on_oauth_refresh_token_rotated=persist_binding_refresh_rotation,
         )
         import_started_at = _utcnow()
     else:
@@ -1376,6 +1554,21 @@ def start_mailbox_oauth_connection(
     )
 
 
+def mailbox_oauth_reauthorization_provider_key(
+    session: Session,
+    *,
+    config_id: str,
+) -> str:
+    """Resolve one current-workspace OAuth channel before browser redirect."""
+
+    config = _mailbox_config_or_error(session, config_id=config_id)
+    if config.archived_at is not None:
+        raise MailboxImportError("mailbox_config_archived")
+    if config.authentication_mode != "oauth2":
+        raise MailboxImportError("mailbox_provider_oauth_not_supported")
+    return _effective_provider_key(config)
+
+
 def start_mailbox_oauth_reauthorization(
     session: Session,
     *,
@@ -1409,6 +1602,7 @@ def _verify_mailbox_connection(
     email_address: str,
     mailbox: str,
     credential: _MailboxCredential,
+    on_oauth_refresh_token_rotated: Callable[[str, str], None] | None = None,
 ) -> None:
     """Validate a reauthorization without altering its original watermark."""
 
@@ -1426,6 +1620,7 @@ def _verify_mailbox_connection(
             provider_key=provider_key,
             email_address=email_address,
             credential=credential,
+            on_oauth_refresh_token_rotated=on_oauth_refresh_token_rotated,
         )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")
@@ -1554,6 +1749,26 @@ def complete_mailbox_oauth_connection(
             or config.mailbox != intent.mailbox
         ):
             raise MailboxImportError("mailbox_oauth_callback_invalid")
+        if not _persist_pending_oauth_reauthorization_token(
+            session,
+            settings=settings,
+            config=config,
+            refresh_token=credential.secret,
+        ):
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
+
+        def persist_reauthorization_refresh_rotation(
+            previous_refresh_token: str,
+            replacement_refresh_token: str,
+        ) -> None:
+            _persist_rotated_oauth_refresh_token(
+                session,
+                settings=settings,
+                config=config,
+                previous_refresh_token=previous_refresh_token,
+                replacement_refresh_token=replacement_refresh_token,
+            )
+
         _verify_mailbox_connection(
             settings=settings,
             provider_key=intent.provider_key,
@@ -1562,6 +1777,7 @@ def complete_mailbox_oauth_connection(
             email_address=config.email_address,
             mailbox=config.mailbox,
             credential=credential,
+            on_oauth_refresh_token_rotated=persist_reauthorization_refresh_rotation,
         )
         config = _update_config_values(
             session,
@@ -3488,6 +3704,16 @@ def retry_mailbox_attachment(
                 provider_key=_effective_provider_key(config),
                 email_address=config.email_address,
                 credential=credential,
+                on_oauth_refresh_token_rotated=(
+                    lambda previous_refresh_token, replacement_refresh_token:
+                    _persist_rotated_oauth_refresh_token(
+                        session,
+                        settings=settings,
+                        config=config,
+                        previous_refresh_token=previous_refresh_token,
+                        replacement_refresh_token=replacement_refresh_token,
+                    )
+                ),
             )
             if login_status != "OK":
                 return complete(
@@ -3940,6 +4166,16 @@ def sync_mailbox(
             provider_key=_effective_provider_key(config),
             email_address=config.email_address,
             credential=credential,
+            on_oauth_refresh_token_rotated=(
+                lambda previous_refresh_token, replacement_refresh_token:
+                _persist_rotated_oauth_refresh_token(
+                    session,
+                    settings=settings,
+                    config=config,
+                    previous_refresh_token=previous_refresh_token,
+                    replacement_refresh_token=replacement_refresh_token,
+                )
+            ),
         )
         if login_status != "OK":
             raise MailboxImportError("mailbox_connection_failed")

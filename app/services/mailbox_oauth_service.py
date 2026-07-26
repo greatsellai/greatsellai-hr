@@ -32,6 +32,19 @@ class MailboxOAuthError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class OAuthAccessTokenRefresh:
+    """One in-memory access token and an optional provider-rotated secret.
+
+    Providers such as Microsoft can invalidate the previous refresh token as
+    part of a successful refresh.  The caller must durably replace that token
+    before doing any later work which could fail or roll back.
+    """
+
+    access_token: str
+    replacement_refresh_token: str | None = None
+
+
+@dataclass(frozen=True)
 class OAuthClientConfiguration:
     provider: MailboxProvider
     client_id: str
@@ -229,8 +242,14 @@ def refresh_access_token(
     *,
     provider_key: str,
     refresh_token: str,
-) -> str:
-    """Exchange encrypted-at-rest refresh material for an in-memory token."""
+) -> OAuthAccessTokenRefresh:
+    """Exchange refresh material for an access token and an optional replacement.
+
+    A missing replacement is valid: Google commonly keeps the previous
+    refresh token.  If a provider includes the field, however, it must be a
+    bounded non-empty string so a malformed response can never overwrite a
+    usable credential.
+    """
 
     if not refresh_token or len(refresh_token) > 8192:
         raise MailboxOAuthError("mailbox_oauth_reauthorization_required")
@@ -252,11 +271,26 @@ def refresh_access_token(
         # endpoint failure so the durable worker can retry before asking the
         # recruiter to authorize again.
         raise MailboxOAuthError("mailbox_oauth_token_exchange_failed")
-    return access_token.strip()
+    raw_replacement_refresh_token = response.get("refresh_token")
+    if raw_replacement_refresh_token is None:
+        replacement_refresh_token = None
+    elif (
+        not isinstance(raw_replacement_refresh_token, str)
+        or not raw_replacement_refresh_token.strip()
+        or len(raw_replacement_refresh_token) > 8192
+    ):
+        raise MailboxOAuthError("mailbox_oauth_token_exchange_failed")
+    else:
+        replacement_refresh_token = raw_replacement_refresh_token.strip()
+    return OAuthAccessTokenRefresh(
+        access_token=access_token.strip(),
+        replacement_refresh_token=replacement_refresh_token,
+    )
 
 
 __all__ = [
     "MailboxOAuthError",
+    "OAuthAccessTokenRefresh",
     "authorization_url",
     "create_oauth_state",
     "create_pkce_code_verifier",

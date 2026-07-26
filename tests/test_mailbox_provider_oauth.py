@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import AppSettings
 from app.main import create_app
 from app.models import MailboxConfig, MailboxOAuthConnectIntent, MailboxOAuthCredential
 from app.services import mailbox_import_service
+from app.services.mailbox_oauth_service import OAuthAccessTokenRefresh
+from app.tenant_scope import LEGACY_ORGANIZATION_ID, set_organization_context
 
 
 @pytest.fixture
@@ -334,6 +337,280 @@ def test_google_oauth_connection_is_one_time_and_never_returns_tokens(
     )
     assert replay.status_code == 303, replay.text
     assert "mailbox_oauth=failed" in replay.headers["location"]
+
+
+def test_oauth_reauthorization_uses_callback_binding_and_replaces_credentials(
+    oauth_client: TestClient,
+    monkeypatch,
+) -> None:
+    class OAuthImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def authenticate(self, mechanism: str, callback) -> tuple[str, list[bytes]]:
+            assert mechanism == "XOAUTH2"
+            assert callback(b"").startswith(b"user=")
+            return "OK", [b"authenticated"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    authorization_codes: list[str] = []
+
+    def exchange_code(*args, **kwargs) -> str:
+        authorization_code = str(kwargs["code"])
+        authorization_codes.append(authorization_code)
+        return {
+            "initial-code": "initial-refresh-token",
+            "reauthorize-code": "reauthorize-refresh-token",
+        }[authorization_code]
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", OAuthImap)
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "exchange_authorization_code",
+        exchange_code,
+    )
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "refresh_access_token",
+        lambda *args, **kwargs: OAuthAccessTokenRefresh(
+            access_token="access-token-for-reauthorization-test",
+            replacement_refresh_token={
+                "initial-refresh-token": "initial-rotated-refresh-token",
+                "reauthorize-refresh-token": "reauthorize-rotated-refresh-token",
+            }[str(kwargs["refresh_token"])],
+        ),
+    )
+
+    initial_start = oauth_client.post(
+        "/v1/mailbox-oauth/start",
+        json={
+            "provider_key": "gmail_oauth",
+            "display_name": "Google reauthorization test",
+            "email_address": "reauthorize@example.test",
+            "mailbox": "INBOX",
+        },
+    )
+    assert initial_start.status_code == 200, initial_start.text
+    initial_state = parse_qs(urlsplit(initial_start.json()["authorization_url"]).query)[
+        "state"
+    ][0]
+    initial_callback = oauth_client.get(
+        "/v1/mailbox-oauth/callback",
+        params={"state": initial_state, "code": "initial-code"},
+        follow_redirects=False,
+    )
+    assert initial_callback.status_code == 303, initial_callback.text
+
+    mailbox_id = oauth_client.get("/v1/mailboxes").json()["items"][0]["mailbox_id"]
+    with oauth_client.app.state.database.session_factory() as session:
+        config = session.scalar(select(MailboxConfig).where(MailboxConfig.id == mailbox_id))
+        credential = session.scalar(
+            select(MailboxOAuthCredential).where(
+                MailboxOAuthCredential.mailbox_config_id == mailbox_id
+            )
+        )
+        assert config is not None
+        assert credential is not None
+        original_watermark = (config.import_start_uid, config.imap_uidvalidity)
+        original_encrypted_refresh_token = credential.encrypted_refresh_token
+        credential.reauthorization_required_at = datetime.now(timezone.utc)
+        credential.last_error_code = "mailbox_oauth_reauthorization_required"
+        session.commit()
+
+    missing_cookie_start = oauth_client.post(
+        f"/v1/mailboxes/{mailbox_id}/oauth/reauthorize"
+    )
+    assert missing_cookie_start.status_code == 200, missing_cookie_start.text
+    missing_cookie_state = parse_qs(
+        urlsplit(missing_cookie_start.json()["authorization_url"]).query
+    )["state"][0]
+    assert missing_cookie_start.headers["cache-control"] == "no-store, private"
+    assert any(
+        "__Secure-resume_v3_mailbox_oauth=" in header
+        and "httponly" in header.casefold()
+        and "secure" in header.casefold()
+        and "samesite=lax" in header.casefold()
+        for header in missing_cookie_start.headers.get_list("set-cookie")
+    )
+    oauth_client.cookies.clear()
+    missing_cookie_callback = oauth_client.get(
+        "/v1/mailbox-oauth/callback",
+        params={"state": missing_cookie_state, "code": "must-not-be-exchanged"},
+        follow_redirects=False,
+    )
+    assert missing_cookie_callback.status_code == 303, missing_cookie_callback.text
+    assert "mailbox_oauth=failed" in missing_cookie_callback.headers["location"]
+    assert authorization_codes == ["initial-code"]
+    with oauth_client.app.state.database.session_factory() as session:
+        pending = session.scalar(
+            select(MailboxOAuthConnectIntent).where(
+                MailboxOAuthConnectIntent.state_hash
+                == mailbox_import_service.hashlib.sha256(
+                    missing_cookie_state.encode("utf-8")
+                ).hexdigest()
+            )
+        )
+        assert pending is not None
+        assert pending.consumed_at is None
+
+    reauthorize_start = oauth_client.post(
+        f"/v1/mailboxes/{mailbox_id}/oauth/reauthorize"
+    )
+    assert reauthorize_start.status_code == 200, reauthorize_start.text
+    reauthorize_state = parse_qs(
+        urlsplit(reauthorize_start.json()["authorization_url"]).query
+    )["state"][0]
+    reauthorize_callback = oauth_client.get(
+        "/v1/mailbox-oauth/callback",
+        params={"state": reauthorize_state, "code": "reauthorize-code"},
+        follow_redirects=False,
+    )
+    assert reauthorize_callback.status_code == 303, reauthorize_callback.text
+    assert "mailbox_oauth=connected" in reauthorize_callback.headers["location"]
+    assert authorization_codes == ["initial-code", "reauthorize-code"]
+    configured_mailboxes = oauth_client.get("/v1/mailboxes")
+    assert configured_mailboxes.status_code == 200, configured_mailboxes.text
+    assert configured_mailboxes.json()["total"] == 1
+    assert configured_mailboxes.json()["items"][0]["mailbox_id"] == mailbox_id
+
+    with oauth_client.app.state.database.session_factory() as session:
+        config = session.scalar(select(MailboxConfig).where(MailboxConfig.id == mailbox_id))
+        credential = session.scalar(
+            select(MailboxOAuthCredential).where(
+                MailboxOAuthCredential.mailbox_config_id == mailbox_id
+            )
+        )
+        assert config is not None
+        assert credential is not None
+        assert (config.import_start_uid, config.imap_uidvalidity) == original_watermark
+        assert credential.encrypted_refresh_token != original_encrypted_refresh_token
+        assert (
+            mailbox_import_service._decrypt_mailbox_secret(
+                oauth_client.app.state.settings,
+                credential.encrypted_refresh_token,
+            )
+            == "reauthorize-rotated-refresh-token"
+        )
+        assert credential.reauthorization_required_at is None
+        assert credential.last_error_code is None
+        intent_count_before_wrong_origin = session.scalar(
+            select(func.count()).select_from(MailboxOAuthConnectIntent)
+        )
+
+    wrong_origin = oauth_client.post(
+        f"/v1/mailboxes/{mailbox_id}/oauth/reauthorize",
+        headers={"host": "wrong.example.test"},
+    )
+    assert wrong_origin.status_code == 422, wrong_origin.text
+    assert wrong_origin.json()["detail"] == "mailbox_oauth_callback_origin_invalid"
+    with oauth_client.app.state.database.session_factory() as session:
+        assert (
+            session.scalar(
+                select(func.count()).select_from(MailboxOAuthConnectIntent)
+            )
+            == intent_count_before_wrong_origin
+        )
+
+
+def test_reauthorization_persists_rotated_token_when_imap_verification_fails(
+    oauth_client: TestClient,
+    monkeypatch,
+) -> None:
+    class DenyingImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def authenticate(self, mechanism: str, callback) -> tuple[str, list[bytes]]:
+            assert mechanism == "XOAUTH2"
+            assert callback(b"").startswith(b"user=")
+            return "NO", [b"denied"]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    database = oauth_client.app.state.database
+    settings = oauth_client.app.state.settings
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        config = MailboxConfig(
+            display_name="Failed reauthorization test",
+            display_name_key="failed reauthorization test",
+            provider_key="gmail_oauth",
+            authentication_mode="oauth2",
+            imap_host="imap.gmail.com",
+            imap_port=993,
+            email_address="failed-reauthorize@example.test",
+            mailbox="INBOX",
+            encrypted_password=None,
+            enabled=True,
+            import_start_uid=42,
+            imap_uidvalidity=9,
+        )
+        session.add(config)
+        session.flush()
+        session.add(
+            MailboxOAuthCredential(
+                organization_id=LEGACY_ORGANIZATION_ID,
+                mailbox_config_id=config.id,
+                encrypted_refresh_token=mailbox_import_service._encrypt_mailbox_secret(
+                    settings,
+                    "old-refresh-token",
+                ),
+                reauthorization_required_at=datetime.now(timezone.utc),
+                last_error_code="mailbox_oauth_reauthorization_required",
+            )
+        )
+        session.commit()
+        mailbox_id = config.id
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", DenyingImap)
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "exchange_authorization_code",
+        lambda *args, **kwargs: "reauthorization-refresh-token",
+    )
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "refresh_access_token",
+        lambda *args, **kwargs: OAuthAccessTokenRefresh(
+            access_token="access-token-for-failed-reauthorization",
+            replacement_refresh_token="rotated-refresh-token",
+        ),
+    )
+
+    started = oauth_client.post(f"/v1/mailboxes/{mailbox_id}/oauth/reauthorize")
+    assert started.status_code == 200, started.text
+    state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
+    callback = oauth_client.get(
+        "/v1/mailbox-oauth/callback",
+        params={"state": state, "code": "provider-code"},
+        follow_redirects=False,
+    )
+    assert callback.status_code == 303, callback.text
+    assert "mailbox_oauth=failed" in callback.headers["location"]
+
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        credential = session.scalar(
+            select(MailboxOAuthCredential).where(
+                MailboxOAuthCredential.mailbox_config_id == mailbox_id
+            )
+        )
+        assert credential is not None
+        assert (
+            mailbox_import_service._decrypt_mailbox_secret(
+                settings,
+                credential.encrypted_refresh_token,
+            )
+            == "rotated-refresh-token"
+        )
+        assert credential.reauthorization_required_at is not None
+        assert credential.last_error_code == "mailbox_oauth_reauthorization_required"
 
 
 def test_oauth_callback_requires_signed_correlation_cookie(

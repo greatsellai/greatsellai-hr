@@ -11,7 +11,7 @@ import logging
 import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Callable, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import (
@@ -387,6 +387,7 @@ from app.services.mailbox_import_service import (
     get_mailbox_config_by_id,
     list_mailbox_configs,
     list_mailbox_imports,
+    mailbox_oauth_reauthorization_provider_key,
     mailbox_provider_list,
     save_mailbox_config,
     start_mailbox_oauth_connection,
@@ -867,6 +868,98 @@ def _mailbox_oauth_callback_cookie_value(
             "cookie_domain": cookie_domain,
         }
     )
+
+
+def _mailbox_oauth_cookie_domain_for_browser_start(
+    request: Request,
+    settings: AppSettings,
+    *,
+    provider_key: str,
+) -> str | None:
+    """Validate callback origin before creating a browser OAuth intent.
+
+    A non-empty but malformed provider redirect URI must fail closed.  An
+    absent URI still lets the domain service return its more useful
+    ``mailbox_oauth_not_configured`` error.
+    """
+
+    setting_name = _MAILBOX_OAUTH_PROVIDER_REDIRECT_URIS.get(provider_key)
+    if setting_name is None:
+        return None
+    configured_redirect_uri = getattr(settings, setting_name, None)
+    if not isinstance(configured_redirect_uri, str) or not configured_redirect_uri.strip():
+        return None
+    if _mailbox_oauth_callback_origin(settings, provider_key=provider_key) is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="mailbox_oauth_callback_origin_invalid",
+        )
+    callback_origin_valid, callback_cookie_domain = _mailbox_oauth_cookie_domain_for_start(
+        request,
+        settings,
+        provider_key=provider_key,
+    )
+    if not callback_origin_valid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="mailbox_oauth_callback_origin_invalid",
+        )
+    return callback_cookie_domain
+
+
+def _start_mailbox_oauth_browser_flow(
+    *,
+    request: Request,
+    response: Response,
+    session: Session,
+    settings: AppSettings,
+    principal: AuthPrincipal,
+    provider_key: str,
+    begin_intent: Callable[[], MailboxOAuthStartResponse],
+) -> MailboxOAuthStartResponse:
+    """Start either OAuth flow with one shared callback-correlation contract."""
+
+    callback_cookie_domain = _mailbox_oauth_cookie_domain_for_browser_start(
+        request,
+        settings,
+        provider_key=provider_key,
+    )
+    result = begin_intent()
+    state_value = _mailbox_oauth_state_from_authorization_url(result.authorization_url)
+    if state_value is None:
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
+    state_hash = hashlib.sha256(state_value.encode("utf-8")).hexdigest()
+    intent = session.scalar(
+        select(MailboxOAuthConnectIntent).where(
+            MailboxOAuthConnectIntent.state_hash == state_hash,
+            MailboxOAuthConnectIntent.organization_id == principal.organization_id,
+            MailboxOAuthConnectIntent.user_id == principal.user.id,
+            MailboxOAuthConnectIntent.membership_id == principal.membership.id,
+            MailboxOAuthConnectIntent.provider_key == provider_key,
+            MailboxOAuthConnectIntent.consumed_at.is_(None),
+            MailboxOAuthConnectIntent.expires_at > datetime.now(timezone.utc),
+        )
+    )
+    if intent is None:
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
+    response.headers.update(_mailbox_oauth_response_headers())
+    response.set_cookie(
+        _MAILBOX_OAUTH_CALLBACK_COOKIE_NAME,
+        _mailbox_oauth_callback_cookie_value(
+            settings,
+            intent=intent,
+            auth_session_version=principal.user.auth_session_version,
+            legacy_compatibility=principal.legacy_compatibility,
+            cookie_domain=callback_cookie_domain,
+        ),
+        max_age=settings.mailbox_oauth_state_ttl_seconds,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+        domain=callback_cookie_domain,
+    )
+    return result
 
 
 def _mailbox_oauth_callback_correlation(
@@ -2687,66 +2780,21 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         principal: AuthPrincipal = Depends(require_mailbox_feature),
         session: Session = Depends(get_session),
     ) -> MailboxOAuthStartResponse:
-        callback_cookie_domain: str | None = None
-        # Preserve the service's useful ``mailbox_oauth_not_configured`` /
-        # ``mailbox_provider_not_available`` errors for an unconfigured
-        # provider. Only validate a callback origin once configuration exists.
-        if _mailbox_oauth_callback_origin(settings, provider_key=payload.provider_key) is not None:
-            callback_origin_valid, callback_cookie_domain = (
-                _mailbox_oauth_cookie_domain_for_start(
-                    request,
-                    settings,
-                    provider_key=payload.provider_key,
-                )
-            )
-            if not callback_origin_valid:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail="mailbox_oauth_callback_origin_invalid",
-                )
         try:
-            result = start_mailbox_oauth_connection(
-                session,
+            return _start_mailbox_oauth_browser_flow(
+                request=request,
+                response=response,
                 settings=settings,
                 principal=principal,
-                payload=payload,
-            )
-            state_value = _mailbox_oauth_state_from_authorization_url(
-                result.authorization_url
-            )
-            if state_value is None:
-                raise MailboxImportError("mailbox_oauth_callback_invalid")
-            state_hash = hashlib.sha256(state_value.encode("utf-8")).hexdigest()
-            intent = session.scalar(
-                select(MailboxOAuthConnectIntent).where(
-                    MailboxOAuthConnectIntent.state_hash == state_hash,
-                    MailboxOAuthConnectIntent.organization_id == principal.organization_id,
-                    MailboxOAuthConnectIntent.user_id == principal.user.id,
-                    MailboxOAuthConnectIntent.membership_id == principal.membership.id,
-                    MailboxOAuthConnectIntent.consumed_at.is_(None),
-                    MailboxOAuthConnectIntent.expires_at > datetime.now(timezone.utc),
-                )
-            )
-            if intent is None:
-                raise MailboxImportError("mailbox_oauth_callback_invalid")
-            response.headers.update(_mailbox_oauth_response_headers())
-            response.set_cookie(
-                _MAILBOX_OAUTH_CALLBACK_COOKIE_NAME,
-                _mailbox_oauth_callback_cookie_value(
-                    settings,
-                    intent=intent,
-                    auth_session_version=principal.user.auth_session_version,
-                    legacy_compatibility=principal.legacy_compatibility,
-                    cookie_domain=callback_cookie_domain,
+                session=session,
+                provider_key=payload.provider_key,
+                begin_intent=lambda: start_mailbox_oauth_connection(
+                    session,
+                    settings=settings,
+                    principal=principal,
+                    payload=payload,
                 ),
-                max_age=settings.mailbox_oauth_state_ttl_seconds,
-                path="/",
-                secure=True,
-                httponly=True,
-                samesite="lax",
-                domain=callback_cookie_domain,
             )
-            return result
         except MailboxImportError as exc:
             session.rollback()
             raise _mailbox_error_http_exception(exc) from exc
@@ -2869,15 +2917,29 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     )
     def post_mailbox_oauth_reauthorize(
         mailbox_id: str,
+        request: Request,
+        response: Response,
         principal: AuthPrincipal = Depends(require_mailbox_feature),
         session: Session = Depends(get_session),
     ) -> MailboxOAuthStartResponse:
         try:
-            return start_mailbox_oauth_reauthorization(
+            provider_key = mailbox_oauth_reauthorization_provider_key(
                 session,
+                config_id=mailbox_id,
+            )
+            return _start_mailbox_oauth_browser_flow(
+                request=request,
+                response=response,
                 settings=settings,
                 principal=principal,
-                config_id=mailbox_id,
+                session=session,
+                provider_key=provider_key,
+                begin_intent=lambda: start_mailbox_oauth_reauthorization(
+                    session,
+                    settings=settings,
+                    principal=principal,
+                    config_id=mailbox_id,
+                ),
             )
         except MailboxImportError as exc:
             session.rollback()

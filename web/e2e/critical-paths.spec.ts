@@ -522,6 +522,84 @@ test.describe("招聘工作台关键路径", () => {
     await expect(trigger).toBeFocused();
   });
 
+  test("招聘助手错误说明 AI 服务，并在重发时不重复用户消息", async ({ page }) => {
+    await registerAndVerify(page, "agent-retry");
+    let attempts = 0;
+    await page.route("**/v1/recruiting-agent/turns", async (route) => {
+      attempts += 1;
+      if (attempts === 1) {
+        await route.fulfill({
+          contentType: "application/json",
+          status: 503,
+          body: JSON.stringify({ detail: "agent_model_unavailable" }),
+        });
+        return;
+      }
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          conversation_id: "e2e-agent-retry-conversation",
+          context_version: 1,
+          active_context: {
+            candidate_set_source: null,
+            candidate_count: 0,
+            active_job_version_id: null,
+            active_job_title: null,
+            expires_at: "2026-07-27T10:00:00Z",
+          },
+          message: "已重新连接 AI 服务，并完成本次检索。",
+          intent: "help",
+          job_version_id: null,
+          candidates: [],
+          actions: [],
+          tool_trace: [],
+          search_summary: null,
+          batch_id: null,
+        }),
+      });
+    });
+
+    await page.getByRole("button", { name: "招聘助手", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    const question = "谁最适合这个岗位？";
+    await dialog.getByLabel("向招聘助手提问").fill(question);
+    await dialog.getByRole("button", { name: "发送提问" }).click();
+
+    await expect(
+      dialog.getByText("招聘助手所用 AI 服务暂时不可用，请稍后重试。"),
+    ).toBeVisible();
+    await expect(dialog.locator(".agent-message.is-user")).toHaveCount(1);
+    await expect(dialog.locator(".agent-message.is-error")).toHaveCount(1);
+
+    await dialog.getByRole("button", { name: "重新发送" }).click();
+
+    await expect(dialog.getByText("已重新连接 AI 服务，并完成本次检索。")).toBeVisible();
+    await expect(dialog.locator(".agent-message.is-user")).toHaveCount(1);
+    await expect(dialog.locator(".agent-message.is-error")).toHaveCount(0);
+    expect(attempts).toBe(2);
+  });
+
+  test("招聘助手不会为确定性请求错误提供无效重发", async ({ page }) => {
+    await registerAndVerify(page, "agent-request-rejected");
+    await page.route("**/v1/recruiting-agent/turns", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        status: 503,
+        body: JSON.stringify({ detail: "agent_model_request_rejected" }),
+      });
+    });
+
+    await page.getByRole("button", { name: "招聘助手", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    await dialog.getByLabel("向招聘助手提问").fill("谁最适合这个岗位？");
+    await dialog.getByRole("button", { name: "发送提问" }).click();
+
+    await expect(
+      dialog.getByText("招聘助手当前配置暂时无法处理这类请求，请联系工作区管理员。"),
+    ).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "重新发送" })).toHaveCount(0);
+  });
+
   test("招聘助手在同一对话中生成画像，并解释零结果的严格召回条件", async ({ page }) => {
     await registerAndVerify(page, "agent-profile-recall");
 

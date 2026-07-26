@@ -37,6 +37,8 @@ function humanizeAgentError(
       agent_model_not_configured: "招聘助手尚未配置 AI 服务。",
       agent_model_timeout: "招聘助手响应超时，请稍后重试。",
       agent_model_network_error: "招聘助手暂时无法连接 AI 服务，请稍后重试。",
+      agent_model_unavailable: "招聘助手所用 AI 服务暂时不可用，请稍后重试。",
+      agent_model_request_rejected: "招聘助手当前配置暂时无法处理这类请求，请联系工作区管理员。",
       agent_service_unavailable: "招聘助手暂时不可用，请稍后重试。",
       agent_model_invalid_response: "招聘助手暂时没有返回有效结果，请重新发送。",
       agent_model_empty_response: "招聘助手暂时没有返回有效结果，请重新发送。",
@@ -70,7 +72,13 @@ function humanizeAgentError(
 
 function isRetryableAgentError(error: unknown): boolean {
   if (!isApiError(error)) return true;
-  return error.status === 408 || error.status === 429 || error.status >= 500;
+  if (error.status === 408 || error.status === 429) return true;
+  return new Set([
+    "agent_model_timeout",
+    "agent_model_network_error",
+    "agent_model_unavailable",
+    "agent_service_unavailable",
+  ]).has(error.message);
 }
 
 type AgentComposerContext = "assistant" | "new_profile" | "refine_profile";
@@ -87,6 +95,11 @@ interface AgentSendSnapshot {
 interface AgentRetry {
   message: string;
   snapshot: AgentSendSnapshot;
+}
+
+interface AgentSendOptions {
+  clearComposer?: boolean;
+  retryFailureId?: number;
 }
 
 interface AgentChatMessage {
@@ -1007,7 +1020,7 @@ export function RecruitingAgentDrawer({
   const send = async (
     raw: string,
     snapshot?: AgentSendSnapshot,
-    options?: { clearComposer?: boolean },
+    options?: AgentSendOptions,
   ) => {
     const message = raw.trim();
     if (!message || interactionPending) return;
@@ -1021,10 +1034,17 @@ export function RecruitingAgentDrawer({
     const isRefinement = request.composerContext === "refine_profile"
       && request.activeTalentProfile !== null;
     if (options?.clearComposer !== false) setInput("");
-    setMessages((current) => [
-      ...current,
-      { id: Date.now(), role: "user", content: message },
-    ]);
+    if (options?.retryFailureId === undefined) {
+      setMessages((current) => [
+        ...current,
+        { id: Date.now(), role: "user", content: message },
+      ]);
+    } else {
+      // Retrying is another attempt for the same user turn. Replacing the
+      // failed reply keeps the conversation readable and prevents a single
+      // question from looking like several duplicate recruiter messages.
+      setMessages((current) => current.filter((item) => item.id !== options.retryFailureId));
+    }
     setLoading(true);
     try {
       if (isProfileWorkflow) {
@@ -1241,7 +1261,7 @@ export function RecruitingAgentDrawer({
                   onClick={() => void send(
                     item.retry!.message,
                     item.retry!.snapshot,
-                    { clearComposer: false },
+                    { clearComposer: false, retryFailureId: item.id },
                   )}
                   type="button"
                 >

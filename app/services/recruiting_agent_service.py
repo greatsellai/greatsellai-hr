@@ -701,6 +701,8 @@ def _gateway_error_as_agent_error(exc: AiGatewayError) -> RecruitingAgentService
         return RecruitingAgentServiceError("agent_model_timeout")
     if code == "ai_provider_network":
         return RecruitingAgentServiceError("agent_model_network_error")
+    if code == "ai_provider_invalid_request":
+        return RecruitingAgentServiceError("agent_model_request_rejected")
     if code in {"ai_provider_structured_invalid", "ai_provider_truncated"}:
         return RecruitingAgentServiceError("agent_model_invalid_response")
     if code in {

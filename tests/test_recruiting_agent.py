@@ -442,6 +442,27 @@ def test_agent_timeout_is_returned_as_a_retryable_service_error(
     assert response.json()["detail"] == "agent_model_timeout"
 
 
+def test_agent_invalid_provider_request_is_not_disguised_as_a_transient_outage(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    def rejected_executor(_payload):
+        raise AiGatewayError("ai_provider_invalid_request")
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service.active_legacy_payload_executor",
+        lambda: rejected_executor,
+    )
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "谁最适合这个岗位？"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "agent_model_request_rejected"
+
+
 def test_agent_tool_loop_records_one_gateway_run_with_one_invocation_per_model_step(
     ai_client: TestClient,
     monkeypatch,

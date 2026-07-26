@@ -14,6 +14,7 @@ from app.ai.contracts import (
     GatewayContractError,
     RouteAuthentication,
     RouteTarget,
+    ToolCall,
     ToolChoice,
     ToolDefinition,
 )
@@ -211,6 +212,55 @@ def test_openai_compatible_adapter_serializes_resolved_route_and_normalizes_usag
     assert result.usage.metered_token_total == 21
     assert result.raw_response["id"] == "response-001"
     assert "candidate-private-text" not in repr(result)
+
+
+def test_openai_compatible_adapter_keeps_null_content_for_assistant_tool_calls() -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_urlopen(http_request: Any, *, timeout: float) -> _FakeResponse:
+        captured["request"] = http_request
+        assert timeout == 12
+        return _FakeResponse(
+            {
+                "id": "response-tool-follow-up",
+                "model": "provider-response-model-001",
+                "choices": [{"finish_reason": "stop", "message": {"content": "已完成"}}],
+            }
+        )
+
+    request = replace(
+        _request(),
+        metadata={},
+        messages=(
+            ChatMessage(role="system", content="Use tools when needed."),
+            ChatMessage(role="user", content="Find the strongest candidate."),
+            ChatMessage(
+                role="assistant",
+                content=None,
+                tool_calls=(
+                    ToolCall(
+                        id="call-search-001",
+                        name="search_candidates",
+                        arguments='{"skill":"RAG"}',
+                    ),
+                ),
+            ),
+            ChatMessage(
+                role="tool",
+                tool_call_id="call-search-001",
+                content='{"items":[]}',
+            ),
+        ),
+    )
+
+    OpenAICompatibleAdapter(opener=fake_urlopen).complete(request, _route())
+
+    payload = json.loads(captured["request"].data.decode("utf-8"))
+    assistant_message = payload["messages"][2]
+    assert assistant_message["role"] == "assistant"
+    assert "content" in assistant_message
+    assert assistant_message["content"] is None
+    assert assistant_message["tool_calls"][0]["id"] == "call-search-001"
 
 
 def test_openai_compatible_adapter_treats_empty_usage_as_unknown() -> None:

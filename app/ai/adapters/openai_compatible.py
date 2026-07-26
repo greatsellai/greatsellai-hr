@@ -171,7 +171,11 @@ def _serialize_completion_request(
 
 def _serialize_message(message: ChatMessage) -> dict[str, Any]:
     payload: dict[str, Any] = {"role": message.role}
-    if message.content is not None:
+    # OpenAI-compatible APIs commonly require an explicit JSON null for an
+    # assistant tool-call message with no textual content. Omitting the key
+    # turns a valid tool-result continuation into a malformed second request
+    # for providers that distinguish a missing field from ``null``.
+    if message.content is not None or (message.role == "assistant" and message.tool_calls):
         payload["content"] = message.content
     if message.name is not None:
         payload["name"] = message.name

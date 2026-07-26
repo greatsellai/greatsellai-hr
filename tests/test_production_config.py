@@ -134,6 +134,33 @@ def test_compose_injects_generic_provider_credential_map_into_api_and_worker() -
         assert "    environment: *app-environment" in match.group("body")
 
 
+def test_compose_injects_mailbox_oauth_clients_into_every_runtime() -> None:
+    """OAuth code exchange and worker token refresh need the same config."""
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "compose.yml").read_text(encoding="utf-8")
+    production_example = (root / ".env.production.example").read_text(encoding="utf-8")
+    variables = (
+        "RESUME_V3_MAILBOX_GOOGLE_OAUTH_CLIENT_ID",
+        "RESUME_V3_MAILBOX_GOOGLE_OAUTH_CLIENT_SECRET",
+        "RESUME_V3_MAILBOX_GOOGLE_OAUTH_REDIRECT_URI",
+        "RESUME_V3_MAILBOX_MICROSOFT_OAUTH_CLIENT_ID",
+        "RESUME_V3_MAILBOX_MICROSOFT_OAUTH_CLIENT_SECRET",
+        "RESUME_V3_MAILBOX_MICROSOFT_OAUTH_REDIRECT_URI",
+    )
+
+    for variable in variables:
+        assert f"{variable}: ${{{variable}:-}}" in compose
+        assert f"{variable}=" in production_example
+
+    for service in ("migrate", "api", "worker"):
+        match = re.search(
+            rf"(?ms)^  {service}:\n(?P<body>.*?)(?=^  [a-z][a-z_]*:|\Z)", compose
+        )
+        assert match is not None
+        assert "    environment: *app-environment" in match.group("body")
+
+
 def test_compose_injects_tencent_ses_templates_into_api_and_worker() -> None:
     """SES configuration must reach both synchronous and durable send paths."""
 

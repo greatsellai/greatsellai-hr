@@ -1688,6 +1688,42 @@ def _consume_oauth_intent(
     return intent
 
 
+def revoke_pending_mailbox_oauth_intents(
+    session: Session,
+    *,
+    principal: "AuthPrincipal",
+    now: datetime | None = None,
+) -> int:
+    """Cancel every still-live browser OAuth handoff owned by one member.
+
+    A mailbox OAuth callback deliberately survives the provider's cross-site
+    redirect without the normal strict session cookie.  Logging out must
+    therefore consume the persisted, short-lived intents too; otherwise its
+    signed correlation cookie could recreate a browser session.  The update
+    repeats all tenant and membership bindings because Core updates bypass the
+    ORM's organization loader criteria.
+
+    The caller owns the transaction so it can clear the browser session even
+    when a database write fails.
+    """
+
+    current_time = now or _utcnow()
+    set_organization_context(session, principal.organization_id)
+    revoked = session.execute(
+        update(MailboxOAuthConnectIntent)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxOAuthConnectIntent.organization_id == principal.organization_id,
+            MailboxOAuthConnectIntent.user_id == principal.user.id,
+            MailboxOAuthConnectIntent.membership_id == principal.membership.id,
+            MailboxOAuthConnectIntent.consumed_at.is_(None),
+            MailboxOAuthConnectIntent.expires_at > current_time,
+        )
+        .values(consumed_at=current_time)
+    )
+    return int(revoked.rowcount or 0)
+
+
 def abandon_mailbox_oauth_connection(
     session: Session,
     *,

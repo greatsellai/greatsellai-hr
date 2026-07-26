@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -661,6 +662,92 @@ def test_oauth_callback_requires_signed_correlation_cookie(
         and "max-age=0" in header.casefold()
         for header in callback.headers.get_list("set-cookie")
     )
+
+
+def test_logout_revokes_only_its_pending_oauth_intent(
+    oauth_workspace_clients: tuple[TestClient, TestClient],
+    monkeypatch,
+) -> None:
+    """A retained OAuth callback cookie must not recreate a logged-out session."""
+
+    client_a, client_b = oauth_workspace_clients
+    _register_and_login(
+        client_a,
+        organization_name="Logout OAuth Alpha",
+        email="logout-oauth-alpha@example.test",
+        password="logout-oauth-test-password-a",
+    )
+    _register_and_login(
+        client_b,
+        organization_name="Logout OAuth Beta",
+        email="logout-oauth-beta@example.test",
+        password="logout-oauth-test-password-b",
+    )
+
+    exchanges: list[str] = []
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "exchange_authorization_code",
+        lambda *args, **kwargs: exchanges.append(str(kwargs["code"]))
+        or "must-not-be-used-after-logout",
+    )
+
+    started_a = client_a.post(
+        "/v1/mailbox-oauth/start",
+        json={
+            "provider_key": "gmail_oauth",
+            "display_name": "Logout OAuth Alpha mailbox",
+            "email_address": "logout-oauth-alpha@example.test",
+            "mailbox": "INBOX",
+        },
+    )
+    started_b = client_b.post(
+        "/v1/mailbox-oauth/start",
+        json={
+            "provider_key": "gmail_oauth",
+            "display_name": "Logout OAuth Beta mailbox",
+            "email_address": "logout-oauth-beta@example.test",
+            "mailbox": "INBOX",
+        },
+    )
+    assert started_a.status_code == 200, started_a.text
+    assert started_b.status_code == 200, started_b.text
+    state_a = parse_qs(urlsplit(started_a.json()["authorization_url"]).query)["state"][0]
+    state_b = parse_qs(urlsplit(started_b.json()["authorization_url"]).query)["state"][0]
+
+    logged_out = client_a.post("/v1/auth/logout")
+    assert logged_out.status_code == 204, logged_out.text
+
+    database = client_a.app.state.database
+    with database.session_factory() as session:
+        intents = {
+            intent.state_hash: intent
+            for intent in session.scalars(
+                select(MailboxOAuthConnectIntent)
+                .where(
+                    MailboxOAuthConnectIntent.state_hash.in_(
+                        {
+                            hashlib.sha256(state_a.encode("utf-8")).hexdigest(),
+                            hashlib.sha256(state_b.encode("utf-8")).hexdigest(),
+                        }
+                    )
+                )
+                .execution_options(skip_organization_scope=True)
+            )
+        }
+        assert intents[hashlib.sha256(state_a.encode("utf-8")).hexdigest()].consumed_at is not None
+        assert intents[hashlib.sha256(state_b.encode("utf-8")).hexdigest()].consumed_at is None
+
+    callback = client_a.get(
+        "/v1/mailbox-oauth/callback",
+        params={"state": state_a, "code": "must-not-be-exchanged"},
+        follow_redirects=False,
+    )
+    assert callback.status_code == 303, callback.text
+    assert "mailbox_oauth=failed" in callback.headers["location"]
+    assert exchanges == []
+    assert client_a.get("/v1/auth/session").json()["authenticated"] is False
+    assert client_a.get("/v1/mailboxes").status_code == 401
 
 
 def test_oauth_start_rejects_callback_origin_mismatch(oauth_client: TestClient) -> None:

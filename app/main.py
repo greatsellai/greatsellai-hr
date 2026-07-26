@@ -389,6 +389,7 @@ from app.services.mailbox_import_service import (
     list_mailbox_imports,
     mailbox_oauth_reauthorization_provider_key,
     mailbox_provider_list,
+    revoke_pending_mailbox_oauth_intents,
     save_mailbox_config,
     start_mailbox_oauth_connection,
     start_mailbox_oauth_reauthorization,
@@ -2031,8 +2032,37 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             ) from exc
 
     @app.post("/v1/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
-    async def post_auth_logout(request: Request) -> None:
-        clear_session(request.session)
+    async def post_auth_logout(
+        request: Request,
+        session: Session = Depends(get_session),
+        x_admin_token: Annotated[str | None, Header()] = None,
+    ) -> None:
+        """End the browser session and cancel its unfinished OAuth handoffs."""
+
+        principal = (
+            legacy_principal(session)
+            if settings.allow_unauthenticated
+            else principal_from_session(session, request.session)
+        )
+        if principal is None:
+            principal = legacy_principal_from_session(session, request.session)
+        if (
+            principal is None
+            and settings.legacy_admin_token_enabled
+            and settings.admin_token
+            and x_admin_token
+            and hmac.compare_digest(x_admin_token, settings.admin_token)
+        ):
+            principal = legacy_principal(session)
+
+        try:
+            if principal is not None:
+                revoke_pending_mailbox_oauth_intents(session, principal=principal)
+                _commit_or_raise(session)
+        finally:
+            # Always clear the normal browser session, even if a transient
+            # database failure prevented intent revocation.
+            clear_session(request.session)
 
     @app.get(
         "/v1/organization/plan",

@@ -15,7 +15,7 @@ from app.models import (
 def test_alembic_history_has_one_canonical_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert script.get_heads() == ["20260727_0039"]
+    assert script.get_heads() == ["20260727_0040"]
 
 
 def test_recruiting_agent_context_ddl_identifiers_fit_postgresql() -> None:

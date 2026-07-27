@@ -371,6 +371,8 @@ export interface MailboxRetentionRuns {
 }
 
 export type RecruitingAgentIntent =
+  | "draft_talent_search_profile"
+  | "refine_active_talent_search_profile"
   | "search_candidates"
   | "run_job_matching"
   | "run_workspace_scoring"
@@ -380,10 +382,24 @@ export type RecruitingAgentIntent =
   | "sync_mailbox"
   | "help";
 
-/** A safe, server-verified source for an Agent candidate scope. */
-export interface RecruitingAgentContextReference {
-  kind: "talent_search_run";
-  run_id: string;
+/** A safe, server-verified source for Agent work state. */
+export type RecruitingAgentContextReference =
+  | {
+    kind: "talent_search_run";
+    run_id: string;
+  }
+  | {
+    kind: "talent_search_profile";
+    profile_id: string;
+    revision_id: string;
+  };
+
+export interface RecruitingAgentActiveTalentProfile {
+  profile_id: string;
+  revision_id: string;
+  revision_number: number;
+  title: string;
+  status: "draft" | "confirmed";
 }
 
 /** The only durable Agent state shown back to a recruiter. */
@@ -392,6 +408,7 @@ export interface RecruitingAgentActiveContext {
   candidate_count: number;
   active_job_version_id: string | null;
   active_job_title: string | null;
+  active_talent_profile: RecruitingAgentActiveTalentProfile | null;
   expires_at: string;
 }
 
@@ -465,6 +482,7 @@ export interface RecruitingAgentTurn {
   tool_trace: RecruitingAgentToolTrace[];
   search_summary: RecruitingAgentSearchSummary | null;
   batch_id: string | null;
+  talent_profile: TalentSearchProfile | null;
 }
 
 export interface ResumeUploadResponse {

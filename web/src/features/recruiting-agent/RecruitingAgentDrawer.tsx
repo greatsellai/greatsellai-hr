@@ -40,6 +40,7 @@ function humanizeAgentError(
       agent_model_unavailable: "招聘助手所用 AI 服务暂时不可用，请稍后重试。",
       agent_model_request_rejected: "招聘助手当前配置暂时无法处理这类请求，请联系工作区管理员。",
       agent_service_unavailable: "招聘助手暂时不可用，请稍后重试。",
+      agent_talent_profile_unavailable: "人才画像暂时无法生成，请稍后重试。",
       agent_model_invalid_response: "招聘助手暂时没有返回有效结果，请重新发送。",
       agent_model_empty_response: "招聘助手暂时没有返回有效结果，请重新发送。",
       agent_model_missing_final_answer: "招聘助手暂时没有完成回答，请重新发送。",
@@ -78,17 +79,11 @@ function isRetryableAgentError(error: unknown): boolean {
     "agent_model_network_error",
     "agent_model_unavailable",
     "agent_service_unavailable",
+    "agent_talent_profile_unavailable",
   ]).has(error.message);
 }
 
-type AgentComposerContext = "assistant" | "new_profile" | "refine_profile";
-
 interface AgentSendSnapshot {
-  composerContext: AgentComposerContext;
-  activeTalentProfile: {
-    profileId: string;
-    revisionId: string;
-  } | null;
   jobVersionId: string;
 }
 
@@ -121,7 +116,7 @@ function initialAgentMessages(): AgentChatMessage[] {
       id: 1,
       role: "assistant",
       content:
-        "我是招聘助手。可以在当前工作区筛选简历、处理 JD 匹配、查看排行榜，并按已有评分规则发起全量评分。需要发起一轮主动找人时，点击“新建人才画像”；我会先整理条件，等你确认后才开始找人。",
+        "我是招聘助手。可以在当前工作区筛选简历、处理 JD 匹配、查看排行榜，并按已有评分规则发起全量评分。直接告诉我想找什么人，我会先整理可确认的找人条件，确认后才开始找人。",
     },
   ];
 }
@@ -604,15 +599,11 @@ export function RecruitingAgentDrawer({
   const [input, setInput] = useState("");
   const [jobs, setJobs] = useState<JobVersion[]>([]);
   const [jobVersionId, setJobVersionId] = useState("");
-  const [composerContext, setComposerContext] = useState<AgentComposerContext>("assistant");
-  const [activeTalentProfile, setActiveTalentProfile] = useState<{
-    profileId: string;
-    revisionId: string;
-  } | null>(null);
   const [recentTalentProfiles, setRecentTalentProfiles] = useState<TalentSearchProfile[]>([]);
   const [loading, setLoading] = useState(false);
   const {
     adoptConversation,
+    bindTalentSearchProfile,
     bindTalentSearchRun,
     buildTurnInput,
     clearConversation,
@@ -625,6 +616,7 @@ export function RecruitingAgentDrawer({
   const drawerRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const restoredTalentProfileKeyRef = useRef<string | null>(null);
   const [messages, setMessages] = useState<AgentChatMessage[]>(initialAgentMessages);
   const interactionPending = loading || isRestoring;
 
@@ -662,6 +654,54 @@ export function RecruitingAgentDrawer({
   }, [conversation?.active_context.active_job_version_id, jobs]);
 
   useEffect(() => {
+    const activeProfile = conversation?.active_context.active_talent_profile;
+    if (!isOpen || !activeProfile) {
+      if (!activeProfile) restoredTalentProfileKeyRef.current = null;
+      return;
+    }
+    const key = `${activeProfile.profile_id}:${activeProfile.revision_id}`;
+    if (restoredTalentProfileKeyRef.current === key) return;
+    // A reload restores only the safe opaque conversation reference. Fetch
+    // the already-authorized profile again for its readable card, never from
+    // browser-stored chat history or a browser-provided profile identifier.
+    restoredTalentProfileKeyRef.current = key;
+    void api.getTalentSearchProfile(activeProfile.profile_id).then((profile) => {
+      if (profile.current_revision.revision_id !== activeProfile.revision_id) {
+        restoredTalentProfileKeyRef.current = null;
+        return;
+      }
+      setRecentTalentProfiles((current) => [
+        profile,
+        ...current.filter((item) => item.profile_id !== profile.profile_id),
+      ].slice(0, 12));
+      setMessages((current) => (
+        current.some((item) => (
+          item.talentProfile?.profile_id === profile.profile_id
+          && item.talentProfile.current_revision.revision_id === profile.current_revision.revision_id
+        ))
+          ? current
+          : [
+            ...current,
+            {
+              id: Date.now() + 1,
+              role: "assistant",
+              content: profile.status === "confirmed"
+                ? "已恢复当前已确认的人才画像。需要发起找人时，请明确点击“开始找人”。"
+                : "已恢复当前人才画像草案。可直接补充条件，或确认后开始找人。",
+              talentProfile: profile,
+            },
+          ]
+      ));
+    }).catch(() => {
+      restoredTalentProfileKeyRef.current = null;
+    });
+  }, [
+    conversation?.active_context.active_talent_profile?.profile_id,
+    conversation?.active_context.active_talent_profile?.revision_id,
+    isOpen,
+  ]);
+
+  useEffect(() => {
     if (!isOpen) return;
     const frame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
@@ -693,6 +733,13 @@ export function RecruitingAgentDrawer({
 
   const addAssistantReply = (turn: RecruitingAgentTurn) => {
     adoptConversation(turn);
+    if (turn.talent_profile) {
+      restoredTalentProfileKeyRef.current = `${turn.talent_profile.profile_id}:${turn.talent_profile.current_revision.revision_id}`;
+      setRecentTalentProfiles((current) => [
+        turn.talent_profile!,
+        ...current.filter((item) => item.profile_id !== turn.talent_profile!.profile_id),
+      ].slice(0, 12));
+    }
     setMessages((current) => [
       ...current,
       {
@@ -702,6 +749,7 @@ export function RecruitingAgentDrawer({
         candidates: turn.candidates,
         actions: turn.actions,
         searchSummary: turn.search_summary,
+        talentProfile: turn.talent_profile ?? undefined,
       },
     ]);
     if (turn.job_version_id) setJobVersionId(turn.job_version_id);
@@ -713,12 +761,14 @@ export function RecruitingAgentDrawer({
   ) => {
     setMessages((current) => current.map((item) => (
       item.talentProfile?.profile_id === profile.profile_id
+        && item.talentProfile.current_revision.revision_id === profile.current_revision.revision_id
         ? { ...item, talentProfile: profile, talentRun: run }
         : item
     )));
   };
 
   const appendTalentProfileReply = (profile: TalentSearchProfile, content: string) => {
+    restoredTalentProfileKeyRef.current = `${profile.profile_id}:${profile.current_revision.revision_id}`;
     setMessages((current) => [
       ...current,
       {
@@ -749,26 +799,7 @@ export function RecruitingAgentDrawer({
     ]);
   };
 
-  const prepareTalentProfileRefinement = (profile: TalentSearchProfile) => {
-    setActiveTalentProfile({
-      profileId: profile.profile_id,
-      revisionId: profile.current_revision.revision_id,
-    });
-    setComposerContext("refine_profile");
-    setInput("");
-    window.requestAnimationFrame(() => composerInputRef.current?.focus());
-  };
-
-  const startNewTalentProfile = () => {
-    if (interactionPending) return;
-    setActiveTalentProfile(null);
-    setComposerContext("new_profile");
-    setInput("");
-    window.requestAnimationFrame(() => composerInputRef.current?.focus());
-  };
-
-  const returnToAssistant = () => {
-    setComposerContext("assistant");
+  const focusTalentProfileComposer = () => {
     setInput("");
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
   };
@@ -781,12 +812,12 @@ export function RecruitingAgentDrawer({
         revision_id: profile.current_revision.revision_id,
         message: "请保留原始招聘目标，重新梳理一版人才画像。删去不明确的硬条件，并给出需要 HR 核验的重点。",
       });
-      setActiveTalentProfile({
+      await bindTalentSearchProfile({
         profileId: next.profile_id,
         revisionId: next.current_revision.revision_id,
+        jobVersionId,
       });
       rememberTalentProfile(next);
-      setComposerContext("refine_profile");
       updateTalentProfileMessage(next);
     } catch (error) {
       addTalentProfileFailure(error);
@@ -802,12 +833,12 @@ export function RecruitingAgentDrawer({
       const confirmed = await api.confirmTalentSearchProfile(profile.profile_id, {
         revision_id: profile.current_revision.revision_id,
       });
-      setActiveTalentProfile({
+      await bindTalentSearchProfile({
         profileId: confirmed.profile_id,
         revisionId: confirmed.current_revision.revision_id,
+        jobVersionId,
       });
       rememberTalentProfile(confirmed);
-      setComposerContext("assistant");
       updateTalentProfileMessage(confirmed);
     } catch (error) {
       addTalentProfileFailure(error);
@@ -824,7 +855,10 @@ export function RecruitingAgentDrawer({
         revision_id: profile.current_revision.revision_id,
         limit: 20,
       });
-      setComposerContext("assistant");
+      await bindTalentSearchRun({
+        runId: run.run_id,
+        jobVersionId: matchableJobVersionId(jobVersionId),
+      });
       updateTalentProfileMessage(profile, run);
     } catch (error) {
       addTalentProfileFailure(error);
@@ -881,25 +915,18 @@ export function RecruitingAgentDrawer({
     setLoading(true);
     try {
       const profile = await api.getTalentSearchProfile(profileId);
-      const run = profile.status === "confirmed"
-        ? await api.startTalentSearchProfileRun(profile.profile_id, {
-          revision_id: profile.current_revision.revision_id,
-          limit: 20,
-        })
-        : undefined;
-      setComposerContext(profile.status === "confirmed" ? "assistant" : "refine_profile");
-      setActiveTalentProfile({
+      await bindTalentSearchProfile({
         profileId: profile.profile_id,
         revisionId: profile.current_revision.revision_id,
+        jobVersionId,
       });
       rememberTalentProfile(profile);
       appendTalentProfileReply(
         profile,
         profile.status === "confirmed"
-          ? "已恢复这份已确认的人才画像及本次找人结果。可在结果范围内继续向助手提问，或补充条件后形成新草案。"
-          : "已恢复这份人才画像草案。请确认，或继续补充条件。",
+          ? "已恢复这份已确认的人才画像。需要发起找人时，请明确点击“开始找人”。"
+          : "已恢复这份人才画像草案。可直接补充条件，或确认后开始找人。",
       );
-      if (run) updateTalentProfileMessage(profile, run);
     } catch (error) {
       addTalentProfileFailure(error);
     } finally {
@@ -942,7 +969,6 @@ export function RecruitingAgentDrawer({
         runId: run.run_id,
         jobVersionId: matchableJobVersionId(jobVersionId),
       });
-      setComposerContext("assistant");
       setMessages((current) => [
         ...current,
         {
@@ -974,8 +1000,7 @@ export function RecruitingAgentDrawer({
     try {
       await clearConversation();
       setMessages(initialAgentMessages());
-      setComposerContext("assistant");
-      setActiveTalentProfile(null);
+      restoredTalentProfileKeyRef.current = null;
       setInput("");
       window.requestAnimationFrame(() => composerInputRef.current?.focus());
     } catch (error) {
@@ -1025,14 +1050,8 @@ export function RecruitingAgentDrawer({
     const message = raw.trim();
     if (!message || interactionPending) return;
     const request = snapshot ?? {
-      composerContext,
-      activeTalentProfile,
       jobVersionId,
     };
-    const isProfileWorkflow = request.composerContext === "new_profile"
-      || (request.composerContext === "refine_profile" && request.activeTalentProfile !== null);
-    const isRefinement = request.composerContext === "refine_profile"
-      && request.activeTalentProfile !== null;
     if (options?.clearComposer !== false) setInput("");
     if (options?.retryFailureId === undefined) {
       setMessages((current) => [
@@ -1047,43 +1066,17 @@ export function RecruitingAgentDrawer({
     }
     setLoading(true);
     try {
-      if (isProfileWorkflow) {
-        const profile = isRefinement && request.activeTalentProfile
-          ? await api.refineTalentSearchProfile(request.activeTalentProfile.profileId, {
-            revision_id: request.activeTalentProfile.revisionId,
-            message,
-          })
-          : await api.generateTalentSearchProfile({
-            message,
-            job_version_id: request.jobVersionId || null,
-          });
-        setActiveTalentProfile({
-          profileId: profile.profile_id,
-          revisionId: profile.current_revision.revision_id,
-        });
-        rememberTalentProfile(profile);
-        setComposerContext("refine_profile");
-        appendTalentProfileReply(
-          profile,
-          isRefinement
-            ? "我已根据你的补充更新人才画像。请确认，或继续补充条件。"
-            : "我先整理了一版人才画像草稿。请看硬条件和重点核验项，还想补什么吗？确认后才会开始找人。",
-        );
-      } else {
-        // Source-only JDs are intentionally usable as input for an AI talent
-        // profile, but the existing conversational assistant only understands
-        // confirmed, matchable JD versions. Do not turn selecting an original
-        // publication into a generic server error in the normal chat mode.
-        const turn = await api.runRecruitingAgentTurn(buildTurnInput({
-          message,
-          jobVersionId: matchableJobVersionId(request.jobVersionId),
-        }));
-        addAssistantReply(turn);
-      }
+      // The LangGraph Agent decides whether this is a normal workspace
+      // question, a new confirmation-first profile, or a refinement of the
+      // server-saved profile. The browser never chooses a profile mode or
+      // submits a profile/revision identifier with a free-form message.
+      const turn = await api.runRecruitingAgentTurn(buildTurnInput({
+        message,
+        jobVersionId: request.jobVersionId || null,
+      }));
+      addAssistantReply(turn);
     } catch (error) {
-      const recoveredMessage = isProfileWorkflow
-        ? null
-        : await recoverAgentConversationError(error);
+      const recoveredMessage = await recoverAgentConversationError(error);
       const failureMessage = recoveredMessage ?? humanizeAgentError(error, formatError);
       const canRetryAfterExpiredConversation = isApiError(error)
         && error.status === 404
@@ -1136,16 +1129,6 @@ export function RecruitingAgentDrawer({
         </button>
       </header>
       <div className="agent-context">
-        <div className="agent-context-actions">
-          <button
-            className="button button-ghost agent-new-profile-button"
-            disabled={interactionPending}
-            onClick={startNewTalentProfile}
-            type="button"
-          >
-            <Icon name="spark" size={14} />新建人才画像
-          </button>
-        </div>
         <div
           className={`agent-work-context${restoreError ? " is-error" : ""}`}
           role="status"
@@ -1176,6 +1159,9 @@ export function RecruitingAgentDrawer({
                   {conversation.active_context.active_job_title
                     ? `关联 JD：${conversation.active_context.active_job_title}`
                     : "未关联 JD"}
+                  {conversation.active_context.active_talent_profile
+                    ? `；当前找人条件：${conversation.active_context.active_talent_profile.title}（${conversation.active_context.active_talent_profile.status === "draft" ? "草案" : "已确认"}）`
+                    : ""}
                   {"；24 小时无操作后自动清除"}
                 </small>
               </div>
@@ -1189,21 +1175,9 @@ export function RecruitingAgentDrawer({
               </button>
             </>
           ) : (
-            <span>尚未设置工作范围；筛选或选择人才画像结果后可继续追问。</span>
+            <span>直接描述你想找的人，我会先整理条件，确认后才开始找人。</span>
           )}
         </div>
-        {composerContext !== "assistant" && (
-          <div className="agent-profile-context" role="status">
-            <span>
-              {composerContext === "new_profile"
-                ? "正在新建人才画像：先给出可确认草案，不会直接检索候选人。"
-                : "正在补充当前人才画像：发送后会生成新草案，不会直接检索候选人。"}
-            </span>
-            <button className="text-button" onClick={returnToAssistant} type="button">
-              返回助手
-            </button>
-          </div>
-        )}
         <div className="select-wrap">
           <label className="sr-only" htmlFor="agent-job-version">关联 JD</label>
           <select
@@ -1223,8 +1197,8 @@ export function RecruitingAgentDrawer({
           <Icon name="chevron-down" size={15} />
         </div>
         {!!recentTalentProfiles.length && (
-          <div className="agent-profile-history" aria-label="继续已保存的人才画像">
-            <span>继续已保存画像</span>
+          <div className="agent-profile-history" aria-label="已保存的人才画像">
+            <span>已保存画像</span>
             <div>
               {recentTalentProfiles.slice(0, 4).map((profile) => (
                 <button
@@ -1293,8 +1267,8 @@ export function RecruitingAgentDrawer({
                     void useTalentSearchRunAsAgentContext(item.talentRun);
                   }
                 }}
-                onSupplement={() => prepareTalentProfileRefinement(item.talentProfile!)}
-                onAdjustConditions={() => prepareTalentProfileRefinement(item.talentProfile!)}
+                onSupplement={focusTalentProfileComposer}
+                onAdjustConditions={focusTalentProfileComposer}
                 profile={item.talentProfile}
                 run={item.talentRun}
               />
@@ -1337,13 +1311,6 @@ export function RecruitingAgentDrawer({
         )}
       </div>
       <div className="agent-composer">
-        {composerContext !== "assistant" && (
-          <p className="agent-profile-context-note">
-            {composerContext === "new_profile"
-              ? "我会先整理可确认的人才画像；发送后不会直接检索候选人。"
-              : "这条消息会更新当前人才画像；发送后不会直接检索候选人。"}
-          </p>
-        )}
         <form
           className="agent-input-row"
           onSubmit={(event) => {
@@ -1356,11 +1323,7 @@ export function RecruitingAgentDrawer({
             disabled={interactionPending}
             id="agent-message"
             onChange={(event) => setInput(event.target.value)}
-            placeholder={composerContext === "new_profile"
-              ? "描述你想找的人，例如：需要有 LangChain 项目经验的本科毕业工程师"
-              : composerContext === "refine_profile"
-                ? "补充或调整条件，例如：正式工作和实习都要有，项目中重点看 RAG 落地"
-                : "例如：找 985 或 211 院校、3 年以上 Python 的候选人；或点击“新建人才画像”发起一轮找人"}
+            placeholder="直接描述你想找的人，例如：找做过 Agent、RAG 和 LLM 服务部署，3 年以上经验的人"
             ref={composerInputRef}
             rows={2}
             value={input}

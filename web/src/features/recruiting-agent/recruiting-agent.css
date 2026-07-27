@@ -82,18 +82,6 @@
   background: var(--surface);
 }
 
-.backoffice-ui-root .agent-context-actions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-start;
-}
-
-.backoffice-ui-root .agent-new-profile-button {
-  min-height: 2.125rem;
-  padding: 0.25rem 0.5rem;
-  font-size: 0.6875rem;
-}
-
 .backoffice-ui-root .agent-work-context {
   display: flex;
   gap: 0.5rem;
@@ -147,30 +135,6 @@
 .backoffice-ui-root .agent-work-context.is-error > span,
 .backoffice-ui-root .agent-work-context.is-error .text-button {
   color: #8f1719;
-}
-
-.backoffice-ui-root .agent-profile-context {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.4375rem 0.5rem;
-  color: var(--ink-soft);
-  font-size: 0.6875rem;
-  line-height: 1.4;
-  background: var(--red-tint);
-  border: 1px solid #f5c7c7;
-  border-radius: var(--radius-xs);
-}
-
-.backoffice-ui-root .agent-profile-context > span {
-  min-width: 0;
-}
-
-.backoffice-ui-root .agent-profile-context .text-button {
-  flex: 0 0 auto;
-  color: var(--red-pressed);
-  font-size: 0.625rem;
 }
 
 .backoffice-ui-root .agent-profile-history {
@@ -1017,13 +981,6 @@
   padding: 0.75rem var(--space-lg) var(--space-md);
   background: var(--surface);
   border-top: 1px solid var(--line);
-}
-
-.backoffice-ui-root .agent-profile-context-note {
-  margin: 0;
-  color: var(--ink-muted);
-  font-size: 0.6875rem;
-  line-height: 1.4;
 }
 
 .backoffice-ui-root .agent-input-row {

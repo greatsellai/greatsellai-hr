@@ -52,6 +52,12 @@ interface BindTalentSearchRunOptions {
   jobVersionId: string | null;
 }
 
+interface BindTalentSearchProfileOptions {
+  profileId: string;
+  revisionId: string;
+  jobVersionId: string | null;
+}
+
 /**
  * Keeps only an opaque server conversation reference in this browser tab.
  *
@@ -156,6 +162,30 @@ export function useRecruitingAgentConversation({
     return bound;
   }, [conversation, persistConversation]);
 
+  const bindTalentSearchProfile = useCallback(async ({
+    profileId,
+    revisionId,
+    jobVersionId,
+  }: BindTalentSearchProfileOptions): Promise<RecruitingAgentConversation> => {
+    const input: RecruitingAgentContextBindInput = {
+      context_ref: {
+        kind: "talent_search_profile",
+        profile_id: profileId,
+        revision_id: revisionId,
+      },
+      job_version_id: jobVersionId,
+      ...(conversation
+        ? {
+          conversation_id: conversation.conversation_id,
+          context_version: conversation.context_version,
+        }
+        : {}),
+    };
+    const bound = await api.bindRecruitingAgentContext(input);
+    persistConversation(bound);
+    return bound;
+  }, [conversation, persistConversation]);
+
   const clearConversation = useCallback(async () => {
     if (!conversation) {
       forgetConversation();
@@ -175,6 +205,7 @@ export function useRecruitingAgentConversation({
     adoptConversation: persistConversation,
     buildTurnInput,
     bindTalentSearchRun,
+    bindTalentSearchProfile,
     clearConversation,
     conversation,
     forgetConversation,
@@ -183,6 +214,7 @@ export function useRecruitingAgentConversation({
     restoreError,
   }), [
     persistConversation,
+    bindTalentSearchProfile,
     bindTalentSearchRun,
     buildTurnInput,
     clearConversation,

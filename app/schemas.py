@@ -1225,15 +1225,41 @@ class CandidateDataAuditEventListResponse(ApiModel):
 
 
 class RecruitingAgentContextReference(ApiModel):
-    """A browser-selectable *source*, never a browser-supplied candidate set.
+    """A browser-selectable server-owned context source.
 
-    The server loads and freezes the referenced run under the authenticated
-    workspace before the Agent can use it.  Resume IDs, candidate IDs, source
-    text, and arbitrary conversation history are intentionally not accepted.
+    The server validates every reference under the authenticated workspace
+    before it changes a private Agent conversation.  Resume IDs, candidate
+    IDs, source text, and arbitrary conversation history are intentionally
+    not accepted.
     """
 
-    kind: Literal["talent_search_run"]
-    run_id: str = Field(min_length=1, max_length=64)
+    kind: Literal["talent_search_run", "talent_search_profile"]
+    run_id: str | None = Field(default=None, min_length=1, max_length=64)
+    profile_id: str | None = Field(default=None, min_length=1, max_length=64)
+    revision_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def valid_source(self) -> "RecruitingAgentContextReference":
+        if self.kind == "talent_search_run":
+            if self.run_id and self.profile_id is None and self.revision_id is None:
+                return self
+        elif (
+            self.profile_id
+            and self.revision_id
+            and self.run_id is None
+        ):
+            return self
+        raise ValueError("invalid_recruiting_agent_context_reference")
+
+
+class RecruitingAgentActiveTalentProfile(ApiModel):
+    """Safe summary of the profile currently attached to a private chat."""
+
+    profile_id: str
+    revision_id: str
+    revision_number: int = Field(ge=1)
+    title: str
+    status: Literal["draft", "confirmed"]
 
 
 class RecruitingAgentActiveContext(ApiModel):
@@ -1243,6 +1269,7 @@ class RecruitingAgentActiveContext(ApiModel):
     candidate_count: int = Field(default=0, ge=0)
     active_job_version_id: str | None = None
     active_job_title: str | None = None
+    active_talent_profile: RecruitingAgentActiveTalentProfile | None = None
     expires_at: datetime
 
 
@@ -1368,6 +1395,8 @@ class RecruitingAgentResponse(ApiModel):
     active_context: RecruitingAgentActiveContext
     message: str
     intent: Literal[
+        "draft_talent_search_profile",
+        "refine_active_talent_search_profile",
         "search_candidates",
         "run_job_matching",
         "run_workspace_scoring",
@@ -1383,6 +1412,10 @@ class RecruitingAgentResponse(ApiModel):
     tool_trace: list[RecruitingAgentToolTrace] = Field(default_factory=list)
     search_summary: RecruitingAgentSearchSummary | None = None
     batch_id: str | None = None
+    # The profile API already returns this same recruiter-safe shape.  The
+    # explicit forward reference keeps the generic Agent contract close to its
+    # conversation models while the reusable profile schemas remain together.
+    talent_profile: "TalentSearchProfileResponse | None" = None
 
 
 class CandidateCreate(ApiModel):
@@ -2798,3 +2831,10 @@ class TalentSearchRunResponse(ApiModel):
     applied_hard_filters: TalentSearchHardFilters
     recall_diagnostics: TalentSearchRecallDiagnostics | None = None
     candidate_recall: CandidateSearchResponse
+
+
+# ``RecruitingAgentResponse`` is declared before the reusable talent-profile
+# response models to keep related Agent request/response schemas together.
+# Rebuild its forward reference after this module has defined the full profile
+# shape, rather than weakening the contract to an untyped dictionary.
+RecruitingAgentResponse.model_rebuild()

@@ -862,20 +862,113 @@ test.describe("招聘工作台关键路径", () => {
       },
       updated_at: "2026-07-24T10:01:00Z",
     };
-
-    await page.route(/\/v1\/talent-search-profiles\/generate$/, async (route) => {
-      expect(route.request().postDataJSON()).toMatchObject({
-        message: "寻找有 LangChain 项目经验的本科毕业工程师",
-      });
-      await route.fulfill({ json: draftProfile });
+    const refinedHardFilters = {
+      ...hardFilters,
+      institution_classifications_any_of: ["985"],
+      min_employment_months: 60,
+    };
+    const refinedProfile = {
+      ...draftProfile,
+      current_revision: {
+        ...draftRevision,
+        revision_id: "e2e-profile-revision-2",
+        revision_number: 2,
+        source: "ai_refined",
+        hard_filters: refinedHardFilters,
+      },
+      updated_at: "2026-07-24T10:00:30Z",
+    };
+    const activeProfileContext = (profile: typeof draftProfile) => ({
+      profile_id: profile.profile_id,
+      revision_id: profile.current_revision.revision_id,
+      revision_number: profile.current_revision.revision_number,
+      title: profile.current_revision.title,
+      status: profile.status,
     });
+    let agentTurnCount = 0;
+
+    await page.route("**/v1/recruiting-agent/turns", async (route) => {
+      agentTurnCount += 1;
+      const body = route.request().postDataJSON();
+      if (agentTurnCount === 1) {
+        expect(body).toEqual({
+          message: "寻找有 LangChain 项目经验的本科毕业工程师",
+          job_version_id: null,
+        });
+        await route.fulfill({
+          json: {
+            conversation_id: "e2e-profile-agent-context",
+            context_version: 2,
+            active_context: {
+              candidate_set_source: null,
+              candidate_count: 0,
+              active_job_version_id: null,
+              active_job_title: null,
+              active_talent_profile: activeProfileContext(draftProfile),
+              expires_at: "2026-07-25T10:00:00Z",
+            },
+            message: "这是我整理的找人条件。确认前不会筛选、评分或匹配候选人。",
+            intent: "draft_talent_search_profile",
+            job_version_id: null,
+            candidates: [],
+            actions: [],
+            tool_trace: [{ tool: "人才画像草案", summary: "已整理人才画像草案，尚未执行候选人筛选或评分" }],
+            search_summary: null,
+            batch_id: null,
+            talent_profile: draftProfile,
+          },
+        });
+        return;
+      }
+      expect(agentTurnCount).toBe(2);
+      expect(body).toEqual({
+        message: "再加 985，正式工作年限改成 5 年",
+        job_version_id: null,
+        conversation_id: "e2e-profile-agent-context",
+        context_version: 2,
+      });
+      expect(JSON.stringify(body)).not.toContain("profile_id");
+      await route.fulfill({
+        json: {
+          conversation_id: "e2e-profile-agent-context",
+          context_version: 3,
+          active_context: {
+            candidate_set_source: null,
+            candidate_count: 0,
+            active_job_version_id: null,
+            active_job_title: null,
+            active_talent_profile: activeProfileContext(refinedProfile),
+            expires_at: "2026-07-25T10:00:00Z",
+          },
+          message: "这是更新后的找人条件。确认前不会筛选、评分或匹配候选人。",
+          intent: "refine_active_talent_search_profile",
+          job_version_id: null,
+          candidates: [],
+          actions: [],
+          tool_trace: [{ tool: "人才画像草案", summary: "已根据补充条件更新人才画像草案，尚未执行候选人筛选或评分" }],
+          search_summary: null,
+          batch_id: null,
+          talent_profile: refinedProfile,
+        },
+      });
+    });
+
     await page.route(/\/v1\/talent-search-profiles\/e2e-profile\/confirm$/, async (route) => {
-      expect(route.request().postDataJSON()).toEqual({ revision_id: "e2e-profile-revision-1" });
-      await route.fulfill({ json: confirmedProfile });
+      expect(route.request().postDataJSON()).toEqual({ revision_id: "e2e-profile-revision-2" });
+      await route.fulfill({
+        json: {
+          ...confirmedProfile,
+          current_revision: {
+            ...refinedProfile.current_revision,
+            status: "confirmed",
+            confirmed_at: "2026-07-24T10:01:00Z",
+          },
+        },
+      });
     });
     await page.route(/\/v1\/talent-search-profiles\/e2e-profile\/runs$/, async (route) => {
       expect(route.request().postDataJSON()).toMatchObject({
-        revision_id: "e2e-profile-revision-1",
+        revision_id: "e2e-profile-revision-2",
       });
       await route.fulfill({
         json: {
@@ -883,6 +976,7 @@ test.describe("招聘工作台关键路径", () => {
           profile_id: "e2e-profile",
           revision_id: "e2e-profile-revision-1",
           status: "completed",
+          result_mode: "hard_filter_recall",
           total_recalled_count: 0,
           job_match_batch_id: null,
           match_total_count: 0,
@@ -921,46 +1015,93 @@ test.describe("招聘工作台关键路径", () => {
       });
     });
     await page.route("**/v1/recruiting-agent/conversations/context", async (route) => {
-      expect(route.request().postDataJSON()).toEqual({
-        context_ref: { kind: "talent_search_run", run_id: "e2e-profile-run" },
-        job_version_id: null,
-      });
+      const body = route.request().postDataJSON();
+      const isProfileBind = body.context_ref.kind === "talent_search_profile";
+      expect(body).toMatchObject(
+        isProfileBind
+          ? {
+            context_ref: {
+              kind: "talent_search_profile",
+              profile_id: "e2e-profile",
+              revision_id: "e2e-profile-revision-2",
+            },
+            conversation_id: "e2e-profile-agent-context",
+            context_version: 3,
+          }
+          : {
+            context_ref: { kind: "talent_search_run", run_id: "e2e-profile-run" },
+            conversation_id: "e2e-profile-agent-context",
+            context_version: 4,
+          },
+      );
       await route.fulfill({
         json: {
           conversation_id: "e2e-profile-agent-context",
-          context_version: 2,
+          context_version: isProfileBind ? 4 : 5,
           active_context: {
-            candidate_set_source: "talent_search_run",
+            candidate_set_source: isProfileBind ? null : "talent_search_run",
             candidate_count: 0,
             active_job_version_id: null,
             active_job_title: null,
+            active_talent_profile: activeProfileContext({
+              ...refinedProfile,
+              status: "confirmed",
+            }),
             expires_at: "2026-07-25T10:00:00Z",
           },
         },
       });
     });
+    await page.route(
+      /\/v1\/recruiting-agent\/conversations\/e2e-profile-agent-context$/,
+      async (route) => {
+        await route.fulfill({
+          json: {
+            conversation_id: "e2e-profile-agent-context",
+            context_version: 2,
+            active_context: {
+              candidate_set_source: null,
+              candidate_count: 0,
+              active_job_version_id: null,
+              active_job_title: null,
+              active_talent_profile: activeProfileContext(draftProfile),
+              expires_at: "2026-07-25T10:00:00Z",
+            },
+          },
+        });
+      },
+    );
+    await page.route(/\/v1\/talent-search-profiles\/e2e-profile$/, async (route) => {
+      await route.fulfill({ json: draftProfile });
+    });
 
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "招聘助手" });
-    await expect(dialog.getByRole("button", { name: "新建人才画像" })).toBeVisible();
-    await expect(dialog.getByRole("button", { name: "助手对话" })).toHaveCount(0);
-
-    await dialog.getByRole("button", { name: "新建人才画像" }).click();
-    await expect(dialog.getByText("正在新建人才画像：先给出可确认草案，不会直接检索候选人。")).toBeVisible();
+    let dialog = page.getByRole("dialog", { name: "招聘助手" });
+    await expect(dialog.getByRole("button", { name: "新建人才画像" })).toHaveCount(0);
     await dialog.getByLabel("向招聘助手提问").fill("寻找有 LangChain 项目经验的本科毕业工程师");
     await dialog.getByRole("button", { name: "发送提问" }).click();
 
     await expect(dialog.getByText("教育经历：含本科（任一）")).toBeVisible();
     await expect(dialog.getByText("具备 LangChain 的项目、实习或工作实践")).toBeVisible();
-    await expect(dialog.getByText("正在补充当前人才画像：发送后会生成新草案，不会直接检索候选人。")).toBeVisible();
+    // Only the opaque conversation ID survives a reload. The drawer must
+    // recover the safe active-profile reference and then re-fetch the card
+    // under the ordinary workspace-scoped profile endpoint.
+    await page.reload();
+    await page.getByRole("button", { name: "招聘助手", exact: true }).click();
+    dialog = page.getByRole("dialog", { name: "招聘助手" });
+    await expect(dialog.getByText("教育经历：含本科（任一）")).toBeVisible();
+    await expect(dialog.getByText("具备 LangChain 的项目、实习或工作实践")).toBeVisible();
+    await dialog.getByLabel("向招聘助手提问").fill("再加 985，正式工作年限改成 5 年");
+    await dialog.getByRole("button", { name: "发送提问" }).click();
+    await expect(dialog.getByText("院校类型：985（任一）")).toBeVisible();
+    await expect(dialog.getByText("正式工作不少于 5 年")).toBeVisible();
 
-    await dialog.getByRole("button", { name: "确认画像" }).click();
-    await dialog.getByRole("button", { name: "开始找人" }).click();
+    await dialog.getByRole("button", { name: "确认画像" }).last().click();
+    await dialog.getByRole("button", { name: "开始找人" }).last().click();
 
-    await expect(dialog.getByText("没有候选人同时满足本次严格条件")).toBeVisible();
-    await expect(dialog.getByText("筛掉 3，剩余 0")).toBeVisible();
+    await expect(dialog.getByText("没有候选人同时满足本次严格条件").last()).toBeVisible();
+    await expect(dialog.getByText("筛掉 3，剩余 0").last()).toBeVisible();
     await expect(dialog.getByRole("button", { name: "调整条件" })).toBeVisible();
-    await dialog.getByRole("button", { name: "将本次人才画像结果设为助手工作范围" }).click();
     await expect(dialog.getByText("人才画像找人结果 · 0 位候选人")).toBeVisible();
   });
 
@@ -1104,8 +1245,12 @@ test.describe("招聘工作台关键路径", () => {
 
     await reloadedDialog.getByRole("button", { name: "清除范围" }).click();
     await expect(
-      reloadedDialog.getByText("尚未设置工作范围；筛选或选择人才画像结果后可继续追问。"),
+      reloadedDialog.getByText(
+        "直接描述你想找的人，我会先整理条件，确认后才开始找人。",
+        { exact: true },
+      ),
     ).toBeVisible();
+    await expect(reloadedDialog.getByRole("button", { name: "清除范围" })).toHaveCount(0);
   });
 
   test("邮箱通道保存后同步请求只进入后台队列", async ({ page }) => {

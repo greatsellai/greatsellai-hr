@@ -2028,10 +2028,11 @@ class RecruitingAgentConversation(OrganizationScoped, Base):
     """One private, short-lived recruiting-Agent work session.
 
     The conversation deliberately keeps only controlled work state: the
-    selected JD and a server-created candidate-set reference.  It never stores
-    chat transcripts, prompts, model output, candidate names, source blocks,
-    or resume text.  Candidate membership lives in the normalized child table
-    below so a browser can never submit an arbitrary set of resume IDs.
+    selected JD, a profile/revision reference, and a server-created
+    candidate-set reference. It never stores chat transcripts, prompts, model
+    output, candidate names, source blocks, or resume text. Candidate
+    membership lives in the normalized child table below so a browser can
+    never submit an arbitrary set of resume IDs.
     """
 
     __tablename__ = "recruiting_agent_conversations"
@@ -2051,6 +2052,16 @@ class RecruitingAgentConversation(OrganizationScoped, Base):
             "ix_recruiting_agent_conversations_organization_expiry",
             "organization_id",
             "expires_at",
+        ),
+        # Keep explicit names below PostgreSQL's 63-character identifier
+        # limit.  The column names themselves intentionally remain verbose.
+        Index(
+            "ix_agent_conv_active_talent_profile",
+            "active_talent_profile_id",
+        ),
+        Index(
+            "ix_agent_conv_active_talent_profile_revision",
+            "active_talent_profile_revision_id",
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -2074,6 +2085,18 @@ class RecruitingAgentConversation(OrganizationScoped, Base):
         String(36),
         nullable=True,
         index=True,
+    )
+    # A direct Agent request can create or refine a confirmation-first talent
+    # profile.  Keep only opaque references here: profile contents remain in
+    # their own workspace-scoped, revisioned records and chat messages never
+    # enter this table.
+    active_talent_profile_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+    )
+    active_talent_profile_revision_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
     )
     # Protect two browser tabs from silently replacing each other's "just now"
     # candidate scope.  The client returns this value on the next turn.

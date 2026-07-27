@@ -1582,6 +1582,17 @@ def test_foreign_talent_search_profile_routes_are_indistinguishable_from_missing
         client_a.get(
             f"/v1/talent-search-profiles/{profile_id}/runs/{run_id}"
         ),
+        client_a.post(
+            "/v1/recruiting-agent/conversations/context",
+            json={
+                "context_ref": {
+                    "kind": "talent_search_profile",
+                    "profile_id": profile_id,
+                    "revision_id": revision_id,
+                },
+                "job_version_id": None,
+            },
+        ),
     )
     for response in foreign_responses:
         assert response.status_code == 404, response.text

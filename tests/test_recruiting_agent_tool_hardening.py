@@ -190,6 +190,68 @@ def test_unknown_search_tool_key_does_not_fall_back_to_a_broader_search(
     ]
 
 
+def test_profile_draft_rejects_model_arguments_and_skips_mixed_candidate_tools(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """A malformed draft call cannot become draft plus an immediate search."""
+
+    generate_called = False
+    search_called = False
+    completions = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal completions
+        del settings, messages
+        completions += 1
+        assert completions == 1
+        return {
+            "content": None,
+            "tool_calls": [
+                _tool_call(
+                    name="draft_talent_search_profile",
+                    arguments={"profile_id": "browser-and-model-must-not-control-this"},
+                    call_id="invalid-draft",
+                ),
+                _tool_call(
+                    name="search_candidates",
+                    arguments={"skills_all_of": ["Python"]},
+                    call_id="must-not-run-search",
+                ),
+            ],
+        }
+
+    def unexpected_generate(*args, **kwargs):
+        nonlocal generate_called
+        generate_called = True
+        raise AssertionError("invalid profile tool arguments must not generate a draft")
+
+    def unexpected_search(*args, **kwargs):
+        nonlocal search_called
+        search_called = True
+        raise AssertionError("a draft turn must not read candidates")
+
+    monkeypatch.setattr(recruiting_agent_service, "_model_completion", fake_completion)
+    monkeypatch.setattr(recruiting_agent_service, "generate_profile", unexpected_generate)
+    monkeypatch.setattr(recruiting_agent_service, "search_candidates", unexpected_search)
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "找有 Python 经验的人"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert generate_called is False
+    assert search_called is False
+    payload = response.json()
+    assert payload["talent_profile"] is None
+    assert payload["candidates"] == []
+    assert payload["intent"] == "help"
+    summaries = [item["summary"] for item in payload["tool_trace"]]
+    assert "本轮只生成画像草案，未执行其他候选人操作" in summaries
+    assert "工具调用参数无法识别，未执行任何操作。" in summaries
+
+
 def test_invalid_workspace_jd_batch_arguments_create_no_batch_side_effect(
     ai_client: TestClient,
     monkeypatch,

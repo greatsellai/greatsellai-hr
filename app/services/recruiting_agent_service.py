@@ -24,11 +24,14 @@ from app.models import (
     RecruitingAgentCandidateSetItem,
     RecruitingAgentConversation,
     Resume,
+    TalentSearchProfile,
+    TalentSearchProfileRevision,
     TalentSearchRun,
     utcnow,
 )
 from app.schemas import (
     CandidateSearchRequest,
+    RecruitingAgentActiveTalentProfile,
     RecruitingAgentActiveContext,
     RecruitingAgentAction,
     RecruitingAgentCandidate,
@@ -39,6 +42,9 @@ from app.schemas import (
     RecruitingAgentSearchSummary,
     RecruitingAgentToolTrace,
     RecruitingAgentVerificationEvidence,
+    TalentSearchProfileGenerateRequest,
+    TalentSearchProfileRefineRequest,
+    TalentSearchProfileResponse,
 )
 from app.services.ai_gateway_service import (
     AiExecutionSpec,
@@ -47,6 +53,7 @@ from app.services.ai_gateway_service import (
     ai_gateway_credentials_configured,
     ai_gateway_execution,
 )
+from app.services.deepseek_provider import DeepSeekProviderError
 from app.services.trial_quota_service import TRIAL_LLM_CALL_QUOTA_EXHAUSTED_CODE
 from app.services.job_match_batch_service import enqueue_job_version_match_batch
 from app.services.job_service import (
@@ -74,6 +81,12 @@ from app.services.score_service import (
     ScoreTemplateNotFoundError,
     list_score_templates,
 )
+from app.services.talent_search_profile_service import (
+    TalentSearchProfileServiceError,
+    generate_profile,
+    get_profile,
+    refine_profile,
+)
 from app.tenant_scope import clear_organization_context, set_organization_context
 
 
@@ -100,6 +113,8 @@ class ResolvedJob:
 
 
 AgentIntent = Literal[
+    "draft_talent_search_profile",
+    "refine_active_talent_search_profile",
     "search_candidates",
     "run_job_matching",
     "run_workspace_scoring",
@@ -120,6 +135,7 @@ class ToolRun:
     search_summary: RecruitingAgentSearchSummary | None = None
     batch_id: str | None = None
     intent: AgentIntent | None = None
+    talent_profile: TalentSearchProfileResponse | None = None
     # Only a server-produced search result may become the next conversational
     # candidate scope.  The browser and the model never provide this list.
     context_resume_ids: list[str] | None = None
@@ -148,9 +164,11 @@ class _RecruitingAgentGraphState(TypedDict, total=False):
     traces: list[RecruitingAgentToolTrace]
     search_summary: RecruitingAgentSearchSummary | None
     batch_id: str | None
+    talent_profile: TalentSearchProfileResponse | None
     intent: AgentIntent
     tool_steps: int
     tool_call_limit_exceeded: bool
+    profile_lifecycle_completed: bool
     pending_search_resume_ids: list[str] | None
     response: RecruitingAgentResponse
 
@@ -160,6 +178,12 @@ _CONTEXT_SOURCE_AGENT_SEARCH = "agent_search"
 _CONTEXT_SOURCE_TALENT_SEARCH_RUN = "talent_search_run"
 _MAX_TOOL_CALLS_PER_MODEL_RESPONSE = 4
 _MAX_TOOL_ROUNDS_PER_TURN = 4
+_PROFILE_LIFECYCLE_TOOL_NAMES = frozenset(
+    {
+        "draft_talent_search_profile",
+        "refine_active_talent_search_profile",
+    }
+)
 
 
 _STRING_ARRAY_SCHEMA: dict[str, Any] = {
@@ -360,6 +384,33 @@ _SEARCH_SCHEMA: dict[str, Any] = {
 
 
 _TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "draft_talent_search_profile",
+            "description": (
+                "Create a confirmation-first talent-search draft when the recruiter describes a "
+                "new person to find or a new target role. The server uses the original recruiter "
+                "message and selected JD itself. This only creates a draft: it must not search, "
+                "score, match, confirm, or start a candidate run."
+            ),
+            "parameters": {"type": "object", "additionalProperties": False, "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "refine_active_talent_search_profile",
+            "description": (
+                "Update the currently active confirmation-first talent-search draft when the "
+                "recruiter adds, removes, or changes its requirements, for example 再加985 or "
+                "年限改成5年. The server selects the active profile and revision itself. This only "
+                "creates a new draft revision: it must not search, score, match, confirm, or start "
+                "a candidate run."
+            ),
+            "parameters": {"type": "object", "additionalProperties": False, "properties": {}},
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -819,6 +870,178 @@ def _active_candidate_set(
     return candidate_set
 
 
+def _active_talent_profile_response(
+    session: Session,
+    *,
+    conversation: RecruitingAgentConversation,
+) -> TalentSearchProfileResponse | None:
+    """Resolve the private chat's current profile under the active workspace.
+
+    The conversation stores no profile content.  Both opaque pointers must
+    still describe the profile's current, non-superseded revision before any
+    model turn can use it.  A stale, deleted, foreign, or malformed reference
+    fails closed rather than silently applying another recruiter's draft.
+    """
+
+    profile_id = conversation.active_talent_profile_id
+    revision_id = conversation.active_talent_profile_revision_id
+    if not profile_id or not revision_id:
+        return None
+    profile = session.scalar(
+        select(TalentSearchProfile).where(TalentSearchProfile.id == profile_id)
+    )
+    if profile is None:
+        return None
+    revision = session.scalar(
+        select(TalentSearchProfileRevision).where(
+            TalentSearchProfileRevision.id == revision_id,
+            TalentSearchProfileRevision.profile_id == profile.id,
+        )
+    )
+    if (
+        revision is None
+        or revision.revision_number != profile.current_revision_number
+        or revision.status == "superseded"
+    ):
+        return None
+    try:
+        return get_profile(session, profile_id=profile.id)
+    except TalentSearchProfileServiceError:
+        # The ordinary profile service owns any tenant and lifecycle details.
+        # A conversation reference never turns those details into an oracle.
+        return None
+
+
+def _active_talent_profile_summary(
+    profile: TalentSearchProfileResponse | None,
+) -> RecruitingAgentActiveTalentProfile | None:
+    if profile is None:
+        return None
+    revision = profile.current_revision
+    return RecruitingAgentActiveTalentProfile(
+        profile_id=profile.profile_id,
+        revision_id=revision.revision_id,
+        revision_number=revision.revision_number,
+        title=revision.title,
+        status=profile.status,
+    )
+
+
+def _profile_work_state(profile: TalentSearchProfileResponse | None) -> dict[str, object] | None:
+    """Project an active profile into one bounded, transcript-free model view."""
+
+    if profile is None:
+        return None
+    revision = profile.current_revision
+    return {
+        "status": profile.status,
+        "title": revision.title,
+        "summary": revision.summary,
+        "hard_filters": revision.hard_filters.model_dump(mode="json"),
+        "verification_requirements": [
+            {"label": item.label, "evidence_hint": item.evidence_hint}
+            for item in revision.verification_requirements
+        ],
+        "preferred_requirements": [
+            {"label": item.label, "evidence_hint": item.evidence_hint}
+            for item in revision.preferred_requirements
+        ],
+    }
+
+
+def _clear_active_candidate_set(
+    session: Session,
+    *,
+    conversation: RecruitingAgentConversation,
+) -> bool:
+    """Forget the one private candidate scope without touching a profile run."""
+
+    candidate_set = _active_candidate_set(session, conversation=conversation)
+    if candidate_set is None:
+        if conversation.active_candidate_set_id is None:
+            return False
+        conversation.active_candidate_set_id = None
+        return True
+    conversation.active_candidate_set_id = None
+    session.delete(candidate_set)
+    return True
+
+
+def _set_active_talent_profile(
+    session: Session,
+    *,
+    conversation: RecruitingAgentConversation,
+    profile: TalentSearchProfileResponse,
+    clear_candidate_scope: bool,
+) -> None:
+    """Attach a current profile revision to one private Agent conversation."""
+
+    revision = profile.current_revision
+    changed = (
+        conversation.active_talent_profile_id != profile.profile_id
+        or conversation.active_talent_profile_revision_id != revision.revision_id
+    )
+    conversation.active_talent_profile_id = profile.profile_id
+    conversation.active_talent_profile_revision_id = revision.revision_id
+    if clear_candidate_scope:
+        changed = _clear_active_candidate_set(
+            session,
+            conversation=conversation,
+        ) or changed
+    if changed:
+        _advance_conversation_context(conversation)
+
+
+def _bind_talent_search_profile_context(
+    session: Session,
+    *,
+    conversation: RecruitingAgentConversation,
+    profile_id: str,
+    revision_id: str,
+) -> TalentSearchProfileResponse:
+    """Bind a recruiter-visible current profile without accepting any facts."""
+
+    # Serialize this bind with profile refine/confirm/start. Without the
+    # profile-row lock, another conversation could supersede the revision
+    # between validation and this conversation's commit.
+    profile = session.scalar(
+        select(TalentSearchProfile)
+        .where(TalentSearchProfile.id == profile_id)
+        .with_for_update()
+    )
+    if profile is None:
+        raise RecruitingAgentContextReferenceNotFoundError(
+            "agent_context_reference_not_found"
+        )
+    revision = session.scalar(
+        select(TalentSearchProfileRevision).where(
+            TalentSearchProfileRevision.id == revision_id,
+            TalentSearchProfileRevision.profile_id == profile.id,
+        )
+    )
+    if (
+        revision is None
+        or revision.revision_number != profile.current_revision_number
+        or revision.status == "superseded"
+    ):
+        raise RecruitingAgentContextReferenceNotFoundError(
+            "agent_context_reference_not_found"
+        )
+    try:
+        response = get_profile(session, profile_id=profile.id)
+    except TalentSearchProfileServiceError as exc:
+        raise RecruitingAgentContextReferenceNotFoundError(
+            "agent_context_reference_not_found"
+        ) from exc
+    _set_active_talent_profile(
+        session,
+        conversation=conversation,
+        profile=response,
+        clear_candidate_scope=True,
+    )
+    return response
+
+
 def _candidate_set_resume_ids(
     session: Session,
     *,
@@ -865,6 +1088,10 @@ def _conversation_context(
     """Build the only durable work state that enters the model context."""
 
     candidate_set = _active_candidate_set(session, conversation=conversation)
+    active_profile = _active_talent_profile_response(
+        session,
+        conversation=conversation,
+    )
     candidate_count = len(
         _candidate_set_resume_ids(session, candidate_set=candidate_set)
     )
@@ -881,6 +1108,7 @@ def _conversation_context(
             saved_job.job_version_id if saved_job is not None else None
         ),
         active_job_title=(saved_job.title if saved_job is not None else None),
+        active_talent_profile=_active_talent_profile_summary(active_profile),
         expires_at=conversation.expires_at,
     )
 
@@ -1055,11 +1283,22 @@ def bind_recruiting_agent_context(
         else None
     )
     _set_explicit_conversation_job(conversation, job=job)
-    _bind_talent_search_run_context(
-        session,
-        conversation=conversation,
-        run_id=payload.context_ref.run_id,
-    )
+    if payload.context_ref.kind == "talent_search_run":
+        assert payload.context_ref.run_id is not None
+        _bind_talent_search_run_context(
+            session,
+            conversation=conversation,
+            run_id=payload.context_ref.run_id,
+        )
+    else:
+        assert payload.context_ref.profile_id is not None
+        assert payload.context_ref.revision_id is not None
+        _bind_talent_search_profile_context(
+            session,
+            conversation=conversation,
+            profile_id=payload.context_ref.profile_id,
+            revision_id=payload.context_ref.revision_id,
+        )
     _touch_conversation(session, conversation=conversation)
     return _conversation_response(
         session,
@@ -1135,11 +1374,55 @@ def _bind_talent_search_run_context(
 ) -> None:
     """Bind one workspace-owned, server-generated RAG recall set to a chat."""
 
-    run = session.get(TalentSearchRun, run_id)
+    run = session.scalar(select(TalentSearchRun).where(TalentSearchRun.id == run_id))
     if run is None:
         raise RecruitingAgentContextReferenceNotFoundError(
             "agent_context_reference_not_found"
         )
+    profile = session.scalar(
+        select(TalentSearchProfile).where(TalentSearchProfile.id == run.profile_id)
+    )
+    revision = session.scalar(
+        select(TalentSearchProfileRevision).where(
+            TalentSearchProfileRevision.id == run.revision_id,
+            TalentSearchProfileRevision.profile_id == run.profile_id,
+        )
+    )
+    if profile is None or revision is None:
+        raise RecruitingAgentContextReferenceNotFoundError(
+            "agent_context_reference_not_found"
+        )
+    # A historic run can remain readable after a later refinement.  It is
+    # still a valid source for “these candidates”, but must never silently
+    # become the draft that a new free-form change refines.
+    if (
+        revision.revision_number == profile.current_revision_number
+        and revision.status != "superseded"
+    ):
+        try:
+            current_profile = get_profile(session, profile_id=profile.id)
+        except TalentSearchProfileServiceError as exc:
+            raise RecruitingAgentContextReferenceNotFoundError(
+                "agent_context_reference_not_found"
+            ) from exc
+        _set_active_talent_profile(
+            session,
+            conversation=conversation,
+            profile=current_profile,
+            clear_candidate_scope=False,
+        )
+    else:
+        # A historic run remains a valid, immutable “these candidates” scope,
+        # but it is not a current draft.  Leaving an unrelated active profile
+        # in place would make a later “再加 985” refine the wrong brief.
+        profile_context_cleared = (
+            conversation.active_talent_profile_id is not None
+            or conversation.active_talent_profile_revision_id is not None
+        )
+        conversation.active_talent_profile_id = None
+        conversation.active_talent_profile_revision_id = None
+        if profile_context_cleared:
+            _advance_conversation_context(conversation)
     current = _active_candidate_set(session, conversation=conversation)
     if (
         current is not None
@@ -2640,6 +2923,125 @@ def _tool_consumes_pending_search_scope(
     return not _message_explicitly_targets_workspace(user_message.casefold())
 
 
+def _raise_profile_service_failure(
+    exc: TalentSearchProfileServiceError | DeepSeekProviderError,
+) -> None:
+    """Map profile-provider failures to the Agent's stable public vocabulary."""
+
+    code = str(exc)
+    if code == TRIAL_LLM_CALL_QUOTA_EXHAUSTED_CODE:
+        raise RecruitingAgentServiceError(code) from exc
+    raise RecruitingAgentServiceError("agent_talent_profile_unavailable") from exc
+
+
+def _profile_tool_payload(profile: TalentSearchProfileResponse) -> dict[str, object]:
+    """Give the model only a compact lifecycle result, never profile source text."""
+
+    revision = profile.current_revision
+    return {
+        "status": profile.status,
+        "title": revision.title,
+        "revision_number": revision.revision_number,
+        "candidate_search_started": False,
+    }
+
+
+def _draft_talent_search_profile(
+    session: Session,
+    *,
+    arguments: dict[str, Any],
+    conversation: RecruitingAgentConversation,
+    settings: AppSettings,
+    actor_user_id: str,
+    user_message: str,
+    source_job_version_id: str | None,
+) -> ToolRun:
+    """Create a profile draft without reading candidate records or starting work."""
+
+    _strict_tool_arguments(arguments, allowed=set())
+    try:
+        profile = generate_profile(
+            session,
+            payload=TalentSearchProfileGenerateRequest(
+                message=user_message.strip(),
+                job_version_id=(source_job_version_id or None),
+            ),
+            settings=settings,
+            actor_user_id=actor_user_id,
+        )
+    except (TalentSearchProfileServiceError, DeepSeekProviderError) as exc:
+        _raise_profile_service_failure(exc)
+    _set_active_talent_profile(
+        session,
+        conversation=conversation,
+        profile=profile,
+        clear_candidate_scope=True,
+    )
+    return ToolRun(
+        payload=_profile_tool_payload(profile),
+        traces=[
+            RecruitingAgentToolTrace(
+                tool="人才画像草案",
+                summary="已整理人才画像草案，尚未执行候选人筛选或评分",
+            )
+        ],
+        intent="draft_talent_search_profile",
+        talent_profile=profile,
+    )
+
+
+def _refine_active_talent_search_profile(
+    session: Session,
+    *,
+    arguments: dict[str, Any],
+    conversation: RecruitingAgentConversation,
+    settings: AppSettings,
+    actor_user_id: str,
+    user_message: str,
+) -> ToolRun:
+    """Create one new revision of the current private profile draft."""
+
+    _strict_tool_arguments(arguments, allowed=set())
+    profile = _active_talent_profile_response(session, conversation=conversation)
+    if profile is None:
+        message = "当前没有可继续补充的人才画像草案，请先直接描述想找的人。"
+        return ToolRun(
+            payload={"error": message},
+            traces=[RecruitingAgentToolTrace(tool="人才画像草案", summary=message)],
+            intent="refine_active_talent_search_profile",
+        )
+    try:
+        refined = refine_profile(
+            session,
+            profile_id=profile.profile_id,
+            payload=TalentSearchProfileRefineRequest(
+                revision_id=profile.current_revision.revision_id,
+                message=user_message.strip(),
+            ),
+            settings=settings,
+            actor_user_id=actor_user_id,
+        )
+    except (TalentSearchProfileServiceError, DeepSeekProviderError) as exc:
+        _raise_profile_service_failure(exc)
+    _set_active_talent_profile(
+        session,
+        conversation=conversation,
+        profile=refined,
+        clear_candidate_scope=True,
+    )
+    return ToolRun(
+        payload=_profile_tool_payload(refined),
+        traces=[
+            RecruitingAgentToolTrace(
+                tool="人才画像草案",
+                summary="已根据补充条件更新人才画像草案，尚未执行候选人筛选或评分",
+            )
+        ],
+        intent="refine_active_talent_search_profile",
+        talent_profile=refined,
+    )
+
+
 def _execute_tool(
     *,
     name: str,
@@ -2648,10 +3050,31 @@ def _execute_tool(
     job: ResolvedJob | None,
     conversation: RecruitingAgentConversation,
     settings: AppSettings,
+    actor_user_id: str,
     mailbox_tools_available: bool,
     user_message: str,
+    source_job_version_id: str | None,
     force_active_scope: bool = False,
 ) -> ToolRun:
+    if name == "draft_talent_search_profile":
+        return _draft_talent_search_profile(
+            session,
+            arguments=arguments,
+            conversation=conversation,
+            settings=settings,
+            actor_user_id=actor_user_id,
+            user_message=user_message,
+            source_job_version_id=source_job_version_id,
+        )
+    if name == "refine_active_talent_search_profile":
+        return _refine_active_talent_search_profile(
+            session,
+            arguments=arguments,
+            conversation=conversation,
+            settings=settings,
+            actor_user_id=actor_user_id,
+            user_message=user_message,
+        )
     if name == "search_candidates":
         return _search(session, arguments)
     if name == "start_current_job_match_batch":
@@ -2793,8 +3216,20 @@ def _agent_system_instruction(*, mailbox_tools_available: bool) -> str:
         "reply must be Chinese regardless of the request language. Do not output a complete English "
         "sentence or paragraph; English is allowed only for indispensable proper names, standard codes, "
         "URLs, or technical terms embedded inside Chinese prose. "
+        "When a recruiter directly describes a new target person or a new round of proactive hiring, "
+        "call draft_talent_search_profile before any candidate search. It creates only a draft for "
+        "the recruiter to confirm. Never combine that tool with search_candidates, JD matching, "
+        "ranking, scoring, confirmation, or starting a run in the same response. When the "
+        "conversation_work_state includes an active_talent_profile and the recruiter clearly adds, "
+        "removes, or changes its hiring conditions, call refine_active_talent_search_profile. "
+        "Use the current profile work state to understand the existing conditions, but never expose "
+        "or request profile IDs, revision IDs, candidate IDs, resume text, prompts, or chat history. "
+        "Do not use the generic search_candidates tool as a substitute for a new confirmation-first "
+        "talent profile. Generic search remains for an explicit library lookup that is not a new "
+        "proactive find-person task. "
         "The server-provided conversation_work_state is a private, current work scope. It may contain "
-        "one saved candidate set and one current JD, but never a chat transcript. When the recruiter "
+        "one saved candidate set, one current JD, and one structured talent-profile summary, but never "
+        "a chat transcript. When the recruiter "
         "says 刚刚筛选出的、上一轮结果、其中、这些人, or asks to choose from the current RAG result, use "
         "get_current_job_ranking_from_active_context instead of get_current_job_ranking. If they "
         "explicitly request only RAG results displayed as 100%, call that tool with "
@@ -2840,11 +3275,22 @@ def _prepare_graph_turn(state: _RecruitingAgentGraphState) -> dict[str, Any]:
         require_context_version=True,
     )
     if payload.context_ref is not None:
-        _bind_talent_search_run_context(
-            session,
-            conversation=conversation,
-            run_id=payload.context_ref.run_id,
-        )
+        if payload.context_ref.kind == "talent_search_run":
+            assert payload.context_ref.run_id is not None
+            _bind_talent_search_run_context(
+                session,
+                conversation=conversation,
+                run_id=payload.context_ref.run_id,
+            )
+        else:
+            assert payload.context_ref.profile_id is not None
+            assert payload.context_ref.revision_id is not None
+            _bind_talent_search_profile_context(
+                session,
+                conversation=conversation,
+                profile_id=payload.context_ref.profile_id,
+                revision_id=payload.context_ref.revision_id,
+            )
     job = _resolve_conversation_job(
         session,
         payload=payload,
@@ -2860,6 +3306,10 @@ def _prepare_graph_turn(state: _RecruitingAgentGraphState) -> dict[str, Any]:
         conversation=conversation,
         current_job=job,
     )
+    active_profile = _active_talent_profile_response(
+        session,
+        conversation=conversation,
+    )
     context = {
         "current_job": {"job_version_id": job.job_version_id, "title": job.title} if job else None,
         "conversation_work_state": {
@@ -2867,6 +3317,7 @@ def _prepare_graph_turn(state: _RecruitingAgentGraphState) -> dict[str, Any]:
             "candidate_count": active_context.candidate_count,
             "active_job_version_id": active_context.active_job_version_id,
             "active_job_title": active_context.active_job_title,
+            "active_talent_profile": _profile_work_state(active_profile),
         },
         "current_score_templates": _score_template_context(session),
         "mailbox_tools_available": mailbox_tools_available,
@@ -2900,9 +3351,11 @@ def _prepare_graph_turn(state: _RecruitingAgentGraphState) -> dict[str, Any]:
         "traces": [],
         "search_summary": None,
         "batch_id": None,
+        "talent_profile": None,
         "intent": "help",
         "tool_steps": 0,
         "tool_call_limit_exceeded": False,
+        "profile_lifecycle_completed": False,
         "pending_search_resume_ids": None,
     }
 
@@ -2951,6 +3404,8 @@ def _route_after_agent_tools(
 ) -> Literal["model", "final_model", "finalize"]:
     """Bound tools while still allowing a final recruiter-readable reply."""
 
+    if state.get("profile_lifecycle_completed"):
+        return "finalize"
     if state.get("tool_call_limit_exceeded"):
         return "finalize"
     if state["tool_steps"] >= _MAX_TOOL_ROUNDS_PER_TURN:
@@ -2983,12 +3438,51 @@ def _execute_agent_tools(state: _RecruitingAgentGraphState) -> dict[str, Any]:
                 ),
             ],
         }
+    call_names: list[str] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            raise RecruitingAgentServiceError("agent_model_invalid_tool_calls")
+        function = call.get("function")
+        call_id = call.get("id")
+        if not isinstance(function, dict) or not isinstance(call_id, str):
+            raise RecruitingAgentServiceError("agent_model_invalid_tool_calls")
+        name = function.get("name")
+        if not isinstance(name, str):
+            raise RecruitingAgentServiceError("agent_model_invalid_tool_calls")
+        call_names.append(name)
+    profile_lifecycle_indexes = [
+        index
+        for index, name in enumerate(call_names)
+        if name in _PROFILE_LIFECYCLE_TOOL_NAMES
+    ]
+    if len(profile_lifecycle_indexes) > 1:
+        return {
+            "assistant_message": {
+                "content": "本次请求包含多个画像操作，未执行任何操作。请一次只描述一项找人条件。"
+            },
+            "tool_steps": state["tool_steps"] + 1,
+            "tool_call_limit_exceeded": True,
+            "traces": [
+                *state["traces"],
+                RecruitingAgentToolTrace(
+                    tool="人才画像草案",
+                    summary="同一轮包含多个画像操作，未执行任何操作",
+                ),
+            ],
+        }
+    # Drafting or refining a profile is deliberately exclusive.  A provider
+    # must not turn “帮我找人” into draft + candidate read/score/match in one
+    # response before the recruiter has explicitly confirmed the draft.
+    selected_calls = calls
+    profile_lifecycle_requested = bool(profile_lifecycle_indexes)
+    if profile_lifecycle_requested:
+        selected_calls = [calls[profile_lifecycle_indexes[0]]]
     messages = list(state["messages"])
     messages.append(
         {
             "role": "assistant",
             "content": assistant_message.get("content"),
-            "tool_calls": calls,
+            "tool_calls": selected_calls,
         }
     )
     cards = list(state["cards"])
@@ -2996,9 +3490,17 @@ def _execute_agent_tools(state: _RecruitingAgentGraphState) -> dict[str, Any]:
     traces = list(state["traces"])
     search_summary = state.get("search_summary")
     batch_id = state.get("batch_id")
+    talent_profile = state.get("talent_profile")
     intent = state.get("intent", "help")
     pending_search_resume_ids = state.get("pending_search_resume_ids")
-    for call in calls:
+    if profile_lifecycle_requested and len(calls) > 1:
+        traces.append(
+            RecruitingAgentToolTrace(
+                tool="人才画像草案",
+                summary="本轮只生成画像草案，未执行其他候选人操作",
+            )
+        )
+    for call in selected_calls:
         if not isinstance(call, dict):
             raise RecruitingAgentServiceError("agent_model_invalid_tool_calls")
         function = call.get("function")
@@ -3037,8 +3539,15 @@ def _execute_agent_tools(state: _RecruitingAgentGraphState) -> dict[str, Any]:
                 job=state["job"],
                 conversation=state["conversation"],
                 settings=state["settings"],
+                actor_user_id=state["actor_user_id"],
                 mailbox_tools_available=state["mailbox_tools_available"],
                 user_message=state["payload"].message,
+                # The conversation may already have a selected JD after a
+                # reload or a prior turn.  Use that server-resolved record,
+                # not only the raw field supplied by this browser request.
+                source_job_version_id=(
+                    state["job"].job_version_id if state["job"] is not None else None
+                ),
                 force_active_scope=force_active_scope,
             )
         except RecruitingAgentServiceError as exc:
@@ -3061,6 +3570,8 @@ def _execute_agent_tools(state: _RecruitingAgentGraphState) -> dict[str, Any]:
         batch_id = run.batch_id or batch_id
         if run.intent is not None:
             intent = run.intent
+        if run.talent_profile is not None:
+            talent_profile = run.talent_profile
         messages.append(
             {
                 "role": "tool",
@@ -3068,6 +3579,26 @@ def _execute_agent_tools(state: _RecruitingAgentGraphState) -> dict[str, Any]:
                 "content": json.dumps(run.payload, ensure_ascii=False),
             }
         )
+    if profile_lifecycle_requested:
+        profile_message = (
+            "这是我整理的找人条件。确认前不会筛选、评分或匹配候选人；还需要补充、删除或调整什么吗？"
+            if talent_profile is not None
+            else "当前无法更新人才画像草案，请直接重新描述想找的人后再试。"
+        )
+        return {
+            "messages": messages,
+            "assistant_message": {"content": profile_message},
+            "cards": cards,
+            "actions": actions,
+            "traces": traces,
+            "search_summary": search_summary,
+            "batch_id": batch_id,
+            "talent_profile": talent_profile,
+            "intent": intent,
+            "tool_steps": state["tool_steps"] + 1,
+            "profile_lifecycle_completed": True,
+            "pending_search_resume_ids": pending_search_resume_ids,
+        }
     return {
         "messages": messages,
         "cards": cards,
@@ -3075,6 +3606,7 @@ def _execute_agent_tools(state: _RecruitingAgentGraphState) -> dict[str, Any]:
         "traces": traces,
         "search_summary": search_summary,
         "batch_id": batch_id,
+        "talent_profile": talent_profile,
         "intent": intent,
         "tool_steps": state["tool_steps"] + 1,
         "pending_search_resume_ids": pending_search_resume_ids,
@@ -3123,6 +3655,7 @@ def _finalize_graph_turn(state: _RecruitingAgentGraphState) -> dict[str, Any]:
             tool_trace=state["traces"],
             search_summary=state.get("search_summary"),
             batch_id=state.get("batch_id"),
+            talent_profile=state.get("talent_profile"),
         )
     }
 

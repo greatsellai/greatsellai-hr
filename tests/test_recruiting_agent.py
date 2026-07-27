@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -14,14 +15,89 @@ from app.models import (
     Organization,
     RecruitingAgentCandidateSetItem,
     RecruitingAgentConversation,
+    TalentSearchProfile,
+    TalentSearchProfileRevision,
+    TalentSearchRun,
     utcnow,
 )
 from app.services.ai_gateway_service import AiGatewayError
+from app.services import talent_search_profile_service as profile_service
+from app.services.deepseek_provider import DeepSeekProviderError
 from app.services.recruiting_agent_service import ResolvedJob, _TOOLS, _resolve_job
 from app.services.trial_quota_service import TRIAL_LLM_CALL_QUOTA_EXHAUSTED_CODE
 from app.tenant_scope import bypass_organization_scope
 from test_score_service import _template_payload
 from test_resume_flow import create_candidate, replace_page_evidence, upload_text_resume
+
+
+def _agent_profile_hard_filters() -> dict[str, object]:
+    return {
+        "institution_classifications_any_of": [],
+        "education_degree_in": ["bachelor"],
+        "highest_degree_in": [],
+        "graduation_status": "any",
+        "fresh_graduate_start_month": None,
+        "fresh_graduate_end_month": None,
+        "min_employment_months": None,
+        "min_employment_or_internship_months": None,
+        "experience_types_all_of": [],
+        "skills_all_of": ["Python"],
+        "language_credentials_all_of": [],
+    }
+
+
+def _install_agent_profile_provider_stub(monkeypatch) -> list[dict[str, object]]:
+    """Keep profile persistence real while replacing only its model transport."""
+
+    calls: list[dict[str, object]] = []
+
+    def fake_generate(**kwargs: object) -> dict[str, object]:
+        calls.append(dict(kwargs))
+        hard_filters = _agent_profile_hard_filters()
+        request_message = str(kwargs["request_message"])
+        if "985" in request_message:
+            hard_filters["institution_classifications_any_of"] = ["985"]
+        if "5年" in request_message or "5 年" in request_message or "五年" in request_message:
+            hard_filters["min_employment_months"] = 60
+        return {
+            "schema_version": "talent_search_profile.v1",
+            "title": "AI 应用工程师人才画像",
+            "summary": "先确认硬条件，再核验项目与工程能力证据。",
+            "hard_filters": hard_filters,
+            "verification_requirements": [
+                {
+                    "key": "agent_delivery",
+                    "label": "具备 Agent 系统的实际交付经历",
+                    "evidence_hint": "核验项目职责、技术方案与结果。",
+                    "evidence_policy": {
+                        "kind": "any_fact",
+                        "allowed_experience_types": [],
+                        "terms_all_of": [],
+                        "terms_any_of": [],
+                    },
+                }
+            ],
+            "preferred_requirements": [],
+            "aliases": ["LLM 应用工程师"],
+            "clarifying_questions": ["是否有行业经验要求？"],
+        }
+
+    monkeypatch.setattr(
+        profile_service,
+        "ai_gateway_credentials_configured",
+        lambda _settings: True,
+    )
+    monkeypatch.setattr(
+        profile_service,
+        "ai_gateway_execution",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        profile_service,
+        "generate_talent_search_profile",
+        fake_generate,
+    )
+    return calls
 
 
 def _save_agent_source_only_resume(
@@ -112,6 +188,303 @@ def test_agent_executes_model_selected_search_tool(
     assert payload["tool_trace"][0]["summary"] == "已完成候选人筛选：找到 0 人"
     assert "{" not in payload["tool_trace"][0]["summary"]
     assert calls == 2
+
+
+def test_agent_direct_request_creates_a_confirmation_first_profile_draft(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """A direct find-person request enters LangGraph but reads no candidates."""
+
+    _install_agent_profile_provider_stub(monkeypatch)
+    model_calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal model_calls
+        del settings
+        model_calls += 1
+        assert model_calls == 1
+        assert "找做过 Agent 和 RAG，3 年以上经验的人" in str(messages[-1]["content"])
+        return {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "draft-profile",
+                    "type": "function",
+                    "function": {
+                        "name": "draft_talent_search_profile",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "找做过 Agent 和 RAG，3 年以上经验的人"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["intent"] == "draft_talent_search_profile"
+    assert payload["candidates"] == []
+    assert payload["batch_id"] is None
+    assert payload["talent_profile"]["status"] == "draft"
+    assert payload["active_context"]["candidate_count"] == 0
+    active_profile = payload["active_context"]["active_talent_profile"]
+    assert active_profile == {
+        "profile_id": payload["talent_profile"]["profile_id"],
+        "revision_id": payload["talent_profile"]["current_revision"]["revision_id"],
+        "revision_number": 1,
+        "title": "AI 应用工程师人才画像",
+        "status": "draft",
+    }
+    assert "尚未执行候选人筛选或评分" in payload["tool_trace"][0]["summary"]
+    # A page reload restores only the safe, opaque profile reference.  It does
+    # not need browser-held profile state or a persisted chat transcript.
+    restored = ai_client.get(
+        f"/v1/recruiting-agent/conversations/{payload['conversation_id']}"
+    )
+    assert restored.status_code == 200, restored.text
+    restored_context = restored.json()["active_context"]
+    assert restored_context["active_talent_profile"] == active_profile
+    assert "original_request" not in str(restored_context)
+    assert "candidate_id" not in str(restored_context)
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            conversation = session.get(
+                RecruitingAgentConversation,
+                payload["conversation_id"],
+            )
+            assert conversation is not None
+            assert conversation.active_candidate_set_id is None
+            assert conversation.active_talent_profile_id == active_profile["profile_id"]
+            assert (
+                conversation.active_talent_profile_revision_id
+                == active_profile["revision_id"]
+            )
+            assert session.scalar(select(TalentSearchRun.id)) is None
+
+
+def test_agent_direct_profile_uses_the_server_saved_jd_after_a_reload(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """A continuation does not need to resend a JD ID for profile grounding."""
+
+    profile_calls = _install_agent_profile_provider_stub(monkeypatch)
+    job = ai_client.post(
+        "/v1/jobs",
+        json={
+            "title": "Server-resolved Agent JD",
+            "jd_text": "需要有 Python 服务端与 Agent 项目交付经验。",
+            "requirements": {"must_have": ["Python"], "preferred": ["Agent"]},
+        },
+    )
+    assert job.status_code == 200, job.text
+    model_calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal model_calls
+        del settings, messages
+        model_calls += 1
+        if model_calls == 1:
+            return {"content": "已保留当前 JD，后续会以它作为工作范围。"}
+        return {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "draft-profile-from-saved-jd",
+                    "type": "function",
+                    "function": {
+                        "name": "draft_talent_search_profile",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+    initial = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "后续以这份 JD 为准。",
+            "job_version_id": job.json()["job_version_id"],
+        },
+    )
+    assert initial.status_code == 200, initial.text
+
+    continued = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "那就找符合这份 JD 的人。",
+            "conversation_id": initial.json()["conversation_id"],
+            "context_version": initial.json()["context_version"],
+        },
+    )
+
+    assert continued.status_code == 200, continued.text
+    assert continued.json()["talent_profile"]["source_job_version_id"] == job.json()[
+        "job_version_id"
+    ]
+    assert profile_calls[-1]["source_job_text"] == "需要有 Python 服务端与 Agent 项目交付经验。"
+
+
+def test_agent_refines_the_server_saved_profile_without_chat_history(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """“再加 985、年限改成 5 年” uses only the saved opaque revision."""
+
+    profile_calls = _install_agent_profile_provider_stub(monkeypatch)
+    model_calls = 0
+    follow_up_context = ""
+
+    def fake_completion(*, settings, messages):
+        nonlocal model_calls, follow_up_context
+        del settings
+        model_calls += 1
+        if model_calls == 1:
+            return {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "draft-profile",
+                        "type": "function",
+                        "function": {
+                            "name": "draft_talent_search_profile",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            }
+        assert model_calls == 2
+        follow_up_context = str(messages[-1]["content"])
+        return {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "refine-profile",
+                    "type": "function",
+                    "function": {
+                        "name": "refine_active_talent_search_profile",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+
+    first = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "找做过 Agent 的本科毕业工程师"},
+    )
+    assert first.status_code == 200, first.text
+    first_payload = first.json()
+    first_profile_id = first_payload["talent_profile"]["profile_id"]
+    first_revision_id = first_payload["talent_profile"]["current_revision"]["revision_id"]
+
+    second = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "再加 985，正式工作年限改成 5 年",
+            "conversation_id": first_payload["conversation_id"],
+            "context_version": first_payload["context_version"],
+        },
+    )
+
+    assert second.status_code == 200, second.text
+    second_payload = second.json()
+    assert second_payload["intent"] == "refine_active_talent_search_profile"
+    refined = second_payload["talent_profile"]
+    assert refined["profile_id"] == first_profile_id
+    assert refined["current_revision"]["revision_id"] != first_revision_id
+    assert refined["current_revision"]["revision_number"] == 2
+    assert refined["current_revision"]["hard_filters"]["institution_classifications_any_of"] == ["985"]
+    assert refined["current_revision"]["hard_filters"]["min_employment_months"] == 60
+    assert "找做过 Agent 的本科毕业工程师" not in follow_up_context
+    assert "active_talent_profile" in follow_up_context
+    assert "candidate_id" not in follow_up_context
+    assert len(profile_calls) == 2
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            conversation = session.get(
+                RecruitingAgentConversation,
+                second_payload["conversation_id"],
+            )
+            assert conversation is not None
+            assert conversation.active_candidate_set_id is None
+            assert conversation.active_talent_profile_id == first_profile_id
+            assert (
+                conversation.active_talent_profile_revision_id
+                == refined["current_revision"]["revision_id"]
+            )
+            revisions = list(
+                session.scalars(
+                    select(TalentSearchProfileRevision)
+                    .where(TalentSearchProfileRevision.profile_id == first_profile_id)
+                    .order_by(TalentSearchProfileRevision.revision_number)
+                )
+            )
+            assert [item.status for item in revisions] == ["superseded", "draft"]
+            assert session.scalar(select(TalentSearchRun.id)) is None
+
+
+def test_agent_profile_provider_failure_returns_a_stable_retryable_error(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """A profile transport failure never leaks as a generic internal error."""
+
+    _install_agent_profile_provider_stub(monkeypatch)
+
+    def provider_failure(**kwargs: object) -> dict[str, object]:
+        del kwargs
+        raise DeepSeekProviderError("ai_provider_network")
+
+    monkeypatch.setattr(
+        profile_service,
+        "generate_talent_search_profile",
+        provider_failure,
+    )
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        lambda **kwargs: {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "draft-profile-provider-failure",
+                    "type": "function",
+                    "function": {
+                        "name": "draft_talent_search_profile",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        },
+    )
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "找有 Agent 交付经验的人"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "agent_talent_profile_unavailable"
 
 
 def test_agent_keeps_a_server_created_search_scope_for_the_next_turn(

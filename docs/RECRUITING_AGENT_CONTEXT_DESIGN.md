@@ -9,28 +9,30 @@
 每个会话仅保存以下受控状态，默认有效期为 24 小时：
 
 - 当前用户、当前工作区与当前 JD 的不透明 ID；
+- 当前人才画像与当前画像版本的不透明 ID；
 - 一个服务端创建的候选集合；
 - 候选集合来源：普通 Agent 筛选结果，或人才画像搜索运行；
 - 集合中的简历 ID 与顺序；
 - 上下文版本号，用于阻止两个浏览器标签静默覆盖“刚刚这些人”。
 
-不会保存聊天记录、提示词、模型回答、候选人姓名、简历原文、来源证据块或邮件正文。会话默认仅创建者可读；同工作区共享需要未来显式授权，不能隐式开启。
+不会保存聊天记录、提示词、模型回答、候选人姓名、简历原文、来源证据块或邮件正文。人才画像实体自身为可审计而保存原始找人需求；会话只引用该实体，不复制其原始需求或内容。会话默认仅创建者可读；同工作区共享需要未来显式授权，不能隐式开启。
 
-过期状态不仅不可读取，worker 还会按工作区重新校验后物理删除会话、候选集合和集合成员。清理扫描仅读取不透明会话 ID 与工作区 ID。
+新建或修订人才画像会清除旧候选集合，避免将旧结果误当成新条件的结果。过期状态不仅不可读取，worker 还会按工作区重新校验后物理删除会话、候选集合和集合成员；它不会删除独立保存的人才画像、版本或已执行的搜索运行。清理扫描仅读取不透明会话 ID 与工作区 ID。
 
-浏览器只能传递 `conversation_id` 和一个已知人才画像运行的 `run_id`。浏览器、模型工具和 URL 都不能提交 `resume_ids`、`candidate_ids` 或任意历史消息。
+自由文本续写时，浏览器只能传递 `conversation_id` 和 `context_version`；它不传画像或版本 ID。受控上下文接口可从卡片操作绑定当前工作区内的 `talent_search_profile(profile_id, revision_id)` 或确认后的 `talent_search_run(run_id)`。浏览器、模型工具和 URL 都不能提交 `resume_ids`、`candidate_ids` 或任意历史消息。
 
 ## 运行图
 
 ```text
 prepare → model ──无工具──→ finalize
               │
-              └─有工具→ tools ───────┘
+              └─有工具→ tools ──画像生命周期──→ finalize
+                              └──其他受控工具──→ model/finalize
 ```
 
-- `prepare`：验证当前用户/工作区会话，绑定合法人才画像运行，解析当前 JD，并生成本轮临时上下文。
+- `prepare`：验证当前用户/工作区会话，绑定合法人才画像或运行，解析当前 JD 与当前画像，并生成本轮临时上下文。
 - `model`：通过既有 AI Gateway 调用模型；每轮最多四次工具循环，单条模型回复最多四个工具调用。
-- `tools`：只执行服务端声明的筛选、评分、JD 匹配和邮箱工具。搜索结果会成为下一轮可用的候选集合。
+- `tools`：服务端声明的 `draft_talent_search_profile` 和 `refine_active_talent_search_profile` 用于自然语言起草/修订画像。新找人需求或“再加 985、年限改 5 年”等补充条件先走这两个工具；它们只产生草案，且与候选人搜索、读取、评分、JD 匹配、确认和启动运行互斥。普通筛选、评分、JD 匹配和邮箱工具继续受控执行；搜索结果会成为下一轮可用的候选集合。
 - `finalize`：仅写入受控工作状态并返回 Markdown；不持久化图内消息。
 
 LangGraph 不配置 checkpointer。持久化真相仍是带组织范围约束的数据库模型；LangGraph 仅编排单个 HTTP 回合。
@@ -46,10 +48,10 @@ LangGraph 不配置 checkpointer。持久化真相仍是带组织范围约束的
 
 ## API 契约与前端接入
 
-`POST /v1/recruiting-agent/turns` 返回 `conversation_id`、`context_version` 与安全摘要。首次回合不传版本；后续回合携带 `conversation_id` 时必须同时携带最新 `context_version`。数据库行锁与乐观版本共同阻止两个标签页静默覆盖范围。
+`POST /v1/recruiting-agent/turns` 返回 `conversation_id`、`context_version`、安全上下文摘要与需要展示的画像卡。首次回合不传版本；后续回合携带 `conversation_id` 时必须同时携带最新 `context_version`。直接描述想找的人时，LangGraph 先生成画像草案；后续自由文本根据服务端保存的当前画像版本修订草案，而不是由前端选择“新建/补充”模式。数据库行锁与乐观版本共同阻止两个标签页静默覆盖范围。
 
-`POST /v1/recruiting-agent/conversations/context` 可在不调用模型的前提下，把一个当前工作区内的 `talent_search_run` 设为 Agent 工作范围。它同样使用会话版本保护，并且只接受受控的 `run_id`；前端不能借此提交候选人 ID 或简历内容。
+`POST /v1/recruiting-agent/conversations/context` 可在不调用模型的前提下，把当前工作区内的画像版本或确认后的 `talent_search_run` 设为 Agent 工作范围。它同样使用会话版本保护，并且只接受受控的 profile/revision 或 run ID；前端不能借此提交候选人 ID 或简历内容。绑定历史运行时只保留“这些候选人”的范围，不保留可被继续修订的画像，防止误改无关草案。
 
-已提供 `GET` / `DELETE /v1/recruiting-agent/conversations/{id}` 供前端恢复或清除会话。前端只在 `sessionStorage` 保存按“工作区 + 用户”分隔的不透明会话 ID；刷新后只恢复当前候选范围和 JD 摘要，不恢复聊天记录、候选人 ID、简历内容或模型输出。人才画像结果只有在招聘人员明确点选后才会调用上下文绑定接口。
+已提供 `GET` / `DELETE /v1/recruiting-agent/conversations/{id}` 供前端恢复或清除会话。前端只在 `sessionStorage` 保存按“工作区 + 用户”分隔的不透明会话 ID；刷新后恢复当前候选范围、JD 摘要和安全画像摘要，并通过正常工作区授权重新读取画像卡。不会恢复聊天记录、候选人 ID、简历内容或模型输出。画像仍需招聘人员明确确认并点击开始找人，才能读取候选人或启动任何匹配工作。
 
 会话不存在、已过期、跨工作区或非所有者访问统一按不可访问处理；上下文版本过期返回冲突，前端先重新读取当前安全摘要再允许用户重试。

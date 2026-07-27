@@ -334,6 +334,111 @@ def test_talent_search_run_binds_agent_context_without_an_ai_turn(
     assert missing_version.status_code == 422, missing_version.text
 
 
+def test_historic_talent_search_run_clears_an_unrelated_active_profile(
+    ai_client: TestClient,
+) -> None:
+    """A historic recall can scope candidates, but never a later refinement."""
+
+    workspace = ai_client.get("/v1/auth/session")
+    assert workspace.status_code == 200, workspace.text
+    organization_id = str(workspace.json()["organization"]["organization_id"])
+    historic_run_id = _seed_talent_search_run_for_workspace(
+        ai_client,
+        organization_id=organization_id,
+    )
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        set_organization_context(session, organization_id)
+        try:
+            historic_run = session.scalar(
+                select(TalentSearchRun).where(TalentSearchRun.id == historic_run_id)
+            )
+            assert historic_run is not None
+            historic_profile = session.scalar(
+                select(TalentSearchProfile).where(
+                    TalentSearchProfile.id == historic_run.profile_id
+                )
+            )
+            assert historic_profile is not None
+            # The run is now from revision 1 while the profile has advanced to
+            # revision 2.  It may still be viewed, but is no longer refinable.
+            historic_profile.current_revision_number = 2
+            historic_profile.status = "draft"
+            session.add(
+                TalentSearchProfileRevision(
+                    profile_id=historic_profile.id,
+                    revision_number=2,
+                    status="draft",
+                    title="Historic profile revision two",
+                    summary="A newer draft replaces the run's revision.",
+                    hard_filters={},
+                    verification_requirements=[],
+                    preferred_requirements=[],
+                    aliases=[],
+                    clarifying_questions=[],
+                )
+            )
+            current_profile = TalentSearchProfile(
+                title="Different active profile",
+                original_request="A separate current draft.",
+                status="draft",
+                current_revision_number=1,
+            )
+            session.add(current_profile)
+            session.flush()
+            current_revision = TalentSearchProfileRevision(
+                profile_id=current_profile.id,
+                revision_number=1,
+                status="draft",
+                title="Different active profile",
+                summary="This is not the historic run profile.",
+                hard_filters={},
+                verification_requirements=[],
+                preferred_requirements=[],
+                aliases=[],
+                clarifying_questions=[],
+            )
+            session.add(current_revision)
+            session.commit()
+            current_profile_id = current_profile.id
+            current_revision_id = current_revision.id
+        finally:
+            clear_organization_context(session)
+
+    active_profile = ai_client.post(
+        "/v1/recruiting-agent/conversations/context",
+        json={
+            "context_ref": {
+                "kind": "talent_search_profile",
+                "profile_id": current_profile_id,
+                "revision_id": current_revision_id,
+            },
+        },
+    )
+    assert active_profile.status_code == 200, active_profile.text
+    assert (
+        active_profile.json()["active_context"]["active_talent_profile"]["profile_id"]
+        == current_profile_id
+    )
+
+    historic_run = ai_client.post(
+        "/v1/recruiting-agent/conversations/context",
+        json={
+            "context_ref": {
+                "kind": "talent_search_run",
+                "run_id": historic_run_id,
+            },
+            "conversation_id": active_profile.json()["conversation_id"],
+            "context_version": active_profile.json()["context_version"],
+        },
+    )
+
+    assert historic_run.status_code == 200, historic_run.text
+    context = historic_run.json()["active_context"]
+    assert context["candidate_set_source"] == "talent_search_run"
+    assert context["active_talent_profile"] is None
+
+
 def test_worker_purges_expired_agent_contexts_across_workspaces_and_cascades_items() -> None:
     """A tenant-agnostic worker must remove only expired private state.
 

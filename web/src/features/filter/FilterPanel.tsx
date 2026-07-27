@@ -87,6 +87,28 @@ export function FilterPanel({
         </div>
       </div>
       <div className="filter-scroll" id="filter-controls">
+        <details className="filter-match-rules">
+          <summary>
+            <span>匹配规则</span>
+            <span aria-hidden="true" className="filter-match-rules-hint">
+              查看条件如何组合
+            </span>
+          </summary>
+          <div className="filter-match-rules-content">
+            <p>未选择的条件不会限制候选人。</p>
+            <ul>
+              <li>
+                院校类型和最高学历的多选项均按任一项匹配；学校、专业、成绩等条件会在同一条教育经历中核验。
+              </li>
+              <li>
+                项目/竞赛名称、公司、职位和获奖条件会在同一条经历中联合匹配。
+              </li>
+              <li>
+                英语证书支持常见别名归一，例如四级、英语四级、CET4、CET-4；已选证书按任一项匹配。
+              </li>
+            </ul>
+          </div>
+        </details>
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>已保存的筛选</h3>
@@ -158,12 +180,21 @@ export function FilterPanel({
           <div className="filter-section-heading">
             <h3>学历与院校</h3>
           </div>
+          <span className="sr-only" id="filter-rule-education">
+            匹配规则：院校类型和最高学历的多选项均按任一项匹配；学校、专业、成绩等条件会在同一条教育经历中核验。
+          </span>
           <div className="field-stack">
             <span className="field-label">院校类型</span>
-            <div className="choice-grid" aria-label="院校类型条件">
+            <div
+              aria-describedby="filter-rule-education"
+              aria-label="院校类型条件"
+              className="choice-grid"
+              role="group"
+            >
               {institutionClassifications.map((option) => (
                 <label className="choice-row" key={option.value}>
                   <input
+                    aria-describedby="filter-rule-education"
                     checked={draft.institutionClassifications.includes(option.value)}
                     onChange={() =>
                       update({
@@ -187,10 +218,16 @@ export function FilterPanel({
             </div>
           </div>
           <span className="field-label">最高学历</span>
-          <div className="choice-grid" aria-label="学历条件">
+          <div
+            aria-describedby="filter-rule-education"
+            aria-label="学历条件"
+            className="choice-grid"
+            role="group"
+          >
             {filterOptions.degrees.map((option) => (
               <label className="choice-row" key={option.value}>
                 <input
+                  aria-describedby="filter-rule-education"
                   checked={draft.degrees.includes(option.value)}
                   onChange={() =>
                     update({
@@ -250,6 +287,7 @@ export function FilterPanel({
               院校名称
             </label>
             <input
+              aria-describedby="filter-rule-education"
               className="field"
               id="school-name"
               onChange={(event) => updateAfterTyping({ schoolName: event.target.value })}
@@ -263,6 +301,7 @@ export function FilterPanel({
               <label className="field-stack">
                 <span className="field-label">最低平均成绩</span>
                 <input
+                  aria-describedby="filter-rule-education"
                   className="field"
                   max="100"
                   min="0"
@@ -275,6 +314,7 @@ export function FilterPanel({
               <label className="field-stack">
                 <span className="field-label">最低绩点百分比</span>
                 <input
+                  aria-describedby="filter-rule-education"
                   className="field"
                   max="100"
                   min="0"
@@ -287,6 +327,7 @@ export function FilterPanel({
               <label className="field-stack">
                 <span className="field-label">专业名次不低于</span>
                 <input
+                  aria-describedby="filter-rule-education"
                   className="field"
                   min="1"
                   onChange={(event) => updateAfterTyping({ maxRankPosition: event.target.value })}
@@ -298,6 +339,7 @@ export function FilterPanel({
               <label className="field-stack">
                 <span className="field-label">排名前百分比</span>
                 <input
+                  aria-describedby="filter-rule-education"
                   className="field"
                   max="100"
                   min="1"
@@ -317,6 +359,7 @@ export function FilterPanel({
               专业方向
             </label>
             <input
+              aria-describedby="filter-rule-education"
               className="field"
               id="major-name"
               onChange={(event) => updateAfterTyping({ major: event.target.value })}
@@ -330,6 +373,9 @@ export function FilterPanel({
           <div className="filter-section-heading">
             <h3>经历类别</h3>
           </div>
+          <span className="sr-only" id="filter-rule-experience">
+            匹配规则：项目/竞赛名称、公司、职位和获奖条件会在同一条经历中联合匹配。
+          </span>
           <div className="field-stack">
             <label className="field-label" htmlFor="min-experience">
               最低正式工作年限
@@ -380,10 +426,16 @@ export function FilterPanel({
           </div>
           <div className="field-stack">
             <span className="field-label">经历类型</span>
-            <div className="choice-grid" aria-label="经历类型条件">
+            <div
+              aria-describedby="filter-rule-experience"
+              aria-label="经历类型条件"
+              className="choice-grid"
+              role="group"
+            >
               {filterOptions.experience_types.map((option) => (
                 <label className="choice-row" key={option.value}>
                   <input
+                    aria-describedby="filter-rule-experience"
                     checked={draft.experienceTypes.includes(option.value)}
                     onChange={() =>
                       update({
@@ -408,6 +460,7 @@ export function FilterPanel({
               项目 / 竞赛 / 经历名称
             </label>
             <input
+              aria-describedby="filter-rule-experience"
               className="field"
               id="experience-name"
               onChange={(event) => updateAfterTyping({ experienceName: event.target.value })}
@@ -420,6 +473,7 @@ export function FilterPanel({
               公司 / 组织
             </label>
             <input
+              aria-describedby="filter-rule-experience"
               className="field"
               id="company-name"
               onChange={(event) => updateAfterTyping({ company: event.target.value })}
@@ -432,6 +486,7 @@ export function FilterPanel({
               职位名称
             </label>
             <input
+              aria-describedby="filter-rule-experience"
               className="field"
               id="role-name"
               onChange={(event) => updateAfterTyping({ title: event.target.value })}
@@ -441,10 +496,16 @@ export function FilterPanel({
           </div>
           <details className="advanced-filter">
             <summary>经历获奖情况（非必选）</summary>
-            <div className="choice-grid">
+            <div
+              aria-describedby="filter-rule-experience"
+              aria-label="经历获奖等级条件"
+              className="choice-grid"
+              role="group"
+            >
               {filterOptions.award_levels.map((option) => (
                 <label className="choice-row" key={option.value}>
                   <input
+                    aria-describedby="filter-rule-experience"
                     checked={draft.experienceAwardLevels.includes(option.value)}
                     onChange={() =>
                       update({
@@ -460,6 +521,7 @@ export function FilterPanel({
               ))}
             </div>
             <input
+              aria-describedby="filter-rule-experience"
               className="field"
               onChange={(event) => updateAfterTyping({ experienceAwardResult: event.target.value })}
               placeholder="获奖结果，例如：一等奖"
@@ -524,6 +586,9 @@ export function FilterPanel({
           <div className="filter-section-heading">
             <h3>英语能力</h3>
           </div>
+          <span className="sr-only" id="filter-rule-language">
+            匹配规则：英语证书支持常见别名归一；已选证书按任一项匹配。
+          </span>
           <div className="credential-list">
             {filterOptions.language_credentials.map((option) => {
               const selected = draft.languageCredentials.includes(option.value);
@@ -531,6 +596,7 @@ export function FilterPanel({
                 <div className="credential-row" key={option.value}>
                   <label className="choice-row">
                     <input
+                      aria-describedby="filter-rule-language"
                       checked={selected}
                       onChange={() =>
                         update({

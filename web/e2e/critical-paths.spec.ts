@@ -301,12 +301,31 @@ test.describe("招聘工作台关键路径", () => {
 
     await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
     await expect(
-      page.getByRole("combobox", { name: "评分口径" }),
-    ).toContainText("E2E 评分规则 · v1");
+      page.getByText("E2E 评分规则 · v1", { exact: true }),
+    ).toBeVisible();
+    const matchRules = page.locator("details.filter-match-rules");
+    await expect(matchRules).toBeVisible();
+    await expect(matchRules).not.toHaveAttribute("open");
+    await matchRules.locator("summary").click();
+    await expect(matchRules).toHaveAttribute("open", "");
+    await expect(matchRules).toContainText(
+      "项目/竞赛名称、公司、职位和获奖条件会在同一条经历中联合匹配。",
+    );
+    await expect(matchRules).toContainText(
+      "英语证书支持常见别名归一，例如四级、英语四级、CET4、CET-4；已选证书按任一项匹配。",
+    );
     const institutionTypes = page.getByLabel("院校类型条件");
     await expect(institutionTypes).toBeVisible();
+    await expect(institutionTypes).toHaveAttribute(
+      "aria-describedby",
+      "filter-rule-education",
+    );
     await expect(page.getByLabel("院校类型快捷筛选")).toHaveCount(0);
     const institution985 = institutionTypes.getByRole("checkbox", { name: "985" });
+    await expect(institution985).toHaveAttribute(
+      "aria-describedby",
+      "filter-rule-education",
+    );
     const searchFor985 = page.waitForResponse((response) => {
       if (
         response.request().method() !== "POST" ||

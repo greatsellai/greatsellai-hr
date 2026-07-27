@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, isApiError } from "../../api";
 import type {
+  CandidateSearchRequest,
   RecruitingAgentContextBindInput,
   RecruitingAgentConversation,
+  RecruitingAgentFilterScopeBindInput,
   RecruitingAgentTurnInput,
 } from "../../types";
 
@@ -55,6 +57,11 @@ interface BindTalentSearchRunOptions {
 interface BindTalentSearchProfileOptions {
   profileId: string;
   revisionId: string;
+  jobVersionId: string | null;
+}
+
+interface BindFilterScopeOptions {
+  filter: CandidateSearchRequest;
   jobVersionId: string | null;
 }
 
@@ -187,6 +194,25 @@ export function useRecruitingAgentConversation({
     return bound;
   }, [conversation, persistConversation]);
 
+  const bindFilterScope = useCallback(async ({
+    filter,
+    jobVersionId,
+  }: BindFilterScopeOptions): Promise<RecruitingAgentConversation> => {
+    const input: RecruitingAgentFilterScopeBindInput = {
+      filter,
+      job_version_id: jobVersionId,
+      ...(conversation
+        ? {
+          conversation_id: conversation.conversation_id,
+          context_version: conversation.context_version,
+        }
+        : {}),
+    };
+    const bound = await api.bindRecruitingAgentFilterScope(input);
+    persistConversation(bound);
+    return bound;
+  }, [conversation, persistConversation]);
+
   const clearConversation = useCallback(async () => {
     if (!conversation) {
       forgetConversation();
@@ -207,6 +233,7 @@ export function useRecruitingAgentConversation({
     buildTurnInput,
     bindTalentSearchRun,
     bindTalentSearchProfile,
+    bindFilterScope,
     clearConversation,
     conversation,
     forgetConversation,
@@ -217,6 +244,7 @@ export function useRecruitingAgentConversation({
     persistConversation,
     bindTalentSearchProfile,
     bindTalentSearchRun,
+    bindFilterScope,
     buildTurnInput,
     clearConversation,
     conversation,

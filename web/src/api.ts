@@ -68,6 +68,8 @@ import type {
   ResumeUploadResponse,
   RecruitingAgentContextBindInput,
   RecruitingAgentConversation,
+  RecruitingAgentFilterScopeBindInput,
+  RecruitingAgentScopedTalentProfileRunInput,
   RecruitingAgentTurn,
   RecruitingAgentTurnInput,
   TalentSearchProfile,
@@ -432,6 +434,15 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    bindRecruitingAgentFilterScope(
+      input: RecruitingAgentFilterScopeBindInput,
+    ): Promise<RecruitingAgentConversation> {
+      return request<RecruitingAgentConversation>(
+        "/recruiting-agent/conversations/filter-scope",
+        { method: "POST", body: input },
+      );
+    },
+
     deleteRecruitingAgentConversation(conversationId: string): Promise<void> {
       return request<void>(
         `/recruiting-agent/conversations/${resourcePath(conversationId)}`,
@@ -721,6 +732,16 @@ export function createApiClient(options: ApiClientOptions = {}) {
     ): Promise<TalentSearchRun> {
       return request<TalentSearchRun>(
         `/talent-search-profiles/${resourcePath(profileId)}/runs`,
+        { method: "POST", body: input },
+      );
+    },
+
+    startRecruitingAgentScopedTalentProfileRun(
+      profileId: string,
+      input: RecruitingAgentScopedTalentProfileRunInput,
+    ): Promise<TalentSearchRun> {
+      return request<TalentSearchRun>(
+        `/recruiting-agent/conversations/talent-profiles/${resourcePath(profileId)}/runs`,
         { method: "POST", body: input },
       );
     },

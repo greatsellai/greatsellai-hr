@@ -1265,7 +1265,11 @@ class RecruitingAgentActiveTalentProfile(ApiModel):
 class RecruitingAgentActiveContext(ApiModel):
     """Safe, recruiter-visible status for the current work-session scope."""
 
-    candidate_set_source: Literal["agent_search", "talent_search_run"] | None = None
+    candidate_set_source: Literal[
+        "agent_search",
+        "candidate_filter",
+        "talent_search_run",
+    ] | None = None
     candidate_count: int = Field(default=0, ge=0)
     active_job_version_id: str | None = None
     active_job_title: str | None = None
@@ -1315,6 +1319,32 @@ class RecruitingAgentContextBindRequest(ApiModel):
     def require_version_for_existing_conversation(
         self,
     ) -> "RecruitingAgentContextBindRequest":
+        if self.conversation_id is not None and self.context_version is None:
+            raise ValueError("context_version_required_for_conversation")
+        if self.conversation_id is None and self.context_version is not None:
+            raise ValueError("context_version_requires_conversation")
+        return self
+
+
+class RecruitingAgentFilterScopeRequest(ApiModel):
+    """Freeze the current server-derived basic-filter result for one Agent chat.
+
+    The browser may describe factual filter conditions only.  It cannot submit
+    candidate IDs, resume IDs, resume text, or a previously rendered page of
+    results.  The service deliberately ignores the request pagination and
+    reconstructs the complete tenant-scoped result before it stores opaque
+    resume references.
+    """
+
+    filter: "CandidateSearchRequest"
+    job_version_id: str | None = Field(default=None, max_length=64)
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=64)
+    context_version: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def require_version_for_existing_conversation(
+        self,
+    ) -> "RecruitingAgentFilterScopeRequest":
         if self.conversation_id is not None and self.context_version is None:
             raise ValueError("context_version_required_for_conversation")
         if self.conversation_id is None and self.context_version is not None:
@@ -2232,6 +2262,13 @@ class TalentSearchProfileRunRequest(ApiModel):
     cursor: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class RecruitingAgentTalentSearchProfileRunRequest(TalentSearchProfileRunRequest):
+    """Run a confirmed talent profile only inside an active Agent filter scope."""
+
+    conversation_id: str = Field(min_length=1, max_length=64)
+    context_version: int = Field(ge=1)
+
+
 class TalentSearchProfileSearchRequest(ApiModel):
     """Pagination only for reading a historic talent-search run."""
 
@@ -2830,6 +2867,11 @@ class TalentSearchRunResponse(ApiModel):
     run_id: str
     profile_id: str
     revision_id: str
+    # Global runs search the whole workspace. A ``candidate_filter`` run is
+    # confined to a private, frozen Agent scope; its opaque digest is never
+    # returned to the browser.
+    scope_kind: Literal["global", "candidate_filter"] = "global"
+    scope_candidate_count: int = Field(default=0, ge=0)
     status: Literal["queued", "running", "completed", "partial"]
     # A pure hard-filter profile intentionally has no semantic match batch.
     # Expose that distinction so an empty AI-match list is never rendered as
@@ -2851,6 +2893,11 @@ class TalentSearchRunResponse(ApiModel):
     applied_hard_filters: TalentSearchHardFilters
     recall_diagnostics: TalentSearchRecallDiagnostics | None = None
     candidate_recall: CandidateSearchResponse
+    # Present only for the conversation-scoped run endpoint.  Returning the
+    # advanced version lets the next Agent turn retain stale-tab protection.
+    conversation_id: str | None = None
+    context_version: int | None = Field(default=None, ge=1)
+    active_context: RecruitingAgentActiveContext | None = None
 
 
 # ``RecruitingAgentResponse`` is declared before the reusable talent-profile

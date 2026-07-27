@@ -1,4 +1,5 @@
 import type {
+  CandidateSearchRequest,
   CandidateSearchItem,
   JobMatch,
   ResumeLibraryItem,
@@ -23,15 +24,11 @@ type CandidateSearchController = ReturnType<typeof useCandidateSearchController>
 type FilterWorkspaceController = Pick<
   CandidateSearchController,
   | "appliedFilter"
-  | "applySavedFilter"
   | "changeScoreTemplate"
-  | "deleteSavedFilter"
   | "filterDraft"
   | "filterOptions"
   | "loadMore"
   | "resetFilter"
-  | "savedFilters"
-  | "saveCurrentFilter"
   | "scoreTemplateId"
   | "scoreTemplates"
   | "search"
@@ -71,6 +68,7 @@ export interface WorkspaceViewRouterProps {
   ) => void;
   onOpenLibraryResume: (item: ResumeLibraryItem) => void;
   onOpenMatchedResume: (match: JobMatch) => void;
+  onRefineWithAgent: (filter: CandidateSearchRequest, totalCount: number) => void;
   onScoreCreated: () => void;
   onTemplateCreated: (template: ScoreTemplate) => void;
   onUploadedResume: (resumeId: string, candidateId: string) => void;
@@ -93,6 +91,7 @@ export function WorkspaceViewRouter({
   onOpenCandidate,
   onOpenLibraryResume,
   onOpenMatchedResume,
+  onRefineWithAgent,
   onScoreCreated,
   onTemplateCreated,
   onUploadedResume,
@@ -114,14 +113,11 @@ export function WorkspaceViewRouter({
           draft={filter.filterDraft}
           filterOptions={filter.filterOptions}
           onDraftChange={filter.updateFilterDraft}
-          savedFilters={filter.savedFilters}
           search={filter.search}
           searching={filter.searching}
           selectedResumeId={library.selectedResumeId}
           onReset={filter.resetFilter}
-          onSave={filter.saveCurrentFilter}
-          onApplySaved={filter.applySavedFilter}
-          onDeleteSaved={filter.deleteSavedFilter}
+          onRefineWithAgent={onRefineWithAgent}
           onOpenCandidate={onOpenCandidate}
           onScoreTemplateChange={filter.changeScoreTemplate}
           onLoadMore={filter.loadMore}

@@ -2024,8 +2024,9 @@ def _build_zero_result_diagnostics(
     session: Session,
     *,
     hard_filters: TalentSearchHardFilters,
+    scope_resume_ids: set[str] | None = None,
 ) -> TalentSearchRecallDiagnostics:
-    """Build and persist an honest funnel only when strict recall is zero."""
+    """Build an honest funnel inside the requested global or frozen scope."""
 
     baseline = search_candidates(
         session,
@@ -2035,6 +2036,7 @@ def _build_zero_result_diagnostics(
             cursor=None,
             included_filter_keys=set(),
         ),
+        resume_ids=scope_resume_ids,
     )
     previous_count = baseline.total_count
     active_keys: set[str] = set()
@@ -2049,6 +2051,7 @@ def _build_zero_result_diagnostics(
                 cursor=None,
                 included_filter_keys=active_keys,
             ),
+            resume_ids=scope_resume_ids,
         )
         remaining_count = result.total_count
         steps.append(
@@ -2072,6 +2075,7 @@ def _recall_all_matching_resume_ids(
     session: Session,
     *,
     hard_filters: TalentSearchHardFilters,
+    scope_resume_ids: set[str] | None = None,
 ) -> list[str]:
     cursor: str | None = None
     recalled: list[str] = []
@@ -2084,6 +2088,7 @@ def _recall_all_matching_resume_ids(
                 limit=100,
                 cursor=cursor,
             ),
+            resume_ids=scope_resume_ids,
         )
         for item in response.items:
             if item.resume_id not in seen:
@@ -2266,6 +2271,12 @@ def _run_response(
         run_id=run.id,
         profile_id=run.profile_id,
         revision_id=run.revision_id,
+        scope_kind=(
+            run.scope_kind
+            if run.scope_kind in {"global", "candidate_filter"}
+            else "global"
+        ),
+        scope_candidate_count=max(run.scope_candidate_count or 0, 0),
         status=_run_status(run, batch),
         result_mode=_run_result_mode(session, run=run),
         total_recalled_count=run.total_recalled_count,
@@ -2291,6 +2302,8 @@ def _existing_run_for_revision(
     session: Session,
     *,
     revision: TalentSearchProfileRevision,
+    scope_kind: str,
+    scope_fingerprint: str | None,
 ) -> TalentSearchRun | None:
     runs = session.scalars(
         select(TalentSearchRun)
@@ -2300,6 +2313,16 @@ def _existing_run_for_revision(
         .order_by(TalentSearchRun.created_at.desc())
     ).all()
     for run in runs:
+        existing_scope_kind = run.scope_kind or "global"
+        if existing_scope_kind != scope_kind:
+            continue
+        if scope_kind == "candidate_filter":
+            if not scope_fingerprint or run.scope_fingerprint != scope_fingerprint:
+                continue
+        elif run.scope_fingerprint is not None:
+            # A malformed historic row must never be reused as the global
+            # run; that could widen a later Agent-scoped request.
+            continue
         batch = session.get(JobMatchBatch, run.job_match_batch_id) if run.job_match_batch_id else None
         status = _run_status(run, batch)
         if run.status != status:
@@ -2318,8 +2341,32 @@ def start_profile_search(
     profile_id: str,
     payload: TalentSearchProfileRunRequest,
     settings: AppSettings,
+    scope_kind: str = "global",
+    scope_fingerprint: str | None = None,
+    scope_resume_ids: list[str] | None = None,
 ) -> TalentSearchRunResponse:
-    """Recall from the frozen profile, then queue semantic matching for that set."""
+    """Recall from a confirmed profile, globally or inside a frozen scope."""
+
+    if scope_kind not in {"global", "candidate_filter"}:
+        raise TalentSearchProfileServiceError("talent_search_profile_scope_invalid")
+    if scope_kind == "global":
+        if scope_fingerprint is not None or scope_resume_ids is not None:
+            raise TalentSearchProfileServiceError("talent_search_profile_scope_invalid")
+        normalized_scope_resume_ids: list[str] | None = None
+        scope_resume_id_set: set[str] | None = None
+    else:
+        if not scope_fingerprint:
+            raise TalentSearchProfileServiceError("talent_search_profile_scope_invalid")
+        # These opaque IDs are server-derived by the recruiting-Agent service.
+        # De-duplicate defensively before they become an immutable run scope.
+        normalized_scope_resume_ids = list(
+            dict.fromkeys(
+                resume_id.strip()
+                for resume_id in (scope_resume_ids or [])
+                if isinstance(resume_id, str) and resume_id.strip()
+            )
+        )
+        scope_resume_id_set = set(normalized_scope_resume_ids)
 
     profile = _profile_or_not_found(session, profile_id=profile_id, for_update=True)
     revision = _current_displayed_revision(
@@ -2333,7 +2380,12 @@ def start_profile_search(
         or profile.confirmed_revision_number != revision.revision_number
     ):
         raise TalentSearchProfileServiceError("talent_search_profile_not_confirmed")
-    existing_run = _existing_run_for_revision(session, revision=revision)
+    existing_run = _existing_run_for_revision(
+        session,
+        revision=revision,
+        scope_kind=scope_kind,
+        scope_fingerprint=scope_fingerprint,
+    )
     if existing_run is not None:
         return _run_response(
             session,
@@ -2348,15 +2400,27 @@ def start_profile_search(
     recalled_resume_ids = _recall_all_matching_resume_ids(
         session,
         hard_filters=hard_filters,
+        scope_resume_ids=scope_resume_id_set,
     )
     recall_diagnostics = (
-        _build_zero_result_diagnostics(session, hard_filters=hard_filters)
+        _build_zero_result_diagnostics(
+            session,
+            hard_filters=hard_filters,
+            scope_resume_ids=scope_resume_id_set,
+        )
         if not recalled_resume_ids
         else None
     )
     run = TalentSearchRun(
         profile_id=profile.id,
         revision_id=revision.id,
+        scope_kind=scope_kind,
+        scope_fingerprint=scope_fingerprint,
+        scope_candidate_count=(
+            len(normalized_scope_resume_ids)
+            if normalized_scope_resume_ids is not None
+            else 0
+        ),
         hard_filter_snapshot=hard_filters.model_dump(mode="json"),
         recall_diagnostics=(
             recall_diagnostics.model_dump(mode="json")

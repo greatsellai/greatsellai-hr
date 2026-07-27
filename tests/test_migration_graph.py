@@ -10,6 +10,7 @@ from app.models import (
     RecruitingAgentCandidateSetItem,
     RecruitingAgentConversation,
     RecruitingAgentConversationTurn,
+    TalentSearchRun,
 )
 
 
@@ -28,6 +29,7 @@ def test_recruiting_agent_context_ddl_identifiers_fit_postgresql() -> None:
         RecruitingAgentConversationTurn.__table__,
         RecruitingAgentCandidateSet.__table__,
         RecruitingAgentCandidateSetItem.__table__,
+        TalentSearchRun.__table__,
     ):
         CreateTable(table).compile(dialect=dialect)
         for index in table.indexes:

@@ -2217,9 +2217,10 @@ class RecruitingAgentCandidateSet(OrganizationScoped, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     conversation_id: Mapped[str] = mapped_column(String(36), index=True)
-    # ``agent_search`` means the visible result cards from a normal Agent
-    # search. ``talent_search_run`` means the entire server-derived recall set
-    # from one confirmed talent-profile run.
+    # ``agent_search`` means visible results from a normal Agent search.
+    # ``candidate_filter`` means a full server-reconstructed sidebar filter
+    # result. ``talent_search_run`` means the recall set from one confirmed
+    # talent-profile run.
     source_kind: Mapped[str] = mapped_column(String(32), index=True)
     # Source IDs are opaque internal references only.  They are never accepted
     # as a resume selection from the browser and do not contain candidate data.
@@ -2427,6 +2428,16 @@ class TalentSearchRun(OrganizationScoped, Base):
             "organization_id",
             "status",
         ),
+        # A confirmed revision can be run globally and inside one frozen
+        # initial-filter scope.  Keep their identities separate so a global
+        # result is never reused for a narrower Agent request (or vice versa).
+        Index(
+            "ix_talent_search_runs_organization_revision_scope",
+            "organization_id",
+            "revision_id",
+            "scope_kind",
+            "scope_fingerprint",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -2437,6 +2448,26 @@ class TalentSearchRun(OrganizationScoped, Base):
     revision_id: Mapped[str] = mapped_column(
         ForeignKey("talent_search_profile_revisions.id"),
         index=True,
+    )
+    # ``global`` is the historical profile workflow. ``candidate_filter`` is
+    # a private Agent run constrained to a frozen, server-derived sidebar
+    # result.  The digest is derived from opaque visible resume IDs and never
+    # stores the browser's original query, prompt, candidate names, or text.
+    scope_kind: Mapped[str] = mapped_column(
+        String(32),
+        default="global",
+        server_default=text("'global'"),
+        index=True,
+    )
+    scope_fingerprint: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+    scope_candidate_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
     )
     hard_filter_snapshot: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     # Server-derived counts for the strict-recall funnel.  Keeping this on the

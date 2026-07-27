@@ -12,6 +12,7 @@ import type {
   RecruitingAgentAction,
   RecruitingAgentCandidate,
   RecruitingAgentConversationTurn,
+  RecruitingAgentFilterScopeRequest,
   RecruitingAgentSearchSummary,
   RecruitingAgentTurn,
   TalentSearchHardFilters,
@@ -50,6 +51,11 @@ function humanizeAgentError(
       agent_conversation_stale: "当前工作范围已在另一页面更新，请重新发送这条问题。",
       agent_conversation_not_found: "上次的助手工作范围已失效，请重新发送这条问题。",
       agent_context_reference_not_found: "本次人才画像结果已不可用，请重新开始找人。",
+      agent_filter_scope_not_found: "当前初筛范围已失效，请回到筛选结果后重新交给 Agent。",
+      agent_filter_scope_expired: "当前初筛范围已失效，请回到筛选结果后重新交给 Agent。",
+      agent_filter_scope_invalid: "当前初筛条件暂时无法冻结，请调整后重试。",
+      agent_filter_scope_pagination_invalid: "当前初筛结果暂时无法完整读取，请稍后重试。",
+      candidate_filter_scope_not_found: "当前初筛范围已失效，请回到筛选结果后重新交给 Agent。",
     };
     if (messages[error.message]) return messages[error.message];
     if (error.message.startsWith("agent_model_http_")) {
@@ -139,8 +145,11 @@ function restoredAgentMessages(
   ]);
 }
 
-function agentContextSourceLabel(source: "agent_search" | "talent_search_run" | null): string {
+function agentContextSourceLabel(
+  source: "agent_search" | "candidate_filter" | "talent_search_run" | null,
+): string {
   if (source === "agent_search") return "助手筛选结果";
+  if (source === "candidate_filter") return "初筛结果";
   if (source === "talent_search_run") return "人才画像找人结果";
   return "尚未设置候选范围";
 }
@@ -467,6 +476,7 @@ function TalentSearchProfileCard({
   onAdjustConditions,
   onOpenCandidate,
   loading,
+  startLabel = "开始找人",
 }: {
   profile: TalentSearchProfile;
   run?: TalentSearchRun;
@@ -480,6 +490,7 @@ function TalentSearchProfileCard({
   onAdjustConditions: () => void;
   onOpenCandidate: (candidate: RecruitingAgentCandidate) => void;
   loading: boolean;
+  startLabel?: string;
 }) {
   const revision = profile.current_revision;
   const hardFilters = talentProfileHardFilterLabels(revision.hard_filters);
@@ -572,7 +583,7 @@ function TalentSearchProfileCard({
         )}
         {confirmed && !run ? (
           <button className="button button-primary" disabled={loading} onClick={onStart} type="button">
-            <Icon name="match" size={15} />开始找人
+            <Icon name="match" size={15} />{startLabel}
           </button>
         ) : !confirmed ? (
           <button className="button button-primary" disabled={loading} onClick={onConfirm} type="button">
@@ -599,7 +610,9 @@ export function RecruitingAgentDrawer({
   formatError,
   isOpen,
   conversationStorageScope,
+  pendingFilterScope,
   onClose,
+  onPendingFilterScopeHandled,
   onOpenMatchWorkspace,
   onOpenScoreWorkspace,
   onOpenMailboxSettings,
@@ -608,7 +621,9 @@ export function RecruitingAgentDrawer({
   formatError: (error: unknown) => string;
   isOpen: boolean;
   conversationStorageScope: string | null;
+  pendingFilterScope: RecruitingAgentFilterScopeRequest | null;
   onClose: () => void;
+  onPendingFilterScopeHandled: (requestId: number) => void;
   onOpenMatchWorkspace: () => void;
   onOpenScoreWorkspace: () => void;
   onOpenMailboxSettings: () => void;
@@ -619,8 +634,11 @@ export function RecruitingAgentDrawer({
   const [jobVersionId, setJobVersionId] = useState("");
   const [recentTalentProfiles, setRecentTalentProfiles] = useState<TalentSearchProfile[]>([]);
   const [loading, setLoading] = useState(false);
+  const [bindingScopeRequestId, setBindingScopeRequestId] = useState<number | null>(null);
+  const [scopeBindingError, setScopeBindingError] = useState<string | null>(null);
   const {
     adoptConversation,
+    bindFilterScope,
     bindTalentSearchProfile,
     bindTalentSearchRun,
     buildTurnInput,
@@ -636,8 +654,11 @@ export function RecruitingAgentDrawer({
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const restoredTalentProfileKeyRef = useRef<string | null>(null);
   const restoredChatHistoryConversationIdRef = useRef<string | null>(null);
+  const autoBoundScopeRequestIdRef = useRef<number | null>(null);
+  const completedScopeRequestIdRef = useRef<number | null>(null);
   const [messages, setMessages] = useState<AgentChatMessage[]>(initialAgentMessages);
-  const interactionPending = loading || isRestoring;
+  const isBindingScope = bindingScopeRequestId !== null;
+  const interactionPending = loading || isRestoring || isBindingScope;
 
   useEffect(() => {
     restoredChatHistoryConversationIdRef.current = null;
@@ -833,7 +854,7 @@ export function RecruitingAgentDrawer({
       {
         id: Date.now() + 1,
         role: "assistant",
-        content: formatError(error),
+        content: humanizeAgentError(error, formatError),
         failure: true,
       },
     ]);
@@ -891,14 +912,29 @@ export function RecruitingAgentDrawer({
     if (interactionPending) return;
     setLoading(true);
     try {
-      const run = await api.startTalentSearchProfileRun(profile.profile_id, {
-        revision_id: profile.current_revision.revision_id,
-        limit: 20,
-      });
-      await bindTalentSearchRun({
-        runId: run.run_id,
-        jobVersionId: matchableJobVersionId(jobVersionId),
-      });
+      const run = conversation?.active_context.candidate_set_source === "candidate_filter"
+        ? await api.startRecruitingAgentScopedTalentProfileRun(profile.profile_id, {
+            revision_id: profile.current_revision.revision_id,
+            limit: 20,
+            conversation_id: conversation.conversation_id,
+            context_version: conversation.context_version,
+          })
+        : await api.startTalentSearchProfileRun(profile.profile_id, {
+            revision_id: profile.current_revision.revision_id,
+            limit: 20,
+          });
+      if (run.active_context && run.conversation_id && run.context_version != null) {
+        adoptConversation({
+          conversation_id: run.conversation_id,
+          context_version: run.context_version,
+          active_context: run.active_context,
+        });
+      } else {
+        await bindTalentSearchRun({
+          runId: run.run_id,
+          jobVersionId: matchableJobVersionId(jobVersionId),
+        });
+      }
       updateTalentProfileMessage(profile, run);
     } catch (error) {
       addTalentProfileFailure(error);
@@ -1001,6 +1037,57 @@ export function RecruitingAgentDrawer({
     }
     return null;
   };
+
+  const bindPendingFilterScope = async (
+    scope: RecruitingAgentFilterScopeRequest | null = pendingFilterScope,
+  ) => {
+    if (!scope || isBindingScope) return;
+    setBindingScopeRequestId(scope.request_id);
+    setScopeBindingError(null);
+    try {
+      const bound = await bindFilterScope({
+        filter: scope.filter,
+        jobVersionId: matchableJobVersionId(jobVersionId),
+      });
+      completedScopeRequestIdRef.current = scope.request_id;
+      onPendingFilterScopeHandled(scope.request_id);
+      setMessages((current) => [
+        ...current,
+        {
+          id: Date.now() + 1,
+          role: "assistant",
+          content: `初筛结果已就绪，共 ${bound.active_context.candidate_count} 位候选人。请描述希望重点核验的人才画像。`,
+        },
+      ]);
+      window.requestAnimationFrame(() => composerInputRef.current?.focus());
+    } catch (error) {
+      const recoveredMessage = await recoverAgentConversationError(error);
+      setScopeBindingError(recoveredMessage ?? humanizeAgentError(error, formatError));
+    } finally {
+      setBindingScopeRequestId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (
+      !isOpen
+      || !pendingFilterScope
+      || isBindingScope
+      || isRestoring
+      || autoBoundScopeRequestIdRef.current === pendingFilterScope.request_id
+      || completedScopeRequestIdRef.current === pendingFilterScope.request_id
+    ) {
+      return;
+    }
+    autoBoundScopeRequestIdRef.current = pendingFilterScope.request_id;
+    void bindPendingFilterScope(pendingFilterScope);
+  }, [
+    isBindingScope,
+    isOpen,
+    isRestoring,
+    pendingFilterScope,
+    pendingFilterScope?.request_id,
+  ]);
 
   const useTalentSearchRunAsAgentContext = async (run: TalentSearchRun) => {
     if (interactionPending) return;
@@ -1172,10 +1259,23 @@ export function RecruitingAgentDrawer({
       </header>
       <div className="agent-context">
         <div
-          className={`agent-work-context${restoreError ? " is-error" : ""}`}
+          className={`agent-work-context${restoreError || scopeBindingError ? " is-error" : ""}`}
           role="status"
         >
-          {isRestoring ? (
+          {isBindingScope ? (
+            <span>正在接收初筛结果…</span>
+          ) : scopeBindingError ? (
+            <>
+              <span>{scopeBindingError}</span>
+              <button
+                className="text-button"
+                onClick={() => void bindPendingFilterScope(pendingFilterScope)}
+                type="button"
+              >
+                重新尝试
+              </button>
+            </>
+          ) : isRestoring ? (
             <span>正在恢复上次的助手工作范围…</span>
           ) : restoreError ? (
             <>
@@ -1316,6 +1416,11 @@ export function RecruitingAgentDrawer({
                 onAdjustConditions={focusTalentProfileComposer}
                 profile={item.talentProfile}
                 run={item.talentRun}
+                startLabel={
+                  conversation?.active_context.candidate_set_source === "candidate_filter"
+                    ? `在当前 ${conversation.active_context.candidate_count} 人中精筛`
+                    : undefined
+                }
               />
             )}
             {!!item.candidates?.length && (
@@ -1368,7 +1473,11 @@ export function RecruitingAgentDrawer({
             disabled={interactionPending}
             id="agent-message"
             onChange={(event) => setInput(event.target.value)}
-            placeholder="直接描述你想找的人，例如：找做过 Agent、RAG 和 LLM 服务部署，3 年以上经验的人"
+            placeholder={
+              conversation?.active_context.candidate_set_source === "candidate_filter"
+                ? "在当前初筛结果中描述精筛要求，例如：有 Agent 落地经验"
+                : "直接描述你想找的人，例如：找做过 Agent、RAG 和 LLM 服务部署，3 年以上经验的人"
+            }
             ref={composerInputRef}
             rows={2}
             value={input}

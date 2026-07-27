@@ -121,6 +121,8 @@ from app.schemas import (
     CandidateDataRetentionPreviewResponse,
     CandidateSearchRequest,
     CandidateSearchResponse,
+    RecruitingAgentFilterScopeRequest,
+    RecruitingAgentTalentSearchProfileRunRequest,
     TalentSearchProfileConfirmRequest,
     TalentSearchProfileGenerateRequest,
     TalentSearchProfileListResponse,
@@ -306,11 +308,15 @@ from app.services.recruiting_agent_service import (
     RecruitingAgentConversationConflictError,
     RecruitingAgentConversationNotFoundError,
     RecruitingAgentContextReferenceNotFoundError,
+    RecruitingAgentFilterScopeNotFoundError,
+    RecruitingAgentFilterScopeValidationError,
     RecruitingAgentServiceError,
     bind_recruiting_agent_context,
+    bind_recruiting_agent_filter_scope,
     delete_recruiting_agent_conversation,
     get_recruiting_agent_conversation,
     run_recruiting_agent_turn,
+    start_recruiting_agent_scoped_profile_search,
 )
 from app.services.talent_search_profile_service import (
     DeepSeekProviderError as TalentProfileDeepSeekProviderError,
@@ -3627,6 +3633,59 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             ) from exc
         return response
 
+    @app.post(
+        "/v1/recruiting-agent/conversations/filter-scope",
+        response_model=RecruitingAgentConversationResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    def bind_recruiting_agent_filter_scope_route(
+        payload: RecruitingAgentFilterScopeRequest,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> RecruitingAgentConversationResponse:
+        """Freeze the complete current factual-filter result for the Agent.
+
+        The browser supplies only a filter object. The server re-runs it across
+        the authenticated workspace, ignores the browser page/cursor, and
+        stores opaque membership under the private conversation.
+        """
+
+        try:
+            response = bind_recruiting_agent_filter_scope(
+                session,
+                payload=payload,
+                actor_user_id=principal.user.id,
+            )
+            _commit_or_raise(session)
+        except RecruitingAgentConversationNotFoundError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="agent_conversation_not_found",
+            ) from exc
+        except RecruitingAgentConversationConflictError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="agent_conversation_stale",
+            ) from exc
+        except RecruitingAgentFilterScopeValidationError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        except StaleDataError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="agent_conversation_stale",
+            ) from exc
+        except JobServiceError as exc:
+            session.rollback()
+            _raise_job_service_error(exc)
+        return response
+
     @app.delete(
         "/v1/recruiting-agent/conversations/{conversation_id}",
         status_code=status.HTTP_204_NO_CONTENT,
@@ -3858,6 +3917,70 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         except Exception as exc:
             session.rollback()
             logger.exception("Talent-search profile run failed")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="talent_search_profile_service_unavailable",
+            ) from exc
+        return response
+
+    @app.post(
+        "/v1/recruiting-agent/conversations/talent-profiles/{profile_id}/runs",
+        response_model=TalentSearchRunResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    def post_recruiting_agent_scoped_talent_search_profile_run(
+        profile_id: str,
+        payload: RecruitingAgentTalentSearchProfileRunRequest,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> TalentSearchRunResponse:
+        """Run a confirmed profile only in the caller's frozen filter scope."""
+
+        try:
+            response = start_recruiting_agent_scoped_profile_search(
+                session,
+                profile_id=profile_id,
+                payload=payload,
+                settings=settings,
+                actor_user_id=principal.user.id,
+            )
+            _commit_or_raise(session)
+        except RecruitingAgentConversationNotFoundError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="agent_conversation_not_found",
+            ) from exc
+        except RecruitingAgentFilterScopeNotFoundError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="agent_filter_scope_not_found",
+            ) from exc
+        except RecruitingAgentConversationConflictError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="agent_conversation_stale",
+            ) from exc
+        except StaleDataError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="agent_conversation_stale",
+            ) from exc
+        except TalentSearchProfileNotFoundError as exc:
+            session.rollback()
+            _raise_talent_search_profile_error(exc)
+        except TalentSearchProfileServiceError as exc:
+            session.rollback()
+            _raise_talent_search_profile_error(exc)
+        except TalentProfileJobServiceError as exc:
+            session.rollback()
+            _raise_job_service_error(exc)
+        except Exception as exc:
+            session.rollback()
+            logger.exception("Recruiting-agent scoped talent-profile run failed")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",

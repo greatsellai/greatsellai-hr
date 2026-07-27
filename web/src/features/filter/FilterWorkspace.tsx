@@ -1,11 +1,12 @@
 import { FilterPanel } from "./FilterPanel";
 import { ResultsPane } from "./ResultsPane";
+import { draftToSearchRequest } from "./filter-search-model";
 import type { FilterDraft } from "./filter-model";
 import type {
+  CandidateSearchRequest,
   CandidateSearchItem,
   CandidateSearchResponse,
   FilterOptions,
-  SavedFilter,
   ScoreTemplate,
 } from "../../types";
 import "./filter-workspace.css";
@@ -15,14 +16,11 @@ export function FilterWorkspace({
   draft,
   filterOptions,
   onDraftChange,
-  savedFilters,
   search,
   searching,
   selectedResumeId,
   onReset,
-  onSave,
-  onApplySaved,
-  onDeleteSaved,
+  onRefineWithAgent,
   onOpenCandidate,
   onScoreTemplateChange,
   onLoadMore,
@@ -34,14 +32,11 @@ export function FilterWorkspace({
   draft: FilterDraft;
   filterOptions: FilterOptions;
   onDraftChange: (draft: FilterDraft, timing?: "immediate" | "debounced") => void;
-  savedFilters: SavedFilter[];
   search: CandidateSearchResponse;
   searching: boolean;
   selectedResumeId: string | null;
   onReset: () => void;
-  onSave: (name: string) => Promise<void>;
-  onApplySaved: (filter: SavedFilter) => boolean;
-  onDeleteSaved: (filter: SavedFilter) => Promise<void>;
+  onRefineWithAgent: (filter: CandidateSearchRequest, totalCount: number) => void;
   onOpenCandidate: (item: CandidateSearchItem, tab?: "score") => void;
   onScoreTemplateChange: (templateId: string | null) => void;
   onLoadMore: () => void;
@@ -54,18 +49,19 @@ export function FilterWorkspace({
       <FilterPanel
         draft={draft}
         filterOptions={filterOptions}
-        onApplySaved={onApplySaved}
-        onDeleteSaved={onDeleteSaved}
         onDraftChange={onDraftChange}
         onReset={onReset}
-        onSave={onSave}
-        savedFilters={savedFilters}
       />
       <ResultsPane
         appliedDraft={appliedDraft}
         onLoadMore={onLoadMore}
         onOpenCandidate={onOpenCandidate}
         onReset={onReset}
+        onRefineWithAgent={() => {
+          const { cursor: _cursor, limit: _limit, score_template_id: _scoreTemplateId, ...filter } =
+            draftToSearchRequest(appliedDraft);
+          onRefineWithAgent(filter, search.total_count);
+        }}
         onScoreTemplateChange={onScoreTemplateChange}
         onUpload={onUpload}
         search={search}

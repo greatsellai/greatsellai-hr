@@ -39,6 +39,20 @@ def test_profile_context_migration_upgrades_existing_agent_conversations(tmp_pat
             "ix_agent_conv_active_talent_profile",
             "ix_agent_conv_active_talent_profile_revision",
         }.issubset(indexes)
+        run_columns = {
+            column["name"]
+            for column in inspector.get_columns("talent_search_runs")
+        }
+        assert {
+            "scope_kind",
+            "scope_fingerprint",
+            "scope_candidate_count",
+        }.issubset(run_columns)
+        run_indexes = {
+            index["name"]
+            for index in inspector.get_indexes("talent_search_runs")
+        }
+        assert "ix_talent_search_runs_organization_revision_scope" in run_indexes
     finally:
         engine.dispose()
 

@@ -217,126 +217,24 @@ export function draftToSearchRequest(
     limit: 50,
     cursor,
   };
+  // Historical saved filters can still hydrate the broader draft shape. The
+  // current first-pass UI intentionally sends only these two school tiers.
+  const institutionClassifications = draft.institutionClassifications.filter(
+    (classification) => classification === "985" || classification === "211",
+  );
 
   if (draft.minEmploymentMonths > 0) {
     request.min_employment_months = draft.minEmploymentMonths;
   }
-  if (draft.minEmploymentOrInternshipMonths > 0) {
-    request.min_employment_or_internship_months =
-      draft.minEmploymentOrInternshipMonths;
-  }
-  if (draft.degrees.length) request.highest_degree_in = draft.degrees;
-  if (draft.graduationStatus !== "any") {
-    request.graduation_status = draft.graduationStatus;
-    request.fresh_graduate_start_month =
-      draft.freshGraduateStartMonth || defaultFilterDraft.freshGraduateStartMonth;
-    request.fresh_graduate_end_month =
-      draft.freshGraduateEndMonth || defaultFilterDraft.freshGraduateEndMonth;
-  }
-  if (
-    draft.institutionClassifications.length ||
-    draft.schoolName.trim() ||
-    draft.major.trim() ||
-    draft.minAverageScore ||
-    draft.minGpaPercent ||
-    draft.maxRankPosition ||
-    draft.maxRankPercent
-  ) {
+  if (institutionClassifications.length) {
     request.education_any_of = [
       {
-        school_name_contains: draft.schoolName.trim()
-          ? [draft.schoolName.trim()]
-          : [],
-        major_contains: draft.major.trim() ? [draft.major.trim()] : [],
-        institution_classifications_any_of: draft.institutionClassifications,
-        min_average_score: draft.minAverageScore
-          ? Number(draft.minAverageScore)
-          : null,
-        min_gpa_percent: draft.minGpaPercent ? Number(draft.minGpaPercent) : null,
-        max_rank_position: draft.maxRankPosition
-          ? Number(draft.maxRankPosition)
-          : null,
-        max_rank_percent: draft.maxRankPercent
-          ? Number(draft.maxRankPercent)
-          : null,
+        institution_classifications_any_of: institutionClassifications,
       },
     ];
   }
-  if (
-    draft.experienceTypes.length ||
-    draft.experienceName.trim() ||
-    draft.company.trim() ||
-    draft.title.trim() ||
-    draft.experienceAwardLevels.length ||
-    draft.experienceAwardResult.trim()
-  ) {
-    request.experience_any_of = [
-      {
-        experience_types: draft.experienceTypes.length
-          ? draft.experienceTypes
-          : experienceTypeOptions.map((option) => option.value),
-        experience_name_contains: draft.experienceName.trim()
-          ? [draft.experienceName.trim()]
-          : [],
-        organization_name_contains: draft.company.trim()
-          ? [draft.company.trim()]
-          : [],
-        title_contains: draft.title.trim() ? [draft.title.trim()] : [],
-        award_levels_any_of: draft.experienceAwardLevels,
-        award_result_contains: draft.experienceAwardResult.trim()
-          ? [draft.experienceAwardResult.trim()]
-          : [],
-      },
-    ];
-  }
-  if (draft.skillCategories.length) {
-    request.skill_categories_any_of = draft.skillCategories;
-  }
-  if (draft.skills.length) {
-    if (draft.skillsMode === "all") request.skills_all_of = draft.skills;
-    else request.skills_any_of = draft.skills;
-  }
-  const validLanguageCredentials = draft.languageCredentials.filter(
-    (code) => code !== "custom" || Boolean(draft.customLanguageName.trim()),
-  );
-  if (validLanguageCredentials.length) {
-    request.language_credentials_any_of = validLanguageCredentials.map(
-      (credential_code) => ({
-        credential_code,
-        custom_name_contains:
-          credential_code === "custom" ? draft.customLanguageName.trim() : null,
-        min_score: draft.languageScores[credential_code]
-          ? Number(draft.languageScores[credential_code])
-          : null,
-      }),
-    );
-  }
-  if (draft.scholarshipStatus !== "any" || draft.scholarshipName.trim()) {
-    request.scholarship_status = draft.scholarshipStatus;
-    request.scholarship_name_contains =
-      draft.scholarshipStatus === "present" && draft.scholarshipName.trim()
-        ? [draft.scholarshipName.trim()]
-        : [];
-    request.scholarship_levels_any_of =
-      draft.scholarshipStatus === "present" ? draft.scholarshipLevels : [];
-  }
-  if (draft.competitionStatus !== "any") {
-    request.competition_status = draft.competitionStatus;
-  }
-  if (draft.competitionAwardStatus !== "any") {
-    request.competition_award_status = draft.competitionAwardStatus;
-  }
-  if (draft.leadershipContexts.length || draft.leadershipRoles.length) {
-    request.leadership_any_of = [
-      {
-        contexts_any_of: draft.leadershipContexts,
-        roles_any_of: draft.leadershipRoles,
-      },
-    ];
-  }
-  if (draft.keywords.length) {
-    request.keywords = draft.keywords;
-    request.keyword_match_mode = draft.keywordsMode;
+  if (draft.experienceTypes.includes("internship")) {
+    request.experience_types_all_of = ["internship"];
   }
   if (scoreTemplateId) request.score_template_id = scoreTemplateId;
   return request;
@@ -427,66 +325,20 @@ function savedInstitutionClassifications(
 export function searchRequestToDraft(
   request: CandidateSearchRequest,
 ): SavedFilterDraftResult {
-  const education = request.education_any_of?.[0];
-  const experience = request.experience_any_of?.[0];
-  const savedDegrees = request.highest_degree_in ?? education?.degree_in ?? [];
   const institutionMigration = savedInstitutionClassifications(request);
   if (institutionMigration.error) {
     return { draft: null, error: institutionMigration.error };
   }
   return {
     draft: {
+      ...freshDefaultFilter(),
       minEmploymentMonths: request.min_employment_months ?? 0,
-      minEmploymentOrInternshipMonths:
-        request.min_employment_or_internship_months ?? 0,
-      degrees: savedDegrees.filter((degree) => degree !== "unknown"),
-      institutionClassifications: institutionMigration.classifications,
-      graduationStatus: request.graduation_status ?? "any",
-      freshGraduateStartMonth:
-        request.fresh_graduate_start_month ??
-        defaultFilterDraft.freshGraduateStartMonth,
-      freshGraduateEndMonth:
-        request.fresh_graduate_end_month ??
-        defaultFilterDraft.freshGraduateEndMonth,
-      schoolName: education?.school_name_contains?.[0] ?? "",
-      major: education?.major_contains?.[0] ?? "",
-      minAverageScore: education?.min_average_score?.toString() ?? "",
-      minGpaPercent: education?.min_gpa_percent?.toString() ?? "",
-      maxRankPosition: education?.max_rank_position?.toString() ?? "",
-      maxRankPercent: education?.max_rank_percent?.toString() ?? "",
-      experienceTypes: experience?.experience_types ?? [],
-      experienceName: experience?.experience_name_contains?.[0] ?? "",
-      company: experience?.organization_name_contains?.[0] ?? "",
-      title: experience?.title_contains?.[0] ?? "",
-      experienceAwardLevels: experience?.award_levels_any_of ?? [],
-      experienceAwardResult: experience?.award_result_contains?.[0] ?? "",
-      skills: request.skills_all_of ?? request.skills_any_of ?? [],
-      skillCategories: request.skill_categories_any_of ?? [],
-      skillsMode: request.skills_any_of?.length ? "any" : "all",
-      languageCredentials:
-        request.language_credentials_any_of?.map((item) => item.credential_code) ??
-        [],
-      languageScores: Object.fromEntries(
-        (request.language_credentials_any_of ?? [])
-          .filter((item) => item.min_score != null)
-          .map((item) => [item.credential_code, String(item.min_score)]),
+      institutionClassifications: institutionMigration.classifications.filter(
+        (classification) => classification === "985" || classification === "211",
       ),
-      customLanguageName:
-        request.language_credentials_any_of?.find(
-          (item) => item.credential_code === "custom",
-        )?.custom_name_contains ?? "",
-      scholarshipStatus: request.scholarship_status ?? "any",
-      scholarshipName: request.scholarship_name_contains?.[0] ?? "",
-      scholarshipLevels: request.scholarship_levels_any_of ?? [],
-      competitionStatus: request.competition_status ?? "any",
-      competitionAwardStatus: request.competition_award_status ?? "any",
-      leadershipContexts: request.leadership_any_of?.[0]?.contexts_any_of ?? [],
-      leadershipRoles: request.leadership_any_of?.[0]?.roles_any_of ?? [],
-      keywords:
-        request.keywords ?? request.keywords_all_of ?? request.keywords_any_of ?? [],
-      keywordsMode:
-        request.keyword_match_mode ??
-        (request.keywords_all_of?.length ? "precise" : "broad"),
+      experienceTypes: request.experience_types_all_of?.includes("internship")
+        ? ["internship"]
+        : [],
     },
     error: null,
   };

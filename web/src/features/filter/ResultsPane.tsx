@@ -52,62 +52,12 @@ function activeResultDisplayColumns(draft: FilterDraft): ResultDisplayColumn[] {
     }
   };
 
-  if (draft.graduationStatus !== "any") add("graduation", "毕业时间");
   if (draft.minEmploymentMonths > 0) {
     add("employment_months", "正式工作年限");
   }
-  if (draft.minEmploymentOrInternshipMonths > 0) {
-    add("employment_or_internship_months", "工作 + 实习年限");
+  if (draft.experienceTypes.includes("internship")) {
+    add("experience_type", "实习经历");
   }
-
-  if (draft.schoolName.trim()) add("school", "学校");
-  if (draft.major.trim()) add("major", "专业");
-  if (
-    draft.minAverageScore ||
-    draft.minGpaPercent ||
-    draft.maxRankPosition ||
-    draft.maxRankPercent
-  ) {
-    add("academic_performance", "学业表现");
-  }
-
-  if (draft.experienceTypes.length) add("experience_type", "经历类型");
-  if (draft.experienceName.trim()) add("experience_name", "经历名称");
-  if (draft.company.trim()) add("organization", "公司 / 组织");
-  if (draft.title.trim()) add("title", "职位");
-  if (
-    draft.experienceAwardLevels.length ||
-    draft.experienceAwardResult.trim()
-  ) {
-    add("experience_award", "经历获奖");
-  }
-
-  if (draft.skills.length || draft.skillCategories.length) add("skills", "技能");
-  if (
-    draft.languageCredentials.some(
-      (credential) =>
-        credential !== "custom" || Boolean(draft.customLanguageName.trim()),
-    )
-  ) {
-    add("language", "语言证书");
-  }
-  if (
-    draft.scholarshipStatus !== "any" ||
-    draft.scholarshipName.trim() ||
-    draft.scholarshipLevels.length
-  ) {
-    add("scholarship", "奖学金");
-  }
-  if (
-    draft.competitionStatus !== "any" ||
-    draft.competitionAwardStatus !== "any"
-  ) {
-    add("competition", "竞赛");
-  }
-  if (draft.leadershipContexts.length || draft.leadershipRoles.length) {
-    add("leadership", "领导经历");
-  }
-  if (draft.keywords.length) add("keywords", "关键词命中");
 
   return columns;
 }
@@ -320,55 +270,23 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
     if (normalizedValue) labels.push(`${label}：${normalizedValue}`);
   };
 
-  if (draft.institutionClassifications.length) {
+  const institutionClassifications = draft.institutionClassifications.filter(
+    (classification) => classification === "985" || classification === "211",
+  );
+  if (institutionClassifications.length) {
     add(
       "院校",
       compactFilterValue(
-        sortInstitutionClassifications(draft.institutionClassifications).map(
+        sortInstitutionClassifications(institutionClassifications).map(
           institutionClassificationLabel,
         ),
       ),
     );
   }
-  if (draft.degrees.length) {
-    add(
-      "学历",
-      compactFilterValue(draft.degrees.map((degree) => degreeLabels[degree])),
-    );
-  }
-  if (draft.schoolName.trim()) add("院校名称", draft.schoolName);
-  if (draft.major.trim()) add("专业", draft.major);
-  if (draft.graduationStatus === "fresh") add("毕业状态", "应届");
-  if (draft.graduationStatus === "previous") add("毕业状态", "非应届");
   if (draft.minEmploymentMonths > 0) {
     add("正式工作", `至少 ${formatDuration(draft.minEmploymentMonths)}`);
   }
-  if (draft.minEmploymentOrInternshipMonths > 0) {
-    add(
-      "工作 + 实习",
-      `至少 ${formatDuration(draft.minEmploymentOrInternshipMonths)}`,
-    );
-  }
-  if (draft.experienceTypes.length) {
-    add(
-      "经历",
-      compactFilterValue(
-        draft.experienceTypes.map(
-          (type) =>
-            experienceTypeOptions.find((option) => option.value === type)
-              ?.label ?? type,
-        ),
-      ),
-    );
-  }
-  if (draft.company.trim()) add("公司", draft.company);
-  if (draft.title.trim()) add("职位", draft.title);
-  if (draft.skills.length || draft.skillCategories.length) {
-    add("技能", compactFilterValue([...draft.skills, ...draft.skillCategories]));
-  }
-  if (draft.keywords.length) {
-    add("关键词", compactFilterValue(draft.keywords));
-  }
+  if (draft.experienceTypes.includes("internship")) add("实习", "有实习经历");
 
   return labels;
 }
@@ -382,6 +300,7 @@ export function ResultsPane({
   onScoreTemplateChange,
   onLoadMore,
   onReset,
+  onRefineWithAgent,
   onUpload,
   scoreTemplateId,
   scoreTemplates,
@@ -394,6 +313,7 @@ export function ResultsPane({
   onScoreTemplateChange: (templateId: string | null) => void;
   onLoadMore: () => void;
   onReset: () => void;
+  onRefineWithAgent: () => void;
   onUpload: () => void;
   scoreTemplateId: string | null;
   scoreTemplates: ScoreTemplate[];
@@ -412,6 +332,16 @@ export function ResultsPane({
           <h1>候选人</h1>
         </div>
         <div className="results-toolbar">
+          <BackofficeButton
+            ariaLabel={`交给 Agent 精筛当前 ${search.total_count} 位候选人`}
+            className="results-agent-refine"
+            disabled={searching || search.total_count === 0}
+            icon={<Icon name="spark" size={16} />}
+            onClick={onRefineWithAgent}
+            tone="primary"
+          >
+            交给 Agent 精筛当前 {search.total_count} 人
+          </BackofficeButton>
           <div className="score-sort-control">
             <BackofficeSelect
               ariaLabel="评分口径"

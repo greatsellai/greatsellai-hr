@@ -404,7 +404,11 @@ export interface RecruitingAgentActiveTalentProfile {
 
 /** The only durable Agent state shown back to a recruiter. */
 export interface RecruitingAgentActiveContext {
-  candidate_set_source: "agent_search" | "talent_search_run" | null;
+  candidate_set_source:
+    | "agent_search"
+    | "candidate_filter"
+    | "talent_search_run"
+    | null;
   candidate_count: number;
   active_job_version_id: string | null;
   active_job_title: string | null;
@@ -440,6 +444,21 @@ export interface RecruitingAgentContextBindInput {
   job_version_id?: string | null;
   conversation_id?: string | null;
   context_version?: number | null;
+}
+
+/** A server-side snapshot of the current first-pass filter, never client IDs. */
+export interface RecruitingAgentFilterScopeBindInput {
+  filter: CandidateSearchRequest;
+  job_version_id?: string | null;
+  conversation_id?: string | null;
+  context_version?: number | null;
+}
+
+/** Ephemeral UI handoff used only to open the Agent with an applied filter. */
+export interface RecruitingAgentFilterScopeRequest {
+  request_id: number;
+  filter: CandidateSearchRequest;
+  total_count: number;
 }
 
 export interface RecruitingAgentCandidate {
@@ -1113,6 +1132,12 @@ export interface TalentSearchProfileRunInput {
   cursor?: string | null;
 }
 
+export interface RecruitingAgentScopedTalentProfileRunInput
+  extends TalentSearchProfileRunInput {
+  conversation_id: string;
+  context_version: number;
+}
+
 export interface TalentSearchProfileMatchRequirement {
   requirement_id: string;
   requirement_key: string;
@@ -1173,6 +1198,12 @@ export interface TalentSearchRun {
   applied_hard_filters: TalentSearchHardFilters;
   recall_diagnostics: TalentSearchRecallDiagnostics | null;
   candidate_recall: CandidateSearchResponse;
+  /** Present when the run was started inside a server-bound Agent scope. */
+  scope_kind?: "global" | "candidate_filter" | null;
+  scope_candidate_count?: number | null;
+  conversation_id?: string | null;
+  context_version?: number | null;
+  active_context?: RecruitingAgentActiveContext | null;
 }
 
 export interface ResumeLibraryItem {

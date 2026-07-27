@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { isApiError } from "./api";
@@ -11,10 +12,12 @@ import {
   ROOT_WORKSPACE_BASE_PATH,
 } from "./landing";
 import type {
+  CandidateSearchRequest,
   CandidateSearchItem,
   JobMatch,
   ResumeLibraryItem,
   RecruitingAgentCandidate,
+  RecruitingAgentFilterScopeRequest,
 } from "./types";
 import { mailboxImportErrorMessages } from "./features/mailbox/mailbox-model";
 import { CandidateDrawer } from "./features/candidate-drawer/CandidateDrawer";
@@ -371,6 +374,9 @@ function App() {
 
 function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [agentOpen, setAgentOpen] = useState(false);
+  const [pendingAgentFilterScope, setPendingAgentFilterScope] =
+    useState<RecruitingAgentFilterScopeRequest | null>(null);
+  const agentScopeRequestIdRef = useRef(0);
   const [libraryRefreshToken, setLibraryRefreshToken] = useState(0);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
@@ -401,6 +407,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   const clearWorkspaceAfterLogout = useCallback(() => {
     resetDrawer();
+    setAgentOpen(false);
+    setPendingAgentFilterScope(null);
   }, [resetDrawer]);
   const {
     authError,
@@ -425,21 +433,17 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   const {
     appliedFilter,
-    applySavedFilter,
     changeScoreTemplate,
-    deleteSavedFilter,
     filterDraft,
     filterOptions,
     loadMore,
     refreshCurrentResults,
     registerScoreTemplate,
     resetFilter,
-    savedFilters,
     scoreTemplateId,
     scoreTemplates,
     search,
     searching,
-    saveCurrentFilter,
     updateFilterDraft,
   } = useCandidateSearchController({
     enabled:
@@ -479,6 +483,25 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     window.requestAnimationFrame(() => {
       document.getElementById("recruiting-agent-trigger")?.focus();
     });
+  }, []);
+
+  const openAgentWithFilterScope = useCallback(
+    (filter: CandidateSearchRequest, totalCount: number) => {
+      closeDrawer();
+      setPendingAgentFilterScope({
+        filter,
+        request_id: ++agentScopeRequestIdRef.current,
+        total_count: totalCount,
+      });
+      setAgentOpen(true);
+    },
+    [closeDrawer],
+  );
+
+  const completeAgentFilterScopeHandoff = useCallback((requestId: number) => {
+    setPendingAgentFilterScope((current) =>
+      current?.request_id === requestId ? null : current,
+    );
   }, []);
 
   useEffect(() => {
@@ -686,15 +709,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             feedback={{ formatError: humanizeError, notify }}
             filter={{
               appliedFilter,
-              applySavedFilter,
               changeScoreTemplate,
-              deleteSavedFilter,
               filterDraft,
               filterOptions,
               loadMore,
               resetFilter,
-              savedFilters,
-              saveCurrentFilter,
               scoreTemplateId,
               scoreTemplates,
               search,
@@ -719,6 +738,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             onOpenCandidate={openCandidate}
             onOpenLibraryResume={openLibraryResume}
             onOpenMatchedResume={openMatchedResume}
+            onRefineWithAgent={openAgentWithFilterScope}
             onScoreCreated={handleScoreCreated}
             onTemplateCreated={registerScoreTemplate}
             onUploadedResume={openUploadedResume}
@@ -748,6 +768,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         formatError={humanizeError}
         isOpen={agentOpen}
         onClose={closeAgent}
+        onPendingFilterScopeHandled={completeAgentFilterScopeHandoff}
         onOpenMatchWorkspace={() => {
           setAgentOpen(false);
           navigateToView("match");
@@ -761,6 +782,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           openSettings("mailbox");
         }}
         onOpenResume={openAgentResume}
+        pendingFilterScope={pendingAgentFilterScope}
       />
 
       <ToastRegion

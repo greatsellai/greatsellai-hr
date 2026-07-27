@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
@@ -39,14 +40,17 @@ from app.schemas import (
     RecruitingAgentContextBindRequest,
     RecruitingAgentConversationResponse,
     RecruitingAgentConversationTurnResponse,
+    RecruitingAgentFilterScopeRequest,
     RecruitingAgentRequest,
     RecruitingAgentResponse,
     RecruitingAgentSearchSummary,
     RecruitingAgentToolTrace,
     RecruitingAgentVerificationEvidence,
+    RecruitingAgentTalentSearchProfileRunRequest,
     TalentSearchProfileGenerateRequest,
     TalentSearchProfileRefineRequest,
     TalentSearchProfileResponse,
+    TalentSearchRunResponse,
 )
 from app.services.ai_gateway_service import (
     AiExecutionSpec,
@@ -77,7 +81,7 @@ from app.services.mailbox_import_service import (
     list_mailbox_imports,
 )
 from app.services.resume_score_batch_service import enqueue_resume_score_batch
-from app.services.search_service import search_candidates
+from app.services.search_service import SearchValidationError, search_candidates
 from app.services.score_service import (
     ScoreServiceError,
     ScoreTemplateNotFoundError,
@@ -88,6 +92,7 @@ from app.services.talent_search_profile_service import (
     generate_profile,
     get_profile,
     refine_profile,
+    start_profile_search,
 )
 from app.tenant_scope import clear_organization_context, set_organization_context
 
@@ -106,6 +111,14 @@ class RecruitingAgentConversationConflictError(RecruitingAgentServiceError):
 
 class RecruitingAgentContextReferenceNotFoundError(RecruitingAgentServiceError):
     """A caller cannot bind an unavailable workspace-owned Agent context."""
+
+
+class RecruitingAgentFilterScopeNotFoundError(RecruitingAgentServiceError):
+    """The private initial-filter scope is unavailable or no longer usable."""
+
+
+class RecruitingAgentFilterScopeValidationError(RecruitingAgentServiceError):
+    """The server cannot reconstruct the requested factual filter scope."""
 
 
 @dataclass(frozen=True)
@@ -182,6 +195,7 @@ _MAX_MODEL_CONVERSATION_TURNS = 6
 _MAX_MODEL_CONVERSATION_HISTORY_CHARS = 12_000
 _MAX_PERSISTED_ASSISTANT_MESSAGE_CHARS = 8_000
 _CONTEXT_SOURCE_AGENT_SEARCH = "agent_search"
+_CONTEXT_SOURCE_CANDIDATE_FILTER = "candidate_filter"
 _CONTEXT_SOURCE_TALENT_SEARCH_RUN = "talent_search_run"
 _MAX_TOOL_CALLS_PER_MODEL_RESPONSE = 4
 _MAX_TOOL_ROUNDS_PER_TURN = 4
@@ -999,6 +1013,36 @@ def _set_active_talent_profile(
         _advance_conversation_context(conversation)
 
 
+def _clear_active_talent_profile(
+    conversation: RecruitingAgentConversation,
+) -> bool:
+    """Forget a stale draft before a recruiter starts a new filter-scoped flow."""
+
+    if (
+        conversation.active_talent_profile_id is None
+        and conversation.active_talent_profile_revision_id is None
+    ):
+        return False
+    conversation.active_talent_profile_id = None
+    conversation.active_talent_profile_revision_id = None
+    _advance_conversation_context(conversation)
+    return True
+
+
+def _preserve_candidate_filter_scope(
+    session: Session,
+    *,
+    conversation: RecruitingAgentConversation,
+) -> bool:
+    """Keep only an explicit sidebar scope while Agent drafts/refines a profile."""
+
+    candidate_set = _active_candidate_set(session, conversation=conversation)
+    return (
+        candidate_set is not None
+        and candidate_set.source_kind == _CONTEXT_SOURCE_CANDIDATE_FILTER
+    )
+
+
 def _bind_talent_search_profile_context(
     session: Session,
     *,
@@ -1044,7 +1088,13 @@ def _bind_talent_search_profile_context(
         session,
         conversation=conversation,
         profile=response,
-        clear_candidate_scope=True,
+        # A profile opened or re-confirmed from the explicit sidebar flow must
+        # retain that frozen scope. Legacy Agent-search scopes still clear so
+        # an unrelated profile cannot silently inherit prior result cards.
+        clear_candidate_scope=not _preserve_candidate_filter_scope(
+            session,
+            conversation=conversation,
+        ),
     )
     return response
 
@@ -1505,6 +1555,114 @@ def _replace_active_candidate_set(
     return candidate_set
 
 
+def _all_candidate_filter_resume_ids(
+    session: Session,
+    *,
+    request: CandidateSearchRequest,
+) -> list[str]:
+    """Reconstruct every matching resume from server-side pagination only."""
+
+    # The browser's visible page must not become the Agent scope. Re-run the
+    # normalized factual query without its cursor/limit and walk every page.
+    normalized_request = request.model_copy(
+        update={
+            "limit": 100,
+            "cursor": None,
+            # A score template only controls list ordering. Its lifecycle
+            # must not change the frozen membership of a factual filter scope
+            # or make a stale/deleted template prevent Agent refinement.
+            "score_template_id": None,
+        }
+    )
+    cursor: str | None = None
+    seen_resume_ids: set[str] = set()
+    seen_cursors: set[str] = set()
+    resume_ids: list[str] = []
+    while True:
+        try:
+            response = search_candidates(
+                session,
+                normalized_request.model_copy(update={"cursor": cursor}),
+            )
+        except SearchValidationError as exc:
+            raise RecruitingAgentFilterScopeValidationError(
+                "agent_filter_scope_invalid"
+            ) from exc
+        for item in response.items:
+            if item.resume_id not in seen_resume_ids:
+                seen_resume_ids.add(item.resume_id)
+                resume_ids.append(item.resume_id)
+        next_cursor = response.next_cursor
+        if next_cursor is None:
+            return resume_ids
+        if next_cursor in seen_cursors:
+            # A repeated server pagination token must fail closed rather than
+            # leave a request looping and accidentally claiming a partial
+            # candidate scope is complete.
+            raise RecruitingAgentFilterScopeValidationError(
+                "agent_filter_scope_pagination_invalid"
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+def _candidate_filter_scope_fingerprint(resume_ids: list[str]) -> str:
+    """Return a non-reversible identity for one frozen, ordered scope."""
+
+    digest = hashlib.sha256()
+    digest.update(b"greatsell.candidate_filter_scope.v1\x00")
+    for resume_id in _deduplicate_resume_ids(resume_ids):
+        digest.update(resume_id.encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def bind_recruiting_agent_filter_scope(
+    session: Session,
+    *,
+    payload: RecruitingAgentFilterScopeRequest,
+    actor_user_id: str,
+) -> RecruitingAgentConversationResponse:
+    """Freeze a full basic-filter result as a private Agent work scope.
+
+    The server owns both the query execution and persisted membership. The
+    request carries no candidate IDs or rendered result data, and any stale or
+    foreign conversation fails before a scope can be replaced.
+    """
+
+    conversation = _conversation_or_create(
+        session,
+        conversation_id=payload.conversation_id,
+        context_version=payload.context_version,
+        actor_user_id=actor_user_id,
+        require_context_version=True,
+    )
+    requested_job_version_id = (payload.job_version_id or "").strip()
+    job = (
+        _resolve_job(session, requested_job_version_id)
+        if requested_job_version_id
+        else None
+    )
+    _set_explicit_conversation_job(conversation, job=job)
+    resume_ids = _all_candidate_filter_resume_ids(session, request=payload.filter)
+    _replace_active_candidate_set(
+        session,
+        conversation=conversation,
+        source_kind=_CONTEXT_SOURCE_CANDIDATE_FILTER,
+        source_ref_id=None,
+        resume_ids=resume_ids,
+    )
+    # A fresh initial filter begins a new profile workflow. Do not let a
+    # profile left in another tab silently absorb a different candidate set.
+    _clear_active_talent_profile(conversation)
+    _touch_conversation(session, conversation=conversation)
+    return _conversation_response(
+        session,
+        conversation=conversation,
+        current_job=job,
+    )
+
+
 def _bind_talent_search_run_context(
     session: Session,
     *,
@@ -1575,6 +1733,86 @@ def _bind_talent_search_run_context(
         source_kind=_CONTEXT_SOURCE_TALENT_SEARCH_RUN,
         source_ref_id=run.id,
         resume_ids=list(run.recalled_resume_ids or []),
+    )
+
+
+def start_recruiting_agent_scoped_profile_search(
+    session: Session,
+    *,
+    profile_id: str,
+    payload: RecruitingAgentTalentSearchProfileRunRequest,
+    settings: AppSettings,
+    actor_user_id: str,
+) -> TalentSearchRunResponse:
+    """Run a confirmed profile only within this caller's frozen filter scope.
+
+    This endpoint intentionally does not accept a candidate list. It verifies
+    both the conversation owner/version and the active profile before it
+    supplies the server-derived visible scope to the ordinary profile runner.
+    If any part is missing, expired, foreign, or superseded, the request fails
+    instead of falling back to a workspace-wide recall.
+    """
+
+    conversation = _conversation_or_create(
+        session,
+        conversation_id=payload.conversation_id,
+        context_version=payload.context_version,
+        actor_user_id=actor_user_id,
+        require_context_version=True,
+    )
+    active_profile = _active_talent_profile_response(
+        session,
+        conversation=conversation,
+    )
+    if (
+        active_profile is None
+        or active_profile.profile_id != profile_id
+        or active_profile.current_revision.revision_id != payload.revision_id
+    ):
+        raise RecruitingAgentFilterScopeNotFoundError(
+            "agent_filter_scope_not_found"
+        )
+    candidate_set = _active_candidate_set(session, conversation=conversation)
+    if (
+        candidate_set is None
+        or candidate_set.source_kind != _CONTEXT_SOURCE_CANDIDATE_FILTER
+    ):
+        raise RecruitingAgentFilterScopeNotFoundError(
+            "agent_filter_scope_not_found"
+        )
+    visible_resume_ids = _candidate_set_resume_ids(
+        session,
+        candidate_set=candidate_set,
+    )
+    run_response = start_profile_search(
+        session,
+        profile_id=profile_id,
+        payload=payload,
+        settings=settings,
+        scope_kind=_CONTEXT_SOURCE_CANDIDATE_FILTER,
+        scope_fingerprint=_candidate_filter_scope_fingerprint(visible_resume_ids),
+        scope_resume_ids=visible_resume_ids,
+    )
+    # A successful scoped run becomes the next explicit Agent context. This
+    # replaces the initial-filter set only after its result is safely frozen on
+    # the run; a failure above leaves the initial scope intact for retry.
+    _bind_talent_search_run_context(
+        session,
+        conversation=conversation,
+        run_id=run_response.run_id,
+    )
+    _touch_conversation(session, conversation=conversation)
+    active_context = _conversation_context(
+        session,
+        conversation=conversation,
+        current_job=None,
+    )
+    return run_response.model_copy(
+        update={
+            "conversation_id": conversation.id,
+            "context_version": conversation.context_version,
+            "active_context": active_context,
+        }
     )
 
 
@@ -3114,7 +3352,13 @@ def _draft_talent_search_profile(
         session,
         conversation=conversation,
         profile=profile,
-        clear_candidate_scope=True,
+        # An explicit sidebar result remains the scope for this new profile.
+        # Historical free-form/Agent search scopes retain their old behavior
+        # and are cleared when a new confirmation-first workflow begins.
+        clear_candidate_scope=not _preserve_candidate_filter_scope(
+            session,
+            conversation=conversation,
+        ),
     )
     return ToolRun(
         payload=_profile_tool_payload(profile),
@@ -3166,7 +3410,10 @@ def _refine_active_talent_search_profile(
         session,
         conversation=conversation,
         profile=refined,
-        clear_candidate_scope=True,
+        clear_candidate_scope=not _preserve_candidate_filter_scope(
+            session,
+            conversation=conversation,
+        ),
     )
     return ToolRun(
         payload=_profile_tool_payload(refined),
@@ -3920,10 +4167,14 @@ __all__ = [
     "RecruitingAgentConversationConflictError",
     "RecruitingAgentConversationNotFoundError",
     "RecruitingAgentContextReferenceNotFoundError",
+    "RecruitingAgentFilterScopeNotFoundError",
+    "RecruitingAgentFilterScopeValidationError",
     "RecruitingAgentServiceError",
     "bind_recruiting_agent_context",
+    "bind_recruiting_agent_filter_scope",
     "delete_recruiting_agent_conversation",
     "get_recruiting_agent_conversation",
     "purge_expired_recruiting_agent_conversations",
     "run_recruiting_agent_turn",
+    "start_recruiting_agent_scoped_profile_search",
 ]

@@ -150,8 +150,8 @@ def test_refresh_response_preserves_optional_provider_rotated_refresh_token(
         def __exit__(self, *args) -> None:
             return None
 
-        def read(self) -> bytes:
-            return self.payload
+        def read(self, size: int = -1) -> bytes:
+            return self.payload if size < 0 else self.payload[:size]
 
     monkeypatch.setattr(
         mailbox_oauth_service,
@@ -195,6 +195,45 @@ def test_refresh_response_preserves_optional_provider_rotated_refresh_token(
             provider_key="microsoft_oauth",
             refresh_token="microsoft-r1",
         )
+
+
+def test_oauth_token_response_body_is_bounded_before_json_decoding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A compromised provider endpoint cannot force an unbounded allocation."""
+
+    settings = _oauth_settings(tmp_path)
+
+    class OversizedTokenResponse:
+        read_sizes: list[int] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            self.__class__.read_sizes.append(size)
+            return b"x" * size
+
+    monkeypatch.setattr(
+        mailbox_oauth_service,
+        "urlopen",
+        lambda *args, **kwargs: OversizedTokenResponse(),
+    )
+
+    with pytest.raises(MailboxOAuthError, match="mailbox_oauth_token_exchange_failed"):
+        refresh_access_token(
+            settings,
+            provider_key="gmail_oauth",
+            refresh_token="refresh-token-for-test-only",
+        )
+
+    assert OversizedTokenResponse.read_sizes == [
+        mailbox_oauth_service._OAUTH_TOKEN_RESPONSE_MAX_BYTES + 1
+    ]
 
 
 def test_rotated_refresh_token_survives_sync_imap_failure(client, monkeypatch) -> None:

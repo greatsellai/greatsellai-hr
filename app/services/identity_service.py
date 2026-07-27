@@ -13,7 +13,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (
@@ -496,6 +496,33 @@ def establish_session(values: dict[str, object], principal: AuthPrincipal) -> No
 
 def clear_session(values: dict[str, object]) -> None:
     values.clear()
+
+
+def revoke_user_auth_sessions(session: Session, *, principal: AuthPrincipal) -> bool:
+    """Invalidate every signed browser session for one account.
+
+    Browser sessions are stateless signed cookies.  A mailbox OAuth callback
+    deliberately survives the provider's cross-site redirect through a
+    short-lived, separately signed correlation cookie, so merely deleting the
+    current browser cookie is not enough to make logout final.  Advancing the
+    account version makes a delayed callback (and every pre-existing session)
+    fail closed on its next server-side identity check.
+
+    This is intentionally account-wide, matching password-reset revocation:
+    the project does not retain a server-side per-browser session registry.
+    The caller owns the transaction and still clears its browser cookie even
+    when this update cannot be applied.
+    """
+
+    revoked = session.execute(
+        update(UserAccount)
+        .where(
+            UserAccount.id == principal.user.id,
+            UserAccount.is_active.is_(True),
+        )
+        .values(auth_session_version=UserAccount.auth_session_version + 1)
+    )
+    return bool(revoked.rowcount)
 
 
 def create_registration(session: Session, payload: AuthRegistration) -> AuthPrincipal:

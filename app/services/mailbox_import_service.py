@@ -1036,6 +1036,47 @@ def _store_oauth_refresh_token(
         credential.last_error_code = None
 
 
+def _oauth_reauthorization_generation_is_current(
+    session: Session,
+    *,
+    config: MailboxConfig,
+    expected_generation: int,
+) -> bool:
+    """Return whether an OAuth callback still belongs to the newest intent."""
+
+    if isinstance(expected_generation, bool) or not isinstance(expected_generation, int):
+        return False
+    if expected_generation < 1:
+        return False
+    current_generation = session.scalar(
+        select(MailboxConfig.oauth_reauthorization_generation).where(
+            MailboxConfig.id == config.id,
+            MailboxConfig.organization_id == config.organization_id,
+            MailboxConfig.archived_at.is_(None),
+            MailboxConfig.authentication_mode == "oauth2",
+        )
+    )
+    return current_generation == expected_generation
+
+
+def _oauth_reauthorization_generation_matches(
+    *,
+    config: MailboxConfig,
+    expected_generation: int,
+):
+    """Build a final-write guard for the latest browser OAuth generation."""
+
+    return exists(
+        select(MailboxConfig.id).where(
+            MailboxConfig.id == config.id,
+            MailboxConfig.organization_id == config.organization_id,
+            MailboxConfig.archived_at.is_(None),
+            MailboxConfig.authentication_mode == "oauth2",
+            MailboxConfig.oauth_reauthorization_generation == expected_generation,
+        )
+    )
+
+
 def _persist_rotated_oauth_refresh_token(
     session: Session,
     *,
@@ -1043,6 +1084,7 @@ def _persist_rotated_oauth_refresh_token(
     config: MailboxConfig,
     previous_refresh_token: str,
     replacement_refresh_token: str,
+    expected_reauthorization_generation: int | None = None,
 ) -> bool:
     """Durably replace one provider-rotated OAuth refresh token.
 
@@ -1063,6 +1105,12 @@ def _persist_rotated_oauth_refresh_token(
         or hmac.compare_digest(previous_refresh_token, replacement_refresh_token)
     ):
         return False
+    if expected_reauthorization_generation is not None and not _oauth_reauthorization_generation_is_current(
+        session,
+        config=config,
+        expected_generation=expected_reauthorization_generation,
+    ):
+        return False
     credential = _oauth_credential_or_error(session, config=config)
     expected_encrypted_refresh_token = credential.encrypted_refresh_token
     current_refresh_token = _decrypt_mailbox_secret(
@@ -1073,16 +1121,23 @@ def _persist_rotated_oauth_refresh_token(
         # Another worker has already persisted a newer refresh result. Do not
         # overwrite it with a late completion from this request.
         return False
+    persistence_conditions = [
+        MailboxOAuthCredential.id == credential.id,
+        MailboxOAuthCredential.organization_id == config.organization_id,
+        MailboxOAuthCredential.mailbox_config_id == config.id,
+        MailboxOAuthCredential.encrypted_refresh_token == expected_encrypted_refresh_token,
+    ]
+    if expected_reauthorization_generation is not None:
+        persistence_conditions.append(
+            _oauth_reauthorization_generation_matches(
+                config=config,
+                expected_generation=expected_reauthorization_generation,
+            )
+        )
     persisted = session.execute(
         update(MailboxOAuthCredential)
         .execution_options(synchronize_session=False)
-        .where(
-            MailboxOAuthCredential.id == credential.id,
-            MailboxOAuthCredential.organization_id == config.organization_id,
-            MailboxOAuthCredential.mailbox_config_id == config.id,
-            MailboxOAuthCredential.encrypted_refresh_token
-            == expected_encrypted_refresh_token,
-        )
+        .where(*persistence_conditions)
         .values(
             encrypted_refresh_token=_encrypt_mailbox_secret(
                 settings,
@@ -1106,6 +1161,7 @@ def _persist_pending_oauth_reauthorization_token(
     settings: AppSettings,
     config: MailboxConfig,
     refresh_token: str,
+    expected_reauthorization_generation: int,
 ) -> bool:
     """Stage a newly authorized refresh token without declaring IMAP healthy.
 
@@ -1117,6 +1173,12 @@ def _persist_pending_oauth_reauthorization_token(
     """
 
     if config.authentication_mode != "oauth2":
+        return False
+    if not _oauth_reauthorization_generation_is_current(
+        session,
+        config=config,
+        expected_generation=expected_reauthorization_generation,
+    ):
         return False
     credential = session.scalar(
         select(MailboxOAuthCredential).where(
@@ -1148,8 +1210,11 @@ def _persist_pending_oauth_reauthorization_token(
             MailboxOAuthCredential.id == credential.id,
             MailboxOAuthCredential.organization_id == config.organization_id,
             MailboxOAuthCredential.mailbox_config_id == config.id,
-            MailboxOAuthCredential.encrypted_refresh_token
-            == expected_encrypted_refresh_token,
+            MailboxOAuthCredential.encrypted_refresh_token == expected_encrypted_refresh_token,
+            _oauth_reauthorization_generation_matches(
+                config=config,
+                expected_generation=expected_reauthorization_generation,
+            ),
         )
         .values(
             encrypted_refresh_token=_encrypt_mailbox_secret(settings, refresh_token),
@@ -1163,6 +1228,41 @@ def _persist_pending_oauth_reauthorization_token(
     session.commit()
     session.expire_all()
     return True
+
+
+def _finalize_oauth_reauthorization(
+    session: Session,
+    *,
+    config: MailboxConfig,
+    expected_reauthorization_generation: int,
+) -> bool:
+    """Clear the reconnect state only for the latest completed browser flow.
+
+    The final conditional write is intentionally separate from staging the
+    exchanged token.  It prevents an old callback that finishes after a newer
+    reauthorization from clearing the newer flow's state or claiming success.
+    """
+
+    credential = _oauth_credential_or_error(session, config=config)
+    finalized = session.execute(
+        update(MailboxOAuthCredential)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxOAuthCredential.id == credential.id,
+            MailboxOAuthCredential.organization_id == config.organization_id,
+            MailboxOAuthCredential.mailbox_config_id == config.id,
+            _oauth_reauthorization_generation_matches(
+                config=config,
+                expected_generation=expected_reauthorization_generation,
+            ),
+        )
+        .values(
+            reauthorization_required_at=None,
+            last_error_code=None,
+            updated_at=_utcnow(),
+        )
+    )
+    return finalized.rowcount == 1
 
 
 def _update_config_values(
@@ -1486,6 +1586,7 @@ def _start_mailbox_oauth_intent(
     email_address: str,
     mailbox: str,
     target_mailbox_config_id: str | None,
+    reauthorization_generation: int = 0,
 ) -> MailboxOAuthStartResponse:
     provider = _oauth_provider_or_error(settings, provider_key=provider_key)
     # A browser authorization start writes the PKCE verifier server-side.
@@ -1500,6 +1601,8 @@ def _start_mailbox_oauth_intent(
     )
     normalized_email = email_address.strip()
     normalized_mailbox = mailbox.strip()
+    if reauthorization_generation < 0:
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
     _validate_imap_connection_arguments(
         email_address=normalized_email,
         mailbox=normalized_mailbox,
@@ -1526,6 +1629,7 @@ def _start_mailbox_oauth_intent(
         mailbox=normalized_mailbox,
         state_hash=hashlib.sha256(state.encode("utf-8")).hexdigest(),
         encrypted_code_verifier=_encrypt_mailbox_secret(settings, code_verifier),
+        reauthorization_generation=reauthorization_generation,
         expires_at=_utcnow() + timedelta(seconds=settings.mailbox_oauth_state_ttl_seconds),
     )
     session.add(intent)
@@ -1551,6 +1655,7 @@ def start_mailbox_oauth_connection(
         email_address=payload.email_address,
         mailbox=payload.mailbox,
         target_mailbox_config_id=None,
+        reauthorization_generation=0,
     )
 
 
@@ -1581,6 +1686,38 @@ def start_mailbox_oauth_reauthorization(
         raise MailboxImportError("mailbox_config_archived")
     if config.authentication_mode != "oauth2":
         raise MailboxImportError("mailbox_provider_oauth_not_supported")
+    # A new browser handoff supersedes every older handoff for the same
+    # mailbox. Use one atomic increment rather than a read/modify/write so two
+    # tabs cannot accidentally receive the same generation on PostgreSQL or
+    # SQLite.
+    advanced = session.execute(
+        update(MailboxConfig)
+        .execution_options(synchronize_session=False)
+        .where(
+            MailboxConfig.id == config.id,
+            MailboxConfig.organization_id == config.organization_id,
+            MailboxConfig.archived_at.is_(None),
+            MailboxConfig.authentication_mode == "oauth2",
+        )
+        .values(
+            oauth_reauthorization_generation=(
+                MailboxConfig.oauth_reauthorization_generation + 1
+            ),
+            updated_at=_utcnow(),
+        )
+    )
+    if advanced.rowcount != 1:
+        session.rollback()
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
+    generation = session.scalar(
+        select(MailboxConfig.oauth_reauthorization_generation).where(
+            MailboxConfig.id == config.id,
+            MailboxConfig.organization_id == config.organization_id,
+        )
+    )
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        session.rollback()
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
     return _start_mailbox_oauth_intent(
         session,
         settings=settings,
@@ -1590,6 +1727,7 @@ def start_mailbox_oauth_reauthorization(
         email_address=config.email_address,
         mailbox=config.mailbox,
         target_mailbox_config_id=config.id,
+        reauthorization_generation=generation,
     )
 
 
@@ -1742,10 +1880,21 @@ def complete_mailbox_oauth_connection(
     principal: "AuthPrincipal",
     state: str,
     code: str,
+    callback_is_still_current: Callable[[], bool] | None = None,
 ) -> MailboxConfigResponse:
-    """Exchange, verify and persist an OAuth connection in its workspace."""
+    """Exchange, verify and persist an OAuth connection in its workspace.
+
+    ``callback_is_still_current`` is supplied by the HTTP boundary for the
+    short-lived cross-site browser handoff.  It deliberately runs after this
+    function claims the one-time intent and after every potentially slow
+    network step.  That way a logout/password reset in another browser cannot
+    turn an already-started callback into a fresh browser session or durable
+    new mailbox connection.
+    """
 
     intent = _consume_oauth_intent(session, principal=principal, state=state)
+    if callback_is_still_current is not None and not callback_is_still_current():
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
     try:
         code_verifier = _decrypt_mailbox_secret(settings, intent.encrypted_code_verifier)
         refresh_token = exchange_authorization_code(
@@ -1758,6 +1907,8 @@ def complete_mailbox_oauth_connection(
         raise MailboxImportError(str(exc)) from exc
 
     credential = _MailboxCredential(authentication_mode="oauth2", secret=refresh_token)
+    if callback_is_still_current is not None and not callback_is_still_current():
+        raise MailboxImportError("mailbox_oauth_callback_invalid")
     if intent.target_mailbox_config_id is None:
         config = _update_config_values(
             session,
@@ -1772,7 +1923,15 @@ def complete_mailbox_oauth_connection(
             credential=credential,
             enabled=True,
         )
+        if callback_is_still_current is not None and not callback_is_still_current():
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
     else:
+        if (
+            isinstance(intent.reauthorization_generation, bool)
+            or not isinstance(intent.reauthorization_generation, int)
+            or intent.reauthorization_generation < 1
+        ):
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
         config = _mailbox_config_or_error(
             session,
             config_id=intent.target_mailbox_config_id,
@@ -1785,13 +1944,28 @@ def complete_mailbox_oauth_connection(
             or config.mailbox != intent.mailbox
         ):
             raise MailboxImportError("mailbox_oauth_callback_invalid")
+        if not _oauth_reauthorization_generation_is_current(
+            session,
+            config=config,
+            expected_generation=intent.reauthorization_generation,
+        ):
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
         if not _persist_pending_oauth_reauthorization_token(
             session,
             settings=settings,
             config=config,
             refresh_token=credential.secret,
+            expected_reauthorization_generation=intent.reauthorization_generation,
         ):
             raise MailboxImportError("mailbox_oauth_callback_invalid")
+
+        # The stage helper commits the exchanged token to survive a provider
+        # rotation followed by an IMAP failure.  Reload before using the
+        # config again so this request never relies on an expired ORM object.
+        config = _mailbox_config_or_error(
+            session,
+            config_id=intent.target_mailbox_config_id,
+        )
 
         def persist_reauthorization_refresh_rotation(
             previous_refresh_token: str,
@@ -1803,6 +1977,7 @@ def complete_mailbox_oauth_connection(
                 config=config,
                 previous_refresh_token=previous_refresh_token,
                 replacement_refresh_token=replacement_refresh_token,
+                expected_reauthorization_generation=intent.reauthorization_generation,
             )
 
         _verify_mailbox_connection(
@@ -1815,6 +1990,26 @@ def complete_mailbox_oauth_connection(
             credential=credential,
             on_oauth_refresh_token_rotated=persist_reauthorization_refresh_rotation,
         )
+        if callback_is_still_current is not None and not callback_is_still_current():
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
+        # A refresh-token rotation commits before the IMAP command completes,
+        # so reload before comparing/finalizing the newest browser flow.
+        config = _mailbox_config_or_error(
+            session,
+            config_id=intent.target_mailbox_config_id,
+        )
+        if not _oauth_reauthorization_generation_is_current(
+            session,
+            config=config,
+            expected_generation=intent.reauthorization_generation,
+        ):
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
+        if not _finalize_oauth_reauthorization(
+            session,
+            config=config,
+            expected_reauthorization_generation=intent.reauthorization_generation,
+        ):
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
         config = _update_config_values(
             session,
             settings=settings,
@@ -1825,9 +2020,14 @@ def complete_mailbox_oauth_connection(
             imap_port=None,
             email_address=config.email_address,
             mailbox=config.mailbox,
-            credential=credential,
+            # The newly exchanged token has already been conditionally staged
+            # above. Passing it here would use the broad upsert helper and
+            # undo the generation compare-and-swap.
+            credential=None,
             enabled=config.enabled,
         )
+        if callback_is_still_current is not None and not callback_is_still_current():
+            raise MailboxImportError("mailbox_oauth_callback_invalid")
     try:
         session.commit()
     except IntegrityError as exc:

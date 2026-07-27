@@ -1162,6 +1162,14 @@ class MailboxConfig(OrganizationScoped, Base):
     # channel in the same workspace.
     sync_lease_token: Mapped[str | None] = mapped_column(String(64))
     sync_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Every browser reauthorization is assigned a monotonically increasing
+    # generation.  A late callback from an older browser tab must never replace
+    # the refresh material produced by the most recently started flow.
+    oauth_reauthorization_generation: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -1270,6 +1278,14 @@ class MailboxOAuthConnectIntent(OrganizationScoped, Base):
     mailbox: Mapped[str] = mapped_column(String(255), nullable=False)
     state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     encrypted_code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    # ``0`` is reserved for a first-time connection. Reauthorization intents
+    # carry the exact mailbox generation that was current when their browser
+    # handoff began, enabling a final compare-and-swap before token persistence.
+    reauthorization_generation: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

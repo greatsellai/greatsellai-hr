@@ -197,6 +197,7 @@ from app.services.identity_service import (
     principal_from_session,
     registration_offer,
     record_email_verification_delivery,
+    revoke_user_auth_sessions,
     require_feature,
     trial_access,
     update_product_plan,
@@ -1054,6 +1055,30 @@ def _mailbox_oauth_callback_intent(
             MailboxOAuthConnectIntent.consumed_at.is_(None),
             MailboxOAuthConnectIntent.expires_at > datetime.now(timezone.utc),
         )
+    )
+
+
+def _mailbox_oauth_callback_current_principal(
+    session: Session,
+    *,
+    correlation: _MailboxOAuthCallbackCorrelation,
+) -> AuthPrincipal | None:
+    """Reload the callback owner after cross-request security boundaries.
+
+    OAuth code exchange can take seconds.  A logout or password reset in a
+    second browser advances ``auth_session_version`` while that call is in
+    flight.  Expiring this request's identity map is required: otherwise an
+    already loaded ``UserAccount`` could make a stale callback look current.
+    """
+
+    session.expire_all()
+    return principal_from_mailbox_oauth_callback(
+        session,
+        user_id=correlation.user_id,
+        organization_id=correlation.organization_id,
+        membership_id=correlation.membership_id,
+        auth_session_version=correlation.auth_session_version,
+        legacy_compatibility=correlation.legacy_compatibility,
     )
 
 
@@ -2058,6 +2083,12 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         try:
             if principal is not None:
                 revoke_pending_mailbox_oauth_intents(session, principal=principal)
+                # A mailbox OAuth callback crosses sites without the normal
+                # strict browser cookie.  Advance the account-wide signed
+                # session version before clearing this browser so any callback
+                # already in flight fails its final identity check instead of
+                # recreating a session after logout.
+                revoke_user_auth_sessions(session, principal=principal)
                 _commit_or_raise(session)
         finally:
             # Always clear the normal browser session, even if a transient
@@ -2874,13 +2905,9 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 provider_key=None,
                 cookie_domain=correlation.cookie_domain,
             )
-        principal = principal_from_mailbox_oauth_callback(
+        principal = _mailbox_oauth_callback_current_principal(
             session,
-            user_id=intent.user_id,
-            organization_id=intent.organization_id,
-            membership_id=intent.membership_id,
-            auth_session_version=correlation.auth_session_version,
-            legacy_compatibility=correlation.legacy_compatibility,
+            correlation=correlation,
         )
         if (
             principal is None
@@ -2896,11 +2923,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             )
 
         set_organization_context(session, principal.organization_id)
-        # The original strict browser session is intentionally absent on this
-        # cross-site GET. A valid short-lived binding plus a reloaded current
-        # principal lets us rotate it into a normal strict session at the
-        # callback host before returning to the canonical app entry.
-        establish_session(request.session, principal)
         provider_key: str | None = None
         try:
             if provider_error is not None or not code:
@@ -2921,8 +2943,38 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 principal=principal,
                 state=state_value,
                 code=code,
+                callback_is_still_current=lambda: _mailbox_oauth_callback_current_principal(
+                    session,
+                    correlation=correlation,
+                )
+                is not None,
             )
             provider_key = result.provider_key
+            # Do not issue a browser session until every exchange, IMAP
+            # verification and persistence step has succeeded. Recheck the
+            # account version after those potentially slow operations so a
+            # logout/password-reset that happened mid-callback cannot be
+            # undone by this redirect response.
+            principal = _mailbox_oauth_callback_current_principal(
+                session,
+                correlation=correlation,
+            )
+            if (
+                principal is None
+                or not principal.email_verified
+                or principal.role != "admin"
+                or not require_feature(principal, "mailbox_import")
+            ):
+                return _mailbox_oauth_redirect_response(
+                    settings,
+                    outcome="failed",
+                    provider_key=None,
+                    cookie_domain=correlation.cookie_domain,
+                )
+            # The original strict browser session is intentionally absent on
+            # this cross-site GET. Only a fully completed, still-current
+            # callback may rotate it into a normal strict session.
+            establish_session(request.session, principal)
             return _mailbox_oauth_redirect_response(
                 settings,
                 outcome="connected",

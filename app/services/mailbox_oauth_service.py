@@ -31,6 +31,9 @@ class MailboxOAuthError(RuntimeError):
     """A stable OAuth error that is safe to show in the recruitment UI."""
 
 
+_OAUTH_TOKEN_RESPONSE_MAX_BYTES = 64 * 1024
+
+
 @dataclass(frozen=True)
 class OAuthAccessTokenRefresh:
     """One in-memory access token and an optional provider-rotated secret.
@@ -170,7 +173,9 @@ def _post_form_json(
         with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
             # The endpoint is a fixed, code-owned OAuth token endpoint. No
             # workspace value influences this URL.
-            payload = response.read()
+            payload = response.read(_OAUTH_TOKEN_RESPONSE_MAX_BYTES + 1)
+            if len(payload) > _OAUTH_TOKEN_RESPONSE_MAX_BYTES:
+                raise MailboxOAuthError("mailbox_oauth_token_exchange_failed")
     except HTTPError as exc:
         # OAuth providers use a structured ``invalid_grant`` response when a
         # refresh token was revoked or expired.  That is materially different
@@ -179,7 +184,9 @@ def _post_form_json(
         # because it can contain provider diagnostics or identifiers.
         error_code = ""
         try:
-            error_payload = json.loads(exc.read(64 * 1024).decode("utf-8"))
+            error_payload = json.loads(
+                exc.read(_OAUTH_TOKEN_RESPONSE_MAX_BYTES).decode("utf-8")
+            )
         except (
             AttributeError,
             OSError,

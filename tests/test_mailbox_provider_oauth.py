@@ -14,7 +14,9 @@ from app.config import AppSettings
 from app.main import create_app
 from app.models import MailboxConfig, MailboxOAuthConnectIntent, MailboxOAuthCredential
 from app.services import mailbox_import_service
-from app.services.mailbox_oauth_service import OAuthAccessTokenRefresh
+from app.services.identity_service import legacy_principal
+from app.services.mailbox_import_service import MailboxImportError
+from app.services.mailbox_oauth_service import MailboxOAuthError, OAuthAccessTokenRefresh
 from app.tenant_scope import LEGACY_ORGANIZATION_ID, set_organization_context
 
 
@@ -120,6 +122,24 @@ def _register_and_login(
         json={"email": email, "password": password},
     )
     assert logged_in.status_code == 200, logged_in.text
+
+
+def _copy_mailbox_oauth_correlation_cookie(
+    source: TestClient,
+    target: TestClient,
+) -> None:
+    """Model a provider callback that has no SameSite=Strict app session."""
+
+    for cookie in source.cookies.jar:
+        if cookie.name == "__Secure-resume_v3_mailbox_oauth":
+            target.cookies.set(
+                cookie.name,
+                cookie.value,
+                domain=cookie.domain,
+                path=cookie.path,
+            )
+            return
+    raise AssertionError("mailbox OAuth correlation cookie was not issued")
 
 
 def test_provider_catalog_exposes_only_reviewed_preset_metadata(client) -> None:
@@ -748,6 +768,284 @@ def test_logout_revokes_only_its_pending_oauth_intent(
     assert exchanges == []
     assert client_a.get("/v1/auth/session").json()["authenticated"] is False
     assert client_a.get("/v1/mailboxes").status_code == 401
+
+
+def test_logout_invalidates_every_existing_browser_session_for_that_account(
+    oauth_workspace_clients: tuple[TestClient, TestClient],
+) -> None:
+    """OAuth callback safety relies on the same account-wide version guard."""
+
+    client_a, client_b = oauth_workspace_clients
+    email = "logout-all-sessions@example.test"
+    password = "logout-all-sessions-password"
+    _register_and_login(
+        client_a,
+        organization_name="Logout All Sessions",
+        email=email,
+        password=password,
+    )
+    second_browser_login = client_b.post(
+        "/v1/auth/login",
+        json={"email": email, "password": password},
+    )
+    assert second_browser_login.status_code == 200, second_browser_login.text
+    assert client_b.get("/v1/auth/session").json()["authenticated"] is True
+
+    assert client_a.post("/v1/auth/logout").status_code == 204
+
+    # The stale signed cookie remains in client_b's jar, but the server rejects
+    # it after the account session version advances.
+    assert client_b.get("/v1/auth/session").json()["authenticated"] is False
+    assert client_b.get("/v1/mailboxes").status_code == 401
+
+
+def test_failed_oauth_callback_never_issues_a_browser_session(
+    oauth_workspace_clients: tuple[TestClient, TestClient],
+    monkeypatch,
+) -> None:
+    """A provider exchange failure cannot turn correlation state into login."""
+
+    client_a, _ = oauth_workspace_clients
+    _register_and_login(
+        client_a,
+        organization_name="Failed OAuth Callback",
+        email="failed-oauth-callback@example.test",
+        password="failed-oauth-callback-password",
+    )
+    started = client_a.post(
+        "/v1/mailbox-oauth/start",
+        json={
+            "provider_key": "gmail_oauth",
+            "display_name": "Failed OAuth callback mailbox",
+            "email_address": "failed-oauth-callback@example.test",
+            "mailbox": "INBOX",
+        },
+    )
+    assert started.status_code == 200, started.text
+    state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "exchange_authorization_code",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            MailboxOAuthError("mailbox_oauth_token_exchange_failed")
+        ),
+    )
+
+    callback_browser = TestClient(client_a.app, base_url="https://testserver")
+    try:
+        _copy_mailbox_oauth_correlation_cookie(client_a, callback_browser)
+        callback = callback_browser.get(
+            "/v1/mailbox-oauth/callback",
+            params={"state": state, "code": "failed-provider-code"},
+            follow_redirects=False,
+        )
+        assert callback.status_code == 303, callback.text
+        assert "mailbox_oauth=failed" in callback.headers["location"]
+        assert not any(
+            header.startswith("resume_v3_session=")
+            for header in callback.headers.get_list("set-cookie")
+        )
+        assert callback_browser.get("/v1/auth/session").json()["authenticated"] is False
+    finally:
+        callback_browser.close()
+
+
+def test_logout_during_oauth_callback_cannot_restore_a_browser_session(
+    oauth_workspace_clients: tuple[TestClient, TestClient],
+    monkeypatch,
+) -> None:
+    """A claimed intent still fails closed when another browser logs out."""
+
+    client_a, client_b = oauth_workspace_clients
+    email = "oauth-callback-race@example.test"
+    password = "oauth-callback-race-password"
+    _register_and_login(
+        client_a,
+        organization_name="OAuth Callback Race",
+        email=email,
+        password=password,
+    )
+    assert client_b.post(
+        "/v1/auth/login",
+        json={"email": email, "password": password},
+    ).status_code == 200
+    started = client_a.post(
+        "/v1/mailbox-oauth/start",
+        json={
+            "provider_key": "gmail_oauth",
+            "display_name": "OAuth callback race mailbox",
+            "email_address": email,
+            "mailbox": "INBOX",
+        },
+    )
+    assert started.status_code == 200, started.text
+    state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
+
+    def exchange_then_logout(*args, **kwargs) -> str:
+        logged_out = client_b.post("/v1/auth/logout")
+        assert logged_out.status_code == 204, logged_out.text
+        return "refresh-token-after-logout"
+
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "exchange_authorization_code",
+        exchange_then_logout,
+    )
+    callback_browser = TestClient(client_a.app, base_url="https://testserver")
+    try:
+        _copy_mailbox_oauth_correlation_cookie(client_a, callback_browser)
+        callback = callback_browser.get(
+            "/v1/mailbox-oauth/callback",
+            params={"state": state, "code": "race-provider-code"},
+            follow_redirects=False,
+        )
+        assert callback.status_code == 303, callback.text
+        assert "mailbox_oauth=failed" in callback.headers["location"]
+        assert not any(
+            header.startswith("resume_v3_session=")
+            for header in callback.headers.get_list("set-cookie")
+        )
+        assert callback_browser.get("/v1/auth/session").json()["authenticated"] is False
+    finally:
+        callback_browser.close()
+
+    assert client_a.get("/v1/auth/session").json()["authenticated"] is False
+    assert client_b.get("/v1/auth/session").json()["authenticated"] is False
+
+
+def test_late_reauthorization_callback_cannot_replace_newer_generation(
+    oauth_client: TestClient,
+    monkeypatch,
+) -> None:
+    """An older OAuth tab must lose its final write to the newest tab."""
+
+    class OAuthImap:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def authenticate(self, mechanism: str, callback) -> tuple[str, list[bytes]]:
+            assert mechanism == "XOAUTH2"
+            assert callback(b"").startswith(b"user=")
+            return "OK", [b"authenticated"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"INBOX (UIDVALIDITY 9 UIDNEXT 42)"]
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    database = oauth_client.app.state.database
+    settings = oauth_client.app.state.settings
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        config = MailboxConfig(
+            display_name="Concurrent OAuth reauthorization",
+            display_name_key="concurrent oauth reauthorization",
+            provider_key="gmail_oauth",
+            authentication_mode="oauth2",
+            imap_host="imap.gmail.com",
+            imap_port=993,
+            email_address="concurrent-reauthorization@example.test",
+            mailbox="INBOX",
+            encrypted_password=None,
+            enabled=True,
+            import_start_uid=42,
+            imap_uidvalidity=9,
+        )
+        session.add(config)
+        session.flush()
+        session.add(
+            MailboxOAuthCredential(
+                organization_id=LEGACY_ORGANIZATION_ID,
+                mailbox_config_id=config.id,
+                encrypted_refresh_token=mailbox_import_service._encrypt_mailbox_secret(
+                    settings,
+                    "original-refresh-token",
+                ),
+                reauthorization_required_at=datetime.now(timezone.utc),
+                last_error_code="mailbox_oauth_reauthorization_required",
+            )
+        )
+        session.commit()
+        mailbox_id = config.id
+
+    authorization_codes: list[str] = []
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", OAuthImap)
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "exchange_authorization_code",
+        lambda *args, **kwargs: authorization_codes.append(str(kwargs["code"]))
+        or {
+            "older-code": "older-refresh-token",
+            "newer-code": "newer-refresh-token",
+        }[str(kwargs["code"])],
+    )
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "refresh_access_token",
+        lambda *args, **kwargs: OAuthAccessTokenRefresh(
+            access_token="access-token-for-concurrent-reauthorization",
+        ),
+    )
+
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        principal = legacy_principal(session)
+        older_start = mailbox_import_service.start_mailbox_oauth_reauthorization(
+            session,
+            settings=settings,
+            principal=principal,
+            config_id=mailbox_id,
+        )
+        newer_start = mailbox_import_service.start_mailbox_oauth_reauthorization(
+            session,
+            settings=settings,
+            principal=principal,
+            config_id=mailbox_id,
+        )
+        older_state = parse_qs(urlsplit(older_start.authorization_url).query)["state"][0]
+        newer_state = parse_qs(urlsplit(newer_start.authorization_url).query)["state"][0]
+
+        completed = mailbox_import_service.complete_mailbox_oauth_connection(
+            session,
+            settings=settings,
+            principal=principal,
+            state=newer_state,
+            code="newer-code",
+            callback_is_still_current=lambda: True,
+        )
+        assert completed.mailbox_id == mailbox_id
+        with pytest.raises(MailboxImportError, match="mailbox_oauth_callback_invalid"):
+            mailbox_import_service.complete_mailbox_oauth_connection(
+                session,
+                settings=settings,
+                principal=principal,
+                state=older_state,
+                code="older-code",
+                callback_is_still_current=lambda: True,
+            )
+
+    assert authorization_codes == ["newer-code", "older-code"]
+    with database.session_factory() as session:
+        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        config = session.scalar(select(MailboxConfig).where(MailboxConfig.id == mailbox_id))
+        credential = session.scalar(
+            select(MailboxOAuthCredential).where(
+                MailboxOAuthCredential.mailbox_config_id == mailbox_id
+            )
+        )
+        assert config is not None
+        assert credential is not None
+        assert config.oauth_reauthorization_generation == 2
+        assert (
+            mailbox_import_service._decrypt_mailbox_secret(
+                settings,
+                credential.encrypted_refresh_token,
+            )
+            == "newer-refresh-token"
+        )
+        assert credential.reauthorization_required_at is None
+        assert credential.last_error_code is None
 
 
 def test_oauth_start_rejects_callback_origin_mismatch(oauth_client: TestClient) -> None:

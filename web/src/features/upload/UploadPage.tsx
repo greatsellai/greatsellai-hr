@@ -325,10 +325,6 @@ export function UploadPage({
       <header className="page-heading">
         <div>
           <h1>批量上传简历</h1>
-          <p>
-            上传后会逐份保存原件、提取原生文字，并由 AI
-            自动识别候选人姓名、教育、经历和技能。姓名无法可靠识别时，将保留为“未命名候选人”。
-          </p>
         </div>
       </header>
       <div className="page-layout">
@@ -336,10 +332,6 @@ export function UploadPage({
           <div className="panel-heading">
             <div>
               <h2>添加候选人简历</h2>
-              <p>
-                可拖入多份简历或一次选择多个文件。支持 PDF、Word、图片、Excel 和 HTML。候选人姓名仅由 AI
-                从简历原文识别，文件名只用于区分上传文件。
-              </p>
             </div>
           </div>
           <div className="form-grid">
@@ -377,8 +369,7 @@ export function UploadPage({
                           : "拖入简历，或点击选择文件"}
                   </h2>
                   <p id="upload-dropzone-help">
-                    支持 PDF、Word、图片、Excel 和 HTML。每份会单独校验、保存，并由 AI
-                    从原文识别候选人姓名和结构化事实；姓名不清晰时不会使用文件名代替。
+                    支持 PDF、Word、图片、Excel 和 HTML。
                   </p>
                   <button
                     className="button"
@@ -532,41 +523,6 @@ export function UploadPage({
             )}
           </div>
         </section>
-        <aside className="panel">
-          <div className="panel-heading">
-            <div>
-              <h2>批量处理路径</h2>
-              <p>每一份简历独立处理，便于定位问题与补传。</p>
-            </div>
-          </div>
-          <ol className="workflow-list">
-            <li>
-              <span className="workflow-step">1</span>
-              <div>
-                <strong>逐份保存原始文件</strong>
-              <span>支持 PDF、Word、图片、Excel 和 HTML，文件质量会单独检查。</span>
-              </div>
-            </li>
-            <li>
-              <span className="workflow-step">2</span>
-              <div>
-                <strong>AI 识别姓名与结构化事实</strong>
-                <span>
-                  基于可提取的原文识别候选人姓名、教育、经历和技能；姓名不明确时保留为未命名候选人。
-                </span>
-              </div>
-            </li>
-            <li>
-              <span className="workflow-step">3</span>
-              <div>
-                <strong>通过证据校验后自动启用</strong>
-                <span>
-                  AI 提取结果会直接进入筛选库；异常简历保留原件与失败状态。
-                </span>
-              </div>
-            </li>
-          </ol>
-        </aside>
       </div>
     </div>
   );

@@ -161,6 +161,46 @@ def test_compose_injects_mailbox_oauth_clients_into_every_runtime() -> None:
         assert "    environment: *app-environment" in match.group("body")
 
 
+def test_compose_injects_one_complete_mailbox_policy_into_every_runtime() -> None:
+    """API and worker must not disagree about a mailbox's safety envelope."""
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "compose.yml").read_text(encoding="utf-8")
+    production_example = (root / ".env.production.example").read_text(
+        encoding="utf-8"
+    )
+    variables = (
+        "RESUME_V3_MAILBOX_SYNC_INTERVAL_SECONDS",
+        "RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS",
+        "RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT",
+        "RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS",
+        "RESUME_V3_MAILBOX_IMAP_CONNECT_TIMEOUT_SECONDS",
+        "RESUME_V3_MAILBOX_IMAP_MAX_RESOLVED_ADDRESSES",
+        "RESUME_V3_MAILBOX_OAUTH_STATE_TTL_SECONDS",
+        "RESUME_V3_MAILBOX_OAUTH_HTTP_TIMEOUT_SECONDS",
+        "RESUME_V3_MAILBOX_MAX_RAW_MESSAGE_BYTES",
+        "RESUME_V3_MAILBOX_MAX_HEADER_BYTES",
+        "RESUME_V3_MAILBOX_MAX_MIME_PARTS",
+        "RESUME_V3_MAILBOX_MAX_MIME_DEPTH",
+        "RESUME_V3_MAILBOX_MAX_ATTACHMENTS_PER_MESSAGE",
+        "RESUME_V3_MAILBOX_MAX_SEARCH_RESPONSE_BYTES",
+        "RESUME_V3_MAILBOX_MAX_BODY_CACHE_BYTES",
+        "RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_ALERT_THRESHOLD",
+        "RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_WINDOW_SECONDS",
+    )
+
+    for variable in variables:
+        assert f"{variable}:" in compose
+        assert f"{variable}=" in production_example
+
+    for service in ("migrate", "api", "worker"):
+        match = re.search(
+            rf"(?ms)^  {service}:\n(?P<body>.*?)(?=^  [a-z][a-z_]*:|\Z)", compose
+        )
+        assert match is not None
+        assert "    environment: *app-environment" in match.group("body")
+
+
 def test_compose_injects_tencent_ses_templates_into_api_and_worker() -> None:
     """SES configuration must reach both synchronous and durable send paths."""
 

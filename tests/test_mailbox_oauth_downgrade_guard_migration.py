@@ -61,7 +61,7 @@ def _upgrade_to_head(tmp_path) -> tuple[str, Config]:
         (False, True),
     ),
 )
-def test_oauth_downgrade_guard_preserves_unsafe_0036_state(
+def test_oauth_downgrade_guard_preserves_unsafe_0037_state(
     tmp_path,
     has_refresh_credential: bool,
     has_active_oauth_mailbox: bool,
@@ -108,7 +108,7 @@ def test_oauth_downgrade_guard_preserves_unsafe_0036_state(
         engine.dispose()
 
     with pytest.raises(RuntimeError, match="mailbox_oauth_downgrade_blocked"):
-        command.downgrade(config, "20260724_0035")
+        command.downgrade(config, "20260725_0037")
 
     engine = create_engine(database_url)
     try:
@@ -129,7 +129,7 @@ def test_oauth_downgrade_guard_preserves_unsafe_0036_state(
                 select(mailboxes.c.authentication_mode).where(mailboxes.c.id == mailbox_id)
             ) == "oauth2"
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "20260724_0038"
+                "20260727_0039"
             )
             if has_refresh_credential:
                 assert connection.scalar(select(credentials.c.id)) == (
@@ -157,7 +157,7 @@ def test_oauth_downgrade_guard_allows_safe_legacy_channel_rollback(tmp_path) -> 
     finally:
         engine.dispose()
 
-    command.downgrade(config, "20260724_0035")
+    command.downgrade(config, "20260725_0037")
 
     engine = create_engine(database_url)
     try:
@@ -166,6 +166,7 @@ def test_oauth_downgrade_guard_allows_safe_legacy_channel_rollback(tmp_path) -> 
         mailbox_columns = {column["name"] for column in inspector.get_columns("mailbox_configs")}
         assert "provider_key" not in mailbox_columns
         assert "authentication_mode" not in mailbox_columns
+        assert "oauth_reauthorization_generation" not in mailbox_columns
         metadata = MetaData()
         mailboxes = Table("mailbox_configs", metadata, autoload_with=engine)
         with engine.connect() as connection:
@@ -175,7 +176,7 @@ def test_oauth_downgrade_guard_allows_safe_legacy_channel_rollback(tmp_path) -> 
                 )
             ) == "safe-app-password-ciphertext"
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "20260724_0035"
+                "20260725_0037"
             )
     finally:
         engine.dispose()

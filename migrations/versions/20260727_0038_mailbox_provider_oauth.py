@@ -1,8 +1,8 @@
 """Add reviewed mailbox providers and OAuth credential storage.
 
-Revision ID: 20260724_0037
-Revises: 20260724_0036
-Create Date: 2026-07-24 16:10:00
+Revision ID: 20260727_0038
+Revises: 20260725_0037
+Create Date: 2026-07-27 16:10:00
 
 Existing IMAP channels retain their encrypted app password, UID watermark,
 imports and source identity.  OAuth refresh tokens are stored in a new table
@@ -16,8 +16,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260724_0037"
-down_revision: Union[str, Sequence[str], None] = "20260724_0036"
+revision: str = "20260727_0038"
+down_revision: Union[str, Sequence[str], None] = "20260725_0037"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -39,6 +39,18 @@ def upgrade() -> None:
             sa.String(length=16),
             nullable=False,
             server_default=sa.text("'app_password'"),
+        ),
+    )
+    # Each reauthorization browser handoff gets an incremented generation.
+    # Existing app-password and OAuth rows start at zero; the runtime only
+    # uses a positive generation for an actual OAuth reauthorization.
+    op.add_column(
+        "mailbox_configs",
+        sa.Column(
+            "oauth_reauthorization_generation",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
         ),
     )
 
@@ -125,6 +137,12 @@ def upgrade() -> None:
         sa.Column("mailbox", sa.String(length=255), nullable=False),
         sa.Column("state_hash", sa.String(length=64), nullable=False),
         sa.Column("encrypted_code_verifier", sa.Text(), nullable=False),
+        sa.Column(
+            "reauthorization_generation",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+        ),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -179,5 +197,6 @@ def downgrade() -> None:
     )
     op.drop_table("mailbox_oauth_credentials")
     with op.batch_alter_table("mailbox_configs") as batch_op:
+        batch_op.drop_column("oauth_reauthorization_generation")
         batch_op.drop_column("authentication_mode")
         batch_op.drop_column("provider_key")

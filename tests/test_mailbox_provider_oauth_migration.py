@@ -8,7 +8,7 @@ from alembic.config import Config
 from sqlalchemy import MetaData, Table, create_engine, inspect, select
 
 
-def test_mailbox_provider_oauth_migration_preserves_existing_channels_and_backfills_known_providers(
+def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_without_branching(
     tmp_path,
 ) -> None:
     database_path = tmp_path / "mailbox-provider-oauth.sqlite"
@@ -16,7 +16,10 @@ def test_mailbox_provider_oauth_migration_preserves_existing_channels_and_backfi
     config = Config("alembic.ini")
     config.cmd_opts = SimpleNamespace(x=[f"database_url={database_url}"])
 
-    command.upgrade(config, "20260724_0035")
+    # ``20260724_0036`` is the last production revision before the contact
+    # details and mailbox OAuth branches. The linear chain must apply both
+    # additions together and land on the one canonical head.
+    command.upgrade(config, "20260724_0036")
 
     engine = create_engine(database_url)
     try:
@@ -93,13 +96,23 @@ def test_mailbox_provider_oauth_migration_preserves_existing_channels_and_backfi
             metadata,
             autoload_with=engine,
         )
+        oauth_intents = Table(
+            "mailbox_oauth_connect_intents",
+            metadata,
+            autoload_with=engine,
+        )
+        alembic_version = Table("alembic_version", metadata, autoload_with=engine)
         inspector = inspect(engine)
         mailbox_columns = {
             column["name"]: column for column in inspector.get_columns("mailbox_configs")
         }
+        resume_columns = {column["name"] for column in inspector.get_columns("resumes")}
         assert mailbox_columns["provider_key"]["nullable"] is False
         assert mailbox_columns["authentication_mode"]["nullable"] is False
+        assert mailbox_columns["oauth_reauthorization_generation"]["nullable"] is False
         assert mailbox_columns["encrypted_password"]["nullable"] is True
+        assert "contact_details" in resume_columns
+        assert "reauthorization_generation" in oauth_intents.c
         assert {
             "mailbox_oauth_credentials",
             "mailbox_oauth_connect_intents",
@@ -122,6 +135,7 @@ def test_mailbox_provider_oauth_migration_preserves_existing_channels_and_backfi
                     mailboxes.c.import_start_uid,
                     mailboxes.c.imap_uidvalidity,
                     mailboxes.c.last_sync_started_at,
+                    mailboxes.c.oauth_reauthorization_generation,
                 ).order_by(mailboxes.c.id)
             ).mappings()
             upgraded = {row["id"]: row for row in result}
@@ -133,6 +147,7 @@ def test_mailbox_provider_oauth_migration_preserves_existing_channels_and_backfi
             assert feishu["import_start_uid"] == 42
             assert feishu["imap_uidvalidity"] == 9
             assert feishu["last_sync_started_at"] is not None
+            assert feishu["oauth_reauthorization_generation"] == 0
             assert upgraded["mailbox-provider-migration-exmail"]["provider_key"] == (
                 "tencent_exmail_app_password"
             )
@@ -170,5 +185,6 @@ def test_mailbox_provider_oauth_migration_preserves_existing_channels_and_backfi
                     "updated_at": now,
                 },
             )
+            assert connection.scalar(select(alembic_version.c.version_num)) == "20260727_0039"
     finally:
         engine.dispose()

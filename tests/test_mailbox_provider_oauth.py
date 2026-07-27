@@ -157,6 +157,10 @@ def test_provider_catalog_exposes_only_reviewed_preset_metadata(client) -> None:
     feishu = payload["items"][0]
     assert feishu["available"] is True
     assert feishu["authentication_mode"] == "app_password"
+    tencent_exmail = next(
+        item for item in payload["items"] if item["provider_key"] == "tencent_exmail_app_password"
+    )
+    assert tencent_exmail["display_name"] == "腾讯企业邮箱"
     gmail = next(item for item in payload["items"] if item["provider_key"] == "gmail_oauth")
     assert gmail["available"] is False
     assert gmail["authentication_mode"] == "oauth2"

@@ -67,7 +67,7 @@
 
 服务商本身不能在既有通道上原地切换；要使用另一服务商时，管理员必须新建目标通道。这避免把旧服务商的授权码错误发送给新的服务商。
 
-飞书、腾讯企业邮和 QQ 邮箱使用服务商提供的授权码或客户端专用密码；更新时不显示旧值，也不重置收件起点。Gmail/Google Workspace 与 Microsoft 365/Outlook 通过 OAuth 授权，系统不收集登录密码；重新授权只替换服务端加密保存的 refresh token。若用户明确创建新通道或重绑一个尚无入库记录的通道，系统重新读取 UIDNEXT，并从新的当前位置开始接收。
+飞书、腾讯企业邮箱和 QQ 邮箱使用服务商提供的授权码或客户端专用密码；更新时不显示旧值，也不重置收件起点。Gmail/Google Workspace 与 Microsoft 365/Outlook 通过 OAuth 授权，系统不收集登录密码；重新授权只替换服务端加密保存的 refresh token。若用户明确创建新通道或重绑一个尚无入库记录的通道，系统重新读取 UIDNEXT，并从新的当前位置开始接收。
 
 OAuth 的生产回调统一为 `https://hr.greatsellai.net/v1/mailbox-oauth/callback`。兼容入口 `https://greatsellai.net/greatsellhr/` 可以发起授权，但完成后回到主入口；后端用短期、安全的浏览器关联 Cookie、一次性 state、PKCE、当前工作区和管理员成员关系共同校验，不放宽普通登录 Cookie 的 `SameSite=Strict` 策略。回调 URL、服务商 OAuth 客户端配置和公共应用入口必须指向同一受控主入口；不满足时安全拒绝开始授权。
 

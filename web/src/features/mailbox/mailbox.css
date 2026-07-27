@@ -1065,10 +1065,11 @@ details[open] > .mailbox-disclosure-heading::after {
   border-color: #98a2b3;
 }
 
-.backoffice-ui-root .mailbox-provider-option.is-selected {
-  background: #fff7f7;
-  border-color: #fda29b;
-  box-shadow: inset 0 0 0 1px rgb(215 22 24 / 0.08);
+.backoffice-ui-root .mailbox-provider-option.is-selected,
+.backoffice-ui-root .mailbox-provider-option.is-selected:hover:not(:disabled) {
+  background: #fff1f0;
+  border-color: var(--red);
+  box-shadow: inset 0 0 0 1px rgb(215 22 24 / 0.18), 0 0 0 0.1875rem rgb(215 22 24 / 0.08);
 }
 
 .backoffice-ui-root .mailbox-provider-option.is-unavailable {
@@ -1107,6 +1108,12 @@ details[open] > .mailbox-disclosure-heading::after {
   border-radius: 0.3125rem;
 }
 
+.backoffice-ui-root .mailbox-provider-option.is-selected .mailbox-provider-option-mark {
+  color: #fff;
+  background: var(--red);
+  border-color: var(--red);
+}
+
 .backoffice-ui-root .mailbox-provider-option strong {
   overflow: hidden;
   color: #1d2939;
@@ -1124,6 +1131,13 @@ details[open] > .mailbox-disclosure-heading::after {
 .backoffice-ui-root .mailbox-provider-option .status-pill {
   align-self: center;
   white-space: nowrap;
+}
+
+.backoffice-ui-root .mailbox-provider-option .status-pill.is-selected {
+  color: #9f1d1d;
+  font-weight: 700;
+  background: #fff;
+  border-color: #f04438;
 }
 
 .backoffice-ui-root .mailbox-provider-help,

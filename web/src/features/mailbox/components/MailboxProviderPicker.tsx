@@ -61,7 +61,7 @@ export function MailboxProviderPicker({
                 <small>{authenticationLabel(provider)}</small>
               </span>
             </span>
-            <span className={`status-pill${unavailable ? " is-warning" : ""}`}>
+            <span className={`status-pill${unavailable ? " is-warning" : selected ? " is-selected" : ""}`}>
               {unavailable ? "当前未启用" : selected ? "已选择" : "可连接"}
             </span>
             <span className="sr-only" id={`mailbox-provider-${provider.provider_key}-hint`}>

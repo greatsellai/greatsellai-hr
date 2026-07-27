@@ -679,7 +679,12 @@ export function MailboxPage({
       })),
   ].filter((item, index, entries) => entries.findIndex((candidate) => candidate.mailboxId === item.mailboxId) === index);
   const hasMailboxChannels = mailboxes.length > 0;
-  const showMailboxSetup = !loading && !hasMailboxChannels;
+  const showMailboxCreation = !loading && isCreating;
+  const mailboxCreationTitle = hasMailboxChannels ? "新建收件通道" : "绑定招聘收件邮箱";
+  const mailboxCreationKicker = hasMailboxChannels ? "新建通道" : "首次接入";
+  const mailboxCreationDescription = hasMailboxChannels
+    ? "从空白配置开始。保存时会记录当前邮箱位置，历史邮件不会入库。"
+    : "保存时会记录当前邮箱位置。只有此刻之后到达的附件会进入简历库，历史邮件不会入库。";
   const showMailboxOverview = Boolean(selectedConfig && !isCreating && !isEditingConnection);
   const formUsesOAuth = isCreating
     ? draftProvider?.authentication_mode === "oauth2"
@@ -1005,7 +1010,7 @@ export function MailboxPage({
           {embedded ? <h2>收件邮箱</h2> : <h1>邮箱附件入库</h1>}
           <p>连接招聘邮箱后，系统只接收绑定之后到达的附件。</p>
         </div>
-        {hasMailboxChannels && (
+        {hasMailboxChannels && !isCreating && (
           <div className="mailbox-heading-actions">
             <BackofficeButton
               disabled={loading || saving || enqueuingAll}
@@ -1027,7 +1032,7 @@ export function MailboxPage({
         )}
       </header>
 
-      {activeSyncAlerts.length > 0 && (
+      {!isCreating && activeSyncAlerts.length > 0 && (
         <section aria-label="需要处理的邮箱同步异常" className="mailbox-sync-alert-list" role="alert">
           <div className="mailbox-sync-alert-list-heading">
             <div>
@@ -1081,13 +1086,13 @@ export function MailboxPage({
         </section>
       )}
 
-      {showMailboxSetup ? (
-        <section className="mailbox-setup-shell" aria-label="绑定招聘收件邮箱">
+      {showMailboxCreation ? (
+        <section className="mailbox-setup-shell" aria-label={mailboxCreationTitle}>
           <section className="panel mailbox-setup-form-panel">
             <div className="mailbox-setup-heading">
-              <span className="mailbox-setup-kicker"><Icon name="inbox" size={16} />首次接入</span>
-              <h2>绑定招聘收件邮箱</h2>
-              <p>保存时会记录当前邮箱位置。只有此刻之后到达的附件会进入简历库，历史邮件不会入库。</p>
+              <span className="mailbox-setup-kicker"><Icon name="inbox" size={16} />{mailboxCreationKicker}</span>
+              <h2>{mailboxCreationTitle}</h2>
+              <p>{mailboxCreationDescription}</p>
             </div>
             {mailboxConnectionFields}
             {mailboxFormActions}
@@ -1096,7 +1101,7 @@ export function MailboxPage({
           <aside className="panel mailbox-setup-aside">
             <div className="mailbox-setup-aside-heading">
               <h2>接入后如何工作</h2>
-              <p>连接配置、同步状态和处理记录都只属于当前工作区。</p>
+              <p>{hasMailboxChannels ? "先完成这个新通道的连接，已有通道和处理记录不会带入。" : "连接配置、同步状态和处理记录都只属于当前工作区。"}</p>
             </div>
             <ol className="mailbox-setup-steps">
               <li>
@@ -1112,7 +1117,7 @@ export function MailboxPage({
                 <div><strong>附件入库</strong><p>支持 PDF、Word、图片、Excel 和 HTML，处理结果会留在本页。</p></div>
               </li>
             </ol>
-            <p className="mailbox-setup-footnote"><Icon name="check" size={15} />连接完成后，可在这里查看入库记录、同步异常和内容保留策略。</p>
+            <p className="mailbox-setup-footnote"><Icon name="check" size={15} />{hasMailboxChannels ? "创建完成后，再查看这个通道的同步、入库和保留信息。" : "连接完成后，可在这里查看入库记录、同步异常和内容保留策略。"}</p>
           </aside>
         </section>
       ) : (

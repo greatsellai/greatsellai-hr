@@ -51,11 +51,11 @@ _PROVIDERS: tuple[MailboxProvider, ...] = (
     ),
     MailboxProvider(
         key="tencent_exmail_app_password",
-        display_name="腾讯企业邮",
+        display_name="腾讯企业邮箱",
         imap_host="imap.exmail.qq.com",
         authentication_mode="app_password",
         credential_label="邮箱密码或客户端专用密码",
-        help_text="使用腾讯企业邮已启用 IMAP 的账号；如开启安全登录，请填写客户端专用密码。",
+        help_text="使用腾讯企业邮箱已启用 IMAP 的账号；如开启安全登录，请填写客户端专用密码。",
     ),
     MailboxProvider(
         key="qq_mail_app_password",

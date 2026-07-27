@@ -157,7 +157,7 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("heading", { name: "批量上传简历" })).toBeVisible();
     await expect(
       page.getByText(
-        "上传后会自动入库并开始 AI 处理；完成后可在简历库查看候选人信息、筛选、评分和匹配岗位。",
+        "上传后自动入库并进入 AI 处理，完成后可在简历库查看、筛选、评分和匹配岗位。",
         { exact: true },
       ),
     ).toBeVisible();

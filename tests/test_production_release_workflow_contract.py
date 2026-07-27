@@ -127,6 +127,26 @@ def test_main_release_uses_verified_pull_request_provenance_instead_of_repeating
     assert "  push:" not in text_encoding
 
 
+def test_public_repository_routes_default_pr_checks_to_hosted_runners() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    encoding = (ROOT / ".github" / "workflows" / "text-encoding.yml").read_text(
+        encoding="utf-8"
+    )
+
+    runner_selector = (
+        "github.event.repository.private && "
+        "fromJSON('[\"self-hosted\", \"Linux\", \"X64\", \"greatsell-ci\"]') "
+        "|| 'ubuntu-latest'"
+    )
+    assert ci.count(runner_selector) == 3
+    assert runner_selector in encoding
+
+    production_images = ci.split("  production-images:", maxsplit=1)[1]
+    assert "github.event.repository.private ||" in production_images
+    assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in production_images
+    assert "runs-on: [self-hosted, Linux, X64, greatsell-ci]" in production_images
+
+
 def test_main_ci_retains_only_labeled_images_that_the_release_workflow_can_transfer() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     transfer = (ROOT / "scripts" / "transfer-production-images.sh").read_text(

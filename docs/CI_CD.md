@@ -2,13 +2,22 @@
 
 ## 自托管 Runner
 
-所有工作流都通过标签 `self-hosted`、`Linux`、`X64` 和 `greatsell-ci` 路由到仓库的
-受信任 Linux 自托管 Runner，因此不会消耗 GitHub 托管 Actions 分钟。该 Runner 必须保持
-在线，并具备 Docker、Docker Compose、Python 3.12、Node 22、Chromium 运行依赖和对 GitHub
-Actions 的网络访问；`postgres-mailbox-race`、生产镜像构建和运行时回归会直接使用其 Docker
-daemon。
+仓库为私有时，测试工作流通过标签 `self-hosted`、`Linux`、`X64` 和 `greatsell-ci` 路由到
+受信任 Linux 自托管 Runner。该 Runner 必须保持在线，并具备 Docker、Docker Compose、Python
+3.12、Node 22、Chromium 运行依赖和对 GitHub Actions 的网络访问；`postgres-mailbox-race`、
+生产镜像构建和运行时回归会直接使用其 Docker daemon。
 
-Runner 离线时，工作流会排队而非自动回退到 GitHub 托管 Runner。生产工作流仍仅从受保护的
+仓库为公开时，来自 PR 的后端、PostgreSQL、Web/Playwright 与 UTF-8 检查自动改用标准
+GitHub-hosted Ubuntu Runner。主分支的生产镜像构建、发布预检、镜像传输与生产部署仍只使用
+`greatsell-ci`。切回私有仓库时，测试工作流会自动恢复自托管 Runner，无需改回 YAML。
+
+这只是工作流的默认路由，不是公开仓库的自托管 Runner 安全边界。公开前必须将该仓库的
+repo-level 自托管 Runner 解绑，或将其迁入只允许受保护 `main` 发布工作流的私有部署中继/
+组织 Runner group；外部 fork 可以提交修改过的 workflow，不能仅依赖本文件中的 `if` 或
+`runs-on` 约束来保护本机。公开仓库使用 GitHub-hosted CI 期间，现有自托管 Runner 的安装、
+标签和私有仓库工作流可以保留，转回私有后再重新绑定即可恢复完整链路。
+
+私有仓库的 Runner 离线时，工作流会排队而非自动回退到 GitHub 托管 Runner。生产工作流仍仅从受保护的
 `main` 或 `prod-*` 进入 `production` Environment，并只在该 Environment 中读取部署密钥与
 变量；不要把这些值加入 Runner 配置、仓库变量或源码。
 
@@ -110,6 +119,9 @@ revision label 标记。**Production release** 在同一受信任 Runner 上校�
 
 ## 安全与边界
 
+- 公开仓库中，默认 `pull_request` 测试 job 必须保持 GitHub-hosted；生产镜像 job 在公开
+  仓库只接受 `main` 的 `push`。在公开前还必须解绑 repo-level 自托管 Runner 或使用受限私有
+  部署中继，因为外部 fork 可以在自己的分支改写 workflow，YAML 条件本身不是 Runner 隔离。
 - CI 不读取生产 Environment 的 SSH 密钥或变量。
 - 自动发布只接受本仓库的 `main` 推送 CI；PR CI、手动 CI、取消或失败的 CI 都不能发布。
 - 工作流只调用现有 `scripts/preflight-production-release.sh`、`scripts/deploy-production.sh` 与

@@ -1,0 +1,6 @@
+# Keep local workflow linting aware of the repository's trusted custom label.
+# The label remains intentionally limited to production and private-repository
+# jobs; public PR validation routes to standard GitHub-hosted Ubuntu runners.
+self-hosted-runner:
+  labels:
+    - greatsell-ci

@@ -12,7 +12,9 @@ permissions:
 jobs:
   validate:
     name: UTF-8 source and PR metadata
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    # Keep public PR code off the trusted local runner, while preserving the
+    # historical self-hosted path whenever the repository is private.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

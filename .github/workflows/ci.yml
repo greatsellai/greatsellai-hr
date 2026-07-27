@@ -42,7 +42,10 @@ jobs:
     # proven by that PR run below, then only performs the release preflight
     # needed to create exact-SHA production images.
     if: github.event_name != 'push'
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    # A public fork PR must never execute on the trusted local Docker runner.
+    # Private repositories keep the existing self-hosted path without a manual
+    # workflow edit when the repository visibility changes back.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +68,7 @@ jobs:
   postgres-mailbox-race:
     name: PostgreSQL mailbox race
     if: github.event_name != 'push'
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     services:
       postgres:
@@ -100,7 +103,7 @@ jobs:
   web:
     name: Web build
     if: github.event_name != 'push'
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -126,11 +129,15 @@ jobs:
         run: npm run build
       - name: Install Chromium for Playwright critical paths
         working-directory: web
-        # The trusted self-hosted runner is provisioned with Playwright's
-        # Linux system dependencies once. Do not run apt on every PR: it
-        # makes CI depend on an external OS package mirror and adds minutes
-        # without increasing application coverage.
-        run: npx playwright install chromium
+        # The trusted self-hosted runner is provisioned once. Standard GitHub
+        # hosted Ubuntu runners are ephemeral, so install their browser system
+        # dependencies with Chromium instead.
+        run: |
+          if [[ "${RUNNER_ENVIRONMENT:-self-hosted}" == "github-hosted" ]]; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
       - name: Run Playwright critical paths
         working-directory: web
         shell: bash
@@ -148,11 +155,18 @@ jobs:
 
   production-images:
     name: Production image builds
+    # Public pull requests may originate from arbitrary forks. Only a trusted
+    # main push may access the self-hosted Docker runner in that mode. Private
+    # repositories retain the full historical PR/manual image regression.
     needs: [main-release-provenance]
     if: >-
       always() &&
       (needs.main-release-provenance.result == 'success' ||
-       needs.main-release-provenance.result == 'skipped')
+       needs.main-release-provenance.result == 'skipped') &&
+      (
+        github.event.repository.private ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      )
     runs-on: [self-hosted, Linux, X64, greatsell-ci]
     timeout-minutes: 55
     steps:

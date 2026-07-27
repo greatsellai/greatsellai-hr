@@ -155,8 +155,14 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "upload");
     await page.getByRole("button", { name: "上传简历", exact: true }).first().click();
     await expect(page.getByRole("heading", { name: "批量上传简历" })).toBeVisible();
+    await expect(
+      page.getByText(
+        "上传后会自动入库并开始 AI 处理；完成后可在简历库查看候选人信息、筛选、评分和匹配岗位。",
+        { exact: true },
+      ),
+    ).toBeVisible();
     await expect(page.getByText("批量处理路径", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("上传后会逐份保存原件", { exact: false })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "上传后会发生什么" })).toHaveCount(0);
     const uploadGridTracks = await page
       .locator(".upload-workspace .page-layout")
       .evaluate((element) => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length);

@@ -325,6 +325,9 @@ export function UploadPage({
       <header className="page-heading">
         <div>
           <h1>批量上传简历</h1>
+          <p>
+            上传后会自动入库并开始 AI 处理；完成后可在简历库查看候选人信息、筛选、评分和匹配岗位。
+          </p>
         </div>
       </header>
       <div className="page-layout">

@@ -152,7 +152,6 @@ export function CandidateDrawer({
               <span className="tiny-badge">已启用</span>
             ) : null}
           </h2>
-          <p>{review ? review.original_filename : "正在读取简历详情…"}</p>
         </div>
         <div className="drawer-actions">
           {canManageCandidateData && candidate && (
@@ -303,10 +302,11 @@ function scoreEvidenceCoverage(score: ResumeScore): number | null {
   return Math.round((groundedWeight / totalWeight) * 100);
 }
 
-function scoreRecordLabel(score: ResumeScore): string {
+function scoreRecordLabel(score: ResumeScore): string | null {
+  if (!score.is_current_facts_version) return "版本待更新";
   if (score.status === "overridden") return "含人工调整";
   if (score.status === "needs_review") return "建议复核";
-  return "AI 评分";
+  return null;
 }
 
 function CandidateScoreDetails({
@@ -324,6 +324,7 @@ function CandidateScoreDetails({
     (item) => item.is_current_facts_version && item.is_current_template_version,
   ) ?? scores.find((item) => item.is_current_facts_version) ?? scores[0] ?? null;
   const evidenceCoverage = score ? scoreEvidenceCoverage(score) : null;
+  const scoreStatus = score ? scoreRecordLabel(score) : null;
 
   if (loading && !scores.length) {
     return <div className="drawer-score-details"><TableSkeleton /></div>;
@@ -358,14 +359,19 @@ function CandidateScoreDetails({
     <section aria-label="综合评分详情" className="drawer-score-details">
       <header className="drawer-score-heading">
         <div>
-          <h3>评分详情</h3>
-          <p>
-            {score.template_name ?? "评分模板"} · 模板 v{score.template_version} · {formatLibraryDate(score.created_at)}
-          </p>
+          <h3
+            title={`${score.template_name ?? "评分模板"} · 模板 v${score.template_version} · ${formatLibraryDate(score.created_at)}`}
+          >
+            {score.template_name ?? "评分详情"}
+          </h3>
         </div>
-        <span className={`score-record-status is-${score.status}`}>
-          {scoreRecordLabel(score)}
-        </span>
+        {scoreStatus && (
+          <span
+            className={`score-record-status is-${score.status}${!score.is_current_facts_version ? " is-stale" : ""}`}
+          >
+            {scoreStatus}
+          </span>
+        )}
       </header>
 
       <div className="drawer-score-overview">
@@ -375,22 +381,11 @@ function CandidateScoreDetails({
         </div>
         <dl className="drawer-score-metrics">
           <div>
-            <dt>计算方式</dt>
-            <dd>最终分 ÷ 100 × 权重</dd>
-          </div>
-          <div>
             <dt>事实覆盖</dt>
             <dd>{evidenceCoverage === null ? "待核实" : `${evidenceCoverage}%`}</dd>
           </div>
-          <div>
-            <dt>当前版本</dt>
-            <dd>{score.is_current_facts_version ? "是" : "否，请重新评分"}</dd>
-          </div>
         </dl>
       </div>
-      <p className="drawer-score-formula">
-        总分 = Σ（每项最终分 ÷ 100 × 权重）。事实覆盖只表示简历中可验证依据的覆盖程度，不代表候选人能力高低。
-      </p>
 
       <div className="drawer-score-dimensions">
         {score.dimension_scores.map((dimension) => {
@@ -412,20 +407,27 @@ function CandidateScoreDetails({
                 </div>
               </div>
               <div className="drawer-score-dimension-meta">
-                <span>AI 原始分 {dimension.ai_raw_score.toFixed(0)} / 100</span>
                 <span>权重 {dimension.weight}%</span>
-                <span className={`score-evidence-state is-${dimension.evidence_state}`}>
-                  {dimension.evidence_state === "grounded" ? "已提供简历依据" : "证据不足"}
-                </span>
-                {manuallyAdjusted && <span className="score-manual-mark">已人工调整</span>}
+                {dimension.evidence_state !== "grounded" && (
+                  <span
+                    className={`score-evidence-state is-${dimension.evidence_state}`}
+                  >
+                    证据不足
+                  </span>
+                )}
+                {manuallyAdjusted && (
+                  <span className="score-manual-mark">
+                    人工调整，原始分 {dimension.ai_raw_score.toFixed(0)}
+                  </span>
+                )}
               </div>
 
               <div className="drawer-score-section">
-                <span>AI 评分理由</span>
+                <span>AI 判断</span>
                 <p>{dimension.rationale || "信息不足，未提供可验证判断依据。"}</p>
               </div>
               <div className="drawer-score-section">
-                <span>简历事实依据</span>
+                <span>简历事实</span>
                 {dimension.fact_evidence.length ? (
                   <ul className="drawer-score-facts">
                     {dimension.fact_evidence.map((fact) => (

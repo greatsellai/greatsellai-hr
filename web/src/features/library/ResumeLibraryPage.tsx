@@ -61,16 +61,16 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
   return { label: "等待启用", tone: "waiting" };
 }
 
-function resumeLibraryScoreState(status: string | null): string {
+function resumeLibraryScoreNotice(status: string | null): string | null {
   switch (status) {
     case "overridden":
       return "含人工调整";
     case "needs_review":
       return "建议复核";
     case "succeeded":
-      return "AI 已完成";
+      return null;
     default:
-      return "评分已生成";
+      return "评分待更新";
   }
 }
 
@@ -144,13 +144,15 @@ export function ResumeLibraryPage({
   const pageOverview = items.reduce(
     (summary, item) => {
       const status = resumeLibraryStatus(item);
-      summary[status.tone] += 1;
+      if (status.tone !== "ready") {
+        summary[status.tone] += 1;
+      }
       if (status.tone === "ready" && item.score_total === null) {
         summary.unscored += 1;
       }
       return summary;
     },
-    { ready: 0, progress: 0, attention: 0, waiting: 0, unscored: 0 },
+    { progress: 0, attention: 0, waiting: 0, unscored: 0 },
   );
   const firstItemIndex = total ? (page - 1) * RESUME_LIBRARY_PAGE_SIZE + 1 : 0;
   const lastItemIndex = Math.min(page * RESUME_LIBRARY_PAGE_SIZE, total);
@@ -169,9 +171,6 @@ export function ResumeLibraryPage({
       <header className="page-heading">
         <div>
           <h1>简历库</h1>
-          <p>
-            一眼查看入库进度、AI 总结和 AI 评分；打开后可继续查看原始文件与提取依据。
-          </p>
         </div>
         <div className="resume-library-actions">
           {mailboxSources.length ? (
@@ -209,15 +208,30 @@ export function ResumeLibraryPage({
         </div>
       </header>
 
-      {library && (
-        <section aria-label="当前页面简历状态" className="library-queue-summary">
-          <span className="library-queue-total"><strong>{total}</strong> 份已入库</span>
-          <span className="library-queue-item is-ready">本页已启用 <strong>{pageOverview.ready}</strong></span>
-          {(pageOverview.progress + pageOverview.waiting) > 0 && <span className="library-queue-item is-progress">处理中 <strong>{pageOverview.progress + pageOverview.waiting}</strong></span>}
-          {pageOverview.attention > 0 && <span className="library-queue-item is-attention">需处理 <strong>{pageOverview.attention}</strong></span>}
-          {pageOverview.unscored > 0 && <span className="library-queue-item">待评分 <strong>{pageOverview.unscored}</strong></span>}
-        </section>
-      )}
+      {library &&
+        pageOverview.progress +
+          pageOverview.waiting +
+          pageOverview.attention +
+          pageOverview.unscored >
+          0 && (
+          <section aria-label="当前页面简历状态" className="library-queue-summary">
+            {pageOverview.progress + pageOverview.waiting > 0 && (
+              <span className="library-queue-item is-progress">
+                处理中 <strong>{pageOverview.progress + pageOverview.waiting}</strong>
+              </span>
+            )}
+            {pageOverview.attention > 0 && (
+              <span className="library-queue-item is-attention">
+                需处理 <strong>{pageOverview.attention}</strong>
+              </span>
+            )}
+            {pageOverview.unscored > 0 && (
+              <span className="library-queue-item">
+                待评分 <strong>{pageOverview.unscored}</strong>
+              </span>
+            )}
+          </section>
+        )}
 
       {error && (
         <p className="library-error" role="status">
@@ -241,7 +255,6 @@ export function ResumeLibraryPage({
                   <th scope="col">候选人</th>
                   <th scope="col">AI 总结</th>
                   <th scope="col">AI 评分</th>
-                  <th scope="col">状态</th>
                   <th scope="col">上传时间</th>
                   <th aria-label="查看简历" scope="col" />
                 </tr>
@@ -254,6 +267,9 @@ export function ResumeLibraryPage({
                   );
                   const supersededReparse = hasSupersededReparseVersion(
                     item.quality_flags,
+                  );
+                  const scoreNotice = resumeLibraryScoreNotice(
+                    item.score_status,
                   );
                   return (
                     <tr
@@ -272,11 +288,25 @@ export function ResumeLibraryPage({
                           <span className="candidate-name">
                             {item.display_name?.trim() || "未命名候选人"}
                           </span>
-                          <span className="candidate-meta library-source-label">
-                            {item.source_mailbox_label
-                              ? `邮箱 · ${item.source_mailbox_label}`
-                              : "手动上传"}
-                          </span>
+                          {status.tone !== "ready" && (
+                            <span
+                              className={`library-status is-${status.tone}`}
+                              title={
+                                sourceTextIssue
+                                  ? "提取文本疑似乱码，请先重新解析原件。"
+                                  : supersededReparse
+                                    ? "候选人已有更新版本，此解析版本不会被启用。"
+                                    : item.ai_extraction_error ?? undefined
+                              }
+                            >
+                              {status.label}
+                            </span>
+                          )}
+                          {item.source_mailbox_label && (
+                            <span className="candidate-meta library-source-label">
+                              邮箱 · {item.source_mailbox_label}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="library-summary-cell">
@@ -315,11 +345,11 @@ export function ResumeLibraryPage({
                         ) : item.score_total !== null ? (
                           <div
                             className="library-score"
-                            title={`${item.score_template_name ?? "评分模板"} · ${resumeLibraryScoreState(item.score_status)}`}
+                            title={item.score_template_name ?? "评分模板"}
                           >
                             <strong>{item.score_total.toFixed(1)}</strong>
                             <span>/ 100</span>
-                            <small>{item.score_template_name ?? "评分模板"} · {resumeLibraryScoreState(item.score_status)}</small>
+                            {scoreNotice && <small>{scoreNotice}</small>}
                           </div>
                         ) : item.is_active ? (
                           <span className="library-empty-copy">
@@ -329,23 +359,6 @@ export function ResumeLibraryPage({
                           <span className="library-empty-copy">
                             完成提取后可评分
                           </span>
-                        )}
-                      </td>
-                      <td className="library-status-cell">
-                        <span
-                          className={`library-status is-${status.tone}`}
-                          title={
-                            sourceTextIssue
-                              ? "提取文本疑似乱码，请先重新解析原件。"
-                              : supersededReparse
-                                ? "候选人已有更新版本，此解析版本不会被启用。"
-                                : item.ai_extraction_error ?? undefined
-                          }
-                        >
-                          {status.label}
-                        </span>
-                        {status.tone === "progress" && (
-                          <small>完成后会自动更新</small>
                         )}
                       </td>
                       <td>
@@ -363,7 +376,7 @@ export function ResumeLibraryPage({
                           }}
                           type="button"
                         >
-                          查看 <Icon name="chevron-right" size={17} />
+                          <Icon name="chevron-right" size={17} />
                         </button>
                       </td>
                     </tr>

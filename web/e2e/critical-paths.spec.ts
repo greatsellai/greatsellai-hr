@@ -366,8 +366,21 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("columnheader", { name: "经历", exact: true })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "核心技能", exact: true })).toBeVisible();
     await expect(page.getByText("e2e-fixture-1.pdf", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("正式工作年限待核实").first()).toBeVisible();
+    await expect(page.getByText("待核实", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("未设门槛")).toHaveCount(0);
+    await expect(page.getByText("当前已加载", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("评分口径", { exact: true })).toHaveCount(0);
+
+    const candidateTableFillsResultsPane = await page
+      .locator(".filter-workspace .candidate-table")
+      .evaluate((table) => {
+        const scrollRegion = table.parentElement;
+        return Boolean(
+          scrollRegion &&
+            table.getBoundingClientRect().width >= scrollRegion.clientWidth - 1,
+        );
+      });
+    expect(candidateTableFillsResultsPane).toBeTruthy();
 
     await page.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" }).click();
     const drawer = page.getByRole("dialog", { name: "E2E 推荐候选人 的简历详情" });
@@ -375,10 +388,13 @@ test.describe("招聘工作台关键路径", () => {
       "aria-selected",
       "true",
     );
-    await expect(drawer.getByRole("heading", { name: "评分详情", exact: true })).toBeVisible();
-    await expect(drawer.getByText("AI 评分理由", { exact: true }).first()).toBeVisible();
-    await expect(drawer.getByText("简历事实依据", { exact: true }).first()).toBeVisible();
+    await expect(drawer.getByRole("heading", { name: "E2E 评分规则", exact: true })).toBeVisible();
+    await expect(drawer.getByText("AI 判断", { exact: true }).first()).toBeVisible();
+    await expect(drawer.getByText("简历事实", { exact: true }).first()).toBeVisible();
     await expect(drawer.getByText("待确认项", { exact: true })).toBeVisible();
+    await expect(
+      drawer.locator(".drawer-title-wrap").getByText("e2e-fixture-1.pdf", { exact: true }),
+    ).toHaveCount(0);
     await drawer.getByRole("button", { name: "关闭简历详情" }).click();
     await expect(drawer).toBeHidden();
 

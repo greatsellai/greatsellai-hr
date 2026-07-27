@@ -90,7 +90,6 @@ export function FilterPanel({
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>已保存的筛选</h3>
-            <span>{savedFilters.length} 组</span>
           </div>
           <div className="saved-filter-row">
             <div className="select-wrap" style={{ flex: 1 }}>
@@ -158,7 +157,6 @@ export function FilterPanel({
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>学历与院校</h3>
-            <span>任一满足</span>
           </div>
           <div className="field-stack">
             <span className="field-label">院校类型</span>
@@ -187,7 +185,6 @@ export function FilterPanel({
                 </label>
               ))}
             </div>
-            <span className="field-hint">已选院校类型满足任一即可。</span>
           </div>
           <span className="field-label">最高学历</span>
           <div className="choice-grid" aria-label="学历条件">
@@ -210,7 +207,6 @@ export function FilterPanel({
               </label>
             ))}
           </div>
-          <span className="field-hint">已选最高学历满足任一即可。</span>
           <div className="field-stack">
             <span className="field-label">应届状态</span>
             <div className="choice-grid choice-grid-inline" role="radiogroup">
@@ -333,7 +329,6 @@ export function FilterPanel({
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>经历类别</h3>
-            <span>按同一条经历匹配</span>
           </div>
           <div className="field-stack">
             <label className="field-label" htmlFor="min-experience">
@@ -407,7 +402,6 @@ export function FilterPanel({
                 </label>
               ))}
             </div>
-            <span className="field-hint">不选则不限经历类型。</span>
           </div>
           <div className="field-stack">
             <label className="field-label" htmlFor="experience-name">
@@ -477,7 +471,6 @@ export function FilterPanel({
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>技能</h3>
-            <span>支持全部或任一</span>
           </div>
           <div className="field-stack">
             <span className="field-label">技能匹配方式</span>
@@ -500,7 +493,7 @@ export function FilterPanel({
               ))}
             </div>
           </div>
-          <span className="field-label">技能分类（非必选）</span>
+          <span className="field-label">技能分类</span>
           <div className="choice-grid">
             {filterOptions.skill_categories.map((option) => (
               <label className="choice-row" key={option.value}>
@@ -530,7 +523,6 @@ export function FilterPanel({
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>英语能力</h3>
-            <span>证书之间按 OR</span>
           </div>
           <div className="credential-list">
             {filterOptions.language_credentials.map((option) => {
@@ -581,15 +573,11 @@ export function FilterPanel({
               value={draft.customLanguageName}
             />
           )}
-          <span className="field-hint">
-            “四级、英语四级、CET4、CET-4”等写法均匹配大学英语四级（CET-4）。
-          </span>
         </section>
 
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>奖学金与竞赛</h3>
-            <span>均为非必选</span>
           </div>
           <PresenceRadio
             label="奖学金"
@@ -645,7 +633,6 @@ export function FilterPanel({
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>管理与领导经历</h3>
-            <span>非必选</span>
           </div>
           <div className="choice-grid">
             {filterOptions.leadership_contexts.map((option) => (
@@ -676,7 +663,6 @@ export function FilterPanel({
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>自定义关键词</h3>
-            <span>泛匹配或精准匹配</span>
           </div>
           <div className="field-stack">
             <span className="field-label">关键词匹配方式</span>

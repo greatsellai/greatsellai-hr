@@ -106,10 +106,24 @@ def test_server_preflight_is_read_only_and_uses_candidate_compose() -> None:
     assert "alembic" not in script
 
 
-def test_automatic_release_waits_for_encoding_validation_in_its_ci_gate() -> None:
+def test_main_release_uses_verified_pull_request_provenance_instead_of_repeating_full_ci() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    text_encoding = (ROOT / ".github" / "workflows" / "text-encoding.yml").read_text(
+        encoding="utf-8"
+    )
 
-    assert 'python scripts/check_text_encoding.py --github-event "$GITHUB_EVENT_PATH"' in ci
+    assert ci.count("if: github.event_name != 'push'") == 3
+    assert "main-release-provenance:" in ci
+    assert "name: Main release provenance" in ci
+    assert "python scripts/verify_main_release_provenance.py" in ci
+    assert "needs: [main-release-provenance]" in ci
+    assert "needs.main-release-provenance.result == 'success'" in ci
+    assert "actions: read" in ci
+    assert "checks: read" in ci
+    assert "pull-requests: read" in ci
+    assert "--documents" in ci
+    assert 'python scripts/check_text_encoding.py --github-event "$GITHUB_EVENT_PATH"' in text_encoding
+    assert "  push:" not in text_encoding
 
 
 def test_main_ci_retains_only_labeled_images_that_the_release_workflow_can_transfer() -> None:

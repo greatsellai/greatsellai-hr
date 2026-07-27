@@ -12,10 +12,10 @@ Runner 离线时，工作流会排队而非自动回退到 GitHub 托管 Runner�
 `main` 或 `prod-*` 进入 `production` Environment，并只在该 Environment 中读取部署密钥与
 变量；不要把这些值加入 Runner 配置、仓库变量或源码。
 
-本仓库的自动化分为两层：每个 PR 的持续集成（CI），以及在 `main` CI 成功后的自动
-生产发布（CD）。合并 `main` 本身不会立即连接生产服务器；只有该次 `main` 提交的 CI
-四项检查全部成功后，才会先对服务器既有环境执行无副作用 Compose 预检，通过后自动创建
-不可变的 `prod-*` 标签并部署。
+本仓库的自动化分为两层：每个 PR 的完整持续集成（CI），以及在 `main` 发布预检成功后的
+自动生产发布（CD）。合并 `main` 本身不会立即连接生产服务器；只有该次 `main` 提交能被
+溯源到全绿 PR、完成精确 SHA 镜像构建和无副作用 Compose 预检后，才会自动创建不可变的
+`prod-*` 标签并部署。
 
 成功的 `main` CI 会保留已经完成运行时回归的 API 与 Caddy 镜像，并以完整 commit SHA 与 OCI
 revision label 标记。**Production release** 在同一受信任 Runner 上校验这两份镜像、通过
@@ -27,8 +27,9 @@ revision label 标记。**Production release** 在同一受信任 Runner 上校�
 ## 已提供的工作流
 
 - **Continuous integration**：在向 `main` 提交 PR、合并到 `main` 或手动触发时运行。
-  它分别执行 Python 3.12 全量测试、PostgreSQL 邮箱附件去重并发回归、Node 22.12
-  前端生产构建，以及应用与 Caddy 两个生产镜像构建和 Compose 配置校验。
+  PR/手动运行执行 Python 3.12 全量测试、PostgreSQL 邮箱附件去重并发回归、Node 22.12
+  前端生产构建、生产镜像构建与完整运行时回归；`main` 运行则只做已绿 PR 溯源、精确镜像
+  构建、Compose 校验和轻量镜像 smoke test。
 - **Production release**：监听 `main` 上一次成功的 CI `push` 运行。它只接受本仓库
   的 `main` 提交，先用该提交的 Compose 文件和服务器既有 `.env.production` 做只读预检，
   再次确认 `main` 未前进后，创建不可变的 `prod-YYYYMMDD-<commit>` 标签并在同一次工作流中
@@ -84,14 +85,14 @@ revision label 标记。**Production release** 在同一受信任 Runner 上校�
 
 同时在 GitHub 分支和标签规则中配置：
 
-1. `main` 必须经 PR 合并，并要求四项 CI 检查全部通过。
+1. `main` 必须经 Squash PR 合并，并要求 PR 的完整 CI 与文本完整性检查全部通过。
 2. 禁止强制推送和直接推送 `main`。
 3. 保护 `prod-*` 标签，禁止移动、删除或复用；仅允许受控发布流程创建标签。
 
 ## 日常发布流程
 
 1. PR 合并到 `main`。
-2. `main` CI 的四项检查全部变绿。
+2. `main` 的来源证明与发布预检全部变绿。
 3. **Production release** 先做服务器配置预检；通过后自动创建标签、部署、验证并保留发布
    记录，无需手动操作。它先传输 CI 已验证的镜像，生产机只加载和校验镜像，随后执行备份、
    迁移、启动和健康验证。`prod-*` 是发布候选，只有服务器的 `current-release.env` 和工作流
@@ -120,6 +121,18 @@ revision label 标记。**Production release** 在同一受信任 Runner 上校�
 
 详细的服务器发布与恢复行为见 [DEPLOYMENT.md](DEPLOYMENT.md)，团队协作和标签规则见
 [TEAM_WORKFLOW.md](TEAM_WORKFLOW.md)。
+
+## CI 分层策略（PR 全量、main 发布预检）
+
+为避免同一变更在 PR 与 `main` 上重复执行耗时的完整回归，自动化按提交阶段分层：
+
+- **PR CI** 是唯一的完整质量门：后端全量 pytest、PostgreSQL 邮箱并发回归、前端构建和 Playwright 关键路径、完整生产镜像运行时回归都在 PR 上执行。
+- **main CI** 不重复执行 pytest、PostgreSQL 或 Playwright。它先校验当前 `main` 提交确实来自一个已完成全部 PR 检查的合并请求，并校验两者的 Git tree 一致；随后只为该精确 SHA 构建 API/Caddy 镜像、校验 Compose，并运行文档提取的镜像内 smoke test。
+- **Production release** 仍只监听成功的 `main` CI。主分支直接推送、缺少全绿 PR、PR 与合并结果代码树不一致，或最新文本元数据检查失败时，镜像构建会在发布前失败，不能触发部署。
+
+`Text encoding integrity` 只在 PR（及手动运行）中执行，避免 `main` 发布预检重复占用 Runner；其成功结果由 `scripts/verify_main_release_provenance.py` 在 `main` 发布预检中校验。
+
+这套设计不依赖私有仓库的 GitHub 分支保护功能：即使有人错误地直接推送 `main`，自动发布也会被代码级溯源门阻止。为保持溯源确定性，团队合并 PR 时应使用 **Squash merge**；溯源门要求合并提交只有一个父提交，并且该父提交就是 PR 检查时的 `base` SHA。团队仍应坚持只经 PR 合并，且不应绕过已存在的审核和测试流程。代码级门禁可防止误操作，但不能替代未来可用的仓库/组织级写入权限控制。
 
 ## Release regression gates
 

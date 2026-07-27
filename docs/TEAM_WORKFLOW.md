@@ -200,7 +200,7 @@ gh pr checks <PR-number> --watch
 服务器 `/home/ubuntu/resume-screening-v3` 只接收已合并并带生产标签的源码。标准顺序是：
 
 1. PR 合并到 `main`。
-2. `main` 的四项 CI 检查全部成功。
+2. `main` 的来源证明与发布预检全部成功（完整测试已在 PR 阶段完成）。
 3. GitHub Actions 自动创建不可变生产标签并部署该提交。
 
 需要重试或回滚时，使用 GitHub Actions 中的 **Production deploy** 与

@@ -198,7 +198,6 @@ export function ScoreWorkspace({
       <header className="page-heading">
         <div>
           <h1>通用评分模板</h1>
-          <p>在这里维护维度和权重；生成通用评分时会面向简历库批量执行，不会暗中选择某位候选人。</p>
         </div>
       </header>
       <div className="page-layout">

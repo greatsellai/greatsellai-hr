@@ -155,6 +155,12 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "upload");
     await page.getByRole("button", { name: "上传简历", exact: true }).first().click();
     await expect(page.getByRole("heading", { name: "批量上传简历" })).toBeVisible();
+    await expect(page.getByText("批量处理路径", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("上传后会逐份保存原件", { exact: false })).toHaveCount(0);
+    const uploadGridTracks = await page
+      .locator(".upload-workspace .page-layout")
+      .evaluate((element) => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length);
+    expect(uploadGridTracks).toBe(1);
 
     await page.locator('input[type="file"]').setInputFiles({
       name: "e2e-resume.pdf",
@@ -400,6 +406,7 @@ test.describe("招聘工作台关键路径", () => {
 
     await page.getByRole("button", { name: "评分模板", exact: true }).click();
     await expect(page.getByRole("heading", { name: "通用评分模板", exact: true })).toBeVisible();
+    await expect(page.getByText("在这里维护维度和权重", { exact: false })).toHaveCount(0);
     await expect(page.locator("#main-content").getByText(/当前简历：|尚未选择简历/)).toHaveCount(0);
     await expect(page.locator("#main-content").getByRole("button", { name: /生成当前候选人评分/ })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /通用候选人初筛/ })).toBeVisible();

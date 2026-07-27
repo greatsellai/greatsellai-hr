@@ -37,6 +37,7 @@ REQUIRED_CI_JOB_NAMES = frozenset(
     }
 )
 REQUIRED_TEXT_CHECK_NAME = "UTF-8 source and PR metadata"
+TEXT_ENCODING_WORKFLOW_FILE = "text-encoding.yml"
 
 
 class ProvenanceError(RuntimeError):
@@ -205,19 +206,47 @@ def _verify_full_ci(
 def _verify_text_metadata_check(
     *, repository: str, head_sha: str, fetch_json: JsonFetcher
 ) -> None:
-    checks_response = _require_mapping(
-        fetch_json(f"/repos/{repository}/commits/{head_sha}/check-runs?per_page=100"),
-        context="pull request text checks",
+    workflow_runs_response = _require_mapping(
+        fetch_json(
+            f"/repos/{repository}/actions/workflows/{TEXT_ENCODING_WORKFLOW_FILE}/runs"
+            f"?event=pull_request&head_sha={head_sha}&per_page=100"
+        ),
+        context="pull request text encoding workflow runs",
     )
-    check_runs = _require_sequence(checks_response.get("check_runs"), context="pull request text checks")
-    matching_checks = [
-        _require_mapping(value, context="pull request text check")
-        for value in check_runs
-        if _require_mapping(value, context="pull request text check").get("name")
+    workflow_runs = _require_sequence(
+        workflow_runs_response.get("workflow_runs"),
+        context="pull request text encoding workflow runs",
+    )
+    matching_runs = [
+        _require_mapping(value, context="pull request text encoding workflow run")
+        for value in workflow_runs
+        if _require_mapping(value, context="pull request text encoding workflow run").get("event")
+        == "pull_request"
+    ]
+    latest_run = _latest_item(matching_runs)
+    if not _successful_completed(latest_run):
+        raise ProvenanceError("latest pull request text encoding workflow is not successful")
+
+    run_id = latest_run.get("id")
+    if not isinstance(run_id, int):
+        raise ProvenanceError("latest pull request text encoding workflow has an invalid id")
+
+    jobs_response = _require_mapping(
+        fetch_json(f"/repos/{repository}/actions/runs/{run_id}/jobs?per_page=100"),
+        context="pull request text encoding jobs",
+    )
+    jobs = _require_sequence(
+        jobs_response.get("jobs"),
+        context="pull request text encoding jobs",
+    )
+    matching_jobs = [
+        _require_mapping(value, context="pull request text encoding job")
+        for value in jobs
+        if _require_mapping(value, context="pull request text encoding job").get("name")
         == REQUIRED_TEXT_CHECK_NAME
     ]
-    latest_check = _latest_item(matching_checks)
-    if not _successful_completed(latest_check):
+    latest_job = _latest_item(matching_jobs)
+    if not _successful_completed(latest_job):
         raise ProvenanceError("latest pull request text metadata check is not successful")
 
 

@@ -128,11 +128,11 @@ revision label 标记。**Production release** 在同一受信任 Runner 上校�
 
 - **PR CI** 是唯一的完整质量门：后端全量 pytest、PostgreSQL 邮箱并发回归、前端构建和 Playwright 关键路径、完整生产镜像运行时回归都在 PR 上执行。
 - **main CI** 不重复执行 pytest、PostgreSQL 或 Playwright。它先校验当前 `main` 提交确实来自一个已完成全部 PR 检查的合并请求，并校验两者的 Git tree 一致；随后只为该精确 SHA 构建 API/Caddy 镜像、校验 Compose，并运行文档提取的镜像内 smoke test。
-- **Production release** 仍只监听成功的 `main` CI。主分支直接推送、缺少全绿 PR、PR 与合并结果代码树不一致，或最新文本元数据检查失败时，镜像构建会在发布前失败，不能触发部署。
+- **Production release** 仍只监听成功的 `main` CI。主分支直接推送、缺少全绿 PR、PR 与合并结果代码树不一致，或对应 PR 的文本完整性工作流失败时，镜像构建会在发布前失败，不能触发部署。
 
 `Text encoding integrity` 只在 PR（及手动运行）中执行，避免 `main` 发布预检重复占用 Runner；其成功结果由 `scripts/verify_main_release_provenance.py` 在 `main` 发布预检中校验。
 
-这套设计不依赖私有仓库的 GitHub 分支保护功能：即使有人错误地直接推送 `main`，自动发布也会被代码级溯源门阻止。为保持溯源确定性，团队合并 PR 时应使用 **Squash merge**；溯源门要求合并提交只有一个父提交，并且该父提交就是 PR 检查时的 `base` SHA。团队仍应坚持只经 PR 合并，且不应绕过已存在的审核和测试流程。代码级门禁可防止误操作，但不能替代未来可用的仓库/组织级写入权限控制。
+这套设计不依赖私有仓库的 GitHub 分支保护功能：即使有人错误地直接推送 `main`，自动发布也会被代码级溯源门阻止。为保持溯源确定性，团队合并 PR 时应使用 **Squash merge**；溯源门要求合并提交只有一个父提交，并且该父提交就是 PR 检查时的 `base` SHA。因此合并前必须将 PR 更新或 rebase 到最新 `main`，并等待该基线上的完整 PR 检查全部成功；若在检查未结束或基线落后时合并，`main` 发布预检会拒绝，且需要先修正 PR 后重新走合并流程。团队仍应坚持只经 PR 合并，且不应绕过已存在的审核和测试流程。代码级门禁可防止普通误操作，但不能替代未来可用的仓库/组织级写入权限控制。
 
 ## Release regression gates
 

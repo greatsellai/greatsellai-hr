@@ -37,6 +37,16 @@ def _successful_item(*, name: str, timestamp: str) -> dict[str, object]:
     }
 
 
+def _successful_workflow_run(*, run_id: int, timestamp: str) -> dict[str, object]:
+    return {
+        "id": run_id,
+        "event": "pull_request",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": timestamp,
+    }
+
+
 def _success_responses() -> dict[str, object]:
     return {
         f"/repos/{REPOSITORY}/commits/{RELEASE_SHA}/pulls?per_page=100": [
@@ -63,13 +73,7 @@ def _success_responses() -> dict[str, object]:
             f"&head_sha={PR_HEAD_SHA}&per_page=100"
         ): {
             "workflow_runs": [
-                {
-                    "id": 12345,
-                    "event": "pull_request",
-                    "status": "completed",
-                    "conclusion": "success",
-                    "completed_at": "2026-07-27T08:48:00Z",
-                }
+                _successful_workflow_run(run_id=12345, timestamp="2026-07-27T08:48:00Z")
             ]
         },
         f"/repos/{REPOSITORY}/actions/runs/12345/jobs?per_page=100": {
@@ -78,8 +82,16 @@ def _success_responses() -> dict[str, object]:
                 for name in sorted(PROVENANCE.REQUIRED_CI_JOB_NAMES)
             ]
         },
-        f"/repos/{REPOSITORY}/commits/{PR_HEAD_SHA}/check-runs?per_page=100": {
-            "check_runs": [
+        (
+            f"/repos/{REPOSITORY}/actions/workflows/{PROVENANCE.TEXT_ENCODING_WORKFLOW_FILE}"
+            f"/runs?event=pull_request&head_sha={PR_HEAD_SHA}&per_page=100"
+        ): {
+            "workflow_runs": [
+                _successful_workflow_run(run_id=54321, timestamp="2026-07-27T08:48:30Z")
+            ]
+        },
+        f"/repos/{REPOSITORY}/actions/runs/54321/jobs?per_page=100": {
+            "jobs": [
                 _successful_item(
                     name=PROVENANCE.REQUIRED_TEXT_CHECK_NAME,
                     timestamp="2026-07-27T08:48:30Z",
@@ -147,16 +159,19 @@ def test_main_commit_with_a_non_base_parent_is_rejected() -> None:
         )
 
 
-def test_latest_failed_text_metadata_check_blocks_release() -> None:
+def test_latest_failed_text_encoding_workflow_blocks_release() -> None:
     responses = _success_responses()
-    responses[f"/repos/{REPOSITORY}/commits/{PR_HEAD_SHA}/check-runs?per_page=100"] = {
-        "check_runs": [
-            _successful_item(
-                name=PROVENANCE.REQUIRED_TEXT_CHECK_NAME,
-                timestamp="2026-07-27T08:48:00Z",
-            ),
+    responses[
+        (
+            f"/repos/{REPOSITORY}/actions/workflows/{PROVENANCE.TEXT_ENCODING_WORKFLOW_FILE}"
+            f"/runs?event=pull_request&head_sha={PR_HEAD_SHA}&per_page=100"
+        )
+    ] = {
+        "workflow_runs": [
+            _successful_workflow_run(run_id=54320, timestamp="2026-07-27T08:48:00Z"),
             {
-                "name": PROVENANCE.REQUIRED_TEXT_CHECK_NAME,
+                "id": 54322,
+                "event": "pull_request",
                 "status": "completed",
                 "conclusion": "failure",
                 "completed_at": "2026-07-27T08:49:00Z",
@@ -164,7 +179,40 @@ def test_latest_failed_text_metadata_check_blocks_release() -> None:
         ]
     }
 
-    with pytest.raises(PROVENANCE.ProvenanceError, match="text metadata check"):
+    with pytest.raises(PROVENANCE.ProvenanceError, match="text encoding workflow"):
+        PROVENANCE.verify_main_release_provenance(
+            repository=REPOSITORY,
+            release_sha=RELEASE_SHA,
+            fetch_json=_fetcher(responses),
+        )
+
+
+def test_manual_text_check_cannot_mask_a_failed_pull_request_check() -> None:
+    responses = _success_responses()
+    text_workflow_runs_path = (
+        f"/repos/{REPOSITORY}/actions/workflows/{PROVENANCE.TEXT_ENCODING_WORKFLOW_FILE}"
+        f"/runs?event=pull_request&head_sha={PR_HEAD_SHA}&per_page=100"
+    )
+    responses[text_workflow_runs_path] = {
+        "workflow_runs": [
+            {
+                "id": 54322,
+                "event": "pull_request",
+                "status": "completed",
+                "conclusion": "failure",
+                "completed_at": "2026-07-27T08:49:00Z",
+            },
+            {
+                "id": 54323,
+                "event": "workflow_dispatch",
+                "status": "completed",
+                "conclusion": "success",
+                "completed_at": "2026-07-27T08:50:00Z",
+            },
+        ]
+    }
+
+    with pytest.raises(PROVENANCE.ProvenanceError, match="text encoding workflow"):
         PROVENANCE.verify_main_release_provenance(
             repository=REPOSITORY,
             release_sha=RELEASE_SHA,

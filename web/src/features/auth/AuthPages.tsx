@@ -280,6 +280,11 @@ export function EmailVerificationPage({
   );
   const verificationSucceeded = Boolean(token && verificationState === "verified");
   const verificationInProgress = Boolean(token && verificationState === "verifying");
+  const shouldEnterWorkspace = Boolean(
+    session?.authenticated &&
+      !session.email_verification_required &&
+      (!token || verificationSucceeded),
+  );
 
   useEffect(() => {
     if (!token || completionStarted.current) return;
@@ -323,12 +328,12 @@ export function EmailVerificationPage({
   }, [isWaitingForVerification, onRefreshSession]);
 
   useEffect(() => {
-    if (!token && session?.authenticated && !session.email_verification_required) {
-      // This is the original registration tab. It is the only page that
-      // automatically enters the workspace after a successful email check.
-      window.location.replace(workspaceHref());
-    }
-  }, [session?.authenticated, session?.email_verification_required, token]);
+    if (!shouldEnterWorkspace) return;
+    // The original registration tab observes the verified server session via
+    // polling. The email-link tab owns a newly established verified session.
+    // Both tabs should land in the workspace once their own session is ready.
+    window.location.replace(workspaceHref());
+  }, [shouldEnterWorkspace, workspaceHref]);
 
   const maskedEmail = email
     ? email.replace(/^(.{1,2}).*(@.*)$/, "$1•••$2")
@@ -363,7 +368,7 @@ export function EmailVerificationPage({
               : "请查收验证邮件"}
         </h2>
         {verificationSucceeded ? (
-          <p>验证已经完成。请返回发起注册的页面，系统会自动进入工作台；你可以直接关闭此页面。</p>
+          <p>验证已经完成，正在进入工作台。</p>
         ) : token ? (
           <p>
             {loading || verificationInProgress

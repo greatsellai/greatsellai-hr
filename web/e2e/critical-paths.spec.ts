@@ -72,7 +72,7 @@ test.describe("招聘工作台关键路径", () => {
     await expect(trigger).toBeFocused();
   });
 
-  test("验证链接页只确认成功，原注册页自动进入工作台", async ({ page, browser }) => {
+  test("验证链接页和原注册页都会自动进入工作台", async ({ page, browser }) => {
     const { verificationPath } = await registerAndAwaitEmailVerification(
       page,
       "verification-return",
@@ -89,18 +89,29 @@ test.describe("招聘工作台关键路径", () => {
       const verificationPage = await verificationContext.newPage();
       await verificationPage.goto(new URL(verificationPath, page.url()).toString());
 
-      await expect(
-        verificationPage.getByRole("heading", { name: "邮箱已验证" }),
-      ).toBeVisible();
-      await expect(verificationPage).toHaveURL(/\/verify-email\?token=/);
-      await expect(
-        accountMenuTrigger(verificationPage),
-      ).toHaveCount(0);
+      await expect(verificationPage).toHaveURL(/\/$/);
+      await expect(accountMenuTrigger(verificationPage)).toBeVisible();
 
       await expect(page).toHaveURL(/\/$/);
       await expect(accountMenuTrigger(page)).toBeVisible();
     } finally {
       await verificationContext.close();
+    }
+
+    // A used link must not be mistaken for an already-authenticated email tab.
+    // A fresh browser remains on the validation page and receives no session.
+    const replayContext = await browser.newContext();
+    try {
+      const replayPage = await replayContext.newPage();
+      await replayPage.goto(new URL(verificationPath, page.url()).toString());
+
+      await expect(replayPage).toHaveURL(/\/verify-email\?token=/);
+      await expect(
+        replayPage.getByRole("heading", { name: "邮箱验证未完成" }),
+      ).toBeVisible();
+      await expect(accountMenuTrigger(replayPage)).toHaveCount(0);
+    } finally {
+      await replayContext.close();
     }
   });
 

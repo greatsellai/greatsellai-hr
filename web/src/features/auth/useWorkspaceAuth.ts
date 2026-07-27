@@ -188,9 +188,9 @@ export function useWorkspaceAuth({
       setAuthError(null);
       setAuthLoading(true);
       try {
-        // Keep the verification-link tab on its explicit confirmation page.
-        // The registration tab polls its own session and is the one that enters
-        // the workspace after this server-side verification succeeds.
+        // This response establishes the verification-link browser session.
+        // EmailVerificationPage then enters that workspace, while the original
+        // registration tab independently observes the verified server session.
         const session = await api.completeEmailVerification(token);
         applyAuthSession(session);
         return session;

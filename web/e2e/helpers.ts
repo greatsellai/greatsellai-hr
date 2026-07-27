@@ -98,8 +98,6 @@ export async function registerAndAwaitEmailVerification(
 export async function registerAndVerify(page: Page, label: string): Promise<string> {
   const { email, verificationPath } = await registerAndAwaitEmailVerification(page, label);
   await page.goto(verificationPath);
-  await expect(page.getByRole("heading", { name: "邮箱已验证" })).toBeVisible();
-  await page.goto("/");
   await expect(accountMenuTrigger(page)).toBeVisible();
   return email;
 }

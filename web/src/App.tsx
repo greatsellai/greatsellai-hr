@@ -4,7 +4,6 @@ import {
   useCallback,
   useEffect,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { isApiError } from "./api";
 import {
@@ -374,7 +373,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [agentOpen, setAgentOpen] = useState(false);
   const [libraryRefreshToken, setLibraryRefreshToken] = useState(0);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const [globalQuery, setGlobalQuery] = useState("");
 
   const notify = useCallback((kind: ToastKind, message: string) => {
     const id = Date.now() + Math.round(Math.random() * 1000);
@@ -440,7 +438,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     scoreTemplateId,
     scoreTemplates,
     search,
-    searchKeywords,
     searching,
     saveCurrentFilter,
     updateFilterDraft,
@@ -578,16 +575,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     [openResume],
   );
 
-  const handleGlobalSearch = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key !== "Enter") return;
-    const terms = globalQuery
-      .split(/[、,，\s]+/)
-      .map((term) => term.trim())
-      .filter(Boolean);
-    navigateToView("filter");
-    searchKeywords(terms);
-  };
-
   if (authState === "checking") {
     return (
       <main className="login-page" aria-live="polite">
@@ -673,9 +660,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       />
       <div className="app-area" inert={drawerOpen || agentOpen}>
       <Topbar
-        globalQuery={globalQuery}
-        onGlobalQueryChange={setGlobalQuery}
-        onGlobalSearchKeyDown={handleGlobalSearch}
         onOpenAgent={() => {
             closeDrawer();
             setAgentOpen(true);

@@ -278,16 +278,6 @@ export function useCandidateSearchController({
     void runSearch(appliedFilterRef.current);
   }, [runSearch]);
 
-  const searchKeywords = useCallback(
-    (keywords: string[]) => {
-      const next = { ...filterDraftRef.current, keywords };
-      cancelScheduledFilterSearch();
-      replaceFilterDraft(next);
-      void runSearch(next);
-    },
-    [cancelScheduledFilterSearch, replaceFilterDraft, runSearch],
-  );
-
   return {
     appliedFilter,
     applySavedFilter,
@@ -303,7 +293,6 @@ export function useCandidateSearchController({
     scoreTemplateId,
     scoreTemplates,
     search,
-    searchKeywords,
     searching,
     saveCurrentFilter,
     updateFilterDraft,

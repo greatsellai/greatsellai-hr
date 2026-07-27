@@ -2,7 +2,6 @@ import {
   useEffect,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { Icon, type IconName } from "../../icons";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
@@ -128,9 +127,6 @@ export function SideRail({
 }
 
 export function Topbar({
-  globalQuery,
-  onGlobalQueryChange,
-  onGlobalSearchKeyDown,
   onOpenAgent,
   canManageSettings,
   onAccountMenuOpen,
@@ -146,9 +142,6 @@ export function Topbar({
   userDisplayName,
   userEmail,
 }: {
-  globalQuery: string;
-  onGlobalQueryChange: (value: string) => void;
-  onGlobalSearchKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => void;
   onOpenAgent: () => void;
   canManageSettings: boolean;
   onAccountMenuOpen: () => void;
@@ -190,16 +183,6 @@ export function Topbar({
           </p>
         )}
       </div>
-      <label className="topbar-search">
-        <Icon name="search" size={17} />
-        <span className="sr-only">全局检索简历关键词</span>
-        <input
-          onChange={(event) => onGlobalQueryChange(event.target.value)}
-          onKeyDown={onGlobalSearchKeyDown}
-          placeholder="输入技能或关键词，按 Enter 筛选"
-          value={globalQuery}
-        />
-      </label>
       <div className="topbar-actions">
         {trialLabel && <span className={`topbar-trial${trial?.plan_status === "expired" ? " is-expired" : ""}`}>{trialLabel}</span>}
         <BackofficeButton

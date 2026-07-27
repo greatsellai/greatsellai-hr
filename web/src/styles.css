@@ -1972,8 +1972,7 @@ button {
     flex: 1 1 auto;
   }
 
-  .topbar-title span,
-  .topbar-search {
+  .topbar-title span {
     display: none;
   }
 

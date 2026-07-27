@@ -502,6 +502,116 @@ test.describe("招聘工作台关键路径", () => {
     }
   });
 
+  test("筛选结果完整显示评分可信度的三档状态", async ({ page }) => {
+    await page.route("**/v1/candidates/search", async (route) => {
+      await route.fulfill({
+        json: {
+          items: [
+            {
+              candidate_id: "e2e-confidence-grounded-candidate",
+              display_name: "E2E 高可信度候选人",
+              resume_id: "e2e-confidence-grounded-resume",
+              original_filename: "e2e-confidence-grounded.pdf",
+              is_985_211: false,
+              institution_classifications: [],
+              highest_degree: "bachelor",
+              employment_months: 24,
+              employment_or_internship_months: 24,
+              education_school: "E2E 大学",
+              education_major: "软件工程",
+              latest_experience_title: "后端工程师",
+              latest_experience_organization: "E2E 公司",
+              latest_experience_type: "employment",
+              skill_highlights: ["Python"],
+              summary_preview: null,
+              score_id: "e2e-confidence-grounded-score",
+              score_template_id: null,
+              score_total: 88,
+              score_status: "succeeded",
+              score_template_name: null,
+              score_confidence: 80,
+              display_fields: [],
+              matched_filters: [],
+              matched_evidence: [],
+            },
+            {
+              candidate_id: "e2e-confidence-partial-candidate",
+              display_name: "E2E 部分可信度候选人",
+              resume_id: "e2e-confidence-partial-resume",
+              original_filename: "e2e-confidence-partial.pdf",
+              is_985_211: false,
+              institution_classifications: [],
+              highest_degree: "bachelor",
+              employment_months: 12,
+              employment_or_internship_months: 12,
+              education_school: "E2E 大学",
+              education_major: "计算机科学",
+              latest_experience_title: "开发工程师",
+              latest_experience_organization: "E2E 公司",
+              latest_experience_type: "employment",
+              skill_highlights: ["TypeScript"],
+              summary_preview: null,
+              score_id: "e2e-confidence-partial-score",
+              score_template_id: null,
+              score_total: 72,
+              score_status: "succeeded",
+              score_template_name: null,
+              score_confidence: 79,
+              display_fields: [],
+              matched_filters: [],
+              matched_evidence: [],
+            },
+            {
+              candidate_id: "e2e-confidence-unknown-candidate",
+              display_name: "E2E 待核实候选人",
+              resume_id: "e2e-confidence-unknown-resume",
+              original_filename: "e2e-confidence-unknown.pdf",
+              is_985_211: false,
+              institution_classifications: [],
+              highest_degree: "bachelor",
+              employment_months: 6,
+              employment_or_internship_months: 6,
+              education_school: "E2E 大学",
+              education_major: "信息管理",
+              latest_experience_title: "实习生",
+              latest_experience_organization: "E2E 公司",
+              latest_experience_type: "internship",
+              skill_highlights: ["SQL"],
+              summary_preview: null,
+              score_id: "e2e-confidence-unknown-score",
+              score_template_id: null,
+              score_total: 64,
+              score_status: "succeeded",
+              score_template_name: null,
+              score_confidence: null,
+              display_fields: [],
+              matched_filters: [],
+              matched_evidence: [],
+            },
+          ],
+          next_cursor: null,
+          needs_review_count: 1,
+          total_count: 3,
+        },
+      });
+    });
+
+    await registerAndVerify(page, "score-confidence");
+    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+
+    const grounded = page.locator("tr", { hasText: "E2E 高可信度候选人" });
+    await expect(grounded.locator(".score-confidence")).toHaveText("可信度 80%");
+    await expect(grounded.locator(".score-confidence")).toHaveClass(/is-grounded/);
+
+    const partial = page.locator("tr", { hasText: "E2E 部分可信度候选人" });
+    await expect(partial.locator(".score-confidence")).toHaveText("可信度 79%");
+    await expect(partial.locator(".score-confidence")).toHaveClass(/is-partial/);
+
+    const unknown = page.locator("tr", { hasText: "E2E 待核实候选人" });
+    await expect(unknown.locator(".score-confidence")).toHaveText("待核实");
+    await expect(unknown.locator(".score-confidence")).toHaveClass(/is-unknown/);
+  });
+
   test("联系方式只在受保护的简历详情中展示并可复制", async ({ page, context }) => {
     await registerAndVerify(page, "contact-details");
     await seedWorkspaceFixture(page);

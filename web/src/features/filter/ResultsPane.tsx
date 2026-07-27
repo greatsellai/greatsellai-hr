@@ -197,7 +197,7 @@ function scoreConfidencePresentation(value: number | null): {
     return { label: "待核实", tone: "unknown" };
   }
   if (value >= 80) {
-    return null;
+    return { label: `可信度 ${value.toFixed(0)}%`, tone: "grounded" };
   }
   if (value >= 50) {
     return { label: `可信度 ${value.toFixed(0)}%`, tone: "partial" };

@@ -29,7 +29,7 @@ revision label 标记。**Production release** 在同一受信任 Runner 上校�
 - **Continuous integration**：在向 `main` 提交 PR、合并到 `main` 或手动触发时运行。
   PR/手动运行执行 Python 3.12 全量测试、PostgreSQL 邮箱附件去重并发回归、Node 22.12
   前端生产构建、生产镜像构建与完整运行时回归；`main` 运行则只做已绿 PR 溯源、精确镜像
-  构建、Compose 校验和轻量镜像 smoke test。
+  构建、Compose 校验和该精确镜像的完整运行时回归。
 - **Production release**：监听 `main` 上一次成功的 CI `push` 运行。它只接受本仓库
   的 `main` 提交，先用该提交的 Compose 文件和服务器既有 `.env.production` 做只读预检，
   再次确认 `main` 未前进后，创建不可变的 `prod-YYYYMMDD-<commit>` 标签并在同一次工作流中
@@ -126,8 +126,8 @@ revision label 标记。**Production release** 在同一受信任 Runner 上校�
 
 为避免同一变更在 PR 与 `main` 上重复执行耗时的完整回归，自动化按提交阶段分层：
 
-- **PR CI** 是唯一的完整质量门：后端全量 pytest、PostgreSQL 邮箱并发回归、前端构建和 Playwright 关键路径、完整生产镜像运行时回归都在 PR 上执行。
-- **main CI** 不重复执行 pytest、PostgreSQL 或 Playwright。它先校验当前 `main` 提交确实来自一个已完成全部 PR 检查的合并请求，并校验两者的 Git tree 一致；随后只为该精确 SHA 构建 API/Caddy 镜像、校验 Compose，并运行文档提取的镜像内 smoke test。
+- **PR CI** 是完整的源代码质量门：后端全量 pytest、PostgreSQL 邮箱并发回归、前端构建和 Playwright 关键路径、完整生产镜像运行时回归都在 PR 上执行。
+- **main CI** 不重复执行 pytest、PostgreSQL 邮箱并发回归或 Playwright。它先校验当前 `main` 提交确实来自一个已完成全部 PR 检查的合并请求，并校验两者的 Git tree 一致；随后只为该精确 SHA 构建 API/Caddy 镜像、校验 Compose，并对这个将被部署的 API 镜像执行完整 `--all` 运行时回归（包含文档提取及 PostgreSQL 迁移、备份/恢复和 lease recovery）。
 - **Production release** 仍只监听成功的 `main` CI。主分支直接推送、缺少全绿 PR、PR 与合并结果代码树不一致，或对应 PR 的文本完整性工作流失败时，镜像构建会在发布前失败，不能触发部署。
 
 `Text encoding integrity` 只在 PR（及手动运行）中执行，避免 `main` 发布预检重复占用 Runner；其成功结果由 `scripts/verify_main_release_provenance.py` 在 `main` 发布预检中校验。

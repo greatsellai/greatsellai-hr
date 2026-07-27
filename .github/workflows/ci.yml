@@ -209,18 +209,12 @@ jobs:
           docker compose --env-file .env.production.example config --quiet
           python scripts/verify_production_compose.py
       - name: Run Docker release runtime regression
-        shell: bash
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
-            # The full PR gate already exercises document extraction and
-            # PostgreSQL recovery.  Keep a fast in-image smoke test here for
-            # the exact commit whose images will be deployed.
-            python scripts/run_release_regression.py --documents \
-              --image "greatsellai-hr-api:${{ github.sha }}"
-          else
-            python scripts/run_release_regression.py --all \
-              --image "greatsellai-hr-api:${{ github.sha }}"
-          fi
+        # The main image is rebuilt after PR validation.  Exercise the full
+        # release harness against this exact deployable artifact rather than
+        # assuming a previous PR image had identical base layers.
+        run: >-
+          python scripts/run_release_regression.py --all
+          --image "greatsellai-hr-api:${{ github.sha }}"
       - name: Remove temporary release regression resources
         if: always()
         run: |

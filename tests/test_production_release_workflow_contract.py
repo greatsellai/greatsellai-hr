@@ -121,7 +121,8 @@ def test_main_release_uses_verified_pull_request_provenance_instead_of_repeating
     assert "actions: read" in ci
     assert "checks: read" in ci
     assert "pull-requests: read" in ci
-    assert "--documents" in ci
+    assert ci.count("python scripts/run_release_regression.py --all") == 1
+    assert "--documents" not in ci
     assert 'python scripts/check_text_encoding.py --github-event "$GITHUB_EVENT_PATH"' in text_encoding
     assert "  push:" not in text_encoding
 

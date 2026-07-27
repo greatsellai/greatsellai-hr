@@ -265,7 +265,8 @@ def test_contact_values_cannot_be_used_as_candidate_search_keywords(client) -> N
     _, resume_id = _save_ready_resume(
         client,
         source_text=(
-            "Candidate private-contact@example.test, phone 138 0000 0000. "
+            "Email: private-contact@example.test, Phone: 138 0000 0000, "
+            "Mobile: +1 415 555 2671, Tel: 0086 138-0013-8000. "
             "教育经历 清华大学 计算机 本科。工作经历 Acme Python Engineer。"
             "Skills Python SQL Kubernetes."
         ),
@@ -274,7 +275,11 @@ def test_contact_values_cannot_be_used_as_candidate_search_keywords(client) -> N
     for payload in (
         {"keywords_all_of": ["private-contact@example.test"]},
         {"keywords": ["13800000000"], "keyword_match_mode": "precise"},
-        {"keywords_any_of": ["010-12345678", "private-contact@example.test"]},
+        {"keywords_any_of": ["+1 415 555 2671", "private-contact@example.test"]},
+        {"keywords_all_of": ["008613800138000"]},
+        # Labels and former placeholders must not become a side channel for
+        # contact-data searches either.
+        {"keywords_any_of": ["email", "phone", "tel", "mobile", "redacted"]},
     ):
         response = client.post("/v1/candidates/search", json=payload)
         assert response.status_code == 200, response.text

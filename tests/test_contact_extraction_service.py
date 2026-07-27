@@ -5,6 +5,7 @@ from app.services.contact_extraction_service import (
     extract_resume_contacts,
     redact_contact_values,
 )
+from app.services.normalization import normalized_key
 
 
 def test_extracts_and_deduplicates_header_and_labeled_resume_contacts() -> None:
@@ -63,6 +64,33 @@ def test_later_page_requires_an_explicit_contact_label() -> None:
     ]
 
 
+def test_extracts_international_and_0086_phone_formats() -> None:
+    contacts = extract_resume_contacts(
+        [
+            ContactSourceBlock(
+                block_id="page-001",
+                page_no=1,
+                text=(
+                    "Candidate\n"
+                    "Phone: +1 415 555 2671 | Mobile: 0086 138-0013-8000\n"
+                    "Python / FastAPI"
+                ),
+            ),
+            ContactSourceBlock(
+                block_id="page-002",
+                page_no=2,
+                text="Tel: +44 (20) 7946-0958",
+            ),
+        ]
+    )
+
+    assert [(item.kind, item.value, item.evidence_block_ids) for item in contacts] == [
+        ("phone", "+14155552671", ("page-001",)),
+        ("phone", "13800138000", ("page-001",)),
+        ("phone", "+442079460958", ("page-002",)),
+    ]
+
+
 def test_ignores_malformed_or_non_phone_values() -> None:
     contacts = extract_resume_contacts(
         [
@@ -84,11 +112,19 @@ def test_ignores_malformed_or_non_phone_values() -> None:
 
 def test_redacts_contact_values_from_all_source_text_for_non_contact_consumers() -> None:
     redacted = redact_contact_values(
-        "Phone 138 0000 0000, Tel 010-12345678, Email Candidate@Example.Test"
+        "Phone: 138 0000 0000, Tel: 010-12345678, "
+        "Email: Candidate@Example.Test, Mobile: +1 415 555 2671, "
+        "Callback: 0086 138-0013-8000, Skills: Python"
     )
 
     assert "138 0000 0000" not in redacted
     assert "010-12345678" not in redacted
     assert "Candidate@Example.Test" not in redacted
-    assert redacted.count("[REDACTED_PHONE]") == 2
-    assert "[REDACTED_EMAIL]" in redacted
+    assert "+1 415 555 2671" not in redacted
+    assert "0086 138-0013-8000" not in redacted
+    assert "Python" in redacted
+    normalized = normalized_key(redacted)
+    assert all(
+        normalized_key(keyword) not in normalized
+        for keyword in ("email", "phone", "tel", "mobile", "redacted")
+    )

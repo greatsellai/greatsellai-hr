@@ -599,6 +599,30 @@ def test_agent_language_search_can_use_clear_source_text_without_relaxing_public
     assert language_match.evidence_block_ids == ["page-001"]
 
 
+def test_agent_source_language_fallback_ignores_contact_values(client) -> None:
+    """A contact address must not manufacture an Agent-only language match."""
+
+    _save_source_only_cet4_resume(
+        client,
+        source_text=(
+            "Email: cet4-candidate@example.test。教育经历 北京大学 本科。"
+            "技能：Python。"
+        ),
+    )
+    database = client.app.state.database
+    with database.session_factory() as session:
+        result = search_candidates(
+            session,
+            CandidateSearchRequest(
+                language_credentials_any_of=[{"credential_code": "cet4"}],
+            ),
+            include_source_language_evidence=True,
+        )
+
+    assert result.total_count == 0
+    assert result.items == []
+
+
 def test_agent_language_source_fallback_rejects_professional_level_and_negative_mentions(
     client,
 ) -> None:

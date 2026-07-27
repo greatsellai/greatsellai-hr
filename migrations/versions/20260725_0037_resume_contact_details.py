@@ -11,7 +11,7 @@ AI provider and never writes contacts into a fact snapshot.
 from __future__ import annotations
 
 import re
-from typing import Sequence, Union
+from typing import Iterable, Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
@@ -34,11 +34,17 @@ _EMAIL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _MOBILE_PHONE_PATTERN = re.compile(
-    r"(?<!\d)(?:\+?\s*86[\s-]*)?1[3-9](?:[\s-]?\d){9}(?!\d)"
+    r"(?<![0-9])(?P<phone>(?:\+?[ \t]*86[ \t.-]*)?1[3-9](?:[ \t.-]?[0-9]){9})(?![0-9])"
 )
 _LANDLINE_PHONE_PATTERN = re.compile(
-    r"(?<!\d)(?:\+?\s*86[\s-]*)?0\d{2,3}(?:[\s-]?\d){7,8}(?!\d)"
+    r"(?<![0-9])(?P<phone>(?:\+?[ \t]*86[ \t.-]*)?0[0-9]{2,3}(?:[ \t.-]?[0-9]){7,8})(?![0-9])"
 )
+_INTERNATIONAL_PHONE_START_PATTERN = re.compile(r"(?<![0-9+])(?:\+|00)")
+_PHONE_PATTERNS = (
+    _MOBILE_PHONE_PATTERN,
+    _LANDLINE_PHONE_PATTERN,
+)
+_INTERNATIONAL_PHONE_SEPARATOR_CHARS = frozenset(" \t().-")
 _EXPLICIT_CONTACT_LINE_PATTERN = re.compile(
     r"(?im)^\s*(?:"
     r"联系方式|联系(?:电话|邮箱)|电子?邮箱|邮箱|邮件|"
@@ -50,16 +56,85 @@ _HEADER_TEXT_LIMIT = 2_000
 
 
 def _normalize_phone(value: str) -> str | None:
-    digits = re.sub(r"\D", "", value)
-    if digits.startswith("0086"):
-        digits = digits[4:]
-    elif digits.startswith("86"):
-        digits = digits[2:]
-    if re.fullmatch(r"1[3-9]\d{9}", digits):
+    stripped = value.strip()
+    digits = re.sub(r"\D", "", stripped)
+    is_international = stripped.startswith("+") or digits.startswith("00")
+    if is_international:
+        international_digits = digits[2:] if digits.startswith("00") else digits
+        if not re.fullmatch(r"[1-9][0-9]{7,14}", international_digits):
+            return None
+        if international_digits.startswith("86"):
+            china_local = international_digits[2:]
+            if re.fullmatch(r"1[3-9][0-9]{9}", china_local):
+                return china_local
+            if re.fullmatch(r"0[0-9]{9,11}", china_local):
+                return china_local
+        return f"+{international_digits}"
+    if re.fullmatch(r"1[3-9][0-9]{9}", digits):
         return digits
-    if re.fullmatch(r"0\d{9,11}", digits):
+    if re.fullmatch(r"0[0-9]{9,11}", digits):
         return digits
     return None
+
+
+def _contact_value_matches(text: str) -> list[tuple[str, str, int, int]]:
+    candidates: list[tuple[str, str, int, int]] = []
+    for match in _EMAIL_PATTERN.finditer(text):
+        normalized = match.group("email").strip().casefold()
+        if normalized and len(normalized) <= 254:
+            candidates.append(("email", normalized, match.start(), match.end()))
+    for raw, start, end in _international_phone_matches(text):
+        normalized = _normalize_phone(raw)
+        if normalized is not None:
+            candidates.append(("phone", normalized, start, end))
+    for pattern in _PHONE_PATTERNS:
+        for match in pattern.finditer(text):
+            normalized = _normalize_phone(match.group("phone"))
+            if normalized is not None:
+                candidates.append(("phone", normalized, match.start(), match.end()))
+
+    ordered = sorted(candidates, key=lambda item: (item[2], -(item[3] - item[2]), item[0]))
+    selected: list[tuple[str, str, int, int]] = []
+    for candidate in ordered:
+        _, _, start, end = candidate
+        if any(start < chosen_end and end > chosen_start for _, _, chosen_start, chosen_end in selected):
+            continue
+        selected.append(candidate)
+    return selected
+
+
+def _international_phone_matches(text: str) -> Iterable[tuple[str, int, int]]:
+    for match in _INTERNATIONAL_PHONE_START_PATTERN.finditer(text):
+        start = match.start()
+        index = match.end()
+        digit_count = 0
+        last_digit_end: int | None = None
+        while index < len(text):
+            character = text[index]
+            if "0" <= character <= "9":
+                if digit_count >= 15:
+                    break
+                digit_count += 1
+                last_digit_end = index + 1
+                index += 1
+                continue
+            if character not in _INTERNATIONAL_PHONE_SEPARATOR_CHARS:
+                break
+            if character in " \t":
+                next_index = index
+                while (
+                    next_index < len(text)
+                    and text[next_index] in " \t"
+                ):
+                    next_index += 1
+                if (
+                    text.startswith("+", next_index)
+                    or text.startswith("00", next_index)
+                ):
+                    break
+            index += 1
+        if last_digit_end is not None:
+            yield text[start:last_digit_end], start, last_digit_end
 
 
 def _contact_storage_values(
@@ -85,15 +160,8 @@ def _contact_storage_values(
             if _EXPLICIT_CONTACT_LINE_PATTERN.search(line)
         )
         for segment in segments:
-            for pattern in (_MOBILE_PHONE_PATTERN, _LANDLINE_PHONE_PATTERN):
-                for match in pattern.finditer(segment):
-                    normalized = _normalize_phone(match.group(0))
-                    if normalized is not None:
-                        add("phone", normalized, block_id)
-            for match in _EMAIL_PATTERN.finditer(segment):
-                normalized = match.group("email").strip().casefold()
-                if normalized and len(normalized) <= 254:
-                    add("email", normalized, block_id)
+            for kind, value, _, _ in _contact_value_matches(segment):
+                add(kind, value, block_id)
 
     return [
         {
@@ -148,10 +216,15 @@ def upgrade() -> None:
         resume_id: str,
         blocks: Sequence[tuple[str, int, str]],
     ) -> None:
+        contacts = _contact_storage_values(blocks)
+        # New columns default to ``[]``. Avoid one write lock per unrelated
+        # historical resume during this online data backfill.
+        if not contacts:
+            return
         bind.execute(
             resumes.update()
             .where(resumes.c.id == resume_id)
-            .values(contact_details=_contact_storage_values(blocks))
+            .values(contact_details=contacts)
         )
 
     for resume_id, block_id, page_no, text in rows:

@@ -23,6 +23,7 @@ from app.schemas import (
     TalentSearchProfileRequirement,
 )
 from app.services.institution_service import build_985_211_ai_rulebook
+from app.services.contact_extraction_service import redact_contact_values
 from app.services.normalization import normalized_contains, normalized_key
 from app.services.ai_gateway_service import AiGatewayError, active_legacy_payload_executor
 from app.services.trial_quota_service import TRIAL_LLM_CALL_QUOTA_EXHAUSTED_CODE
@@ -32,16 +33,6 @@ API_URL = "https://api.deepseek.com/beta/chat/completions"
 _LEGACY_DIRECT_TRANSPORT_ENABLED: ContextVar[bool] = ContextVar(
     "greatsell_legacy_direct_ai_transport_enabled",
     default=False,
-)
-EMAIL_PATTERN = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-# Keep the model boundary at least as strict as local contact extraction.
-# This catches regular Chinese mobile and landline layouts even without a
-# contact label, including separated digits from copy/paste or OCR output.
-PHONE_PATTERN = re.compile(
-    r"(?<!\d)(?:"
-    r"(?:\+?\s*86[\s-]*)?1[3-9](?:[\s-]?\d){9}"
-    r"|(?:\+?\s*86[\s-]*)?0\d{2,3}(?:[\s-]?\d){7,8}"
-    r")(?!\d)"
 )
 _ENGLISH_SCORE_PROSE_WORD = re.compile(
     r"(?i)\b(?:a|an|the|is|are|was|were|be|been|has|have|had|with|and|or|of|to|"
@@ -682,15 +673,20 @@ def redact_nonessential_personal_data(
             retained = _retained_candidate_name_line(match.group(0))
             if retained is not None:
                 return retained
-        return "[REDACTED_PERSONAL_LINE]"
+        # Removing the whole explicitly personal line is stronger than a
+        # semantic placeholder: model input cannot infer or repeat what kind
+        # of personal field was present.
+        return ""
 
     redacted = LABELED_PERSONAL_LINE.sub(replace_labeled_personal_line, text)
     redacted = _LABELED_ENGLISH_PERSONAL_LINE.sub(
         replace_labeled_personal_line,
         redacted,
     )
-    redacted = EMAIL_PATTERN.sub("[REDACTED_EMAIL]", redacted)
-    return PHONE_PATTERN.sub("[REDACTED_PHONE]", redacted)
+    # Keep every model route aligned with the local screening/Agent boundary.
+    # In particular, this covers international formats such as ``+1 ...`` and
+    # ``0086 ...`` that are not necessarily written on a labeled line.
+    return redact_contact_values(redacted)
 
 
 def _evidence_schema() -> dict[str, Any]:

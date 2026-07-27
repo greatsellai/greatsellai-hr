@@ -60,7 +60,8 @@ def test_model_evidence_rendering_never_includes_local_contact_values() -> None:
                 block_type="page_text",
                 text=(
                     "Name: AI Candidate\n138 0000 0000\n010-12345678\n"
-                    "Email: person@example.com\nSkills: Python"
+                    "Email: person@example.com\n+1 415 555 2671\n"
+                    "0086 138-0013-8000\nSkills: Python"
                 ),
             )
         ],
@@ -71,6 +72,9 @@ def test_model_evidence_rendering_never_includes_local_contact_values() -> None:
     assert "138 0000 0000" not in rendered
     assert "010-12345678" not in rendered
     assert "person@example.com" not in rendered
+    assert "+1 415 555 2671" not in rendered
+    assert "0086 138-0013-8000" not in rendered
+    assert "REDACTED" not in rendered
     assert "Python" in rendered
 
 

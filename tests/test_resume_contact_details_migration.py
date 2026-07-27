@@ -73,7 +73,10 @@ def test_contact_details_migration_backfills_existing_source_blocks(tmp_path) ->
                     "block_id": "page-001",
                     "page_no": 1,
                     "block_type": "page_text",
-                    "text": "Candidate 138 0000 0000 candidate@example.test",
+                    "text": (
+                        "Candidate 138 0000 0000 candidate@example.test "
+                        "+1 415 555 2671 0086 139-0013-8000"
+                    ),
                 },
             )
 
@@ -98,6 +101,16 @@ def test_contact_details_migration_backfills_existing_source_blocks(tmp_path) ->
             {
                 "kind": "email",
                 "value": "candidate@example.test",
+                "evidence_block_ids": ["page-001"],
+            },
+            {
+                "kind": "phone",
+                "value": "+14155552671",
+                "evidence_block_ids": ["page-001"],
+            },
+            {
+                "kind": "phone",
+                "value": "13900138000",
                 "evidence_block_ids": ["page-001"],
             },
         ]

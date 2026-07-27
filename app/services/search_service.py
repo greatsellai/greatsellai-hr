@@ -540,7 +540,7 @@ def _source_language_evidence_block_ids(
     return sorted(
         block.block_id
         for block in resume.source_blocks
-        if _source_mentions_language_alias(block.text, aliases)
+        if _source_mentions_language_alias(redact_contact_values(block.text), aliases)
     )
 
 
@@ -561,7 +561,7 @@ def _credential_has_negative_source_context(
     if not evidence_block_ids or not aliases:
         return False
     return any(
-        _source_has_negative_language_alias(block.text, aliases)
+        _source_has_negative_language_alias(redact_contact_values(block.text), aliases)
         for block in resume.source_blocks
         if block.block_id in evidence_block_ids
     )

@@ -13,6 +13,18 @@
   --semi-color-bg-0: var(--surface);
   --semi-color-bg-1: var(--paper);
   --semi-color-bg-2: var(--surface-muted);
+  /*
+   * Semi Select and Popover render their menus through a portal.  Keep the
+   * popup-surface tokens in the workspace theme too, otherwise the missing
+   * CSS variables make dropdown menus transparent.
+   */
+  --semi-color-bg-3: var(--surface);
+  --semi-color-bg-4: var(--surface);
+  --semi-color-fill-0: var(--surface-muted);
+  --semi-color-fill-1: #ebe9e7;
+  --semi-color-fill-2: #dedad7;
+  --semi-color-disabled-text: var(--ink-muted);
+  --semi-shadow-elevated: var(--shadow-md);
   --semi-color-border: var(--line);
   --semi-color-border-tertiary: var(--line);
   --semi-border-radius-small: var(--radius-sm);

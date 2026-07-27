@@ -50,17 +50,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-.backoffice-ui-root .library-queue-total {
-  color: var(--workspace-text);
-  font-weight: 700;
-}
-
 .backoffice-ui-root .library-queue-item {
   white-space: nowrap;
-}
-
-.backoffice-ui-root .library-queue-item.is-ready strong {
-  color: #197043;
 }
 
 .backoffice-ui-root .library-queue-item.is-progress strong {
@@ -97,11 +88,10 @@
   table-layout: fixed;
 }
 
-.backoffice-ui-root .resume-library-page .library-table th:nth-child(1) { width: 19%; }
-.backoffice-ui-root .resume-library-page .library-table th:nth-child(2) { width: 38%; }
+.backoffice-ui-root .resume-library-page .library-table th:nth-child(1) { width: 22%; }
+.backoffice-ui-root .resume-library-page .library-table th:nth-child(2) { width: 45%; }
 .backoffice-ui-root .resume-library-page .library-table th:nth-child(3) { width: 15%; }
-.backoffice-ui-root .resume-library-page .library-table th:nth-child(4) { width: 11%; }
-.backoffice-ui-root .resume-library-page .library-table th:nth-child(5) { width: 11%; }
+.backoffice-ui-root .resume-library-page .library-table th:nth-child(4) { width: 12%; }
 .backoffice-ui-root .resume-library-page .library-table th:last-child,
 .backoffice-ui-root .resume-library-page .library-table td:last-child {
   width: 6%;
@@ -165,14 +155,6 @@
   border-color: #fecdca;
 }
 
-.backoffice-ui-root .resume-library-page .library-status-cell small {
-  display: block;
-  margin-top: 0.3125rem;
-  color: var(--workspace-text-muted);
-  font-size: 0.6875rem;
-  line-height: 1.3;
-}
-
 .backoffice-ui-root .resume-library-page .library-open-cell {
   color: var(--workspace-text-muted);
   vertical-align: middle;
@@ -180,9 +162,11 @@
 
 .backoffice-ui-root .resume-library-page .library-open-affordance {
   display: inline-flex;
-  gap: 0.125rem;
+  width: 2rem;
+  height: 2rem;
   align-items: center;
-  padding: 0;
+  justify-content: center;
+  padding: 0.25rem;
   font: inherit;
   color: inherit;
   font-size: 0.75rem;

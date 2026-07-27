@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
 import { BackofficeSelect } from "../../backoffice/ui/BackofficeSelect";
 import { TableSkeleton } from "../../backoffice/ui/TableSkeleton";
@@ -190,33 +189,18 @@ function ResultDisplayValues({
   );
 }
 
-function ResultColumnHeader({
-  children,
-  active = false,
-}: {
-  children: ReactNode;
-  active?: boolean;
-}) {
-  return (
-    <span className="result-column-heading">
-      {children}
-      {active && <span className="result-filter-indicator">已筛</span>}
-    </span>
-  );
-}
-
 function scoreConfidencePresentation(value: number | null): {
   label: string;
   tone: "grounded" | "partial" | "unknown";
-} {
+} | null {
   if (value === null) {
-    return { label: "依据待核实", tone: "unknown" };
+    return { label: "待核实", tone: "unknown" };
   }
   if (value >= 80) {
-    return { label: `可信度高 · ${value.toFixed(0)}%`, tone: "grounded" };
+    return null;
   }
   if (value >= 50) {
-    return { label: `可信度中 · ${value.toFixed(0)}%`, tone: "partial" };
+    return { label: `可信度 ${value.toFixed(0)}%`, tone: "partial" };
   }
   return { label: `待核实 · ${value.toFixed(0)}%`, tone: "unknown" };
 }
@@ -235,7 +219,7 @@ function CandidateEducationCell({ item }: { item: CandidateSearchItem }) {
       item.education_major ||
       item.institution_classifications.length,
   );
-  if (!hasEducation) return <span className="candidate-meta">未识别</span>;
+  if (!hasEducation) return <span className="candidate-meta">待核实</span>;
   return (
     <div className="candidate-profile-cell candidate-education-cell">
       <div className="candidate-profile-primary">
@@ -243,7 +227,7 @@ function CandidateEducationCell({ item }: { item: CandidateSearchItem }) {
           <span className="degree-label">{degreeLabels[item.highest_degree]}</span>
         )}
         <span className="candidate-profile-title">
-          {item.education_school || "学校信息待补充"}
+          {item.education_school || "学校待核实"}
         </span>
       </div>
       {item.education_major && (
@@ -269,6 +253,9 @@ function CandidateExperienceCell({ item }: { item: CandidateSearchItem }) {
   const hasVerifiedEmployment = item.employment_months > 0;
   const hasAdditionalInternshipTenure =
     item.employment_or_internship_months > item.employment_months;
+  if (!hasVerifiedEmployment && !role) {
+    return <span className="candidate-meta">待核实</span>;
+  }
   return (
     <div className="candidate-profile-cell">
       <div className="candidate-profile-primary">
@@ -283,7 +270,7 @@ function CandidateExperienceCell({ item }: { item: CandidateSearchItem }) {
         >
           {hasVerifiedEmployment
             ? `${formatDuration(item.employment_months)} 正式工作`
-            : "正式工作年限待核实"}
+            : "工作年限待核实"}
         </span>
       </div>
       {hasAdditionalInternshipTenure && (
@@ -296,16 +283,14 @@ function CandidateExperienceCell({ item }: { item: CandidateSearchItem }) {
           {experienceType ? `${experienceType} · ` : ""}
           {role}
         </span>
-      ) : (
-        <span className="candidate-meta">最近岗位信息待补充</span>
-      )}
+      ) : null}
     </div>
   );
 }
 
 function CandidateSkillHighlights({ item }: { item: CandidateSearchItem }) {
   const skills = item.skill_highlights ?? [];
-  if (!skills.length) return <span className="candidate-meta">未识别</span>;
+  if (!skills.length) return <span className="candidate-meta">—</span>;
   return (
     <div
       aria-label={`核心技能：${skills.join("；")}`}
@@ -415,13 +400,6 @@ export function ResultsPane({
 }) {
   const displayColumns = activeResultDisplayColumns(appliedDraft);
   const hasAppliedDisplayColumns = displayColumns.length > 0;
-  const selectedScoreTemplate = scoreTemplates.find(
-    (template) => template.template_id === scoreTemplateId,
-  );
-  const scoreOrderLabel = selectedScoreTemplate
-    ? `按“${selectedScoreTemplate.name} · v${selectedScoreTemplate.version}”综合评分排序`
-    : "未选择统一评分模板，按最近更新排序";
-
   const appliedFilters = appliedFilterLabels(appliedDraft);
   const visibleAppliedFilters = appliedFilters.slice(0, 4);
   const hiddenAppliedFilterCount =
@@ -431,19 +409,12 @@ export function ResultsPane({
     <section className="results-pane" aria-label="候选人结果">
       <header className="results-header">
         <div className="results-summary">
-          <h1>候选人结果</h1>
-          <p>
-            {search.items.length
-              ? `当前已加载 ${search.items.length} 位候选人，${scoreOrderLabel}`
-              : "仅显示已完成 AI 提取并启用的简历"}
-          </p>
+          <h1>候选人</h1>
         </div>
         <div className="results-toolbar">
           <div className="score-sort-control">
-            <span id="score-sort-label">评分口径</span>
             <BackofficeSelect
-              ariaLabel="综合评分排序规则"
-              ariaLabelledBy="score-sort-label"
+              ariaLabel="评分口径"
               className="score-sort-select"
               onChange={(templateId) => onScoreTemplateChange(templateId || null)}
               options={[
@@ -471,7 +442,6 @@ export function ResultsPane({
       </header>
       {appliedFilters.length > 0 && (
         <div className="applied-filter-bar" aria-label="已应用的筛选条件">
-          <span className="applied-filter-label">已应用条件</span>
           <div className="applied-filter-list">
             {visibleAppliedFilters.map((label) => (
               <span className="applied-filter-chip" key={label} title={label}>
@@ -519,7 +489,7 @@ export function ResultsPane({
                 <th scope="col">核心技能</th>
                 {displayColumns.map((column) => (
                   <th className="result-display-column" key={column.key} scope="col">
-                    <ResultColumnHeader active>{column.label}</ResultColumnHeader>
+                    {column.label}
                   </th>
                 ))}
                 <th scope="col">综合评分</th>
@@ -527,85 +497,90 @@ export function ResultsPane({
               </tr>
             </thead>
             <tbody>
-              {search.items.map((item) => (
-                <tr
-                  className={
-                    selectedResumeId === item.resume_id ? "is-selected" : ""
-                  }
-                  key={item.resume_id}
-                  onClick={() => onOpenCandidate(item)}
-                >
-                  <td className="candidate-result-cell">
-                    <div className="candidate-person">
-                      <span className="candidate-name">
-                        {item.display_name?.trim() || "未命名候选人"}
-                      </span>
-                    </div>
-                  </td>
-                  <td>
-                    <CandidateEducationCell item={item} />
-                  </td>
-                  <td>
-                    <CandidateExperienceCell item={item} />
-                  </td>
-                  <td><CandidateSkillHighlights item={item} /></td>
-                  {displayColumns.map((column) => (
-                    <td className="result-display-cell" key={column.key}>
-                      <ResultDisplayValues
-                        fieldKey={column.key}
-                        item={item}
-                        label={column.label}
-                      />
-                    </td>
-                  ))}
-                  <td className="candidate-score-cell">
-                    {item.score_total !== null ? (
-                      <div className="candidate-score-summary">
-                        <button
-                          aria-label={`查看 ${item.display_name ?? "候选人"} 的评分详情`}
-                          className="library-score candidate-score-link"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onOpenCandidate(item, "score");
-                          }}
-                          type="button"
-                        >
-                          <strong>{item.score_total.toFixed(1)}</strong>
-                          <span>/ 100</span>
-                          {item.score_template_name && (
-                            <small>{item.score_template_name}</small>
-                          )}
-                        </button>
-                        <span
-                          className={`score-confidence is-${scoreConfidencePresentation(item.score_confidence).tone}`}
-                        >
-                          {scoreConfidencePresentation(item.score_confidence).label}
+              {search.items.map((item) => {
+                const scoreConfidence = scoreConfidencePresentation(
+                  item.score_confidence,
+                );
+                const scoreStatus = scoreStatusLabel(item.score_status);
+                return (
+                  <tr
+                    className={
+                      selectedResumeId === item.resume_id ? "is-selected" : ""
+                    }
+                    key={item.resume_id}
+                    onClick={() => onOpenCandidate(item)}
+                  >
+                    <td className="candidate-result-cell">
+                      <div className="candidate-person">
+                        <span className="candidate-name">
+                          {item.display_name?.trim() || "未命名候选人"}
                         </span>
-                        {scoreStatusLabel(item.score_status) && (
-                          <span className="candidate-score-status">
-                            {scoreStatusLabel(item.score_status)}
-                          </span>
-                        )}
                       </div>
-                    ) : (
-                      <span className="library-empty-copy">尚未评分</span>
-                    )}
-                  </td>
-                  <td className="candidate-open-cell">
-                    <button
-                      aria-label={`查看 ${item.display_name?.trim() || "未命名候选人"} 的简历详情`}
-                      className="candidate-open-action"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onOpenCandidate(item);
-                      }}
-                      type="button"
-                    >
-                      查看 <Icon name="chevron-right" size={17} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                    </td>
+                    <td>
+                      <CandidateEducationCell item={item} />
+                    </td>
+                    <td>
+                      <CandidateExperienceCell item={item} />
+                    </td>
+                    <td><CandidateSkillHighlights item={item} /></td>
+                    {displayColumns.map((column) => (
+                      <td className="result-display-cell" key={column.key}>
+                        <ResultDisplayValues
+                          fieldKey={column.key}
+                          item={item}
+                          label={column.label}
+                        />
+                      </td>
+                    ))}
+                    <td className="candidate-score-cell">
+                      {item.score_total !== null ? (
+                        <div className="candidate-score-summary">
+                          <button
+                            aria-label={`查看 ${item.display_name ?? "候选人"} 的评分详情`}
+                            className="library-score candidate-score-link"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onOpenCandidate(item, "score");
+                            }}
+                            type="button"
+                          >
+                            <strong>{item.score_total.toFixed(1)}</strong>
+                            <span>/ 100</span>
+                          </button>
+                          {scoreConfidence && (
+                            <span
+                              className={`score-confidence is-${scoreConfidence.tone}`}
+                            >
+                              {scoreConfidence.label}
+                            </span>
+                          )}
+                          {scoreStatus && (
+                            <span className="candidate-score-status">
+                              {scoreStatus}
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="library-empty-copy">尚未评分</span>
+                      )}
+                    </td>
+                    <td className="candidate-open-cell">
+                      <button
+                        aria-label={`查看 ${item.display_name?.trim() || "未命名候选人"} 的简历详情`}
+                        className="candidate-open-action"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onOpenCandidate(item);
+                        }}
+                        type="button"
+                      >
+                        <Icon name="chevron-right" size={17} />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         ) : (

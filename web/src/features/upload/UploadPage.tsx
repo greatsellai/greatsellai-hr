@@ -536,7 +536,7 @@ export function UploadPage({
           <div className="panel-heading">
             <div>
               <h2>上传后会发生什么</h2>
-              <p>每份简历独立处理，成功后可在简历库继续筛选和评估。</p>
+              <p>每份简历独立处理，进度会显示在上传队列中。</p>
             </div>
           </div>
           <ol className="workflow-list">
@@ -561,7 +561,7 @@ export function UploadPage({
               <div>
                 <strong>进入简历库继续处理</strong>
                 <span>
-                  提取完成后可筛选、评分和匹配岗位；异常文件可直接重试。
+                  提取完成后可筛选、评分和匹配岗位；无法完成时可查看原因，并重新上传原件。
                 </span>
               </div>
             </li>

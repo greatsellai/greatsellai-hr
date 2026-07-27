@@ -535,33 +535,33 @@ export function UploadPage({
         <aside className="panel">
           <div className="panel-heading">
             <div>
-              <h2>批量处理路径</h2>
-              <p>每一份简历独立处理，便于定位问题与补传。</p>
+              <h2>上传后会发生什么</h2>
+              <p>每份简历独立处理，成功后可在简历库继续筛选和评估。</p>
             </div>
           </div>
           <ol className="workflow-list">
             <li>
               <span className="workflow-step">1</span>
               <div>
-                <strong>逐份保存原始文件</strong>
-              <span>支持 PDF、Word、图片、Excel 和 HTML，文件质量会单独检查。</span>
+                <strong>上传并保留原始文件</strong>
+                <span>支持 PDF、Word、图片、Excel 和 HTML。</span>
               </div>
             </li>
             <li>
               <span className="workflow-step">2</span>
               <div>
-                <strong>AI 识别姓名与结构化事实</strong>
+                <strong>AI 整理候选人信息</strong>
                 <span>
-                  基于可提取的原文识别候选人姓名、教育、经历和技能；姓名不明确时保留为未命名候选人。
+                  自动识别姓名、学历、经历和技能，处理状态会显示在上传队列中。
                 </span>
               </div>
             </li>
             <li>
               <span className="workflow-step">3</span>
               <div>
-                <strong>通过证据校验后自动启用</strong>
+                <strong>进入简历库继续处理</strong>
                 <span>
-                  AI 提取结果会直接进入筛选库；异常简历保留原件与失败状态。
+                  提取完成后可筛选、评分和匹配岗位；异常文件可直接重试。
                 </span>
               </div>
             </li>

@@ -155,6 +155,10 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "upload");
     await page.getByRole("button", { name: "上传简历", exact: true }).first().click();
     await expect(page.getByRole("heading", { name: "批量上传简历" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "上传后会发生什么" })).toBeVisible();
+    await expect(page.getByText("上传并保留原始文件", { exact: true })).toBeVisible();
+    await expect(page.getByText("AI 整理候选人信息", { exact: true })).toBeVisible();
+    await expect(page.getByText("进入简历库继续处理", { exact: true })).toBeVisible();
 
     await page.locator('input[type="file"]').setInputFiles({
       name: "e2e-resume.pdf",

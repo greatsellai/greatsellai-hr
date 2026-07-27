@@ -38,6 +38,7 @@ from app.services.institution_service import (
     INSTITUTION_CLASSIFICATION_ORDER,
     resolve_institution,
 )
+from app.services.contact_extraction_service import redact_contact_values
 from app.services.normalization import DEGREE_RANK, normalized_contains, normalized_key
 from app.services.resume_eligibility import is_resume_screening_eligible
 
@@ -711,7 +712,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str]:
 def _matches_keywords(resume: Resume, *, all_of: list[str], any_of: list[str]) -> bool:
     if not all_of and not any_of:
         return True
-    source_text = "\n".join(block.text for block in resume.source_blocks)
+    source_text = _screening_source_text(resume)
     normalized_source = normalized_key(source_text)
     all_keys = {normalized_key(value) for value in all_of}
     any_keys = {normalized_key(value) for value in any_of}
@@ -724,7 +725,7 @@ def _matches_keywords(resume: Resume, *, all_of: list[str], any_of: list[str]) -
 def _matches_v2_keywords(resume: Resume, *, keywords: list[str], mode: str) -> bool:
     if not keywords:
         return True
-    source = normalized_key("\n".join(block.text for block in resume.source_blocks))
+    source = normalized_key(_screening_source_text(resume))
     if mode == "precise":
         return all(normalized_key(keyword) in source for keyword in keywords)
     credential_codes = {
@@ -746,7 +747,7 @@ def _matching_keyword_block_ids(resume: Resume, keywords: list[str]) -> list[str
     return sorted(
         block.block_id
         for block in resume.source_blocks
-        if any(key in normalized_key(block.text) for key in keys)
+        if any(key in normalized_key(redact_contact_values(block.text)) for key in keys)
     )
 
 
@@ -761,7 +762,10 @@ def _matching_v2_keyword_block_ids(
         return sorted(
             block.block_id
             for block in resume.source_blocks
-            if any(key in normalized_key(block.text) for key in keyword_keys)
+            if any(
+                key in normalized_key(redact_contact_values(block.text))
+                for key in keyword_keys
+            )
         )
 
     matched_ids: set[str] = set()
@@ -781,9 +785,20 @@ def _matching_v2_keyword_block_ids(
     matched_ids.update(
         block.block_id
         for block in resume.source_blocks
-        if any(key in normalized_key(block.text) for key in source_keys)
+        if any(
+            key in normalized_key(redact_contact_values(block.text))
+            for key in source_keys
+        )
     )
     return sorted(matched_ids)
+
+
+def _screening_source_text(resume: Resume) -> str:
+    """Return source text stripped of contact values for search and Agent tools."""
+
+    return "\n".join(
+        redact_contact_values(block.text) for block in resume.source_blocks
+    )
 
 
 def search_candidates(

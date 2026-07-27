@@ -23,6 +23,7 @@ from app.models import (
     MailboxConfig,
     MailboxAttachmentContentIdentity,
     MailboxSyncFailureAlert,
+    Organization,
     Resume,
     ResumeAiExtractionJob,
     ResumeEducation,
@@ -634,6 +635,66 @@ def test_workspaces_can_reuse_candidate_names_without_cross_tenant_access(
 
     foreign_original = client_a.get(f"/v1/resumes/{resume_b_id}/original-file")
     assert foreign_original.status_code == 404, foreign_original.text
+
+
+def test_contact_details_remain_scoped_to_the_resume_workspace(
+    workspace_clients: tuple[TestClient, TestClient],
+) -> None:
+    client_a, client_b = workspace_clients
+    _register_and_login(
+        client_a,
+        organization_name="Contact workspace alpha",
+        full_name="Contact Alpha",
+        email="contact-alpha@example.test",
+        password="tenant-contact-password-a",
+    )
+    _register_and_login(
+        client_b,
+        organization_name="Contact workspace beta",
+        full_name="Contact Beta",
+        email="contact-beta@example.test",
+        password="tenant-contact-password-b",
+    )
+    _, resume_b_id = _create_candidate_and_resume(
+        client_b,
+        display_name="Contact detail fixture",
+    )
+    with client_b.app.state.database.session_factory() as session:
+        organization_b = session.scalar(
+            select(Organization).where(Organization.name == "Contact workspace beta")
+        )
+        assert organization_b is not None
+        set_organization_context(session, organization_b.id)
+        resume = session.get(Resume, resume_b_id)
+        assert resume is not None
+        resume.contact_details = [
+            {
+                "kind": "email",
+                "value": "candidate-contact@example.test",
+                "evidence_block_ids": ["page-001"],
+            }
+        ]
+        session.commit()
+
+    owned_review = client_b.get(f"/v1/resumes/{resume_b_id}/review")
+    assert owned_review.status_code == 200, owned_review.text
+    assert owned_review.json()["contacts"] == [
+        {
+            "kind": "email",
+            "value": "candidate-contact@example.test",
+            "evidence_block_ids": ["page-001"],
+        }
+    ]
+    owned_detail = client_b.get(f"/v1/resumes/{resume_b_id}")
+    assert owned_detail.status_code == 200, owned_detail.text
+    assert "contacts" not in owned_detail.json()
+
+    missing_review = client_a.get("/v1/resumes/not-a-real-resume/review")
+    foreign_detail = client_a.get(f"/v1/resumes/{resume_b_id}")
+    foreign_review = client_a.get(f"/v1/resumes/{resume_b_id}/review")
+    for response in (foreign_detail, foreign_review):
+        assert response.status_code == missing_review.status_code == 404
+        assert response.json()["detail"] == missing_review.json()["detail"] == "resume_not_found"
 
 
 def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(

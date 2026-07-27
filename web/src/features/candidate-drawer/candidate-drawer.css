@@ -157,6 +157,81 @@
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.backoffice-ui-root .candidate-drawer .drawer-navigation {
+  min-width: 0;
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-summary {
+  display: grid;
+  gap: 0.625rem;
+  padding: 0.75rem var(--space-lg);
+  border-bottom: 1px solid var(--line);
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-summary-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-summary-heading p {
+  margin: 0.1875rem 0 0;
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  padding: 0;
+  margin: 0;
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-item {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0.625rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-item dt {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-item dd {
+  display: flex;
+  min-width: 0;
+  gap: 0.375rem;
+  align-items: center;
+  justify-content: flex-end;
+  margin: 0;
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-item dd > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  text-align: right;
+}
+
+.backoffice-ui-root .candidate-drawer .drawer-contact-copy {
+  min-height: 1.875rem;
+  flex: 0 0 auto;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
 .backoffice-ui-root .candidate-drawer .tabs {
   display: flex;
   min-height: 3rem;
@@ -768,7 +843,11 @@
     min-width: 37rem;
   }
 
-.backoffice-ui-root .candidate-drawer .detail-grid {
+  .backoffice-ui-root .candidate-drawer .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .backoffice-ui-root .candidate-drawer .drawer-contact-list {
     grid-template-columns: 1fr;
   }
 

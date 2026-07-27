@@ -577,6 +577,15 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
     employment_or_internship_months: Mapped[int] = mapped_column(Integer, default=0, index=True)
     facts_version: Mapped[int] = mapped_column(Integer, default=0)
     raw_text: Mapped[str | None] = mapped_column(Text)
+    # Contacts derive locally from saved source blocks. They intentionally stay
+    # outside AI facts and candidate search; only the protected review view and
+    # a candidate-owned export project them.
+    contact_details: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON,
+        default=list,
+        server_default=text("'[]'"),
+        nullable=False,
+    )
     # Keep source provenance on the resume itself so the library can filter
     # and display a stable channel label without depending on mutable mailbox
     # configuration.  Existing/manual uploads retain the safe default.

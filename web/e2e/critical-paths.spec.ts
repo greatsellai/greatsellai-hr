@@ -454,6 +454,38 @@ test.describe("招聘工作台关键路径", () => {
     }
   });
 
+  test("联系方式只在受保护的简历详情中展示并可复制", async ({ page, context }) => {
+    await registerAndVerify(page, "contact-details");
+    await seedWorkspaceFixture(page);
+    await page.reload();
+
+    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    await expect(page.getByText("e2e-contact@example.test", { exact: true })).toHaveCount(0);
+    await page.locator("#school-name").fill("清华");
+    await expect(
+      page.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" })
+      .click();
+
+    const drawer = page.getByRole("dialog", { name: "E2E 推荐候选人 的简历详情" });
+    await expect(drawer.getByRole("heading", { name: "联系方式", exact: true })).toBeVisible();
+    await expect(drawer.getByText("13800000000", { exact: true })).toBeVisible();
+    await expect(drawer.getByText("e2e-contact@example.test", { exact: true })).toBeVisible();
+    await expect(
+      drawer.getByText("仅从简历原文提取，不参与筛选、评分、JD 匹配或招聘助手。", {
+        exact: true,
+      }),
+    ).toBeVisible();
+
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin: new URL(page.url()).origin,
+    });
+    await drawer.getByRole("button", { name: "复制电话" }).click();
+    await expect(page.getByText("电话已复制。", { exact: true })).toBeVisible();
+  });
+
   test("简历详情只保留直接删除当前简历的入口", async ({ page }) => {
     await registerAndVerify(page, "simple-resume-delete");
     await seedWorkspaceFixture(page);

@@ -693,9 +693,19 @@ export interface ResumeReviewAction {
   created_at: string;
 }
 
+export type ResumeContactKind = "email" | "phone";
+
+/** A locally extracted value, available only in the protected detail drawer. */
+export interface ResumeContact {
+  kind: ResumeContactKind;
+  value: string;
+  evidence_block_ids: string[];
+}
+
 export interface ResumeReviewDetail extends ResumeDetail {
   original_filename: string;
   facts_version: number;
+  contacts: ResumeContact[];
   source_blocks: ResumeSourceBlock[];
   education: ResumeEducation[];
   experiences: ResumeExperience[];

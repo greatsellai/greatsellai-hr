@@ -127,6 +127,7 @@ from app.schemas import (
     JobVersionResponse,
     ResumeDetail,
     ResumeActivateRequest,
+    ResumeContactResponse,
     ResumeFactsSaveRequest,
     ResumeReviewActionResponse,
     ResumeReviewDetail,
@@ -859,6 +860,7 @@ def _resume_review_detail(resume: object) -> ResumeReviewDetail:
         **base.model_dump(),
         original_filename=resume.original_filename,
         facts_version=resume.facts_version,
+        contacts=_resume_contacts(resume),
         source_blocks=[
             ResumeSourceBlockResponse(
                 block_id=block.block_id,
@@ -967,6 +969,35 @@ def _resume_review_detail(resume: object) -> ResumeReviewDetail:
             )
         ],
     )
+
+
+def _resume_contacts(resume: object) -> list[ResumeContactResponse]:
+    """Project validated local contacts only on an explicit review request."""
+
+    contacts: list[ResumeContactResponse] = []
+    for item in getattr(resume, "contact_details", None) or []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        value = item.get("value")
+        evidence_block_ids = item.get("evidence_block_ids")
+        if kind not in {"email", "phone"} or not isinstance(value, str):
+            continue
+        normalized_value = value.strip()
+        if not normalized_value or len(normalized_value) > 254:
+            continue
+        contacts.append(
+            ResumeContactResponse(
+                kind=kind,
+                value=normalized_value,
+                evidence_block_ids=[
+                    block_id
+                    for block_id in (evidence_block_ids or [])
+                    if isinstance(block_id, str) and block_id.strip()
+                ],
+            )
+        )
+    return contacts
 
 
 async def require_authenticated_member(

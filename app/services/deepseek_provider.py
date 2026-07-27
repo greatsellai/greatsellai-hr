@@ -34,7 +34,15 @@ _LEGACY_DIRECT_TRANSPORT_ENABLED: ContextVar[bool] = ContextVar(
     default=False,
 )
 EMAIL_PATTERN = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)")
+# Keep the model boundary at least as strict as local contact extraction.
+# This catches regular Chinese mobile and landline layouts even without a
+# contact label, including separated digits from copy/paste or OCR output.
+PHONE_PATTERN = re.compile(
+    r"(?<!\d)(?:"
+    r"(?:\+?\s*86[\s-]*)?1[3-9](?:[\s-]?\d){9}"
+    r"|(?:\+?\s*86[\s-]*)?0\d{2,3}(?:[\s-]?\d){7,8}"
+    r")(?!\d)"
+)
 _ENGLISH_SCORE_PROSE_WORD = re.compile(
     r"(?i)\b(?:a|an|the|is|are|was|were|be|been|has|have|had|with|and|or|of|to|"
     r"in|for|from|on|at|by|this|that|these|those|candidate|candidates|experience|"

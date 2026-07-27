@@ -28,6 +28,7 @@ import type {
   CandidateDrawerTab,
   SelectedResume,
 } from "./candidate-drawer-types";
+import { CandidateContactPanel } from "./CandidateContactPanel";
 import "./candidate-drawer.css";
 
 export interface CandidateDrawerProps {
@@ -62,6 +63,7 @@ export interface CandidateDrawerProps {
   onDownloadOriginal: () => void;
   onRefreshScores: () => void;
   onDeleteResume: () => Promise<void>;
+  onNotify: (kind: "success" | "error", message: string) => void;
 }
 
 export function CandidateDrawer({
@@ -93,6 +95,7 @@ export function CandidateDrawer({
   onDownloadOriginal,
   onRefreshScores,
   onDeleteResume,
+  onNotify,
 }: CandidateDrawerProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [deleting, setDeleting] = useState(false);
@@ -182,28 +185,33 @@ export function CandidateDrawer({
       )}
       {supersededReparse && !sourceTextIssue && <SupersededReparseNotice />}
       <div className="drawer-body">
-        <div aria-label="详情标签" className="tabs" role="tablist">
-          {(
-            [
-              ["original", "原始文件"],
-              ["summary", "AI 总结"],
-              ["score", "评分详情"],
-              ["evidence", "提取依据"],
-            ] as Array<[CandidateDrawerTab, string]>
-          ).map(([tab, label]) => (
-            <button
-              aria-controls={`candidate-drawer-panel-${tab}`}
-              aria-selected={drawerTab === tab}
-              className={`tab${drawerTab === tab ? " is-active" : ""}`}
-              id={`candidate-drawer-tab-${tab}`}
-              key={tab}
-              onClick={() => onTabChange(tab)}
-              role="tab"
-              type="button"
-            >
-              {label}
-            </button>
-          ))}
+        <div className="drawer-navigation">
+          {review?.contacts.length ? (
+            <CandidateContactPanel contacts={review.contacts} onNotify={onNotify} />
+          ) : null}
+          <div aria-label="详情标签" className="tabs" role="tablist">
+            {(
+              [
+                ["original", "原始文件"],
+                ["summary", "AI 总结"],
+                ["score", "评分详情"],
+                ["evidence", "提取依据"],
+              ] as Array<[CandidateDrawerTab, string]>
+            ).map(([tab, label]) => (
+              <button
+                aria-controls={`candidate-drawer-panel-${tab}`}
+                aria-selected={drawerTab === tab}
+                className={`tab${drawerTab === tab ? " is-active" : ""}`}
+                id={`candidate-drawer-tab-${tab}`}
+                key={tab}
+                onClick={() => onTabChange(tab)}
+                role="tab"
+                type="button"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <div
           aria-labelledby={`candidate-drawer-tab-${drawerTab}`}

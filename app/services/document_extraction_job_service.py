@@ -19,6 +19,10 @@ from app.services.document_text_extraction import (
     extract_document_text,
     validate_document_path_signature,
 )
+from app.services.contact_extraction_service import (
+    ContactSourceBlock,
+    contact_storage_values,
+)
 from app.services.tencent_ocr_provider import TencentOcrConfig
 from app.tenant_scope import clear_organization_context, set_organization_context
 
@@ -347,6 +351,7 @@ def _recover_expired_leases(session: Session, *, now: datetime) -> None:
                 quality_flags=["document_extraction_worker_lease_expired"],
                 parser_version="document-worker",
                 raw_text=None,
+                contact_details=[],
             )
             .execution_options(skip_organization_scope=True)
         )
@@ -569,6 +574,7 @@ def _save_completed_document_extraction(
             session.execute(
                 delete(ResumeSourceBlock).where(ResumeSourceBlock.resume_id == resume.id)
             )
+            resume.contact_details = []
             resume.source_page_count = source_page_count
             resume.parsed_page_count = parsed_page_count
             resume.extraction_status = extraction_status
@@ -576,20 +582,31 @@ def _save_completed_document_extraction(
             resume.parser_version = parser_version[:100]
             resume.raw_text = _database_safe_text(raw_text) or None
             has_source_text = False
+            source_blocks: list[ContactSourceBlock] = []
             for page in pages:
                 page_text = _database_safe_text(str(getattr(page, "text", "")))
                 if not page_text:
                     continue
                 has_source_text = True
+                block_id = f"page-{int(getattr(page, 'page_no')):03d}"
+                page_no = int(getattr(page, "page_no"))
                 session.add(
                     ResumeSourceBlock(
                         resume_id=resume.id,
-                        block_id=f"page-{int(getattr(page, 'page_no')):03d}",
-                        page_no=int(getattr(page, "page_no")),
+                        block_id=block_id,
+                        page_no=page_no,
                         block_type="page_text",
                         text=page_text,
                     )
                 )
+                source_blocks.append(
+                    ContactSourceBlock(
+                        block_id=block_id,
+                        page_no=page_no,
+                        text=page_text,
+                    )
+                )
+            resume.contact_details = contact_storage_values(source_blocks)
             job.status = DOCUMENT_EXTRACTION_COMPLETED
             job.next_attempt_at = None
             job.lease_owner = None
@@ -678,6 +695,7 @@ def _finish_failure(
                     resume.quality_flags = [error[:2000]]
                     resume.parser_version = "document-worker"
                     resume.raw_text = None
+                    resume.contact_details = []
             job.lease_owner = None
             job.lease_expires_at = None
             job.last_error = error[:2000]

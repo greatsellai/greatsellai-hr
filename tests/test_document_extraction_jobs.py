@@ -163,11 +163,14 @@ def test_document_worker_persists_source_blocks_then_queues_ai_job(
         pages=[
             ExtractedPage(
                 page_no=1,
-                text="Candidate\x00 Python SQL",
-                non_whitespace_chars=18,
+                text="Candidate\x00 138 0000 0000 candidate@example.test Python SQL",
+                non_whitespace_chars=54,
             )
         ],
-        raw_text="--- PAGE 1 ---\nCandidate\x00 Python SQL",
+        raw_text=(
+            "--- PAGE 1 ---\n"
+            "Candidate\x00 138 0000 0000 candidate@example.test Python SQL"
+        ),
         quality_flags=[],
         parser_version="document-worker-test",
     )
@@ -177,7 +180,9 @@ def test_document_worker_persists_source_blocks_then_queues_ai_job(
         files={
             "file": (
                 "candidate.pdf",
-                make_pdf_with_text("candidate source"),
+                make_pdf_with_text(
+                    "Candidate 138 0000 0000 candidate@example.test Python source"
+                ),
                 "application/pdf",
             )
         },
@@ -204,6 +209,18 @@ def test_document_worker_persists_source_blocks_then_queues_ai_job(
         )
         assert block is not None
         assert "\x00" not in block.text
+        assert resume.contact_details == [
+            {
+                "kind": "phone",
+                "value": "13800000000",
+                "evidence_block_ids": ["page-001"],
+            },
+            {
+                "kind": "email",
+                "value": "candidate@example.test",
+                "evidence_block_ids": ["page-001"],
+            },
+        ]
         document_job = session.scalar(
             select(ResumeDocumentExtractionJob).where(
                 ResumeDocumentExtractionJob.resume_id == resume_id
@@ -216,6 +233,24 @@ def test_document_worker_persists_source_blocks_then_queues_ai_job(
         )
         assert ai_job is not None
         assert ai_job.status == "queued"
+
+    detail = ai_client.get(f"/v1/resumes/{resume_id}")
+    assert detail.status_code == 200, detail.text
+    assert "contacts" not in detail.json()
+    review = ai_client.get(f"/v1/resumes/{resume_id}/review")
+    assert review.status_code == 200, review.text
+    assert review.json()["contacts"] == [
+        {
+            "kind": "phone",
+            "value": "13800000000",
+            "evidence_block_ids": ["page-001"],
+        },
+        {
+            "kind": "email",
+            "value": "candidate@example.test",
+            "evidence_block_ids": ["page-001"],
+        },
+    ]
 
 
 @pytest.mark.parametrize(

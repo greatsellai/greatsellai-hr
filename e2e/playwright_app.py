@@ -211,8 +211,27 @@ def _seed_ready_resume(
     """Create one source-grounded, searchable candidate through domain code."""
 
     candidate = create_candidate(session, display_name=None)
+    contact_details: list[dict[str, object]] = []
+    contact_header = ""
+    if sequence == 1:
+        # Synthetic local-only fixture values for the protected drawer path.
+        # The browser test asserts they never appear in the search surface.
+        contact_header = "电话：138 0000 0000\\n邮箱：e2e-contact@example.test\\n"
+        contact_details = [
+            {
+                "kind": "phone",
+                "value": "13800000000",
+                "evidence_block_ids": ["page-001"],
+            },
+            {
+                "kind": "email",
+                "value": "e2e-contact@example.test",
+                "evidence_block_ids": ["page-001"],
+            },
+        ]
     source_text = (
         f"{candidate_name}\n"
+        f"{contact_header}"
         "清华大学 计算机科学 本科\n"
         "Python 后端经验 分布式系统\n"
         "负责服务端开发与系统设计。"
@@ -228,6 +247,7 @@ def _seed_ready_resume(
         quality_flags=[],
         parser_version="e2e-fixture",
         raw_text=source_text,
+        contact_details=contact_details,
     )
     session.add(resume)
     session.flush()

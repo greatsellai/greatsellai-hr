@@ -14,6 +14,7 @@ from app.services.deepseek_provider import (
     extract_resume_facts,
     legacy_direct_transport_for_testing,
     redact_nonessential_personal_data,
+    render_evidence_blocks,
     resume_core_facts_tool_schema,
     resume_facts_tool_schema,
 )
@@ -48,6 +49,29 @@ def test_candidate_name_can_be_retained_without_exposing_contact_data() -> None:
     assert "Shanghai" not in rendered
     assert "13800138000" not in rendered
     assert "person@example.com" not in rendered
+
+
+def test_model_evidence_rendering_never_includes_local_contact_values() -> None:
+    rendered = render_evidence_blocks(
+        [
+            EvidenceBlock(
+                block_id="page-001",
+                page_no=1,
+                block_type="page_text",
+                text=(
+                    "Name: AI Candidate\n138 0000 0000\n010-12345678\n"
+                    "Email: person@example.com\nSkills: Python"
+                ),
+            )
+        ],
+        retain_candidate_name=True,
+    )
+
+    assert "AI Candidate" in rendered
+    assert "138 0000 0000" not in rendered
+    assert "010-12345678" not in rendered
+    assert "person@example.com" not in rendered
+    assert "Python" in rendered
 
 
 def test_tool_evidence_ids_accept_current_strings_and_legacy_objects() -> None:
@@ -311,7 +335,8 @@ def test_extraction_prompt_contains_the_versioned_ai_rulebook(monkeypatch) -> No
                 page_no=1,
                 block_type="page",
                 text=(
-                    "\u59d3\u540d\uff1aTest Candidate \u7535\u8bdd\uff1a13800138000 Education Test University "
+                    "\u59d3\u540d\uff1aTest Candidate \u7535\u8bdd\uff1a13800138000 010-12345678 person@example.com "
+                    "Education Test University "
                     "Computer Science Project Data Platform Developer Built ingestion "
                     "pipeline Reduced report latency"
                 ),
@@ -330,6 +355,8 @@ def test_extraction_prompt_contains_the_versioned_ai_rulebook(monkeypatch) -> No
     assert "detail_items must contain every separately written task" in prompt
     assert "Test Candidate" in prompt
     assert "13800138000" not in prompt
+    assert "010-12345678" not in prompt
+    assert "person@example.com" not in prompt
 
 
 def test_strict_function_reports_output_truncation_before_json_parsing(monkeypatch) -> None:

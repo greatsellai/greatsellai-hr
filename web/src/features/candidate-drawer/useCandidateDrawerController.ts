@@ -461,6 +461,7 @@ export function useCandidateDrawerController({
     onDownloadOriginal: downloadOriginalFile,
     onEnrichFacts: () => void enrichSelectedFacts(),
     onGenerateSummary: () => void generateSummary(),
+    onNotify: notify,
     onPreviewOriginal: () => void previewOriginalFile(),
     onRefreshScores: () => {
       if (selectedResumeId) void loadDrawerScores(selectedResumeId);

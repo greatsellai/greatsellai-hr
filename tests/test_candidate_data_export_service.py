@@ -78,6 +78,13 @@ def _seed_exportable_candidate(client) -> tuple[str, str]:
             parser_version="test",
             is_active=True,
             facts_version=1,
+            contact_details=[
+                {
+                    "kind": "email",
+                    "value": "export-contact@example.test",
+                    "evidence_block_ids": ["page-001"],
+                }
+            ],
         )
         session.add(resume)
         session.flush()
@@ -161,6 +168,7 @@ def test_export_worker_builds_safe_archive_and_download_grant(client) -> None:
             "candidates.csv",
             "candidates.xlsx",
             "facts.json",
+            "contacts.json",
             "summaries.json",
             "scores.json",
             "job_matches.json",
@@ -168,9 +176,18 @@ def test_export_worker_builds_safe_archive_and_download_grant(client) -> None:
         }
         assert not any(name.startswith("originals/") for name in archive.namelist())
         facts = archive.read("facts.json").decode("utf-8")
+        contacts = json.loads(archive.read("contacts.json").decode("utf-8"))
         summaries = archive.read("summaries.json").decode("utf-8")
         csv_text = archive.read("candidates.csv").decode("utf-8-sig")
         assert "must-not-export" not in facts
+        assert contacts[0]["contacts"] == [
+            {"kind": "email", "value": "export-contact@example.test"}
+        ]
+        assert all(
+            set(contact) == {"kind", "value"}
+            for document in contacts
+            for contact in document["contacts"]
+        )
         assert "must-not-export" not in summaries
         assert "private-resume.pdf" not in archive.read("manifest.json").decode("utf-8")
         assert "'=FormulaLikeName" in csv_text

@@ -1476,9 +1476,19 @@ class ResumeReviewActionResponse(ApiModel):
     created_at: str
 
 
+ResumeContactKind = Literal["email", "phone"]
+
+
+class ResumeContactResponse(ApiModel):
+    kind: ResumeContactKind
+    value: str
+    evidence_block_ids: list[str] = Field(default_factory=list)
+
+
 class ResumeReviewDetail(ResumeDetail):
     original_filename: str
     facts_version: int
+    contacts: list[ResumeContactResponse] = Field(default_factory=list)
     source_blocks: list[ResumeSourceBlockResponse]
     education: list[ResumeEducationResponse]
     experiences: list[ResumeExperienceResponse]

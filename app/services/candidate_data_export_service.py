@@ -137,6 +137,7 @@ class _ExportCandidatePayload:
     facts_version: int
     fact_snapshot_id: str
     facts: dict[str, object]
+    contact_details: list[dict[str, str]]
     summaries: list[dict[str, object]]
     scores: list[dict[str, object]]
     job_matches: list[dict[str, object]]
@@ -651,6 +652,25 @@ def _load_snapshot_facts(fact_snapshot: ResumeFactSnapshot) -> dict[str, object]
     return safe
 
 
+def _safe_contact_details(value: object) -> list[dict[str, str]]:
+    """Project local contacts into an entitled data export without evidence."""
+
+    if not isinstance(value, list):
+        return []
+    contacts: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        contact_value = item.get("value")
+        if kind not in {"email", "phone"} or not isinstance(contact_value, str):
+            continue
+        normalized_value = contact_value.strip()
+        if normalized_value:
+            contacts.append({"kind": kind, "value": normalized_value})
+    return contacts
+
+
 def _snapshot_entry_value(entry: dict[str, object], key: str) -> object:
     value = entry.get(key)
     return value
@@ -761,6 +781,7 @@ def _load_export_build_payload(
                 facts_version=fact_snapshot.facts_version,
                 fact_snapshot_id=fact_snapshot.id,
                 facts=_load_snapshot_facts(fact_snapshot),
+                contact_details=_safe_contact_details(resume.contact_details),
                 summaries=[
                     {
                         "summary_id": summary.id,
@@ -906,6 +927,7 @@ def _json_bytes(value: object) -> bytes:
 
 def _archive_documents(payload: _ExportBuildPayload) -> dict[str, object]:
     facts: list[dict[str, object]] = []
+    contacts: list[dict[str, object]] = []
     summaries: list[dict[str, object]] = []
     scores: list[dict[str, object]] = []
     job_matches: list[dict[str, object]] = []
@@ -919,6 +941,7 @@ def _archive_documents(payload: _ExportBuildPayload) -> dict[str, object]:
             "facts_version": item.facts_version,
         }
         facts.append({**root, "facts": item.facts})
+        contacts.append({**root, "contacts": item.contact_details})
         summaries.extend({**root, **summary} for summary in item.summaries)
         scores.extend({**root, **score} for score in item.scores)
         job_matches.extend({**root, **job_match} for job_match in item.job_matches)
@@ -938,6 +961,7 @@ def _archive_documents(payload: _ExportBuildPayload) -> dict[str, object]:
             )
     return {
         "facts": facts,
+        "contacts": contacts,
         "summaries": summaries,
         "scores": scores,
         "job_matches": job_matches,
@@ -972,6 +996,7 @@ def _write_export_archive(
             archive.writestr("candidates.csv", _csv_bytes(summary_rows))
             archive.writestr("candidates.xlsx", _xlsx_bytes(summary_rows))
             archive.writestr("facts.json", _json_bytes(documents["facts"]))
+            archive.writestr("contacts.json", _json_bytes(documents["contacts"]))
             archive.writestr("summaries.json", _json_bytes(documents["summaries"]))
             archive.writestr("scores.json", _json_bytes(documents["scores"]))
             archive.writestr("job_matches.json", _json_bytes(documents["job_matches"]))
@@ -1001,6 +1026,7 @@ def _write_export_archive(
                     "candidates.csv",
                     "candidates.xlsx",
                     "facts.json",
+                    "contacts.json",
                     "summaries.json",
                     "scores.json",
                     "job_matches.json",

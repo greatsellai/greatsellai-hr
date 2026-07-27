@@ -928,6 +928,7 @@ export function RecruitingAgentDrawer({
           conversation_id: run.conversation_id,
           context_version: run.context_version,
           active_context: run.active_context,
+          chat_history: conversation?.chat_history ?? [],
         });
       } else {
         await bindTalentSearchRun({

@@ -1,7 +1,7 @@
 """Keep global and Agent-scoped talent-profile runs distinct.
 
-Revision ID: 20260727_0041
-Revises: 20260727_0040
+Revision ID: 20260727_0042
+Revises: 20260727_0041
 Create Date: 2026-07-27 22:20:00
 
 Only a scope kind, opaque SHA-256 membership digest, and count are persisted.
@@ -16,8 +16,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260727_0041"
-down_revision: Union[str, Sequence[str], None] = "20260727_0040"
+revision: str = "20260727_0042"
+down_revision: Union[str, Sequence[str], None] = "20260727_0041"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

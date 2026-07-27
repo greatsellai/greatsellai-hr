@@ -10,6 +10,7 @@ interface BackofficeButtonProps {
   children: ReactNode;
   className?: string;
   disabled?: boolean;
+  id?: string;
   icon?: ReactNode;
   loading?: boolean;
   onClick?: MouseEventHandler<HTMLButtonElement>;
@@ -32,6 +33,7 @@ export function BackofficeButton({
   children,
   className,
   disabled = false,
+  id,
   icon,
   loading = false,
   onClick,
@@ -43,6 +45,7 @@ export function BackofficeButton({
       aria-label={ariaLabel}
       className={`button${tone === "primary" ? " button-primary" : tone === "danger" ? " button-danger-ghost" : ""} ${className ?? ""}`.trim()}
       disabled={disabled || loading}
+      id={id}
       onClick={onClick}
       type="button"
     >
@@ -58,6 +61,7 @@ export function BackofficeButton({
         className={buttonClassName}
         disabled={disabled}
         htmlType="button"
+        id={id}
         icon={icon}
         loading={loading}
         onClick={onClick}

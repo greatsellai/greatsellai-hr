@@ -3,7 +3,6 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
-  type RefObject,
 } from "react";
 import { Icon, type IconName } from "../../icons";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
@@ -133,7 +132,6 @@ export function Topbar({
   onGlobalQueryChange,
   onGlobalSearchKeyDown,
   onOpenAgent,
-  agentTriggerRef,
   canManageSettings,
   onAccountMenuOpen,
   onLogout,
@@ -152,7 +150,6 @@ export function Topbar({
   onGlobalQueryChange: (value: string) => void;
   onGlobalSearchKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => void;
   onOpenAgent: () => void;
-  agentTriggerRef: RefObject<HTMLButtonElement | null>;
   canManageSettings: boolean;
   onAccountMenuOpen: () => void;
   onLogout: () => void;
@@ -205,16 +202,16 @@ export function Topbar({
       </label>
       <div className="topbar-actions">
         {trialLabel && <span className={`topbar-trial${trial?.plan_status === "expired" ? " is-expired" : ""}`}>{trialLabel}</span>}
-        <button
-          aria-label="招聘助手"
-          className="button button-agent"
+        <BackofficeButton
+          ariaLabel="招聘助手"
+          className="backoffice-agent-button"
+          icon={<Icon name="spark" size={16} />}
+          id="recruiting-agent-trigger"
           onClick={onOpenAgent}
-          ref={agentTriggerRef}
-          type="button"
+          tone="primary"
         >
-          <Icon name="spark" size={16} />
           <span className="topbar-action-label">招聘助手</span>
-        </button>
+        </BackofficeButton>
         <BackofficeButton
           aria-label="上传简历"
           icon={<Icon name="upload" size={16} />}

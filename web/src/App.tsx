@@ -3,7 +3,6 @@ import {
   Suspense,
   useCallback,
   useEffect,
-  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -359,7 +358,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const [libraryRefreshToken, setLibraryRefreshToken] = useState(0);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [globalQuery, setGlobalQuery] = useState("");
-  const agentTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const notify = useCallback((kind: ToastKind, message: string) => {
     const id = Date.now() + Math.round(Math.random() * 1000);
@@ -464,7 +462,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   const closeAgent = useCallback(() => {
     setAgentOpen(false);
-    window.requestAnimationFrame(() => agentTriggerRef.current?.focus());
+    window.requestAnimationFrame(() => {
+      document.getElementById("recruiting-agent-trigger")?.focus();
+    });
   }, []);
 
   useEffect(() => {
@@ -663,7 +663,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             closeDrawer();
             setAgentOpen(true);
           }}
-          agentTriggerRef={agentTriggerRef}
           canManageSettings={canManageSettings}
           onAccountMenuOpen={() => {
             void refreshAuthSession();

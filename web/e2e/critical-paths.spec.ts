@@ -541,6 +541,9 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "agent-focus");
 
     const trigger = page.getByRole("button", { name: "招聘助手", exact: true });
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveClass(/semi-button-primary/);
+    await expect(trigger).toHaveCSS("background-color", "rgb(215, 22, 24)");
     await trigger.click();
     const dialog = page.getByRole("dialog", { name: "招聘助手" });
     const closeButton = dialog.getByRole("button", { name: "关闭招聘助手" });
@@ -552,6 +555,18 @@ test.describe("招聘工作台关键路径", () => {
 
     await page.keyboard.press("Escape");
     await expect(trigger).toBeFocused();
+  });
+
+  test("窄屏保留招聘助手入口", async ({ page }) => {
+    await registerAndVerify(page, "agent-mobile-entry");
+    await page.setViewportSize({ width: 390, height: 844 });
+
+    const trigger = page.getByRole("button", { name: "招聘助手", exact: true });
+    await expect(trigger).toBeVisible();
+    await expect(trigger).toHaveClass(/semi-button-primary/);
+    await expect(trigger).toHaveCSS("background-color", "rgb(215, 22, 24)");
+    await trigger.click();
+    await expect(page.getByRole("dialog", { name: "招聘助手" })).toBeVisible();
   });
 
   test("招聘助手错误说明 AI 服务，并在重发时不重复用户消息", async ({ page }) => {

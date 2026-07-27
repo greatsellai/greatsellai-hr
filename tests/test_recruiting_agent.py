@@ -15,6 +15,7 @@ from app.models import (
     Organization,
     RecruitingAgentCandidateSetItem,
     RecruitingAgentConversation,
+    RecruitingAgentConversationTurn,
     TalentSearchProfile,
     TalentSearchProfileRevision,
     TalentSearchRun,
@@ -190,6 +191,203 @@ def test_agent_executes_model_selected_search_tool(
     assert calls == 2
 
 
+def test_agent_persists_visible_history_and_supplies_it_to_a_follow_up(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """A later natural-language turn receives only prior visible chat pairs."""
+
+    model_inputs: list[list[dict[str, object]]] = []
+
+    def fake_completion(*, settings, messages):
+        del settings
+        model_inputs.append(list(messages))
+        if len(model_inputs) == 1:
+            return {"content": "已记下第一条条件，后续可以继续补充。"}
+        return {"content": "已按上一条条件补充本次要求。"}
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+
+    first = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "先找有 Python 项目经验的人"},
+    )
+    assert first.status_code == 200, first.text
+    first_payload = first.json()
+    assert [
+        (item["user_message"], item["assistant_message"])
+        for item in first_payload["chat_history"]
+    ] == [("先找有 Python 项目经验的人", "已记下第一条条件，后续可以继续补充。")]
+
+    second = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "再加三年以上正式工作经验",
+            "conversation_id": first_payload["conversation_id"],
+            "context_version": first_payload["context_version"],
+        },
+    )
+    assert second.status_code == 200, second.text
+    second_payload = second.json()
+
+    assert [item["role"] for item in model_inputs[1]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert model_inputs[1][1]["content"] == "先找有 Python 项目经验的人"
+    assert model_inputs[1][2]["content"] == "已记下第一条条件，后续可以继续补充。"
+    assert "当前工作台上下文：" in str(model_inputs[1][3]["content"])
+    assert "再加三年以上正式工作经验" in str(model_inputs[1][3]["content"])
+    assert "tool_calls" not in json.dumps(model_inputs[1], ensure_ascii=False)
+
+    expected_pairs = [
+        ("先找有 Python 项目经验的人", "已记下第一条条件，后续可以继续补充。"),
+        ("再加三年以上正式工作经验", "已按上一条条件补充本次要求。"),
+    ]
+    assert [
+        (item["user_message"], item["assistant_message"])
+        for item in second_payload["chat_history"]
+    ] == expected_pairs
+    restored = ai_client.get(
+        f"/v1/recruiting-agent/conversations/{first_payload['conversation_id']}"
+    )
+    assert restored.status_code == 200, restored.text
+    assert [
+        (item["user_message"], item["assistant_message"])
+        for item in restored.json()["chat_history"]
+    ] == expected_pairs
+
+
+def test_agent_does_not_persist_an_incomplete_or_failed_turn(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal calls
+        del settings, messages
+        calls += 1
+        if calls == 1:
+            return {"content": "第一条已完成。"}
+        raise RuntimeError("simulated provider failure")
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+    first = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "第一条问题"},
+    )
+    assert first.status_code == 200, first.text
+    failed = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "这条失败的问题不应被保存",
+            "conversation_id": first.json()["conversation_id"],
+            "context_version": first.json()["context_version"],
+        },
+    )
+    assert failed.status_code == 503, failed.text
+    restored = ai_client.get(
+        f"/v1/recruiting-agent/conversations/{first.json()['conversation_id']}"
+    )
+    assert restored.status_code == 200, restored.text
+    assert [item["user_message"] for item in restored.json()["chat_history"]] == [
+        "第一条问题"
+    ]
+
+
+def test_deleting_agent_conversation_cascades_its_short_history(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        lambda **kwargs: {"content": "这条会话可以被立即清除。"},
+    )
+    created = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "创建一条可清除的对话"},
+    )
+    assert created.status_code == 200, created.text
+    conversation_id = created.json()["conversation_id"]
+
+    deleted = ai_client.delete(
+        f"/v1/recruiting-agent/conversations/{conversation_id}"
+    )
+    assert deleted.status_code == 204, deleted.text
+    restored = ai_client.get(f"/v1/recruiting-agent/conversations/{conversation_id}")
+    assert restored.status_code == 404, restored.text
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            assert session.scalar(
+                select(RecruitingAgentConversationTurn.id).where(
+                    RecruitingAgentConversationTurn.conversation_id == conversation_id
+                )
+            ) is None
+
+
+def test_agent_history_keeps_twelve_completed_turns_and_models_six(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    captured_inputs: list[list[dict[str, object]]] = []
+
+    def fake_completion(*, settings, messages):
+        del settings
+        captured_inputs.append(list(messages))
+        return {"content": f"已记录第 {len(captured_inputs)} 条需求。"}
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+    conversation_id: str | None = None
+    context_version: int | None = None
+    last_payload: dict[str, object] | None = None
+    for ordinal in range(1, 14):
+        response = ai_client.post(
+            "/v1/recruiting-agent/turns",
+            json={
+                "message": f"第 {ordinal} 条需求",
+                **(
+                    {
+                        "conversation_id": conversation_id,
+                        "context_version": context_version,
+                    }
+                    if conversation_id is not None and context_version is not None
+                    else {}
+                ),
+            },
+        )
+        assert response.status_code == 200, response.text
+        last_payload = response.json()
+        conversation_id = str(last_payload["conversation_id"])
+        context_version = int(last_payload["context_version"])
+
+    assert last_payload is not None
+    history = last_payload["chat_history"]
+    assert len(history) == 12
+    assert history[0]["user_message"] == "第 2 条需求"
+    assert history[-1]["user_message"] == "第 13 条需求"
+    latest_model_messages = captured_inputs[-1]
+    assert [item["role"] for item in latest_model_messages] == [
+        "system",
+        *(role for _ in range(6) for role in ("user", "assistant")),
+        "user",
+    ]
+    assert latest_model_messages[1]["content"] == "第 7 条需求"
+    assert "第 13 条需求" in str(latest_model_messages[-1]["content"])
+
+
 def test_agent_direct_request_creates_a_confirmation_first_profile_draft(
     ai_client: TestClient,
     monkeypatch,
@@ -245,8 +443,9 @@ def test_agent_direct_request_creates_a_confirmation_first_profile_draft(
         "status": "draft",
     }
     assert "尚未执行候选人筛选或评分" in payload["tool_trace"][0]["summary"]
-    # A page reload restores only the safe, opaque profile reference.  It does
-    # not need browser-held profile state or a persisted chat transcript.
+    # A page reload restores the bounded recruiter-visible exchange alongside
+    # the safe profile reference. It never exposes the persisted profile's
+    # original request or any candidate payload.
     restored = ai_client.get(
         f"/v1/recruiting-agent/conversations/{payload['conversation_id']}"
     )
@@ -255,6 +454,14 @@ def test_agent_direct_request_creates_a_confirmation_first_profile_draft(
     assert restored_context["active_talent_profile"] == active_profile
     assert "original_request" not in str(restored_context)
     assert "candidate_id" not in str(restored_context)
+    assert restored.json()["chat_history"] == [
+        {
+            "context_version": payload["context_version"],
+            "user_message": "找做过 Agent 和 RAG，3 年以上经验的人",
+            "assistant_message": payload["message"],
+            "created_at": restored.json()["chat_history"][0]["created_at"],
+        }
+    ]
     database = ai_client.app.state.database
     with database.session_factory() as session:
         with bypass_organization_scope(session):
@@ -269,6 +476,19 @@ def test_agent_direct_request_creates_a_confirmation_first_profile_draft(
                 conversation.active_talent_profile_revision_id
                 == active_profile["revision_id"]
             )
+            turns = list(
+                session.scalars(
+                    select(RecruitingAgentConversationTurn)
+                    .where(
+                        RecruitingAgentConversationTurn.conversation_id
+                        == conversation.id
+                    )
+                    .order_by(RecruitingAgentConversationTurn.context_version)
+                )
+            )
+            assert [(turn.user_message, turn.assistant_message) for turn in turns] == [
+                ("找做过 Agent 和 RAG，3 年以上经验的人", payload["message"])
+            ]
             assert session.scalar(select(TalentSearchRun.id)) is None
 
 
@@ -339,7 +559,7 @@ def test_agent_direct_profile_uses_the_server_saved_jd_after_a_reload(
     assert profile_calls[-1]["source_job_text"] == "需要有 Python 服务端与 Agent 项目交付经验。"
 
 
-def test_agent_refines_the_server_saved_profile_without_chat_history(
+def test_agent_refines_the_server_saved_profile_with_bounded_chat_history(
     ai_client: TestClient,
     monkeypatch,
 ) -> None:
@@ -348,9 +568,10 @@ def test_agent_refines_the_server_saved_profile_without_chat_history(
     profile_calls = _install_agent_profile_provider_stub(monkeypatch)
     model_calls = 0
     follow_up_context = ""
+    follow_up_messages: list[dict[str, object]] = []
 
     def fake_completion(*, settings, messages):
-        nonlocal model_calls, follow_up_context
+        nonlocal model_calls, follow_up_context, follow_up_messages
         del settings
         model_calls += 1
         if model_calls == 1:
@@ -369,6 +590,7 @@ def test_agent_refines_the_server_saved_profile_without_chat_history(
             }
         assert model_calls == 2
         follow_up_context = str(messages[-1]["content"])
+        follow_up_messages = list(messages)
         return {
             "content": None,
             "tool_calls": [
@@ -418,6 +640,14 @@ def test_agent_refines_the_server_saved_profile_without_chat_history(
     assert "找做过 Agent 的本科毕业工程师" not in follow_up_context
     assert "active_talent_profile" in follow_up_context
     assert "candidate_id" not in follow_up_context
+    assert [item["role"] for item in follow_up_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert follow_up_messages[1]["content"] == "找做过 Agent 的本科毕业工程师"
+    assert "这是我整理的找人条件" in str(follow_up_messages[2]["content"])
     assert len(profile_calls) == 2
     database = ai_client.app.state.database
     with database.session_factory() as session:
@@ -1323,6 +1553,13 @@ def test_agent_rejects_a_stale_conversation_context_version(
     assert stale_turn.status_code == 409, stale_turn.text
     assert stale_turn.json()["detail"] == "agent_conversation_stale"
     assert completion_calls == 1
+    restored = ai_client.get(
+        f"/v1/recruiting-agent/conversations/{first_payload['conversation_id']}"
+    )
+    assert restored.status_code == 200, restored.text
+    assert [item["user_message"] for item in restored.json()["chat_history"]] == [
+        "使用这个 JD"
+    ]
 
 
 def test_agent_rewrites_an_english_only_final_reply_to_chinese_once(

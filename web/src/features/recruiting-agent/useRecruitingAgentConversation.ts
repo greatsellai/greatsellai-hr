@@ -62,8 +62,9 @@ interface BindTalentSearchProfileOptions {
  * Keeps only an opaque server conversation reference in this browser tab.
  *
  * Chat messages, candidate IDs, candidate details, source text and resume
- * content deliberately remain outside sessionStorage. On reload we request a
- * fresh, tenant- and owner-scoped work-state summary from the API instead.
+ * content deliberately remain outside sessionStorage. On reload the API
+ * returns only a bounded, tenant- and owner-scoped visible transcript plus a
+ * fresh work-state summary. The browser never submits history back to it.
  */
 export function useRecruitingAgentConversation({
   storageScope,

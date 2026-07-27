@@ -2027,12 +2027,13 @@ class SavedFilter(OrganizationScoped, Base):
 class RecruitingAgentConversation(OrganizationScoped, Base):
     """One private, short-lived recruiting-Agent work session.
 
-    The conversation deliberately keeps only controlled work state: the
-    selected JD, a profile/revision reference, and a server-created
-    candidate-set reference. It never stores chat transcripts, prompts, model
-    output, candidate names, source blocks, or resume text. Candidate
-    membership lives in the normalized child table below so a browser can
-    never submit an arbitrary set of resume IDs.
+    The conversation keeps controlled work state plus a deliberately bounded
+    short-term transcript.  The transcript records only a recruiter's visible
+    input and the final Markdown reply that was shown back to that recruiter.
+    It never stores system prompts, graph messages, tool calls or payloads,
+    candidate cards, source blocks, or resume text. Candidate membership lives
+    in the normalized child table below so a browser can never submit an
+    arbitrary set of resume IDs.
     """
 
     __tablename__ = "recruiting_agent_conversations"
@@ -2126,6 +2127,64 @@ class RecruitingAgentConversation(OrganizationScoped, Base):
         back_populates="conversation",
         cascade="all, delete-orphan",
         foreign_keys="RecruitingAgentCandidateSet.conversation_id",
+    )
+    turns: Mapped[list["RecruitingAgentConversationTurn"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        foreign_keys="RecruitingAgentConversationTurn.conversation_id",
+    )
+
+
+class RecruitingAgentConversationTurn(OrganizationScoped, Base):
+    """One completed, recruiter-visible turn in a private Agent session.
+
+    The row is intentionally a complete user/assistant pair rather than a
+    partial message stream. A failed model call or stale browser tab therefore
+    cannot leave an orphaned prompt that later changes the meaning of a retry.
+    ``context_version`` is the parent's post-turn version and gives each turn
+    a deterministic order while the parent row is locked by the service.
+    """
+
+    __tablename__ = "recruiting_agent_conversation_turns"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["conversation_id", "organization_id"],
+            [
+                "recruiting_agent_conversations.id",
+                "recruiting_agent_conversations.organization_id",
+            ],
+            name="fk_agent_turn_conversation_organization",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "conversation_id",
+            "organization_id",
+            "context_version",
+            name="uq_agent_turn_org_conversation_version",
+        ),
+        Index(
+            "ix_agent_turn_org_conversation_version",
+            "organization_id",
+            "conversation_id",
+            "context_version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    conversation_id: Mapped[str] = mapped_column(String(36), index=True)
+    context_version: Mapped[int] = mapped_column(Integer)
+    user_message: Mapped[str] = mapped_column(Text)
+    assistant_message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    conversation: Mapped[RecruitingAgentConversation] = relationship(
+        back_populates="turns",
+        foreign_keys=[conversation_id],
+        primaryjoin=(
+            "and_(RecruitingAgentConversationTurn.conversation_id == "
+            "RecruitingAgentConversation.id, RecruitingAgentConversationTurn.organization_id == "
+            "RecruitingAgentConversation.organization_id)"
+        ),
     )
 
 

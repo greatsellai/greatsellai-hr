@@ -11,6 +11,7 @@ import type {
   JobVersion,
   RecruitingAgentAction,
   RecruitingAgentCandidate,
+  RecruitingAgentConversationTurn,
   RecruitingAgentSearchSummary,
   RecruitingAgentTurn,
   TalentSearchHardFilters,
@@ -94,11 +95,11 @@ interface AgentRetry {
 
 interface AgentSendOptions {
   clearComposer?: boolean;
-  retryFailureId?: number;
+  retryFailureId?: AgentChatMessage["id"];
 }
 
 interface AgentChatMessage {
-  id: number;
+  id: number | string;
   role: "assistant" | "user";
   content: string;
   candidates?: RecruitingAgentCandidate[];
@@ -119,6 +120,23 @@ function initialAgentMessages(): AgentChatMessage[] {
         "我是招聘助手。可以在当前工作区筛选简历、处理 JD 匹配、查看排行榜，并按已有评分规则发起全量评分。直接告诉我想找什么人，我会先整理可确认的找人条件，确认后才开始找人。",
     },
   ];
+}
+
+function restoredAgentMessages(
+  history: RecruitingAgentConversationTurn[],
+): AgentChatMessage[] {
+  return history.flatMap((turn) => [
+    {
+      id: `restored-${turn.context_version}-user`,
+      role: "user" as const,
+      content: turn.user_message,
+    },
+    {
+      id: `restored-${turn.context_version}-assistant`,
+      role: "assistant" as const,
+      content: turn.assistant_message,
+    },
+  ]);
 }
 
 function agentContextSourceLabel(source: "agent_search" | "talent_search_run" | null): string {
@@ -617,8 +635,13 @@ export function RecruitingAgentDrawer({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const restoredTalentProfileKeyRef = useRef<string | null>(null);
+  const restoredChatHistoryConversationIdRef = useRef<string | null>(null);
   const [messages, setMessages] = useState<AgentChatMessage[]>(initialAgentMessages);
   const interactionPending = loading || isRestoring;
+
+  useEffect(() => {
+    restoredChatHistoryConversationIdRef.current = null;
+  }, [conversationStorageScope]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -652,6 +675,20 @@ export function RecruitingAgentDrawer({
       setJobVersionId(restoredJobVersionId);
     }
   }, [conversation?.active_context.active_job_version_id, jobs]);
+
+  useEffect(() => {
+    if (!isOpen || !conversation) return;
+    if (restoredChatHistoryConversationIdRef.current === conversation.conversation_id) {
+      return;
+    }
+    restoredChatHistoryConversationIdRef.current = conversation.conversation_id;
+    const restored = conversation.chat_history ?? [];
+    if (restored.length) setMessages(restoredAgentMessages(restored));
+  }, [
+    conversation?.chat_history,
+    conversation?.conversation_id,
+    isOpen,
+  ]);
 
   useEffect(() => {
     const activeProfile = conversation?.active_context.active_talent_profile;
@@ -732,6 +769,9 @@ export function RecruitingAgentDrawer({
   };
 
   const addAssistantReply = (turn: RecruitingAgentTurn) => {
+    // This response is already rendered locally with cards/actions. Avoid
+    // replacing it with the text-only transcript that is returned for reload.
+    restoredChatHistoryConversationIdRef.current = turn.conversation_id;
     adoptConversation(turn);
     if (turn.talent_profile) {
       restoredTalentProfileKeyRef.current = `${turn.talent_profile.profile_id}:${turn.talent_profile.current_revision.revision_id}`;
@@ -946,6 +986,7 @@ export function RecruitingAgentDrawer({
     if (!isApiError(error)) return null;
     if (error.status === 409 && error.message === "agent_conversation_stale") {
       try {
+        restoredChatHistoryConversationIdRef.current = null;
         const restored = await restoreConversation(conversation?.conversation_id);
         return restored
           ? "当前工作范围已在另一页面更新，现已同步。请重新发送这条问题。"
@@ -1001,6 +1042,7 @@ export function RecruitingAgentDrawer({
       await clearConversation();
       setMessages(initialAgentMessages());
       restoredTalentProfileKeyRef.current = null;
+      restoredChatHistoryConversationIdRef.current = null;
       setInput("");
       window.requestAnimationFrame(() => composerInputRef.current?.focus());
     } catch (error) {
@@ -1141,7 +1183,10 @@ export function RecruitingAgentDrawer({
               <button
                 className="text-button"
                 disabled={loading}
-                onClick={() => void restoreConversation().catch(() => undefined)}
+                onClick={() => {
+                  restoredChatHistoryConversationIdRef.current = null;
+                  void restoreConversation().catch(() => undefined);
+                }}
                 type="button"
               >
                 重新连接
@@ -1162,7 +1207,7 @@ export function RecruitingAgentDrawer({
                   {conversation.active_context.active_talent_profile
                     ? `；当前找人条件：${conversation.active_context.active_talent_profile.title}（${conversation.active_context.active_talent_profile.status === "draft" ? "草案" : "已确认"}）`
                     : ""}
-                  {"；24 小时无操作后自动清除"}
+                  {"；最近 12 轮对话会在 24 小时无操作后自动清除"}
                 </small>
               </div>
               <button

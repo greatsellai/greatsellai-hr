@@ -131,7 +131,8 @@ UserAccount
 - `saved_filters`；
 - `score_templates`、`resume_scores`、`resume_summaries`；
 - `jobs`、`job_versions`、`job_matches`、`job_match_batches`、`job_match_batch_items`；
-- `mailbox_configs`、`email_attachment_imports`。
+- `mailbox_configs`、`email_attachment_imports`；
+- `recruiting_agent_conversations`、`recruiting_agent_conversation_turns`、`recruiting_agent_candidate_sets` 与集合成员。
 
 教育、经历、技能、原文块、JD 条款和评分维度等子记录通过已经受工作区过滤的父 `Resume`、`Job` 或 `ScoreTemplate` 访问。它们不会暴露为绕过父级的独立 API 资源。
 
@@ -182,6 +183,8 @@ uploads/<organization_id>/<random-id>.<extension>
 
 Agent 只能使用当前请求 Session 绑定的工作区查询。模型输入不包含其他工作区的候选人、JD、评分或邮件元数据；工具调用产生的 ID 也会再次受工作区过滤。人才画像、画像版本和画像运行同样按当前用户与工作区校验；画像读取、修订、执行与刷新恢复都只能使用当前工作区内、父子关系一致的引用，跨工作区或过期引用一律拒绝。
 
+会话的最近 12 轮可见对话正文也属于工作区敏感数据：每个回合通过“会话 ID + 工作区 ID”复合外键关联父会话，且父会话还按创建者校验。刷新只返回当前创建者自己的短期正文；跨工作区、同工作区其他成员、过期会话和猜测 ID 都统一返回 `404`。正文不包含 system/hidden Prompt、LangGraph 消息、工具 JSON、候选人卡片或简历原文；父会话删除或 24 小时无操作清理时，通过级联物理删除。
+
 ## 6. 旧数据迁移与兼容性
 
 Alembic 迁移不读取环境变量、不读取文件卷、不读取候选人内容：
@@ -220,6 +223,7 @@ Alembic 迁移不读取环境变量、不读取文件卷、不读取候选人内
 
 - A 无法通过 Resume、Candidate、Score、Summary、Job、JobVersion、Match、Batch、Mailbox 配置或导入记录 ID 读取/修改 B 的数据；返回 `404`。
 - A 的搜索、简历库、筛选器、评分模板、JD 列表、Agent 排名不包含 B 数据。
+- A 无法读取 B 或同工作区其他成员的 Agent 会话正文；过期或删除会话的短期正文不会残留。
 - A 无法下载 B 的原件，也不能通过伪造 storage key 访问 B 目录。
 - A 的 AI 提取、JD 批次和邮箱同步写入只保留在 A；Worker 处理 B 任务时不污染 A。
 - 工作区范围唯一约束允许 A、B 使用同名模板/筛选器和同一客户端幂等键。

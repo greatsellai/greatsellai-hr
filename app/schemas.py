@@ -1273,10 +1273,27 @@ class RecruitingAgentActiveContext(ApiModel):
     expires_at: datetime
 
 
+class RecruitingAgentConversationTurnResponse(ApiModel):
+    """One completed, short-lived recruiter-visible Agent exchange.
+
+    This intentionally omits internal prompts, tool calls, candidate cards,
+    source evidence, and provider payloads.  The parent conversation enforces
+    the tenant, owner, TTL, and bounded-history policy.
+    """
+
+    context_version: int = Field(ge=1)
+    user_message: str
+    assistant_message: str
+    created_at: datetime
+
+
 class RecruitingAgentConversationResponse(ApiModel):
     conversation_id: str
     context_version: int = Field(ge=1)
     active_context: RecruitingAgentActiveContext
+    chat_history: list[RecruitingAgentConversationTurnResponse] = Field(
+        default_factory=list
+    )
 
 
 class RecruitingAgentContextBindRequest(ApiModel):
@@ -1393,6 +1410,9 @@ class RecruitingAgentResponse(ApiModel):
     conversation_id: str
     context_version: int = Field(ge=1)
     active_context: RecruitingAgentActiveContext
+    chat_history: list[RecruitingAgentConversationTurnResponse] = Field(
+        default_factory=list
+    )
     message: str
     intent: Literal[
         "draft_talent_search_profile",

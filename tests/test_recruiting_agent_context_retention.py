@@ -17,6 +17,7 @@ from app.models import (
     RecruitingAgentCandidateSet,
     RecruitingAgentCandidateSetItem,
     RecruitingAgentConversation,
+    RecruitingAgentConversationTurn,
     TalentSearchProfile,
     TalentSearchProfileRevision,
     TalentSearchRun,
@@ -60,7 +61,7 @@ def _seed_conversation(
     expires_in: timedelta,
     item_count: int,
 ) -> tuple[str, str, tuple[str, ...]]:
-    """Create only opaque Agent-state references; no resume content is seeded."""
+    """Create private Agent state plus one bounded recruiter-visible turn."""
 
     with database.session_factory() as session:
         organization = Organization(name=f"Agent context retention {label}")
@@ -102,6 +103,14 @@ def _seed_conversation(
                 )
                 for ordinal, resume_id in enumerate(item_ids, start=1)
             )
+            session.add(
+                RecruitingAgentConversationTurn(
+                    conversation_id=conversation.id,
+                    context_version=conversation.context_version,
+                    user_message="Synthetic retention prompt.",
+                    assistant_message="Synthetic retention reply.",
+                )
+            )
             conversation.active_candidate_set_id = candidate_set.id
             session.commit()
             return conversation.id, candidate_set.id, item_ids
@@ -129,6 +138,19 @@ def _item_count_anywhere(database: Database, candidate_set_id: str) -> int:
                 session.scalar(
                     select(func.count(RecruitingAgentCandidateSetItem.id)).where(
                         RecruitingAgentCandidateSetItem.candidate_set_id == candidate_set_id
+                    )
+                )
+                or 0
+            )
+
+
+def _turn_count_anywhere(database: Database, conversation_id: str) -> int:
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            return int(
+                session.scalar(
+                    select(func.count(RecruitingAgentConversationTurn.id)).where(
+                        RecruitingAgentConversationTurn.conversation_id == conversation_id
                     )
                 )
                 or 0
@@ -514,6 +536,8 @@ def test_worker_purges_expired_agent_contexts_across_workspaces_and_cascades_ite
         )
         assert _item_count_anywhere(database, expired_a_set_id) == 0
         assert _item_count_anywhere(database, expired_b_set_id) == 0
+        assert _turn_count_anywhere(database, expired_a_id) == 0
+        assert _turn_count_anywhere(database, expired_b_id) == 0
 
         # Expiry cleanup is not a global Agent-state wipe. The unexpired
         # conversation and its opaque scope remain usable.
@@ -528,6 +552,7 @@ def test_worker_purges_expired_agent_contexts_across_workspaces_and_cascades_ite
             active_set_id,
         )
         assert _item_count_anywhere(database, active_set_id) == 1
+        assert _turn_count_anywhere(database, active_id) == 1
     finally:
         database.dispose()
 

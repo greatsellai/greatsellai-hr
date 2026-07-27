@@ -412,10 +412,19 @@ export interface RecruitingAgentActiveContext {
   expires_at: string;
 }
 
+/** One bounded, server-owned, recruiter-visible completed chat exchange. */
+export interface RecruitingAgentConversationTurn {
+  context_version: number;
+  user_message: string;
+  assistant_message: string;
+  created_at: string;
+}
+
 export interface RecruitingAgentConversation {
   conversation_id: string;
   context_version: number;
   active_context: RecruitingAgentActiveContext;
+  chat_history: RecruitingAgentConversationTurn[];
 }
 
 export interface RecruitingAgentTurnInput {
@@ -474,6 +483,7 @@ export interface RecruitingAgentTurn {
   conversation_id: string;
   context_version: number;
   active_context: RecruitingAgentActiveContext;
+  chat_history: RecruitingAgentConversationTurn[];
   message: string;
   intent: RecruitingAgentIntent;
   job_version_id: string | null;

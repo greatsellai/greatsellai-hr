@@ -1184,6 +1184,20 @@ test.describe("招聘工作台关键路径", () => {
       active_job_title: null,
       expires_at: "2026-07-25T10:00:00Z",
     };
+    const chatHistory = [
+      {
+        context_version: 2,
+        user_message: "先筛选符合条件的人",
+        assistant_message: "已保存当前筛选范围。",
+        created_at: "2026-07-24T10:00:00Z",
+      },
+      {
+        context_version: 3,
+        user_message: "在刚才这些人中继续比较",
+        assistant_message: "已在当前范围内继续处理。",
+        created_at: "2026-07-24T10:01:00Z",
+      },
+    ];
     await page.route("**/v1/recruiting-agent/turns", async (route) => {
       turnRequests.push(route.request().postDataJSON() as Record<string, unknown>);
       const contextVersion = turnRequests.length + 1;
@@ -1192,6 +1206,7 @@ test.describe("招聘工作台关键路径", () => {
           conversation_id: "e2e-agent-context-conversation",
           context_version: contextVersion,
           active_context: context,
+          chat_history: chatHistory.slice(0, turnRequests.length),
           message: turnRequests.length === 1
             ? "已保存当前筛选范围。"
             : "已在当前范围内继续处理。",
@@ -1217,6 +1232,7 @@ test.describe("招聘工作台关键路径", () => {
             conversation_id: "e2e-agent-context-conversation",
             context_version: 4,
             active_context: context,
+            chat_history: chatHistory,
           },
         });
       },
@@ -1232,16 +1248,21 @@ test.describe("招聘工作台关键路径", () => {
     await dialog.getByRole("button", { name: "发送提问" }).click();
     await expect.poll(() => turnRequests.length).toBe(2);
     expect(turnRequests[0]).not.toHaveProperty("conversation_id");
+    expect(turnRequests[0]).not.toHaveProperty("chat_history");
     expect(turnRequests[1]).toMatchObject({
       conversation_id: "e2e-agent-context-conversation",
       context_version: 2,
     });
+    expect(turnRequests[1]).not.toHaveProperty("chat_history");
 
     await page.reload();
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
     const reloadedDialog = page.getByRole("dialog", { name: "招聘助手" });
     await expect(reloadedDialog.getByText("助手筛选结果 · 2 位候选人")).toBeVisible();
-    await expect(reloadedDialog.getByText("已在当前范围内继续处理。")).toHaveCount(0);
+    await expect(reloadedDialog.getByText("先筛选符合条件的人")).toBeVisible();
+    await expect(reloadedDialog.getByText("已保存当前筛选范围。")).toBeVisible();
+    await expect(reloadedDialog.getByText("在刚才这些人中继续比较")).toBeVisible();
+    await expect(reloadedDialog.getByText("已在当前范围内继续处理。")).toBeVisible();
 
     await reloadedDialog.getByRole("button", { name: "清除范围" }).click();
     await expect(

@@ -3561,7 +3561,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         principal: AuthPrincipal = Depends(require_single_admin),
         session: Session = Depends(get_session),
     ) -> RecruitingAgentConversationResponse:
-        """Restore only the caller's safe Agent work-state summary."""
+        """Restore the caller's safe Agent work state and short chat history."""
 
         try:
             return get_recruiting_agent_conversation(
@@ -3637,7 +3637,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         principal: AuthPrincipal = Depends(require_single_admin),
         session: Session = Depends(get_session),
     ) -> None:
-        """Forget the caller's private Agent work-state immediately."""
+        """Forget the caller's private Agent work state and chat history immediately."""
 
         try:
             delete_recruiting_agent_conversation(

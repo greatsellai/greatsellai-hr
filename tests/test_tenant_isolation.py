@@ -31,6 +31,7 @@ from app.models import (
     ResumeSourceBlock,
     ResumeSummary,
     RecruitingAgentConversation,
+    RecruitingAgentConversationTurn,
     ScoreTemplate,
     OrganizationMembership,
     UserAccount,
@@ -515,6 +516,15 @@ def test_recruiting_agent_conversations_are_private_to_owner_and_workspace(
             expires_at=utcnow() + timedelta(hours=1),
         )
         session.add_all((owner_conversation, other_member_conversation))
+        session.flush()
+        session.add(
+            RecruitingAgentConversationTurn(
+                conversation_id=owner_conversation.id,
+                context_version=owner_conversation.context_version,
+                user_message="Owner-only recruiter question.",
+                assistant_message="Owner-only recruiter reply.",
+            )
+        )
         session.commit()
         owner_conversation_id = owner_conversation.id
         other_member_conversation_id = other_member_conversation.id
@@ -524,6 +534,14 @@ def test_recruiting_agent_conversations_are_private_to_owner_and_workspace(
     )
     assert owner_read.status_code == 200, owner_read.text
     assert owner_read.json()["conversation_id"] == owner_conversation_id
+    assert owner_read.json()["chat_history"] == [
+        {
+            "context_version": 1,
+            "user_message": "Owner-only recruiter question.",
+            "assistant_message": "Owner-only recruiter reply.",
+            "created_at": owner_read.json()["chat_history"][0]["created_at"],
+        }
+    ]
 
     foreign_workspace_read = client_b.get(
         f"/v1/recruiting-agent/conversations/{owner_conversation_id}"

@@ -14,6 +14,25 @@ export interface MailboxDraft {
   mailbox: string;
   password: string;
   enabled: boolean;
+  initialSyncLookbackDays: number;
+}
+
+/**
+ * The form keeps historical imports deliberately bounded. The server enforces
+ * its own upper limit too, so a channel never turns one click into an
+ * unbounded mailbox scan.
+ */
+export const mailboxInitialSyncLookbackOptions: Array<{ value: string; label: string }> = [
+  { value: "0", label: "从现在开始（不导入历史邮件）" },
+  { value: "1", label: "最近 1 天" },
+  { value: "7", label: "最近 7 天" },
+  { value: "30", label: "最近 30 天" },
+  { value: "90", label: "最近 90 天" },
+];
+
+export function mailboxInitialSyncLookbackLabel(days: number | null | undefined): string {
+  if (typeof days !== "number" || !Number.isInteger(days) || days <= 0) return "从现在开始";
+  return `最近 ${days} 天`;
 }
 
 export function newMailboxDraft(): MailboxDraft {
@@ -24,6 +43,7 @@ export function newMailboxDraft(): MailboxDraft {
     mailbox: "INBOX",
     password: "",
     enabled: true,
+    initialSyncLookbackDays: 0,
   };
 }
 
@@ -35,6 +55,7 @@ export function mailboxDraftFromConfig(config: MailboxConfig): MailboxDraft {
     mailbox: config.mailbox || "INBOX",
     password: "",
     enabled: config.enabled,
+    initialSyncLookbackDays: config.initial_sync_lookback_days ?? 0,
   };
 }
 
@@ -53,6 +74,7 @@ export function mailboxDraftIsDirty(
     || draft.emailAddress !== baseline.emailAddress
     || draft.mailbox !== baseline.mailbox
     || draft.enabled !== baseline.enabled
+    || draft.initialSyncLookbackDays !== baseline.initialSyncLookbackDays
     || Boolean(draft.password.trim())
   );
 }

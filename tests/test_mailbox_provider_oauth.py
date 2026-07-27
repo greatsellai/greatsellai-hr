@@ -287,6 +287,7 @@ def test_google_oauth_connection_is_one_time_and_never_returns_tokens(
             "display_name": "Google 招聘邮箱",
             "email_address": "recruiting@example.test",
             "mailbox": "INBOX",
+            "initial_sync_lookback_days": 7,
         },
     )
     assert start.status_code == 200, start.text
@@ -309,6 +310,9 @@ def test_google_oauth_connection_is_one_time_and_never_returns_tokens(
     with oauth_client.app.state.database.session_factory() as session:
         intent = session.scalar(select(MailboxOAuthConnectIntent))
         assert intent is not None
+        # The initial history choice must survive the external OAuth redirect;
+        # it is later frozen into the newly bound mailbox configuration.
+        assert intent.initial_sync_lookback_days == 7
         assert intent.state_hash != state
         assert state not in intent.encrypted_code_verifier
 
@@ -353,6 +357,9 @@ def test_google_oauth_connection_is_one_time_and_never_returns_tokens(
         assert config is not None
         assert credential is not None
         assert config.encrypted_password is None
+        assert config.initial_sync_lookback_days == 7
+        assert config.initial_backfill_since_date is not None
+        assert config.initial_backfill_completed_at is None
         assert credential.encrypted_refresh_token != "refresh-token-for-test-only"
 
     replay = oauth_client.get(

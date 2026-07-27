@@ -1459,16 +1459,22 @@ test.describe("招聘工作台关键路径", () => {
     });
     await page.getByRole("button", { name: /^(保存收件通道|创建并开始接收)$/ }).click();
     const createPayload = createMailboxRequest.then((request) => request.postDataJSON() as Record<string, unknown>);
-    await expect(createPayload).resolves.toMatchObject({ provider_key: "feishu_app_password" });
+    await expect(createPayload).resolves.toMatchObject({
+      provider_key: "feishu_app_password",
+      initial_sync_lookback_days: 0,
+    });
     await expect(createPayload).resolves.not.toHaveProperty("imap_host");
     await expect(createPayload).resolves.not.toHaveProperty("imap_port");
-    await expect(page.getByText("收件通道已创建，只会入库从现在起收到的附件。")).toBeVisible();
+    await expect(page.getByText("收件通道已创建，不导入历史邮件，后续只接收新邮件。")).toBeVisible();
     await expect(page.getByRole("heading", { name: "E2E 收件通道" })).toBeVisible();
     await expect(page.getByLabel("来源", { exact: true })).toContainText("E2E 收件通道");
+    await expect(page.getByText("首次范围", { exact: true })).toBeVisible();
+    await expect(page.getByText("从现在开始", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "归档通道" })).toBeVisible();
     expect(await gridTrackCount(".mailbox-workspace")).toBe(1);
     await page.getByRole("button", { name: "编辑连接" }).click();
     await expect(page.getByRole("button", { name: "返回概览" })).toBeVisible();
+    await expect(page.locator("#initial-sync-lookback-days")).toHaveCount(0);
     expect(await gridTrackCount(".mailbox-detail-grid")).toBe(1);
     await page.locator("#mailbox-display-name").fill("E2E 未保存收件通道");
     page.once("dialog", (dialog) => dialog.dismiss());
@@ -1563,6 +1569,16 @@ test.describe("招聘工作台关键路径", () => {
     await page.getByRole("radio", { name: /Gmail \/ Google Workspace/ }).click();
     await page.locator("#mailbox-display-name").fill("E2E Google 收件通道");
     await page.locator("#imap-address").fill("e2e-google@example.test");
+    // BackofficeSelect initially renders a native fallback while its shared
+    // Semi Select chunk is loading. Wait for the interactive component so the
+    // test drives the same listbox that users receive after the chunk loads,
+    // rather than trying to inspect the browser-owned native popup.
+    await expect(page.locator(".semi-select#initial-sync-lookback-days")).toBeVisible();
+    await page.getByLabel("导入历史邮件", { exact: true }).click();
+    // Semi Select includes its tick icon in the accessible option name.
+    await page.getByRole("option", { name: /最近 7 天$/ }).click();
+    await expect(page.getByRole("combobox", { name: "导入历史邮件", exact: true }))
+      .toContainText("最近 7 天");
     await expect(page.locator("#imap-password")).toHaveCount(0);
     await expect(page.getByText("Gmail / Google Workspace 网页授权")).toBeVisible();
 
@@ -1577,6 +1593,7 @@ test.describe("招聘工作台关键路径", () => {
       display_name: "E2E Google 收件通道",
       email_address: "e2e-google@example.test",
       mailbox: "INBOX",
+      initial_sync_lookback_days: 7,
     });
     await expect(oauthPayload).resolves.not.toHaveProperty("password");
     await expect(page).toHaveURL(new RegExp(`${oauthLandingPath}$`));

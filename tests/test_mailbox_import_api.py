@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import timedelta
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import pytest
@@ -106,6 +107,11 @@ def test_mailbox_configuration_never_returns_the_authorization_code(client, monk
     assert payload["configured"] is True
     assert payload["password_configured"] is True
     assert payload["import_started_at"] is not None
+    # Existing compatibility callers intentionally retain the pre-backfill
+    # behavior unless they choose a first-bind historical window explicitly.
+    assert payload["initial_sync_lookback_days"] == 0
+    assert payload["initial_backfill_since_date"] is None
+    assert payload["initial_backfill_completed_at"] is None
     assert "password" not in payload
     assert "test-authorization-code" not in saved.text
 
@@ -185,6 +191,148 @@ def test_mailbox_binding_searches_only_messages_at_or_after_uidnext(
     assert result.skipped_count == 1
     assert BoundMailboxImap.search_args == [(None, "UID 42:42")]
     assert BoundMailboxImap.fetched_uids == [b"42"]
+
+
+def test_initial_seven_day_backfill_completes_in_batches_then_returns_to_incremental_sync(
+    client,
+    monkeypatch,
+) -> None:
+    """A first-bind calendar window is frozen and cannot replay indefinitely."""
+
+    fixed_bound_at = datetime(2026, 7, 27, 12, tzinfo=timezone.utc)
+    historical_messages = {
+        str(uid).encode(): _mail_with_attachment(
+            message_id=f"<initial-backfill-{uid}@example.test>",
+            filename=f"candidate-{uid}.pdf",
+            content=f"%PDF-1.7 initial-backfill-{uid}".encode(),
+        )
+        for uid in range(1, 6)
+    }
+    messages = {
+        **historical_messages,
+        b"101": _mail_with_attachment(
+            message_id="<incremental-after-backfill@example.test>",
+            filename="candidate-101.pdf",
+            content=b"%PDF-1.7 incremental-after-backfill",
+        ),
+    }
+
+    class BackfillImap:
+        uidnext = 100
+        search_args: list[tuple[object, ...]] = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [
+                f"INBOX (UIDVALIDITY 9 UIDNEXT {self.__class__.uidnext})".encode()
+            ]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"5"]
+
+        def uid(self, command: str, *args):
+            if command == "search":
+                self.__class__.search_args.append(args)
+                criterion = str(args[-1])
+                if criterion == "SINCE 21-Jul-2026":
+                    return "OK", [b"1 2 3 4 5"]
+                if criterion == "UID 100:101":
+                    return "OK", [b"101"]
+                raise AssertionError(f"unexpected IMAP search: {criterion}")
+            if command == "fetch":
+                return "OK", [(b"RFC822", messages[args[0]])]
+            raise AssertionError(f"unexpected IMAP command: {command}")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    save_calls: list[bytes] = []
+    monkeypatch.setattr(mailbox_import_service, "_utcnow", lambda: fixed_bound_at)
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", BackfillImap)
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "save_pdf_resume",
+        _successful_mailbox_save(save_calls),
+    )
+
+    created = client.post(
+        "/v1/mailboxes",
+        json={
+            "display_name": "Initial history mailbox",
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+            "password": "test-authorization-code",
+            "enabled": True,
+            "initial_sync_lookback_days": 7,
+        },
+    )
+    assert created.status_code == 201, created.text
+    mailbox_id = created.json()["mailbox_id"]
+    assert created.json()["initial_sync_lookback_days"] == 7
+    # N=7 means the binding day plus six preceding calendar days. IMAP SINCE
+    # is inclusive, so subtracting seven would incorrectly create an 8-day
+    # window.
+    assert created.json()["initial_backfill_since_date"] == "2026-07-21"
+    assert created.json()["initial_backfill_completed_at"] is None
+
+    batch_settings = replace(
+        client.app.state.settings,
+        mailbox_sync_attachment_limit=2,
+    )
+    results = []
+    for _ in range(3):
+        with client.app.state.database.session_factory() as session:
+            results.append(
+                mailbox_import_service.sync_mailbox(
+                    session,
+                    settings=batch_settings,
+                    config_id=mailbox_id,
+                )
+            )
+
+    assert [result.imported_count for result in results] == [2, 2, 1]
+    assert BackfillImap.search_args == [
+        (None, "SINCE 21-Jul-2026"),
+        (None, "SINCE 21-Jul-2026"),
+        (None, "SINCE 21-Jul-2026"),
+    ]
+    with client.app.state.database.session_factory() as session:
+        config = session.get(MailboxConfig, mailbox_id)
+        assert config is not None
+        assert config.initial_backfill_since_date.isoformat() == "2026-07-21"
+        assert (
+            mailbox_import_service._as_utc(config.initial_backfill_completed_at)
+            == fixed_bound_at
+        )
+        # Completion must advance to the selected UIDNEXT snapshot. The next
+        # run can then query only messages that arrived afterwards.
+        assert config.import_start_uid == 100
+
+    BackfillImap.uidnext = 102
+    with client.app.state.database.session_factory() as session:
+        incremental = mailbox_import_service.sync_mailbox(
+            session,
+            settings=batch_settings,
+            config_id=mailbox_id,
+        )
+
+    assert incremental.imported_count == 1
+    assert BackfillImap.search_args[-1] == (None, "UID 100:101")
+    assert save_calls == [
+        b"%PDF-1.7 initial-backfill-4",
+        b"%PDF-1.7 initial-backfill-5",
+        b"%PDF-1.7 initial-backfill-2",
+        b"%PDF-1.7 initial-backfill-3",
+        b"%PDF-1.7 initial-backfill-1",
+        b"%PDF-1.7 incremental-after-backfill",
+    ]
 
 
 def test_existing_mailbox_without_watermark_skips_its_history_once(

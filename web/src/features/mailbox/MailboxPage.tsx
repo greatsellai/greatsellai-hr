@@ -30,6 +30,8 @@ import {
   mailboxChannelStatusClass,
   mailboxDraftFromConfig,
   mailboxDraftIsDirty,
+  mailboxInitialSyncLookbackLabel,
+  mailboxInitialSyncLookbackOptions,
   mailboxImportErrorLabel,
   mailboxImportStatusLabel,
   mailboxRetentionDueCount,
@@ -129,6 +131,18 @@ export function MailboxPage({
     selectedMailboxId
     && (activeSyncMailboxIds.has(selectedMailboxId) || enqueuingMailboxId === selectedMailboxId),
   );
+  const selectedInitialSyncLookbackDays = selectedConfig?.initial_sync_lookback_days ?? 0;
+  const selectedInitialImportStatus = selectedInitialSyncLookbackDays === 0
+    ? "不导入历史邮件"
+    : selectedConfig?.initial_backfill_completed_at
+      ? "已完成"
+      : !selectedConfig?.enabled
+        ? "已暂停"
+        : selectedMailboxRequiresAuthorization
+          ? "等待授权"
+          : selectedSyncJob
+            ? "后台导入中"
+            : "等待后台导入";
   const canManageRetention = role === "admin";
   const retentionHasActiveRun = Boolean(retentionRuns?.items.some(
     (run) => run.status === "queued" || run.status === "running",
@@ -349,7 +363,14 @@ export function MailboxPage({
         : null;
       if (connectedMailbox) selectMailbox(connectedMailbox, true);
       const providerName = providers.find((item) => item.provider_key === providerKey)?.display_name ?? "邮箱服务商";
-      notify("success", `已连接 ${providerName}，系统只会接收绑定之后到达的附件。`);
+      const lookbackDays = connectedMailbox?.initial_sync_lookback_days ?? 0;
+      const importMessage = lookbackDays > 0
+        ? `后台将导入${mailboxInitialSyncLookbackLabel(lookbackDays)}的附件，后续只接收新邮件。`
+        : "不导入历史邮件，后续只接收新邮件。";
+      notify("success", `已连接 ${providerName}，${importMessage}`);
+      if (lookbackDays > 0 && connectedMailbox?.enabled) {
+        void api.listMailboxBackgroundJobs().then(setMailboxJobs).catch(() => undefined);
+      }
     }).catch((error) => {
       notify("error", humanizeError(error));
     });
@@ -456,6 +477,7 @@ export function MailboxPage({
           mailbox: draft.mailbox.trim() || draftProvider!.default_mailbox,
           password: draft.password,
           enabled: draft.enabled,
+          initial_sync_lookback_days: draft.initialSyncLookbackDays,
         })
         : await api.updateMailboxConfig(selectedConfig!.mailbox_id, {
           display_name: draft.displayName.trim(),
@@ -467,7 +489,15 @@ export function MailboxPage({
         ...current.filter((item) => item.mailbox_id !== saved.mailbox_id),
       ]);
       selectMailbox(saved, true);
-      notify("success", isCreating ? "收件通道已创建，只会入库从现在起收到的附件。" : "收件通道已保存。");
+      if (isCreating && draft.initialSyncLookbackDays > 0 && draft.enabled) {
+        void api.listMailboxBackgroundJobs().then(setMailboxJobs).catch(() => undefined);
+      }
+      const initialImportMessage = draft.initialSyncLookbackDays > 0
+        ? draft.enabled
+          ? `将在后台导入${mailboxInitialSyncLookbackLabel(draft.initialSyncLookbackDays)}的附件，后续只接收新邮件。`
+          : `已保存${mailboxInitialSyncLookbackLabel(draft.initialSyncLookbackDays)}的范围；启用同步或手动同步后才会导入。`
+        : "不导入历史邮件，后续只接收新邮件。";
+      notify("success", isCreating ? `收件通道已创建，${initialImportMessage}` : "收件通道已保存。");
     } catch (error) {
       notify("error", humanizeError(error));
     } finally {
@@ -500,6 +530,7 @@ export function MailboxPage({
         display_name: draft.displayName.trim(),
         email_address: draft.emailAddress.trim(),
         mailbox: draft.mailbox.trim() || draftProvider.default_mailbox,
+        initial_sync_lookback_days: draft.initialSyncLookbackDays,
       });
       window.location.assign(result.authorization_url);
     } catch (error) {
@@ -683,8 +714,8 @@ export function MailboxPage({
   const mailboxCreationTitle = hasMailboxChannels ? "新建收件通道" : "绑定招聘收件邮箱";
   const mailboxCreationKicker = hasMailboxChannels ? "新建通道" : "首次接入";
   const mailboxCreationDescription = hasMailboxChannels
-    ? "从空白配置开始。保存时会记录当前邮箱位置，历史邮件不会入库。"
-    : "保存时会记录当前邮箱位置。只有此刻之后到达的附件会进入简历库，历史邮件不会入库。";
+    ? "从空白配置开始。连接后会按选定的首次范围导入附件，完成后只接收新邮件。"
+    : "选择首次范围后，系统会在后台导入对应时间内的附件；完成后只接收新邮件。";
   const showMailboxOverview = Boolean(selectedConfig && !isCreating && !isEditingConnection);
   const formUsesOAuth = isCreating
     ? draftProvider?.authentication_mode === "oauth2"
@@ -772,6 +803,44 @@ export function MailboxPage({
           </div>
         </div>
       </section>
+
+      {isCreating && (
+        <section className="mailbox-form-section" aria-labelledby="mailbox-initial-sync-heading">
+          <div className="mailbox-form-section-heading">
+            <div>
+              <h3 id="mailbox-initial-sync-heading">首次入库范围</h3>
+              <p>只在首次绑定时生效，创建后不能修改。</p>
+            </div>
+          </div>
+          <div className="form-grid mailbox-form-grid">
+            <div className="field-stack span-full">
+              <label
+                className="field-label"
+                htmlFor="initial-sync-lookback-days"
+                id="initial-sync-lookback-days-label"
+              >
+                导入历史邮件
+              </label>
+              <BackofficeSelect
+                ariaDescribedBy="initial-sync-lookback-days-hint"
+                ariaLabelledBy="initial-sync-lookback-days-label"
+                id="initial-sync-lookback-days"
+                disabled={saving || authorizing}
+                onChange={(value) => {
+                  const days = Number(value);
+                  if (!Number.isInteger(days)) return;
+                  updateDraft("initialSyncLookbackDays", days);
+                }}
+                options={mailboxInitialSyncLookbackOptions}
+                value={String(draft.initialSyncLookbackDays)}
+              />
+              <p className="field-help" id="initial-sync-lookback-days-hint">
+                系统只会导入这个时间范围内的简历附件；首次完成后，后续同步始终只接收新邮件。
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
 
       <section className="mailbox-form-section" aria-labelledby="mailbox-connection-heading">
         <div className="mailbox-form-section-heading">
@@ -969,16 +1038,16 @@ export function MailboxPage({
           <strong>{mailboxAuthenticationModeLabel(selectedConfig.authentication_mode)}</strong>
         </div>
         <div>
-          <span>开始接收</span>
-          <strong>{selectedConfig.import_started_at ? formatLibraryDate(selectedConfig.import_started_at) : "正在初始化"}</strong>
+          <span>首次范围</span>
+          <strong>{mailboxInitialSyncLookbackLabel(selectedInitialSyncLookbackDays)}</strong>
         </div>
         <div>
           <span>最近同步</span>
           <strong>{selectedConfig.last_synced_at ? formatLibraryDate(selectedConfig.last_synced_at) : "尚未同步"}</strong>
         </div>
         <div>
-          <span>后台同步</span>
-          <strong>{selectedSyncJob ? mailboxBackgroundJobStatusLabel(selectedSyncJob) : selectedMailboxCanSync ? "已启用" : selectedConfig.enabled ? "等待授权" : "已暂停"}</strong>
+          <span>{selectedInitialSyncLookbackDays > 0 ? "首次导入" : "后台同步"}</span>
+          <strong>{selectedInitialSyncLookbackDays > 0 ? selectedInitialImportStatus : selectedSyncJob ? mailboxBackgroundJobStatusLabel(selectedSyncJob) : selectedMailboxCanSync ? "已启用" : selectedConfig.enabled ? "等待授权" : "已暂停"}</strong>
         </div>
       </div>
 
@@ -1008,7 +1077,7 @@ export function MailboxPage({
       <header className="page-heading">
         <div>
           {embedded ? <h2>收件邮箱</h2> : <h1>邮箱附件入库</h1>}
-          <p>连接招聘邮箱后，系统只接收绑定之后到达的附件。</p>
+          <p>连接招聘邮箱后，可按首次范围导入历史附件，后续持续接收新邮件。</p>
         </div>
         {hasMailboxChannels && !isCreating && (
           <div className="mailbox-heading-actions">
@@ -1106,11 +1175,11 @@ export function MailboxPage({
             <ol className="mailbox-setup-steps">
               <li>
                 <span>1</span>
-                <div><strong>保存连接</strong><p>系统记录当前收件位置，不回扫已有邮件。</p></div>
+                <div><strong>保存连接</strong><p>系统按首次范围建立入库起点，范围外的历史邮件不会扫描。</p></div>
               </li>
               <li>
                 <span>2</span>
-                <div><strong>后台同步</strong><p>按计划检查新附件，也可以随时手动触发。</p></div>
+                <div><strong>后台同步</strong><p>如选择历史范围，先在后台导入对应附件；随后按计划检查新邮件。</p></div>
               </li>
               <li>
                 <span>3</span>
@@ -1138,7 +1207,7 @@ export function MailboxPage({
               <div className="panel-heading">
                 <div>
                   <h2>{isCreating ? "新建收件通道" : "收件通道设置"}</h2>
-                  <p>{isCreating ? "保存时会记录当前邮箱位置，历史邮件不会入库。" : "授权码始终保持隐藏；留空则继续使用已保存的值。"}</p>
+                  <p>{isCreating ? "选择首次范围后，系统会在后台导入对应时间内的附件；之后只接收新邮件。" : "首次范围已固定；授权码始终保持隐藏，留空则继续使用已保存的值。"}</p>
                 </div>
                 {selectedConfig && <span className={`status-pill${mailboxChannelStatusClass(selectedConfig)}`}>{mailboxChannelStatus(selectedConfig)}</span>}
               </div>
@@ -1371,7 +1440,7 @@ export function MailboxPage({
                   </tbody>
                 </table>
               </div>
-            ) : <div className="mailbox-history-empty"><span className="empty-glyph"><Icon name="inbox" size={21} /></span><div><h3>还没有附件入库记录</h3><p>绑定后收到的附件会显示在这里，历史邮件不会入库。</p></div></div>}
+            ) : <div className="mailbox-history-empty"><span className="empty-glyph"><Icon name="inbox" size={21} /></span><div><h3>还没有附件入库记录</h3><p>首次范围内和后续收到的简历附件，都会显示在这里。</p></div></div>}
           </section>
 
           <details className="panel mailbox-retention-history">

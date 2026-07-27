@@ -36,7 +36,7 @@ export function MailboxChannelList({
       <div className="panel-heading mailbox-channel-heading">
         <div>
           <h2>收件通道</h2>
-          <p>每个通道独立保存接收起点与同步状态。</p>
+          <p>每个通道独立保存首次入库范围与同步状态。</p>
         </div>
         <span className="tiny-badge">{mailboxes.length}</span>
       </div>
@@ -70,7 +70,7 @@ export function MailboxChannelList({
         <div className="mailbox-channel-empty">
           <span className="empty-glyph"><Icon name="inbox" size={20} /></span>
           <strong>还没有收件通道</strong>
-          <span>新建后，系统从当前邮箱位置开始接收附件。</span>
+          <span>新建时可选择从现在开始，或回溯指定天数的简历附件。</span>
         </div>
       )}
       <BackofficeButton

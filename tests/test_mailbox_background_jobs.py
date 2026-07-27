@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import timedelta
+from datetime import date, timedelta
 
 from sqlalchemy import func, select
 
@@ -160,6 +160,50 @@ def test_duplicate_sync_requests_coalesce_to_one_active_job(client) -> None:
 
     with client.app.state.database.session_factory() as session:
         assert session.scalar(select(func.count()).select_from(MailboxBackgroundJob)) == 1
+
+
+def test_scheduler_resumes_pending_initial_backfill_without_waiting_for_normal_interval(
+    client,
+) -> None:
+    """A crashed/batched first-bind sweep stays eligible until it completes."""
+
+    config_id, _ = _create_config(client)
+    now = mailbox_background_job_service._utcnow()
+    with client.app.state.database.session_factory() as session:
+        config = session.get(MailboxConfig, config_id)
+        assert config is not None
+        config.initial_sync_lookback_days = 7
+        config.initial_backfill_since_date = date(2026, 7, 21)
+        config.initial_backfill_completed_at = None
+        # A successful normal run would not be due again for ten minutes.
+        # The pending frozen backfill must still be resumed immediately.
+        config.last_sync_started_at = now
+        config.last_synced_at = now
+        session.commit()
+
+    assert mailbox_background_job_service.enqueue_due_mailbox_sync_jobs(
+        database=client.app.state.database,
+        settings=client.app.state.settings,
+    )
+    with client.app.state.database.session_factory() as session:
+        job = session.scalar(select(MailboxBackgroundJob))
+        assert job is not None
+        assert job.mailbox_config_id == config_id
+        assert job.trigger_type == "scheduled"
+        assert job.status == "queued"
+        job.status = "completed"
+        job.completed_at = now
+        config = session.get(MailboxConfig, config_id)
+        assert config is not None
+        config.initial_backfill_completed_at = now
+        session.commit()
+
+    # After completion the same fresh last-sync timestamps must return to the
+    # ordinary interval policy instead of producing another immediate task.
+    assert not mailbox_background_job_service.enqueue_due_mailbox_sync_jobs(
+        database=client.app.state.database,
+        settings=client.app.state.settings,
+    )
 
 
 def test_task_history_is_strictly_bounded_and_supports_stable_offset(client) -> None:

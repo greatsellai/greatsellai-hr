@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -835,6 +835,10 @@ class MailboxConfigCreate(ApiModel):
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=512)
     enabled: bool = True
+    # Only accepted while a new source is being bound. The service records an
+    # immutable date at bind time; later PATCH calls deliberately cannot
+    # retroactively scan mail that pre-dated a connection.
+    initial_sync_lookback_days: int = Field(default=0, ge=0, le=365)
 
 
 class MailboxConfigPatch(ApiModel):
@@ -895,6 +899,9 @@ class MailboxConfigResponse(ApiModel):
     password_configured: bool = False
     # Deliberately expose the binding time, but not the IMAP UID internals.
     import_started_at: datetime | None = None
+    initial_sync_lookback_days: int = 0
+    initial_backfill_since_date: date | None = None
+    initial_backfill_completed_at: datetime | None = None
     last_synced_at: datetime | None = None
     last_sync_error: str | None = None
     active_sync_alert: MailboxSyncAlertSummary | None = None
@@ -925,6 +932,7 @@ class MailboxOAuthStartRequest(ApiModel):
     display_name: str = Field(min_length=1, max_length=32)
     email_address: str = Field(min_length=3, max_length=320)
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
+    initial_sync_lookback_days: int = Field(default=0, ge=0, le=365)
 
 
 class MailboxOAuthStartResponse(ApiModel):

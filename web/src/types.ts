@@ -164,6 +164,15 @@ export interface MailboxConfig {
   /** Archived sources no longer receive new mail, but keep their import audit trail. */
   archived_at: string | null;
   password_configured: boolean;
+  /**
+   * Historical mail window used only when this source was first connected.
+   * Zero means the channel starts at the binding point and imports no history.
+   */
+  initial_sync_lookback_days: number;
+  /** Frozen server-side cutoff used for the one-time historical import. */
+  initial_backfill_since_date: string | null;
+  /** Populated once the selected first-import window has finished. */
+  initial_backfill_completed_at: string | null;
   import_started_at: string | null;
   last_synced_at: string | null;
   last_sync_error: string | null;
@@ -190,6 +199,8 @@ export interface MailboxConfigCreate {
   mailbox: string;
   password?: string;
   enabled: boolean;
+  /** The immutable historical window chosen while creating this channel. */
+  initial_sync_lookback_days: number;
 }
 
 /** PATCH payload. Leave the authorization code out to keep the saved value. */
@@ -234,6 +245,8 @@ export interface MailboxOAuthStartRequest {
   display_name: string;
   email_address: string;
   mailbox: string;
+  /** Preserved through the OAuth handoff and applied to the new channel. */
+  initial_sync_lookback_days: number;
 }
 
 /** The browser immediately navigates to this URL. It must never be persisted. */

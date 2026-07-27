@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -1088,6 +1090,10 @@ class MailboxConfig(OrganizationScoped, Base):
 
     __tablename__ = "mailbox_configs"
     __table_args__ = (
+        CheckConstraint(
+            "initial_sync_lookback_days >= 0 AND initial_sync_lookback_days <= 365",
+            name="ck_mailbox_configs_initial_sync_lookback_days",
+        ),
         UniqueConstraint(
             "organization_id",
             "display_name_key",
@@ -1145,6 +1151,21 @@ class MailboxConfig(OrganizationScoped, Base):
     import_start_uid: Mapped[int | None] = mapped_column(BigInteger)
     imap_uidvalidity: Mapped[int | None] = mapped_column(BigInteger)
     import_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A new source may opt into a one-time bounded historical import.  The
+    # date is fixed when the connection is successfully bound rather than
+    # recalculated by a delayed worker, so retries and restarts cannot widen
+    # the selected window.  Existing rows migrate to zero/no date and retain
+    # their original "from now" behavior.
+    initial_sync_lookback_days: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    initial_backfill_since_date: Mapped[date | None] = mapped_column(Date)
+    initial_backfill_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     # Scheduler fairness uses the last attempted run, not only successful
     # syncs, so one broken source cannot monopolize the worker loop.
     last_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1254,6 +1275,10 @@ class MailboxOAuthConnectIntent(OrganizationScoped, Base):
 
     __tablename__ = "mailbox_oauth_connect_intents"
     __table_args__ = (
+        CheckConstraint(
+            "initial_sync_lookback_days >= 0 AND initial_sync_lookback_days <= 365",
+            name="ck_mailbox_oauth_connect_intents_initial_sync_lookback_days",
+        ),
         UniqueConstraint("state_hash", name="uq_mailbox_oauth_connect_intents_state_hash"),
         Index(
             "ix_mailbox_oauth_connect_intents_organization_expiry",
@@ -1276,6 +1301,15 @@ class MailboxOAuthConnectIntent(OrganizationScoped, Base):
     display_name: Mapped[str] = mapped_column(String(32), nullable=False)
     email_address: Mapped[str] = mapped_column(String(320), nullable=False)
     mailbox: Mapped[str] = mapped_column(String(255), nullable=False)
+    # The create-flow selection survives the provider redirect. It is ignored
+    # for a reauthorization intent, which always preserves the existing
+    # channel's immutable historical-import policy.
+    initial_sync_lookback_days: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
     state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     encrypted_code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
     # ``0`` is reserved for a first-time connection. Reauthorization intents

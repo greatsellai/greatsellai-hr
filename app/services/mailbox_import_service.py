@@ -8,7 +8,7 @@ import re
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.header import decode_header, make_header
 from email.message import Message
@@ -140,6 +140,22 @@ _OAUTH_INTENT_CLEANUP_BATCH_SIZE = 200
 _OAUTH_INTENT_CONSUMED_RETENTION = timedelta(hours=1)
 _IMAP_NZ_NUMBER_MAX = (1 << 32) - 1
 _IMAP_CANONICAL_NZ_NUMBER_PATTERN = re.compile(rb"[1-9][0-9]{0,9}\Z")
+_INITIAL_SYNC_LOOKBACK_DAYS_MIN = 0
+_INITIAL_SYNC_LOOKBACK_DAYS_MAX = 365
+_IMAP_MONTH_ABBREVIATIONS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
 _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
     {
         "attachment_validation_failed",
@@ -158,6 +174,45 @@ _NON_RETRYABLE_ATTACHMENT_ERRORS = frozenset(
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _validated_initial_sync_lookback_days(value: object) -> int:
+    """Accept only the bounded, first-bind historical import window."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MailboxImportError("mailbox_initial_sync_lookback_days_invalid")
+    if not _INITIAL_SYNC_LOOKBACK_DAYS_MIN <= value <= _INITIAL_SYNC_LOOKBACK_DAYS_MAX:
+        raise MailboxImportError("mailbox_initial_sync_lookback_days_invalid")
+    return value
+
+
+def _initial_backfill_since_date(*, bound_at: datetime, lookback_days: int) -> date | None:
+    """Freeze a calendar cutoff that includes today in the requested day count."""
+
+    if lookback_days == 0:
+        return None
+    # IMAP ``SINCE`` is inclusive and date-based.  A choice of seven therefore
+    # means today plus the six preceding natural calendar days, not eight days
+    # of mail caused by subtracting a full seven-day duration.
+    return (_as_utc(bound_at) or bound_at).date() - timedelta(days=lookback_days - 1)
+
+
+def _initial_backfill_is_pending(config: MailboxConfig) -> bool:
+    """Return whether this source still owns its one-time historical scan."""
+
+    return (
+        config.initial_backfill_since_date is not None
+        and config.initial_backfill_completed_at is None
+    )
+
+
+def _imap_since_criterion(since_date: date) -> str:
+    """Build a fixed RFC 3501 date criterion without locale-dependent output."""
+
+    return (
+        f"SINCE {since_date.day:02d}-"
+        f"{_IMAP_MONTH_ABBREVIATIONS[since_date.month - 1]}-{since_date.year:04d}"
+    )
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -696,6 +751,9 @@ def _config_response(
         archived_at=config.archived_at,
         password_configured=bool(config.encrypted_password),
         import_started_at=config.import_started_at,
+        initial_sync_lookback_days=config.initial_sync_lookback_days,
+        initial_backfill_since_date=config.initial_backfill_since_date,
+        initial_backfill_completed_at=config.initial_backfill_completed_at,
         last_synced_at=config.last_synced_at,
         last_sync_error=config.last_sync_error,
         active_sync_alert=(
@@ -1278,6 +1336,7 @@ def _update_config_values(
     mailbox: str,
     credential: _MailboxCredential | None,
     enabled: bool,
+    initial_sync_lookback_days: int | None = None,
 ) -> MailboxConfig:
     """Persist one source after validating its identity, auth mode and watermark."""
 
@@ -1287,6 +1346,21 @@ def _update_config_values(
     # connectivity error after we have already contacted the mailbox.
     if credential is not None:
         _fernet(settings)
+    if config is None:
+        lookback_days = _validated_initial_sync_lookback_days(
+            0 if initial_sync_lookback_days is None else initial_sync_lookback_days
+        )
+    else:
+        # The selection belongs to the connection's first binding and cannot
+        # be used by an ordinary update to replay historical messages.
+        lookback_days = _validated_initial_sync_lookback_days(
+            config.initial_sync_lookback_days
+        )
+        if (
+            initial_sync_lookback_days is not None
+            and initial_sync_lookback_days != lookback_days
+        ):
+            raise MailboxImportError("mailbox_initial_sync_window_locked")
     normalized_name, display_name_key = _normalized_display_name(display_name)
     _ensure_display_name_available(
         session,
@@ -1399,8 +1473,13 @@ def _update_config_values(
             on_oauth_refresh_token_rotated=persist_binding_refresh_rotation,
         )
         import_started_at = _utcnow()
+        initial_backfill_since_date = _initial_backfill_since_date(
+            bound_at=import_started_at,
+            lookback_days=lookback_days,
+        )
     else:
         imap_uidvalidity = import_start_uid = import_started_at = None
+        initial_backfill_since_date = None
 
     if config is None:
         config = MailboxConfig(
@@ -1421,6 +1500,9 @@ def _update_config_values(
             import_start_uid=import_start_uid,
             imap_uidvalidity=imap_uidvalidity,
             import_started_at=import_started_at,
+            initial_sync_lookback_days=lookback_days,
+            initial_backfill_since_date=initial_backfill_since_date,
+            initial_backfill_completed_at=None,
         )
         session.add(config)
         # The tenant write guard fills organization_id during this flush. The
@@ -1450,8 +1532,13 @@ def _update_config_values(
             config.import_start_uid = import_start_uid
             config.imap_uidvalidity = imap_uidvalidity
             config.import_started_at = import_started_at
+            config.initial_sync_lookback_days = lookback_days
+            config.initial_backfill_since_date = initial_backfill_since_date
+            config.initial_backfill_completed_at = None
             # The worker should check a newly bound mailbox immediately. The
-            # stored UIDNEXT keeps that check from importing its history.
+            # stored UIDNEXT keeps a zero-day binding from importing history;
+            # a selected historical window is handled only by its pending
+            # one-time IMAP ``SINCE`` branch.
             config.last_synced_at = None
 
     if authentication_mode == "oauth2" and credential is not None:
@@ -1499,6 +1586,7 @@ def create_mailbox_config(
             else None
         ),
         enabled=payload.enabled,
+        initial_sync_lookback_days=payload.initial_sync_lookback_days,
     )
     try:
         session.commit()
@@ -1586,6 +1674,7 @@ def _start_mailbox_oauth_intent(
     email_address: str,
     mailbox: str,
     target_mailbox_config_id: str | None,
+    initial_sync_lookback_days: int = 0,
     reauthorization_generation: int = 0,
 ) -> MailboxOAuthStartResponse:
     provider = _oauth_provider_or_error(settings, provider_key=provider_key)
@@ -1601,6 +1690,7 @@ def _start_mailbox_oauth_intent(
     )
     normalized_email = email_address.strip()
     normalized_mailbox = mailbox.strip()
+    lookback_days = _validated_initial_sync_lookback_days(initial_sync_lookback_days)
     if reauthorization_generation < 0:
         raise MailboxImportError("mailbox_oauth_callback_invalid")
     _validate_imap_connection_arguments(
@@ -1627,6 +1717,7 @@ def _start_mailbox_oauth_intent(
         display_name=normalized_name,
         email_address=normalized_email,
         mailbox=normalized_mailbox,
+        initial_sync_lookback_days=lookback_days,
         state_hash=hashlib.sha256(state.encode("utf-8")).hexdigest(),
         encrypted_code_verifier=_encrypt_mailbox_secret(settings, code_verifier),
         reauthorization_generation=reauthorization_generation,
@@ -1655,6 +1746,7 @@ def start_mailbox_oauth_connection(
         email_address=payload.email_address,
         mailbox=payload.mailbox,
         target_mailbox_config_id=None,
+        initial_sync_lookback_days=payload.initial_sync_lookback_days,
         reauthorization_generation=0,
     )
 
@@ -1727,6 +1819,7 @@ def start_mailbox_oauth_reauthorization(
         email_address=config.email_address,
         mailbox=config.mailbox,
         target_mailbox_config_id=config.id,
+        initial_sync_lookback_days=0,
         reauthorization_generation=generation,
     )
 
@@ -1922,6 +2015,7 @@ def complete_mailbox_oauth_connection(
             mailbox=intent.mailbox,
             credential=credential,
             enabled=True,
+            initial_sync_lookback_days=intent.initial_sync_lookback_days,
         )
         if callback_is_still_current is not None and not callback_is_still_current():
             raise MailboxImportError("mailbox_oauth_callback_invalid")
@@ -4460,14 +4554,39 @@ def sync_mailbox(
         if selected_uidnext < current_uidnext or selected_uidnext < import_start_uid:
             stop_for_source_change("mailbox_source_watermark_invalid")
         pulse()
+        # The binding watermark remains the boundary for ordinary runs. A new
+        # source with a selected historical window temporarily queries the
+        # immutable, calendar-based ``SINCE`` cutoff instead. Once that
+        # bounded sweep completes, this run's UIDNEXT snapshot becomes the
+        # normal baseline so already handled history is not re-scanned.
+        initial_backfill_pending = _initial_backfill_is_pending(config)
+        maximum_uid = selected_uidnext - 1
         search_uids: list[bytes]
-        if selected_uidnext == import_start_uid:
+        if initial_backfill_pending:
+            since_date = config.initial_backfill_since_date
+            assert since_date is not None
+            if maximum_uid < 1:
+                search_uids = []
+            else:
+                status, data = client.uid(
+                    "search",
+                    None,
+                    _imap_since_criterion(since_date),
+                )
+                if status != "OK":
+                    raise MailboxImportError("mailbox_search_failed")
+                search_uids = _parse_search_uids(
+                    data,
+                    settings=settings,
+                    minimum_uid=1,
+                    maximum_uid=maximum_uid,
+                )
+        elif selected_uidnext == import_start_uid:
             # ``UID N:*`` includes the last existing message when N is larger
             # than every assigned UID. Avoid that reversed-range behavior by
             # issuing no SEARCH until the snapshot has a real post-bind UID.
             search_uids = []
         else:
-            maximum_uid = selected_uidnext - 1
             status, data = client.uid(
                 "search",
                 None,
@@ -4504,9 +4623,10 @@ def sync_mailbox(
             candidate_batch.clear()
 
         # Work newest-first so freshly received resumes arrive immediately.
-        # The server has already limited this search to UIDs at or after the
-        # binding watermark. Querying historical handling state in small
-        # batches keeps a long-lived source from loading every prior UID.
+        # The server-side query is either the normal post-bind UID range or a
+        # bounded first-bind calendar window. Querying historical handling
+        # state in small batches keeps either path from loading every prior
+        # UID into the application at once.
         for raw_uid in reversed(search_uids):
             uid = raw_uid.decode("ascii")
             if not uid or uid in seen_uids:
@@ -4519,6 +4639,15 @@ def sync_mailbox(
                 break
         if len(selected_uids) < settings.mailbox_sync_attachment_limit:
             choose_unknown_uids()
+        # Reaching the batch limit is intentionally treated as incomplete,
+        # even when the matching set happens to equal the limit. A following
+        # run can prove that no remaining unknown message exists. This avoids
+        # marking the one-time import complete after only one page.
+        initial_backfill_exhausted = (
+            initial_backfill_pending
+            and len(selected_uids) < settings.mailbox_sync_attachment_limit
+        )
+        initial_backfill_unresolved = False
         uids = list(reversed(selected_uids))
         for raw_uid in uids:
             uid = raw_uid.decode("ascii")
@@ -4526,6 +4655,8 @@ def sync_mailbox(
             declared_size = _fetch_message_size(client, raw_uid=raw_uid)
             if declared_size is None:
                 failed += 1
+                if initial_backfill_pending:
+                    initial_backfill_unresolved = True
                 continue
             if declared_size > settings.mailbox_max_raw_message_bytes:
                 _record(
@@ -4556,6 +4687,8 @@ def sync_mailbox(
                 )
                 if raw_message is None:
                     failed += 1
+                    if initial_backfill_pending:
+                        initial_backfill_unresolved = True
                     continue
                 message = _parse_mailbox_message(raw_message, settings=settings)
                 attachments = _attachments(message, settings=settings)
@@ -4586,6 +4719,8 @@ def sync_mailbox(
                     # bounded BODY.PEEK range. The UID is now durably marked
                     # as skipped; finish this batch cleanly and reconnect on
                     # the next scheduled task for any remaining messages.
+                    if initial_backfill_pending:
+                        initial_backfill_unresolved = True
                     client = None
                     break
                 continue
@@ -4805,6 +4940,18 @@ def sync_mailbox(
         )
         if config.archived_at is not None:
             raise MailboxImportError("mailbox_config_archived")
+        if (
+            initial_backfill_pending
+            and initial_backfill_exhausted
+            and not initial_backfill_unresolved
+        ):
+            # The date cutoff was frozen while binding. Mark completion only
+            # after a complete, non-truncated sweep, then advance the normal
+            # UID baseline to this selected snapshot. Messages that arrive
+            # later have greater UIDs and are picked up by normal sync; all
+            # handled backfill mail remains behind the new baseline.
+            config.initial_backfill_completed_at = _utcnow()
+            config.import_start_uid = selected_uidnext
         config.last_synced_at = _utcnow()
         config.last_sync_error = None
         session.commit()

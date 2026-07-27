@@ -111,8 +111,13 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
         assert mailbox_columns["authentication_mode"]["nullable"] is False
         assert mailbox_columns["oauth_reauthorization_generation"]["nullable"] is False
         assert mailbox_columns["encrypted_password"]["nullable"] is True
+        # Existing mailbox channels keep their pre-feature zero-day behavior.
+        assert mailbox_columns["initial_sync_lookback_days"]["nullable"] is False
+        assert "initial_backfill_since_date" in mailbox_columns
+        assert "initial_backfill_completed_at" in mailbox_columns
         assert "contact_details" in resume_columns
         assert "reauthorization_generation" in oauth_intents.c
+        assert "initial_sync_lookback_days" in oauth_intents.c
         assert {
             "mailbox_oauth_credentials",
             "mailbox_oauth_connect_intents",
@@ -136,6 +141,9 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
                     mailboxes.c.imap_uidvalidity,
                     mailboxes.c.last_sync_started_at,
                     mailboxes.c.oauth_reauthorization_generation,
+                    mailboxes.c.initial_sync_lookback_days,
+                    mailboxes.c.initial_backfill_since_date,
+                    mailboxes.c.initial_backfill_completed_at,
                 ).order_by(mailboxes.c.id)
             ).mappings()
             upgraded = {row["id"]: row for row in result}
@@ -148,6 +156,9 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
             assert feishu["imap_uidvalidity"] == 9
             assert feishu["last_sync_started_at"] is not None
             assert feishu["oauth_reauthorization_generation"] == 0
+            assert feishu["initial_sync_lookback_days"] == 0
+            assert feishu["initial_backfill_since_date"] is None
+            assert feishu["initial_backfill_completed_at"] is None
             assert upgraded["mailbox-provider-migration-exmail"]["provider_key"] == (
                 "tencent_exmail_app_password"
             )

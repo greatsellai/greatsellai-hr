@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterator, Literal
 
-from sqlalchemy import case, delete, exists, func, or_, select, update
+from sqlalchemy import and_, case, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -589,6 +589,14 @@ def enqueue_due_mailbox_sync_jobs(*, database: Database, settings: AppSettings) 
             )
             .where(
                 or_(
+                    # A bounded first-bind history pass must continue until
+                    # its durable completion marker is set. It is deliberately
+                    # separate from the normal interval so a delayed worker
+                    # resumes the same frozen IMAP window after a restart.
+                    and_(
+                        MailboxConfig.initial_backfill_since_date.is_not(None),
+                        MailboxConfig.initial_backfill_completed_at.is_(None),
+                    ),
                     MailboxConfig.import_start_uid.is_(None),
                     MailboxConfig.imap_uidvalidity.is_(None),
                     MailboxConfig.last_sync_started_at <= cutoff,

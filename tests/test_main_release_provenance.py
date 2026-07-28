@@ -49,6 +49,7 @@ def _successful_workflow_run(*, run_id: int, timestamp: str) -> dict[str, object
 
 def _success_responses() -> dict[str, object]:
     return {
+        f"/repos/{REPOSITORY}": {"private": True},
         f"/repos/{REPOSITORY}/commits/{RELEASE_SHA}/pulls?per_page=100": [
             {
                 "number": 108,
@@ -118,6 +119,42 @@ def test_verified_main_commit_requires_one_successful_merged_pull_request() -> N
     assert verified.pull_request_number == 108
     assert verified.pull_request_head_sha == PR_HEAD_SHA
     assert verified.ci_run_id == 12345
+
+
+def test_public_repository_does_not_require_skipped_pr_image_build() -> None:
+    responses = _success_responses()
+    responses[f"/repos/{REPOSITORY}"] = {"private": False}
+    responses[f"/repos/{REPOSITORY}/actions/runs/12345/jobs?per_page=100"] = {
+        "jobs": [
+            _successful_item(name=name, timestamp="2026-07-27T08:48:00Z")
+            for name in sorted(PROVENANCE.PUBLIC_REQUIRED_CI_JOB_NAMES)
+        ]
+    }
+
+    verified = PROVENANCE.verify_main_release_provenance(
+        repository=REPOSITORY,
+        release_sha=RELEASE_SHA,
+        fetch_json=_fetcher(responses),
+    )
+
+    assert verified.ci_run_id == 12345
+
+
+def test_private_repository_still_requires_pr_image_build() -> None:
+    responses = _success_responses()
+    responses[f"/repos/{REPOSITORY}/actions/runs/12345/jobs?per_page=100"] = {
+        "jobs": [
+            _successful_item(name=name, timestamp="2026-07-27T08:48:00Z")
+            for name in sorted(PROVENANCE.PUBLIC_REQUIRED_CI_JOB_NAMES)
+        ]
+    }
+
+    with pytest.raises(PROVENANCE.ProvenanceError, match="Production image builds"):
+        PROVENANCE.verify_main_release_provenance(
+            repository=REPOSITORY,
+            release_sha=RELEASE_SHA,
+            fetch_json=_fetcher(responses),
+        )
 
 
 def test_direct_main_push_is_rejected_before_images_or_deployment() -> None:

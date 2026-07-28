@@ -309,6 +309,19 @@ test.describe("招聘工作台关键路径", () => {
     });
     await expect.poll(() => generateRequests).toBe(0);
     await expect(page.getByText("原版已发布", { exact: true })).toBeVisible();
+
+    const activeJobText = page.locator("#active-job-text");
+    await expect(activeJobText).toHaveValue(originalJd);
+    await expect(activeJobText).toHaveAttribute("readonly", "");
+    const originalJdField = await activeJobText.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        height: element.getBoundingClientRect().height,
+        resize: style.resize,
+      };
+    });
+    expect(originalJdField.height).toBeGreaterThanOrEqual(256);
+    expect(originalJdField.resize).toBe("vertical");
   });
 
   test("初筛支持院校、学历与统一工作年限，评分与 JD 仍按全量批处理", async ({ page }) => {

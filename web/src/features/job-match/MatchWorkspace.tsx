@@ -437,9 +437,10 @@ export function MatchWorkspace({
                 </label>
                 <textarea
                   aria-label="当前已启用岗位的 JD 原文"
-                  className="textarea-field"
+                  className="textarea-field job-jd-original-field"
                   id="active-job-text"
                   readOnly
+                  rows={12}
                   value={jobVersion.raw_text}
                 />
               </div>

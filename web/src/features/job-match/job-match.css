@@ -30,6 +30,11 @@
   min-width: 16rem;
 }
 
+.backoffice-ui-root .job-match-workspace .job-jd-original-field {
+  min-height: 16rem;
+  line-height: 1.6;
+}
+
 
 @media (max-width: 640px) {
   .backoffice-ui-root .job-match-workspace .jd-switcher {
@@ -41,6 +46,10 @@
       width: 100%;
       min-width: 0;
     }
+
+  .backoffice-ui-root .job-match-workspace .job-jd-original-field {
+    min-height: 12rem;
+  }
 }
 
 .backoffice-ui-root .job-match-workspace .jd-publish-guide {

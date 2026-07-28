@@ -38,13 +38,12 @@ export function LoginPage({
 }: {
   error: string | null;
   loading: boolean;
-  onLogin: (input: AuthLoginInput | string) => Promise<AuthSession | null>;
+  onLogin: (input: AuthLoginInput) => Promise<AuthSession | null>;
   workspaceHref: WorkspaceHref;
 }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [legacyMode, setLegacyMode] = useState(false);
-  const canSubmit = legacyMode ? Boolean(password) : Boolean(email.trim() && password);
+  const canSubmit = Boolean(email.trim() && password);
   return (
     <AuthPageLayout
       description="进入只属于你所在团队的招聘工作区。候选人、岗位、评分和原始文件按工作区分别管理。"
@@ -56,44 +55,38 @@ export function LoginPage({
         className="auth-form"
         onSubmit={(event) => {
           event.preventDefault();
-          if (legacyMode && password) {
-            void onLogin(password);
-          } else if (email.trim() && password) {
+          if (email.trim() && password) {
             void onLogin({ email: email.trim(), password });
           }
         }}
       >
-        {!legacyMode && (
-          <div className="field-stack">
-            <label className="field-label" htmlFor="login-email">
-              工作邮箱
-            </label>
-            <input
-              autoComplete="email"
-              className="field"
-              id="login-email"
-              inputMode="email"
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="name@company.com"
-              required
-              type="email"
-              value={email}
-            />
-          </div>
-        )}
+        <div className="field-stack">
+          <label className="field-label" htmlFor="login-email">
+            工作邮箱
+          </label>
+          <input
+            autoComplete="email"
+            className="field"
+            id="login-email"
+            inputMode="email"
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="name@company.com"
+            required
+            type="email"
+            value={email}
+          />
+        </div>
         <div className="field-stack">
           <div className="auth-field-heading">
-            <label className="field-label" htmlFor={legacyMode ? "legacy-login-password" : "login-password"}>
-              {legacyMode ? "旧管理口令" : "密码"}
-            </label>
-            {!legacyMode && <a className="auth-inline-link" href={workspaceHref("/forgot-password")}>忘记密码</a>}
+            <label className="field-label" htmlFor="login-password">密码</label>
+            <a className="auth-inline-link" href={workspaceHref("/forgot-password")}>忘记密码</a>
           </div>
           <input
             autoComplete="current-password"
             className="field"
-            id={legacyMode ? "legacy-login-password" : "login-password"}
+            id="login-password"
             onChange={(event) => setPassword(event.target.value)}
-            placeholder={legacyMode ? "输入旧管理口令" : "输入密码"}
+            placeholder="输入密码"
             required
             type="password"
             value={password}
@@ -105,24 +98,10 @@ export function LoginPage({
           disabled={loading || !canSubmit}
           type="submit"
         >
-          {loading ? <><i className="spinner" />正在登录</> : legacyMode ? "使用口令登录" : "登录工作台"}
+          {loading ? <><i className="spinner" />正在登录</> : "登录工作台"}
         </button>
-        <div className="auth-mode-row">
-          <span>{legacyMode ? "正在使用旧版工作区兼容登录" : "旧版工作区管理员？"}</span>
-          <button
-            aria-pressed={legacyMode}
-            className="auth-mode-switch"
-            onClick={() => setLegacyMode((current) => !current)}
-            type="button"
-          >
-            {legacyMode ? "改用邮箱登录" : "使用旧管理口令"}
-          </button>
-        </div>
         <p className="auth-footer-copy">
           还没有团队工作区？<a href={workspaceHref("/register")}>免费试用 30 天</a>
-        </p>
-        <p className="auth-legacy-note">
-          旧管理口令仅用于迁移中的原工作区，本次提交后不会写入浏览器本地存储。
         </p>
       </form>
     </AuthPageLayout>

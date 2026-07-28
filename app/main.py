@@ -10,7 +10,7 @@ from ipaddress import ip_address, ip_network
 import logging
 import mimetypes
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Callable, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -18,6 +18,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Form,
     Header,
     HTTPException,
     Query,
@@ -81,6 +82,7 @@ from app.schemas import (
     PlatformUserDetailResponse,
     PlatformUserListResponse,
     PlatformUserPatch,
+    PlatformWorkspaceFeedbackListResponse,
     RegistrationOfferResponse,
     MailboxConfigCreate,
     MailboxConfigListResponse,
@@ -173,6 +175,7 @@ from app.schemas import (
     SavedFilterResponse,
     ScoreTemplateCreate,
     ScoreTemplateResponse,
+    WorkspaceFeedbackListResponse,
 )
 from app.services.identity_service import (
     AuthPrincipal,
@@ -304,6 +307,10 @@ from app.services.saved_filter_service import (
 )
 from app.services.search_service import SearchValidationError, search_candidates
 from app.services.resume_library_service import list_resume_library
+from app.services.resume_summary_job_service import (
+    enqueue_resume_summary_job,
+    summary_generation_state,
+)
 from app.services.recruiting_agent_service import (
     RecruitingAgentConversationConflictError,
     RecruitingAgentConversationNotFoundError,
@@ -441,6 +448,20 @@ from app.services.candidate_data_export_service import (
     list_candidate_data_exports,
     resolve_candidate_data_export_download,
 )
+from app.services.workspace_feedback_service import (
+    WORKSPACE_FEEDBACK_ALLOWED_IMAGE_CONTENT_TYPES,
+    WORKSPACE_FEEDBACK_MAX_IMAGE_ATTACHMENTS,
+    WORKSPACE_FEEDBACK_MAX_IMAGE_SIZE_BYTES,
+    WorkspaceFeedbackAttachmentInput,
+    WorkspaceFeedbackCooldownError,
+    WorkspaceFeedbackIdempotencyConflictError,
+    WorkspaceFeedbackServiceError,
+    get_platform_workspace_feedback_attachment,
+    get_workspace_feedback_attachment,
+    list_platform_workspace_feedback,
+    list_workspace_feedback,
+    submit_workspace_feedback,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -448,6 +469,7 @@ logger = logging.getLogger(__name__)
 
 def _resume_detail(resume: object) -> ResumeDetail:
     ai_extraction_status, ai_extraction_error = ai_extraction_state(resume)
+    ai_summary_status, ai_summary_error = summary_generation_state(resume)
     return ResumeDetail(
         resume_id=resume.id,
         candidate_id=resume.candidate_id,
@@ -455,6 +477,8 @@ def _resume_detail(resume: object) -> ResumeDetail:
         extraction_status=resume.extraction_status,
         ai_extraction_status=ai_extraction_status,
         ai_extraction_error=ai_extraction_error,
+        ai_summary_status=ai_summary_status,
+        ai_summary_error=ai_summary_error,
         is_active=resume.is_active,
         retention_hold=resume.retention_hold,
         is_985_211=resume.is_985_211,
@@ -469,6 +493,7 @@ def _resume_detail(resume: object) -> ResumeDetail:
 
 def _resume_upload_response(resume: object) -> ResumeUploadResponse:
     ai_extraction_status, ai_extraction_error = ai_extraction_state(resume)
+    ai_summary_status, ai_summary_error = summary_generation_state(resume)
     return ResumeUploadResponse(
         resume_id=resume.id,
         candidate_id=resume.candidate_id,
@@ -476,6 +501,8 @@ def _resume_upload_response(resume: object) -> ResumeUploadResponse:
         extraction_status=resume.extraction_status,
         ai_extraction_status=ai_extraction_status,
         ai_extraction_error=ai_extraction_error,
+        ai_summary_status=ai_summary_status,
+        ai_summary_error=ai_summary_error,
         source_page_count=resume.source_page_count,
         parsed_page_count=resume.parsed_page_count,
         quality_flags=resume.quality_flags or [],
@@ -515,6 +542,219 @@ def _resume_original_file_path(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="resume_original_file_not_found",
         ) from exc
+
+
+_WORKSPACE_FEEDBACK_UPLOAD_NAMESPACE = "workspace-feedback"
+_WORKSPACE_FEEDBACK_IMAGE_SUFFIXES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+
+def _workspace_feedback_error_http_exception(
+    exc: WorkspaceFeedbackServiceError,
+) -> HTTPException:
+    """Map feedback-domain errors without exposing answer or file details."""
+
+    code = str(exc)
+    if isinstance(exc, WorkspaceFeedbackCooldownError):
+        response_status = status.HTTP_409_CONFLICT
+    elif isinstance(exc, WorkspaceFeedbackIdempotencyConflictError):
+        response_status = status.HTTP_409_CONFLICT
+    elif code in {
+        "workspace_feedback_attachment_size_invalid",
+        "workspace_feedback_attachment_too_large",
+    }:
+        response_status = status.HTTP_413_CONTENT_TOO_LARGE
+    elif code in {
+        "workspace_feedback_organization_not_found",
+        "workspace_feedback_attachment_not_found",
+        "workspace_feedback_not_found",
+    }:
+        response_status = status.HTTP_404_NOT_FOUND
+    else:
+        response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+    return HTTPException(status_code=response_status, detail=code)
+
+
+def _feedback_image_content_type(content: bytes) -> str | None:
+    """Identify accepted screenshot bytes without trusting a multipart header."""
+
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(content) >= 3 and content[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _workspace_feedback_attachment_path(
+    *,
+    settings: AppSettings,
+    storage_key: str,
+    organization_id: str,
+    require_file: bool = True,
+) -> Path:
+    """Resolve one feedback image only in its owning workspace namespace."""
+
+    try:
+        parts = PurePosixPath(storage_key).parts
+        if (
+            len(parts) != 3
+            or parts[0] != _WORKSPACE_FEEDBACK_UPLOAD_NAMESPACE
+            or parts[1] != organization_id
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError("invalid workspace feedback storage key")
+        upload_root = settings.upload_dir.resolve()
+        feedback_root = upload_root / _WORKSPACE_FEEDBACK_UPLOAD_NAMESPACE
+        workspace_directory = feedback_root / organization_id
+        raw_path = upload_root.joinpath(*parts)
+        if raw_path.is_symlink() or feedback_root.is_symlink() or workspace_directory.is_symlink():
+            raise ValueError("workspace feedback symlink")
+        source_path = raw_path.resolve()
+        expected_parent = workspace_directory.resolve()
+        source_path.relative_to(upload_root)
+        if source_path.parent != expected_parent:
+            raise ValueError("workspace feedback path outside namespace")
+        if require_file and not source_path.is_file():
+            raise FileNotFoundError(source_path)
+        return source_path
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="workspace_feedback_attachment_not_found",
+        ) from exc
+
+
+def _prepare_workspace_feedback_attachment_path(
+    *,
+    settings: AppSettings,
+    storage_key: str,
+    organization_id: str,
+) -> Path:
+    """Create and verify the private folder before an atomic image write."""
+
+    try:
+        settings.ensure_directories()
+        upload_root = settings.upload_dir.resolve()
+        feedback_root = upload_root / _WORKSPACE_FEEDBACK_UPLOAD_NAMESPACE
+        workspace_directory = feedback_root / organization_id
+        feedback_root.mkdir(parents=True, exist_ok=True)
+        workspace_directory.mkdir(parents=True, exist_ok=True)
+        if feedback_root.is_symlink() or workspace_directory.is_symlink():
+            raise ValueError("workspace feedback symlink")
+        if feedback_root.resolve().parent != upload_root or workspace_directory.resolve().parent != feedback_root.resolve():
+            raise ValueError("workspace feedback directory outside root")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="workspace_feedback_attachment_storage_unavailable",
+        ) from exc
+    return _workspace_feedback_attachment_path(
+        settings=settings,
+        storage_key=storage_key,
+        organization_id=organization_id,
+        require_file=False,
+    )
+
+
+def _discard_workspace_feedback_attachments(
+    *,
+    settings: AppSettings,
+    organization_id: str,
+    storage_keys: list[str],
+) -> None:
+    """Best-effort cleanup for images that never gained a durable row."""
+
+    for storage_key in storage_keys:
+        try:
+            path = _workspace_feedback_attachment_path(
+                settings=settings,
+                storage_key=storage_key,
+                organization_id=organization_id,
+                require_file=False,
+            )
+            if path.is_file():
+                path.unlink()
+        except (HTTPException, OSError):
+            # Cleanup cannot make a failed questionnaire request unsafe.  The
+            # file remains inside a private, unlinked namespace and can be
+            # removed by normal storage operations later.
+            continue
+
+
+async def _store_workspace_feedback_attachments(
+    *,
+    attachments: list[UploadFile],
+    settings: AppSettings,
+    organization_id: str,
+) -> tuple[list[WorkspaceFeedbackAttachmentInput], list[str]]:
+    """Validate and privately store optional screenshot/photo attachments."""
+
+    if len(attachments) > WORKSPACE_FEEDBACK_MAX_IMAGE_ATTACHMENTS:
+        raise WorkspaceFeedbackServiceError("workspace_feedback_too_many_attachments")
+
+    stored_keys: list[str] = []
+    inputs: list[WorkspaceFeedbackAttachmentInput] = []
+    try:
+        for attachment in attachments:
+            original_filename = (attachment.filename or "").replace("\x00", "").strip()
+            if (
+                not original_filename
+                or len(original_filename) > 255
+                or "/" in original_filename
+                or "\\" in original_filename
+                or any(ord(character) < 32 for character in original_filename)
+            ):
+                raise WorkspaceFeedbackServiceError(
+                    "workspace_feedback_attachment_filename_invalid"
+                )
+            content = await attachment.read(WORKSPACE_FEEDBACK_MAX_IMAGE_SIZE_BYTES + 1)
+            if len(content) > WORKSPACE_FEEDBACK_MAX_IMAGE_SIZE_BYTES:
+                raise WorkspaceFeedbackServiceError("workspace_feedback_attachment_too_large")
+            content_type = _feedback_image_content_type(content)
+            if content_type is None:
+                raise WorkspaceFeedbackServiceError("workspace_feedback_attachment_type_invalid")
+            declared_type = (attachment.content_type or "").strip().casefold()
+            if declared_type and declared_type not in WORKSPACE_FEEDBACK_ALLOWED_IMAGE_CONTENT_TYPES:
+                raise WorkspaceFeedbackServiceError("workspace_feedback_attachment_type_invalid")
+            if declared_type and declared_type != content_type:
+                raise WorkspaceFeedbackServiceError("workspace_feedback_attachment_type_invalid")
+
+            storage_key = (
+                f"{_WORKSPACE_FEEDBACK_UPLOAD_NAMESPACE}/{organization_id}/"
+                f"{secrets.token_hex(20)}{_WORKSPACE_FEEDBACK_IMAGE_SUFFIXES[content_type]}"
+            )
+            destination = _prepare_workspace_feedback_attachment_path(
+                settings=settings,
+                storage_key=storage_key,
+                organization_id=organization_id,
+            )
+            temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
+            with temporary.open("xb") as output:
+                output.write(content)
+            temporary.replace(destination)
+            stored_keys.append(storage_key)
+            inputs.append(
+                WorkspaceFeedbackAttachmentInput(
+                    storage_key=storage_key,
+                    original_filename=original_filename,
+                    content_type=content_type,
+                    size_bytes=len(content),
+                    content_sha256=hashlib.sha256(content).hexdigest(),
+                )
+            )
+    except Exception:
+        _discard_workspace_feedback_attachments(
+            settings=settings,
+            organization_id=organization_id,
+            storage_keys=stored_keys,
+        )
+        raise
+    return inputs, stored_keys
 
 
 def _commit_or_raise(session: Session) -> None:
@@ -2155,6 +2395,53 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> PlatformDashboardResponse:
         return get_platform_dashboard(session)
+
+    @app.get(
+        "/v1/platform/workspace-feedback",
+        response_model=PlatformWorkspaceFeedbackListResponse,
+    )
+    def get_platform_workspace_feedback_endpoint(
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> PlatformWorkspaceFeedbackListResponse:
+        return list_platform_workspace_feedback(
+            session,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/v1/platform/workspace-feedback/{feedback_id}/attachments/{attachment_id}",
+        response_class=FileResponse,
+    )
+    def get_platform_workspace_feedback_attachment_endpoint(
+        feedback_id: str,
+        attachment_id: str,
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> FileResponse:
+        try:
+            attachment = get_platform_workspace_feedback_attachment(
+                session,
+                feedback_id=feedback_id,
+                attachment_id=attachment_id,
+            )
+            attachment_path = _workspace_feedback_attachment_path(
+                settings=settings,
+                storage_key=attachment.storage_key,
+                organization_id=attachment.organization_id,
+            )
+        except WorkspaceFeedbackServiceError as exc:
+            raise _workspace_feedback_error_http_exception(exc) from exc
+        return FileResponse(
+            path=attachment_path,
+            media_type=attachment.content_type,
+            filename=attachment.original_filename,
+            content_disposition_type="inline",
+            headers=_private_file_response_headers(),
+        )
 
     @app.get(
         "/v1/platform/organizations",
@@ -4017,6 +4304,133 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 detail="talent_search_profile_service_unavailable",
             ) from exc
 
+    @app.get(
+        "/v1/workspace-feedback",
+        response_model=WorkspaceFeedbackListResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    def get_workspace_feedback_endpoint(
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> WorkspaceFeedbackListResponse:
+        try:
+            return list_workspace_feedback(
+                session,
+                organization_id=principal.organization_id,
+                submitted_by_user_id=principal.user.id,
+            )
+        except WorkspaceFeedbackServiceError as exc:
+            raise _workspace_feedback_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/workspace-feedback",
+        response_model=WorkspaceFeedbackListResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    async def post_workspace_feedback_endpoint(
+        use_case: Annotated[str, Form(max_length=4_000)],
+        intended_outcome: Annotated[str, Form(max_length=4_000)],
+        friction: Annotated[str, Form(max_length=4_000)],
+        desired_change: Annotated[str, Form(max_length=4_000)],
+        attachments: list[UploadFile] = File(default=[]),
+        idempotency_key: Annotated[
+            str | None,
+            Header(alias="Idempotency-Key"),
+        ] = None,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> WorkspaceFeedbackListResponse:
+        """Accept one complete questionnaire and queue its automatic reward."""
+
+        storage_keys: list[str] = []
+        try:
+            attachment_inputs, storage_keys = await _store_workspace_feedback_attachments(
+                attachments=attachments,
+                settings=settings,
+                organization_id=principal.organization_id,
+            )
+            submitted = submit_workspace_feedback(
+                session,
+                organization_id=principal.organization_id,
+                submitted_by_user_id=principal.user.id,
+                idempotency_key=idempotency_key,
+                use_case=use_case,
+                intended_outcome=intended_outcome,
+                friction=friction,
+                desired_change=desired_change,
+                attachments=attachment_inputs,
+            )
+            _commit_or_raise(session)
+            if submitted.replayed:
+                _discard_workspace_feedback_attachments(
+                    settings=settings,
+                    organization_id=principal.organization_id,
+                    storage_keys=storage_keys,
+                )
+            return list_workspace_feedback(
+                session,
+                organization_id=principal.organization_id,
+                submitted_by_user_id=principal.user.id,
+            )
+        except WorkspaceFeedbackServiceError as exc:
+            session.rollback()
+            _discard_workspace_feedback_attachments(
+                settings=settings,
+                organization_id=principal.organization_id,
+                storage_keys=storage_keys,
+            )
+            raise _workspace_feedback_error_http_exception(exc) from exc
+        except HTTPException:
+            session.rollback()
+            _discard_workspace_feedback_attachments(
+                settings=settings,
+                organization_id=principal.organization_id,
+                storage_keys=storage_keys,
+            )
+            raise
+        except Exception:
+            session.rollback()
+            _discard_workspace_feedback_attachments(
+                settings=settings,
+                organization_id=principal.organization_id,
+                storage_keys=storage_keys,
+            )
+            raise
+
+    @app.get(
+        "/v1/workspace-feedback/{feedback_id}/attachments/{attachment_id}",
+        response_class=FileResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    def get_workspace_feedback_attachment_endpoint(
+        feedback_id: str,
+        attachment_id: str,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> FileResponse:
+        try:
+            attachment = get_workspace_feedback_attachment(
+                session,
+                organization_id=principal.organization_id,
+                submitted_by_user_id=principal.user.id,
+                feedback_id=feedback_id,
+                attachment_id=attachment_id,
+            )
+            attachment_path = _workspace_feedback_attachment_path(
+                settings=settings,
+                storage_key=attachment.storage_key,
+                organization_id=principal.organization_id,
+            )
+        except WorkspaceFeedbackServiceError as exc:
+            raise _workspace_feedback_error_http_exception(exc) from exc
+        return FileResponse(
+            path=attachment_path,
+            media_type=attachment.content_type,
+            filename=attachment.original_filename,
+            content_disposition_type="inline",
+            headers=_private_file_response_headers(),
+        )
+
     @app.post(
         "/v1/candidates",
         response_model=CandidateCreated,
@@ -4249,6 +4663,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             .options(
                 selectinload(Resume.document_extraction_job),
                 selectinload(Resume.ai_extraction_job),
+                selectinload(Resume.summaries),
+                selectinload(Resume.summary_jobs),
             )
             .where(pending)
             .order_by(Resume.created_at.desc(), Resume.id.desc())
@@ -4265,6 +4681,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     extraction_status=resume.extraction_status,
                     ai_extraction_status=ai_extraction_state(resume)[0],
                     ai_extraction_error=ai_extraction_state(resume)[1],
+                    ai_summary_status=summary_generation_state(resume)[0],
+                    ai_summary_error=summary_generation_state(resume)[1],
                     quality_flags=resume.quality_flags or [],
                     created_at=resume.created_at,
                 )
@@ -4793,6 +5211,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     ) -> ResumeDetail:
         try:
             resume = save_facts(session, resume_id=resume_id, request=payload)
+            enqueue_resume_summary_job(
+                session,
+                resume=resume,
+                settings=settings,
+            )
         except NotFoundError as exc:
             session.rollback()
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -4820,6 +5243,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 session,
                 resume_id=resume_id,
                 note=payload.note,
+            )
+            enqueue_resume_summary_job(
+                session,
+                resume=resume,
+                settings=settings,
             )
         except NotFoundError as exc:
             session.rollback()

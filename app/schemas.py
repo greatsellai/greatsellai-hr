@@ -137,6 +137,66 @@ class TrialAccessResponse(ApiModel):
     access_enabled: bool
 
 
+class WorkspaceFeedbackAttachmentResponse(ApiModel):
+    attachment_id: str
+    original_filename: str
+    content_type: str
+    size_bytes: int = Field(ge=0)
+
+
+class WorkspaceFeedbackResponse(ApiModel):
+    feedback_id: str
+    use_case: str
+    intended_outcome: str
+    friction: str
+    desired_change: str
+    reward_status: Literal["queued", "running", "granted"]
+    reward_due_at: datetime
+    reward_granted_at: datetime | None = None
+    reward_call_count: int = Field(ge=0)
+    attachments: list[WorkspaceFeedbackAttachmentResponse] = Field(default_factory=list)
+    created_at: datetime
+
+
+class WorkspaceFeedbackListResponse(ApiModel):
+    items: list[WorkspaceFeedbackResponse] = Field(default_factory=list)
+    next_submission_at: datetime | None = None
+
+
+class WorkspaceFeedbackSubmitResponse(ApiModel):
+    item: WorkspaceFeedbackResponse
+    next_submission_at: datetime | None = None
+    replayed: bool = False
+
+
+class PlatformWorkspaceFeedbackResponse(ApiModel):
+    """Platform-only view of feedback, including its submitter and workspace."""
+
+    feedback_id: str
+    organization_id: str
+    organization_name: str
+    submitted_by_user_id: str
+    submitter_name: str
+    submitter_email: str
+    use_case: str
+    intended_outcome: str
+    friction: str
+    desired_change: str
+    reward_status: Literal["queued", "running", "granted"]
+    reward_due_at: datetime
+    reward_granted_at: datetime | None = None
+    reward_call_count: int = Field(ge=0)
+    attachments: list[WorkspaceFeedbackAttachmentResponse] = Field(default_factory=list)
+    created_at: datetime
+
+
+class PlatformWorkspaceFeedbackListResponse(ApiModel):
+    items: list[PlatformWorkspaceFeedbackResponse] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
 class AuthSession(ApiModel):
     authenticated: bool
     login_required: bool
@@ -1498,6 +1558,8 @@ class ResumeUploadResponse(ApiModel):
     extraction_status: str
     ai_extraction_status: str
     ai_extraction_error: str | None
+    ai_summary_status: str | None = None
+    ai_summary_error: str | None = None
     source_page_count: int
     parsed_page_count: int
     quality_flags: list[str]
@@ -1511,6 +1573,8 @@ class ResumeReviewQueueItem(ApiModel):
     extraction_status: str
     ai_extraction_status: str
     ai_extraction_error: str | None
+    ai_summary_status: str | None = None
+    ai_summary_error: str | None = None
     quality_flags: list[str]
     created_at: datetime
 
@@ -1529,6 +1593,8 @@ class ResumeDetail(ApiModel):
     extraction_status: str
     ai_extraction_status: str
     ai_extraction_error: str | None
+    ai_summary_status: str | None = None
+    ai_summary_error: str | None = None
     is_active: bool
     retention_hold: bool
     is_985_211: bool | None
@@ -2358,6 +2424,8 @@ class ResumeLibraryItem(ApiModel):
     extraction_status: str
     ai_extraction_status: str
     ai_extraction_error: str | None = None
+    ai_summary_status: str | None = None
+    ai_summary_error: str | None = None
     is_active: bool
     ingestion_source_type: str = "manual_upload"
     source_mailbox_config_id: str | None = None

@@ -35,6 +35,7 @@ from app.models import (
     MailboxContentReplica,
     Resume,
     ResumeAiExtractionJob,
+    ResumeSummaryJob,
     ResumeDocumentExtractionJob,
     ResumeEducation,
     ResumeExperience,
@@ -564,6 +565,7 @@ def _purge_database_rows(
         )
     session.execute(delete(JobMatch).where(JobMatch.resume_id.in_(resume_ids)))
     session.execute(delete(ResumeScore).where(ResumeScore.resume_id.in_(resume_ids)))
+    session.execute(delete(ResumeSummaryJob).where(ResumeSummaryJob.resume_id.in_(resume_ids)))
     session.execute(delete(ResumeSummary).where(ResumeSummary.resume_id.in_(resume_ids)))
     if snapshot_ids:
         session.execute(delete(ResumeFactSnapshot).where(ResumeFactSnapshot.id.in_(snapshot_ids)))

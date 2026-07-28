@@ -573,9 +573,10 @@ def test_worker_invokes_agent_context_expiry_cleanup(monkeypatch, tmp_path: Path
         for dependency_name in (
             "run_transactional_email_outbox_worker_once",
             "run_mailbox_background_job_worker_once",
-            "run_document_extraction_worker_once",
-            "run_ai_extraction_worker_once",
-            "run_job_match_batch_worker_once",
+                "run_document_extraction_worker_once",
+                "run_ai_extraction_worker_once",
+                "run_resume_summary_worker_once",
+                "run_job_match_batch_worker_once",
             "run_resume_score_batch_worker_once",
             "enqueue_due_mailbox_sync_jobs",
             "cleanup_due_mailbox_retention",

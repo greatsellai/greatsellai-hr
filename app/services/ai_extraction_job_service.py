@@ -40,6 +40,7 @@ from app.services.resume_service import (
     reparse_clone_auto_activation_allowed,
     save_facts,
 )
+from app.services.resume_summary_job_service import enqueue_resume_summary_job
 
 
 logger = logging.getLogger(__name__)
@@ -746,6 +747,7 @@ def _process_claimed_job(
     try:
         _save_completed_ai_facts(
             database,
+            settings=settings,
             worker_id=worker_id,
             claimed=claimed,
             facts=facts,
@@ -829,6 +831,7 @@ def _load_claimed_source_blocks(
 def _save_completed_ai_facts(
     database: Database,
     *,
+    settings: AppSettings,
     worker_id: str,
     claimed: ClaimedAiExtractionJob,
     facts: ResumeFactsSubmission,
@@ -925,6 +928,17 @@ def _save_completed_ai_facts(
                         raise AiExtractionJobError("ai_extraction_must_auto_activate")
                 elif saved_resume.extraction_status != "needs_review" or saved_resume.is_active:
                     raise AiExtractionJobError("stale_reparse_must_remain_inactive")
+                # Facts are now durable and active.  Queue the independent
+                # summary stage in this same transaction, never in the HTTP
+                # upload request and never by reusing the extraction lease.
+                # A route/credential problem creates an actionable
+                # ``unavailable`` summary job rather than rolling back a
+                # valid searchable candidate.
+                enqueue_resume_summary_job(
+                    session,
+                    resume=saved_resume,
+                    settings=settings,
+                )
                 job.status = AI_EXTRACTION_COMPLETED
                 job.lease_owner = None
                 job.lease_expires_at = None

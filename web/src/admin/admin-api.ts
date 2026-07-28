@@ -24,6 +24,8 @@ import type {
   ProductPlan,
   ProductPlanUpdate,
   UserQuery,
+  PlatformWorkspaceFeedbackPage,
+  WorkspaceFeedbackQuery,
 } from "./admin-types";
 
 export class AdminApiError extends Error {
@@ -46,6 +48,22 @@ function apiBaseUrl() {
   return pathname === compatibilityBase || pathname.startsWith(`${compatibilityBase}/`)
     ? `${compatibilityBase}/v1`
     : "/v1";
+}
+
+/**
+ * Returns a same-origin, session-protected feedback attachment URL.
+ *
+ * The platform route owns the authorization check. Keeping the API base here
+ * makes the link work on both the primary host and the `/greatsellhr`
+ * compatibility entry without copying deployment-specific paths into pages.
+ */
+export function workspaceFeedbackAttachmentUrl(
+  feedbackId: string,
+  attachmentId: string,
+  representation: "attachment" | "thumbnail" = "attachment",
+) {
+  const query = representation === "thumbnail" ? "?thumbnail=1" : "";
+  return `${apiBaseUrl()}/platform/workspace-feedback/${encodeURIComponent(feedbackId)}/attachments/${encodeURIComponent(attachmentId)}${query}`;
 }
 
 function queryString(values: object) {
@@ -153,6 +171,8 @@ export const adminApi = {
     }),
   listAuditEvents: (query: AuditQuery = {}) =>
     request<PlatformAuditPage>(`/platform/audit-events${queryString(query)}`),
+  listWorkspaceFeedback: (query: WorkspaceFeedbackQuery = {}) =>
+    request<PlatformWorkspaceFeedbackPage>(`/platform/workspace-feedback${queryString(query)}`),
   listPlans: () => request<ProductPlan[]>("/platform/plans"),
   updatePlan: (planCode: string, update: ProductPlanUpdate) =>
     request<ProductPlan>(`/platform/plans/${encodeURIComponent(planCode)}`, {

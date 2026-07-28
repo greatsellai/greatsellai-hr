@@ -9,6 +9,7 @@ from uuid import uuid4
 from app.config import AppSettings
 from app.database import Database
 from app.services.ai_extraction_job_service import run_ai_extraction_worker_once
+from app.services.resume_summary_job_service import run_resume_summary_worker_once
 from app.services.document_extraction_job_service import (
     run_document_extraction_worker_once,
 )
@@ -34,6 +35,9 @@ from app.services.recruiting_agent_service import (
 )
 from app.services.transactional_email_outbox_service import (
     run_transactional_email_outbox_worker_once,
+)
+from app.services.workspace_feedback_service import (
+    run_workspace_feedback_reward_worker_once,
 )
 from app.services.institution_service import (
     is_institution_registry_seeded,
@@ -69,6 +73,10 @@ def run_forever(settings: AppSettings) -> None:
     worker_id = _worker_id()
     try:
         while True:
+            ran_workspace_feedback_reward = run_workspace_feedback_reward_worker_once(
+                database,
+                worker_id=worker_id,
+            )
             ran_transactional_email = run_transactional_email_outbox_worker_once(
                 database,
                 settings=settings,
@@ -85,6 +93,11 @@ def run_forever(settings: AppSettings) -> None:
                 worker_id=worker_id,
             )
             ran_extraction = run_ai_extraction_worker_once(
+                database,
+                settings=settings,
+                worker_id=worker_id,
+            )
+            ran_summary = run_resume_summary_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
@@ -132,9 +145,11 @@ def run_forever(settings: AppSettings) -> None:
             )
             if (
                 not ran_extraction
+                and not ran_summary
                 and not ran_document_extraction
                 and not ran_job_match
                 and not ran_score_batch
+                and not ran_workspace_feedback_reward
                 and not ran_transactional_email
                 and not ran_mailbox_job
                 and not queued_due_mailbox_sync
@@ -167,6 +182,10 @@ def main() -> None:
 
     database = _create_worker_database(settings)
     try:
+        run_workspace_feedback_reward_worker_once(
+            database,
+            worker_id=_worker_id(),
+        )
         ran_transactional_email = run_transactional_email_outbox_worker_once(
             database,
             settings=settings,
@@ -193,7 +212,14 @@ def main() -> None:
                 ran_extraction = True
         else:
             ran_extraction = True
+        ran_summary = False
         if not ran_extraction:
+            ran_summary = run_resume_summary_worker_once(
+                database,
+                settings=settings,
+                worker_id=_worker_id(),
+            )
+        if not ran_extraction and not ran_summary:
             ran_job_match = run_job_match_batch_worker_once(
                 database,
                 settings=settings,

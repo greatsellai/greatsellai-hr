@@ -3,6 +3,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type {
   FilterOptions,
+  AiSummaryStatus,
   ResumeReviewDetail,
   ResumeScore,
   ResumeSummary,
@@ -246,8 +247,10 @@ export function CandidateDrawer({
                 currentSummary={currentSummary}
                 loading={summaryLoading}
                 onCreateManual={onCreateManualSummary}
-                onGenerate={onGenerateSummary}
+                onRetry={onGenerateSummary}
                 onOpenEvidence={() => onTabChange("evidence")}
+                summaryError={review?.ai_summary_error ?? null}
+                summaryStatus={review?.ai_summary_status ?? null}
                 summaries={summaries}
               />
             )
@@ -759,19 +762,23 @@ function DrawerSummary({
   currentSummary,
   summaries,
   loading,
-  onGenerate,
+  onRetry,
   onCreateManual,
   onOpenEvidence,
+  summaryError,
+  summaryStatus,
 }: {
   currentSummary: ResumeSummary | null;
   summaries: ResumeSummary[];
   loading: boolean;
-  onGenerate: () => void;
+  onRetry: () => void;
   onCreateManual: (
     summaryId: string,
     content: Record<string, string>,
   ) => Promise<void>;
   onOpenEvidence: () => void;
+  summaryError: string | null;
+  summaryStatus: AiSummaryStatus;
 }) {
   const [selectedSummaryId, setSelectedSummaryId] = useState("");
   const [editing, setEditing] = useState(false);
@@ -795,22 +802,50 @@ function DrawerSummary({
 
   if (loading) return <TableSkeleton />;
   if (!currentSummary) {
+    const generationInProgress =
+      summaryStatus === "queued" ||
+      summaryStatus === "running";
+    const summaryReadyToLoad = summaryStatus === "succeeded";
+    const retryable =
+      summaryStatus === "failed" || summaryStatus === "unavailable";
     return (
       <div className="empty-state">
         <div className="empty-state-inner">
           <span className="empty-glyph">
-            <Icon name="spark" size={23} />
+            {generationInProgress || summaryReadyToLoad
+              ? <i className="spinner" />
+              : <Icon name="spark" size={23} />}
           </span>
-          <h2>还没有 AI 总结</h2>
-          <p>生成后会保存在这份简历中，之后可随时回看。</p>
-          <button
-            className="button button-primary"
-            onClick={onGenerate}
-            type="button"
-          >
-            <Icon name="spark" size={16} />
-            生成 AI 总结
-          </button>
+          <h2>
+            {generationInProgress
+              ? "AI 总结生成中"
+              : summaryReadyToLoad
+                ? "AI 总结正在加载"
+              : retryable
+                ? summaryStatus === "unavailable"
+                  ? "AI 总结暂时不可用"
+                  : "AI 总结暂未生成"
+                : "等待 AI 自动生成总结"}
+          </h2>
+          <p>
+            {generationInProgress
+              ? "系统会在候选人信息提取完成后自动生成，并在完成后显示在这里。"
+              : summaryReadyToLoad
+                ? "AI 已完成生成，正在同步可展示的总结内容。"
+              : retryable
+                ? summaryError?.trim() || "本次自动生成未完成，你可以重新尝试。"
+                : "系统会在候选人信息提取完成后自动生成，无需手动操作。"}
+          </p>
+          {retryable && (
+            <button
+              className="button button-primary"
+              onClick={onRetry}
+              type="button"
+            >
+              <Icon name="refresh" size={16} />
+              重试生成
+            </button>
+          )}
         </div>
       </div>
     );
@@ -826,7 +861,7 @@ function DrawerSummary({
           </p>
         </div>
         <div className="drawer-summary-actions">
-          <button className="button" onClick={onGenerate} type="button">
+          <button className="button" onClick={onRetry} type="button">
             <Icon name="refresh" size={15} />
             重新生成
           </button>

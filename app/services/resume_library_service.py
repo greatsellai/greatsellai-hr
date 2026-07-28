@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models import Resume, ResumeScore, ResumeSummary
 from app.schemas import ResumeLibraryItem, ResumeLibraryResponse
 from app.services.ai_extraction_job_service import ai_extraction_state
+from app.services.resume_summary_job_service import summary_generation_state
 
 
 _SUMMARY_SECTION_ORDER = (
@@ -116,6 +117,7 @@ def list_resume_library(
             selectinload(Resume.document_extraction_job),
             selectinload(Resume.ai_extraction_job),
             selectinload(Resume.summaries),
+            selectinload(Resume.summary_jobs),
             selectinload(Resume.scores).selectinload(ResumeScore.template),
         )
         .where(*filters)
@@ -129,6 +131,7 @@ def list_resume_library(
         summary = _current_summary(resume)
         score = _latest_current_score(resume)
         ai_status, ai_error = ai_extraction_state(resume)
+        summary_status, summary_error = summary_generation_state(resume)
         items.append(
             ResumeLibraryItem(
                 resume_id=resume.id,
@@ -139,6 +142,8 @@ def list_resume_library(
                 extraction_status=resume.extraction_status,
                 ai_extraction_status=ai_status,
                 ai_extraction_error=ai_error,
+                ai_summary_status=summary_status,
+                ai_summary_error=summary_error,
                 is_active=resume.is_active,
                 ingestion_source_type=resume.ingestion_source_type,
                 source_mailbox_config_id=resume.source_mailbox_config_id,

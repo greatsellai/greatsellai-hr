@@ -170,6 +170,15 @@ class Organization(Base):
         default=0,
         server_default=text("0"),
     )
+    # A workspace-level, server-owned cooldown for the feedback incentive.
+    # It is intentionally stored on the organization rather than inferred from
+    # a newest-feedback query: a single conditional UPDATE of this field is the
+    # concurrency boundary that prevents two browser tabs or API replicas from
+    # queuing two rewards inside the same cooldown period.
+    feedback_reward_available_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -510,6 +519,148 @@ class RegistrationRateLimitBucket(Base):
     )
 
 
+class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
+    """One complete workspace-feedback questionnaire and its automatic reward.
+
+    The four text answers are product feedback, not candidate data and never
+    belong in generic audit-event snapshots or application logs.  A durable
+    reward state lets the worker grant the fixed allowance after its delayed
+    due time without relying on a browser tab remaining open.
+    """
+
+    __tablename__ = "workspace_feedback_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            name="uq_workspace_feedback_id_organization",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "idempotency_key_hash",
+            name="uq_workspace_feedback_org_idempotency",
+        ),
+        CheckConstraint(
+            "reward_status IN ('queued', 'running', 'granted')",
+            name="ck_workspace_feedback_reward_status",
+        ),
+        CheckConstraint(
+            "reward_call_count = 500",
+            name="ck_workspace_feedback_reward_call_count",
+        ),
+        CheckConstraint(
+            "reward_attempt_count >= 0",
+            name="ck_workspace_feedback_reward_attempt_count",
+        ),
+        Index(
+            "ix_workspace_feedback_reward_due",
+            "reward_status",
+            "reward_due_at",
+            "created_at",
+        ),
+        Index(
+            "ix_workspace_feedback_org_created",
+            "organization_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    submitted_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        index=True,
+    )
+    # Only digests are retained so a transport retry key cannot become a
+    # durable browser identifier.  ``request_fingerprint`` detects accidental
+    # reuse of the same key for a different questionnaire payload.
+    idempotency_key_hash: Mapped[str] = mapped_column(String(64))
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    use_case: Mapped[str] = mapped_column(Text)
+    intended_outcome: Mapped[str] = mapped_column(Text)
+    friction: Mapped[str] = mapped_column(Text)
+    desired_change: Mapped[str] = mapped_column(Text)
+    reward_status: Mapped[str] = mapped_column(
+        String(32),
+        default="queued",
+        server_default=text("'queued'"),
+        index=True,
+    )
+    reward_call_count: Mapped[int] = mapped_column(
+        Integer,
+        default=500,
+        server_default=text("500"),
+    )
+    reward_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    reward_attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    reward_lease_owner: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    reward_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reward_last_error: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reward_granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    image_attachments: Mapped[list["WorkspaceFeedbackImageAttachment"]] = relationship(
+        back_populates="feedback_submission",
+        cascade="all, delete-orphan",
+    )
+
+
+class WorkspaceFeedbackImageAttachment(OrganizationScoped, Base):
+    """Metadata for an optional image already accepted by a trusted uploader.
+
+    The feedback service deliberately handles metadata only.  The HTTP upload
+    boundary owns byte validation and storage; this model keeps a scoped
+    reference so a future attachment-serving endpoint can authorize it without
+    trusting a browser-supplied path.
+    """
+
+    __tablename__ = "workspace_feedback_image_attachments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["feedback_submission_id", "organization_id"],
+            [
+                "workspace_feedback_submissions.id",
+                "workspace_feedback_submissions.organization_id",
+            ],
+            name="fk_workspace_feedback_image_submission_org",
+        ),
+        UniqueConstraint(
+            "feedback_submission_id",
+            "sort_order",
+            name="uq_workspace_feedback_image_order",
+        ),
+        CheckConstraint("sort_order >= 0", name="ck_workspace_feedback_image_order"),
+        CheckConstraint("size_bytes >= 0", name="ck_workspace_feedback_image_size"),
+        Index(
+            "ix_workspace_feedback_image_org_submission",
+            "organization_id",
+            "feedback_submission_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    feedback_submission_id: Mapped[str] = mapped_column(String(36), index=True)
+    sort_order: Mapped[int] = mapped_column(Integer)
+    original_filename: Mapped[str] = mapped_column(String(255))
+    content_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    storage_key: Mapped[str] = mapped_column(String(512))
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    feedback_submission: Mapped[WorkspaceFeedbackSubmission] = relationship(
+        back_populates="image_attachments",
+    )
+
+
 class Candidate(OrganizationScoped, CandidateDataLifecycle, Base):
     __tablename__ = "candidates"
     __table_args__ = (
@@ -649,6 +800,10 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
         cascade="all, delete-orphan",
     )
     summaries: Mapped[list["ResumeSummary"]] = relationship(
+        back_populates="resume",
+        cascade="all, delete-orphan",
+    )
+    summary_jobs: Mapped[list["ResumeSummaryJob"]] = relationship(
         back_populates="resume",
         cascade="all, delete-orphan",
     )
@@ -1839,6 +1994,83 @@ class ResumeAiExtractionJob(OrganizationScoped, Base):
     ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
 
 
+class ResumeSummaryJob(OrganizationScoped, Base):
+    """Durable, immutable-facts AI summary work for one resume revision.
+
+    A resume can have several fact revisions.  Each revision owns at most one
+    automatic summary task, which makes retries idempotent without conflating
+    summary failures with the preceding extraction job.
+    """
+
+    __tablename__ = "resume_summary_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "resume_id",
+            "facts_version",
+            name="uq_resume_summary_job_facts_version",
+        ),
+        Index(
+            "ix_resume_summary_job_claim",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_resume_summary_job_lease",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_resume_summary_job_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    resume_id: Mapped[str] = mapped_column(ForeignKey("resumes.id"), index=True)
+    fact_snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("resume_fact_snapshots.id"),
+        index=True,
+    )
+    facts_version: Mapped[int] = mapped_column(Integer)
+    # Queue creation freezes the published route that existed for this facts
+    # revision.  A later platform route change cannot silently alter a queued
+    # candidate conclusion.
+    ai_route_policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_route_policy_versions.id"),
+        nullable=True,
+        index=True,
+    )
+    summary_id: Mapped[str | None] = mapped_column(
+        ForeignKey("resume_summaries.id"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    resume: Mapped[Resume] = relationship(back_populates="summary_jobs")
+    fact_snapshot: Mapped["ResumeFactSnapshot"] = relationship(
+        back_populates="summary_jobs"
+    )
+    summary: Mapped["ResumeSummary | None"] = relationship()
+    ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
+
+
 class ResumeSourceBlock(Base):
     __tablename__ = "resume_source_blocks"
     __table_args__ = (UniqueConstraint("resume_id", "block_id", name="uq_resume_block_id"),)
@@ -2013,6 +2245,9 @@ class ResumeFactSnapshot(OrganizationScoped, Base):
     resume: Mapped[Resume] = relationship(back_populates="fact_snapshots")
     scores: Mapped[list["ResumeScore"]] = relationship(back_populates="fact_snapshot")
     job_matches: Mapped[list["JobMatch"]] = relationship(back_populates="fact_snapshot")
+    summary_jobs: Mapped[list["ResumeSummaryJob"]] = relationship(
+        back_populates="fact_snapshot"
+    )
 
 
 class Institution(Base):

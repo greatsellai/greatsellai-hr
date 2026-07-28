@@ -118,6 +118,25 @@
   -webkit-line-clamp: 2;
 }
 
+.backoffice-ui-root .resume-library-page .library-summary-status {
+  display: inline-flex;
+  gap: 0.4375rem;
+  align-items: center;
+  color: var(--workspace-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.backoffice-ui-root .resume-library-page .library-summary-status .spinner {
+  width: 0.8125rem;
+  height: 0.8125rem;
+  border-width: 0.125rem;
+}
+
+.backoffice-ui-root .resume-library-page .library-summary-status.is-attention {
+  color: #b42318;
+}
+
 .backoffice-ui-root .resume-library-page .library-quality-copy {
   color: #7d410b;
   font-size: 0.8125rem;

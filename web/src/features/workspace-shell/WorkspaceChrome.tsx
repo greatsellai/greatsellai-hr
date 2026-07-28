@@ -140,6 +140,7 @@ export function SideRail({
 
 export function Topbar({
   onOpenAgent,
+  onOpenFeedback,
   canManageSettings,
   onAccountMenuOpen,
   onLogout,
@@ -155,6 +156,7 @@ export function Topbar({
   userEmail,
 }: {
   onOpenAgent: () => void;
+  onOpenFeedback: () => void;
   canManageSettings: boolean;
   onAccountMenuOpen: () => void;
   onLogout: () => void;
@@ -217,6 +219,7 @@ export function Topbar({
         <AccountMenu
           canManageSettings={canManageSettings}
           onOpen={onAccountMenuOpen}
+          onOpenFeedback={onOpenFeedback}
           onOpenSettings={onOpenSettings}
           onLogout={onLogout}
           organizationName={organizationName}
@@ -237,6 +240,7 @@ export function Topbar({
 function AccountMenu({
   canManageSettings,
   onOpen,
+  onOpenFeedback,
   onOpenSettings,
   onLogout,
   organizationName,
@@ -251,6 +255,7 @@ function AccountMenu({
 }: {
   canManageSettings: boolean;
   onOpen: () => void;
+  onOpenFeedback: () => void;
   onOpenSettings: () => void;
   onLogout: () => void;
   organizationName: string | null;
@@ -429,6 +434,20 @@ function AccountMenu({
             </section>
           )}
           <div className="account-menu-actions">
+            <button
+              className="account-menu-action account-menu-feedback-action"
+              onClick={() => {
+                closeMenu();
+                onOpenFeedback();
+              }}
+              type="button"
+            >
+              <Icon name="document" size={16} />
+              <span>
+                <strong>填写问卷调查</strong>
+                <small>提交后 5–10 分钟赠送 500 次 AI 调用</small>
+              </span>
+            </button>
             {canManageSettings && (
               <button
                 className="account-menu-action"

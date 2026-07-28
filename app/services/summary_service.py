@@ -134,6 +134,9 @@ def generate_resume_summary(
     *,
     resume_id: str,
     settings: AppSettings,
+    pinned_route_policy_version_id: str | None = None,
+    preserve_manual_current: bool = False,
+    release_read_transaction: bool = False,
 ) -> ResumeSummaryResponse:
     # A generic server-side credential map is sufficient after the gateway
     # migration.  Preserve the pre-existing stable error for installations
@@ -143,9 +146,16 @@ def generate_resume_summary(
     resume, snapshot, fact_snapshot = _ready_resume_snapshot(session, resume_id=resume_id)
     expected_snapshot_id = snapshot.id
     expected_facts_version = snapshot.facts_version
+    business_ref_id = f"{resume.id}:facts{snapshot.facts_version}"
     compatibility_api_key, compatibility_model, compatibility_timeout_seconds = (
         gateway_prompt_transport_arguments(settings)
     )
+    if release_read_transaction:
+        # Queue workers have no caller-owned writes.  Release the snapshot
+        # read before the potentially slow provider call, then re-check the
+        # immutable facts before persisting.  The synchronous compatibility
+        # endpoint keeps its historical transaction behavior by default.
+        session.rollback()
     try:
         with ai_gateway_execution(
             session,
@@ -153,8 +163,9 @@ def generate_resume_summary(
             spec=AiExecutionSpec(
                 feature="resume_summary",
                 business_ref_type="resume_summary",
-                business_ref_id=f"{resume.id}:facts{snapshot.facts_version}",
+                business_ref_id=business_ref_id,
                 contract_version="resume_summary.v1",
+                pinned_route_policy_version_id=pinned_route_policy_version_id,
             ),
         ):
             content = summarize_resume_fact_snapshot(
@@ -173,6 +184,25 @@ def generate_resume_summary(
         expected_snapshot_id=expected_snapshot_id,
         expected_facts_version=expected_facts_version,
     )
+    if preserve_manual_current:
+        current_manual_summary = session.scalar(
+            select(ResumeSummary)
+            .where(
+                ResumeSummary.resume_id == resume.id,
+                ResumeSummary.organization_id == resume.organization_id,
+                ResumeSummary.fact_snapshot_id == snapshot.id,
+                ResumeSummary.facts_version == snapshot.facts_version,
+                ResumeSummary.is_current.is_(True),
+                ResumeSummary.status == "succeeded",
+                ResumeSummary.source == "manual",
+            )
+            .order_by(ResumeSummary.created_at.desc(), ResumeSummary.id.desc())
+        )
+        if current_manual_summary is not None:
+            # A recruiter may create a reviewed version while a background
+            # automatic task is in flight.  The worker must never replace a
+            # human-authored current conclusion with its delayed AI output.
+            return _response(current_manual_summary)
     _set_current(
         session,
         resume_id=resume.id,

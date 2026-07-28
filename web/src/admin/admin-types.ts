@@ -6,6 +6,7 @@ export type AdminView =
   | "overview"
   | "organizations"
   | "users"
+  | "feedback"
   | "plans"
   | "ai"
   | "audit";
@@ -152,6 +153,50 @@ export interface PlatformAuditPage {
   total: number;
   limit: number;
   offset: number;
+}
+
+export type WorkspaceFeedbackRewardStatus = "queued" | "running" | "granted";
+
+export interface PlatformWorkspaceFeedbackAttachment {
+  attachment_id: string;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+}
+
+/**
+ * Platform-only feedback content. It is intentionally separate from audit
+ * events: the response is user-provided text, not a platform mutation log.
+ */
+export interface PlatformWorkspaceFeedback {
+  feedback_id: string;
+  organization_id: string;
+  organization_name: string;
+  submitted_by_user_id: string;
+  submitter_name: string;
+  submitter_email: string;
+  use_case: string;
+  intended_outcome: string;
+  friction: string;
+  desired_change: string;
+  reward_status: WorkspaceFeedbackRewardStatus;
+  reward_due_at: string | null;
+  reward_granted_at: string | null;
+  reward_call_count: number;
+  attachments: PlatformWorkspaceFeedbackAttachment[];
+  created_at: string;
+}
+
+export interface PlatformWorkspaceFeedbackPage {
+  items: PlatformWorkspaceFeedback[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface WorkspaceFeedbackQuery {
+  limit?: number;
+  offset?: number;
 }
 
 export interface AuditQuery {

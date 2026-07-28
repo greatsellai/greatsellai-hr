@@ -11,6 +11,7 @@ import { adminApi, adminErrorMessage } from "./admin-api";
 import type { AdminView } from "./admin-types";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage";
 import { AdminOrganizationsPage } from "./pages/AdminOrganizationsPage";
+import { AdminFeedbackPage } from "./pages/AdminFeedbackPage";
 import {
   AdminAiPage,
   AdminAuditPage,
@@ -29,6 +30,7 @@ const navigation: Array<{
   { view: "overview", label: "平台概览", description: "状态与待处理事项", icon: "activity", group: "平台" },
   { view: "organizations", label: "工作区", description: "套餐、试用与成员", icon: "briefcase", group: "客户" },
   { view: "users", label: "用户", description: "身份与账号状态", icon: "user", group: "客户" },
+  { view: "feedback", label: "用户反馈", description: "原始反馈与奖励", icon: "document", group: "运营" },
   { view: "plans", label: "套餐与试用", description: "价格与功能范围", icon: "layers", group: "运营" },
   { view: "ai", label: "AI 运营", description: "运行、用量与配置", icon: "spark", group: "运营" },
   { view: "audit", label: "操作审计", description: "平台变更记录", icon: "history", group: "治理" },
@@ -43,6 +45,7 @@ const viewPaths: Record<AdminView, string> = {
   overview: platformBasePath,
   organizations: `${platformBasePath}/organizations`,
   users: `${platformBasePath}/users`,
+  feedback: `${platformBasePath}/feedback`,
   plans: `${platformBasePath}/plans`,
   ai: `${platformBasePath}/ai`,
   audit: `${platformBasePath}/audit`,
@@ -52,6 +55,7 @@ function viewFromPath(pathname = window.location.pathname): AdminView {
   const segment = pathname.slice(platformBasePath.length).split("/").filter(Boolean)[0];
   if (segment === "organizations") return "organizations";
   if (segment === "users") return "users";
+  if (segment === "feedback") return "feedback";
   if (segment === "plans") return "plans";
   if (segment === "ai") return "ai";
   if (segment === "audit") return "audit";
@@ -297,6 +301,8 @@ export default function AdminApp() {
             <AdminOrganizationsPage />
           ) : view === "users" ? (
             <AdminUsersPage />
+          ) : view === "feedback" ? (
+            <AdminFeedbackPage />
           ) : view === "plans" ? (
             <AdminPlansPage />
           ) : view === "ai" ? (

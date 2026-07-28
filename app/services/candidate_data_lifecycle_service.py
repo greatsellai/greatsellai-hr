@@ -36,6 +36,7 @@ from app.models import (
     MailboxDeletedAttachmentTombstone,
     Resume,
     ResumeAiExtractionJob,
+    ResumeSummaryJob,
     ResumeScoreBatchItem,
 )
 from app.schemas import (
@@ -497,6 +498,23 @@ def _cancel_resume_async_work(
             ResumeAiExtractionJob.organization_id == organization_id,
             ResumeAiExtractionJob.resume_id.in_(identifiers),
             ResumeAiExtractionJob.status.in_(("queued", "running")),
+        )
+        .values(
+            status="cancelled",
+            next_attempt_at=None,
+            lease_owner=None,
+            lease_expires_at=None,
+            last_error="candidate_data_deleted",
+            completed_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    session.execute(
+        update(ResumeSummaryJob)
+        .where(
+            ResumeSummaryJob.organization_id == organization_id,
+            ResumeSummaryJob.resume_id.in_(identifiers),
+            ResumeSummaryJob.status.in_(("queued", "running")),
         )
         .values(
             status="cancelled",

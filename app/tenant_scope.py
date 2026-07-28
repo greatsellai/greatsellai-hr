@@ -6,11 +6,11 @@ by that value and every write is stamped or verified before it reaches the
 database.  This gives services a defence-in-depth boundary even when a future
 endpoint forgets to add a manual ``organization_id`` predicate.
 
-The legacy workspace is deliberately the safe fallback for unscoped internal
-sessions.  It preserves existing service-level tests and, more importantly,
-means an accidentally unscoped query can see only legacy records rather than
-all customers' data.  Public requests always receive an explicit scope from
-the authentication dependency.
+An empty system workspace is the only fallback for unscoped internal sessions.
+The historical workspace may become a real customer's workspace after the
+one-time handover, so an accidentally unscoped query must never see it.
+Public requests always receive an explicit scope from the authentication
+dependency.
 """
 from __future__ import annotations
 
@@ -24,10 +24,12 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 
-# Keep these stable IDs aligned with the data-only migration.  They are not a
-# credential and let pre-registration records retain a safe, deterministic
-# owner without moving source files or inspecting their contents.
+# Keep these stable IDs aligned with the data-only migration. They are not
+# credentials. The legacy ID owns the original records and flat file keys;
+# the system ID is deliberately empty and is the only safe fallback for an
+# internal session that forgot to bind a workspace.
 LEGACY_ORGANIZATION_ID = "00000000-0000-4000-8000-000000000001"
+SYSTEM_FALLBACK_ORGANIZATION_ID = "00000000-0000-4000-8000-000000000004"
 
 _ORGANIZATION_ID_KEY = "greatsell_organization_id"
 _BYPASS_KEY = "greatsell_skip_organization_scope"
@@ -59,9 +61,14 @@ def clear_organization_context(session: Session) -> None:
 
 
 def organization_context_id(session: Session) -> str:
-    """Return the current safe workspace, falling back only to legacy data."""
+    """Return the current workspace or the empty system fallback.
 
-    return str(session.info.get(_ORGANIZATION_ID_KEY) or LEGACY_ORGANIZATION_ID)
+    The historical organization can be adopted by a real account. It must
+    never remain the implicit fallback after that handover, because a future
+    unscoped internal query would otherwise read real candidate data.
+    """
+
+    return str(session.info.get(_ORGANIZATION_ID_KEY) or SYSTEM_FALLBACK_ORGANIZATION_ID)
 
 
 def enable_organization_scope_bypass(session: Session) -> None:

@@ -55,6 +55,7 @@ export interface WorkspaceViewRouterProps {
     openSettings: (section: WorkspaceSettingsSection) => void;
   };
   permissions: {
+    canAdoptLegacyWorkspace: boolean;
     canGenerateAiJd: boolean;
     canManageCandidateData: boolean;
     canManageMailbox: boolean;
@@ -64,6 +65,7 @@ export interface WorkspaceViewRouterProps {
   settingsSection: WorkspaceSettingsSection;
   view: WorkspaceView;
   onLibraryChanged: () => void;
+  onAdoptLegacyWorkspace: (legacyAdminPassword: string) => Promise<void>;
   onOpenCandidate: (
     item: CandidateSearchItem,
     tab?: CandidateDrawerTab,
@@ -90,6 +92,7 @@ export function WorkspaceViewRouter({
   settingsSection,
   view,
   onLibraryChanged,
+  onAdoptLegacyWorkspace,
   onOpenCandidate,
   onOpenLibraryResume,
   onOpenMatchedResume,
@@ -154,10 +157,12 @@ export function WorkspaceViewRouter({
       {view === "settings" && permissions.canManageSettings && (
         <WorkspaceSettingsPage
           activeSection={settingsSection}
+          canAdoptLegacyWorkspace={permissions.canAdoptLegacyWorkspace}
           canManageCandidateData={permissions.canManageCandidateData}
           canManageMailbox={permissions.canManageMailbox}
           formatError={feedback.formatError}
           notify={feedback.notify}
+          onAdoptLegacyWorkspace={onAdoptLegacyWorkspace}
           onImported={onLibraryChanged}
           onOpenLibrary={() => navigation.navigateToView("library")}
           onSelectSection={navigation.openSettings}

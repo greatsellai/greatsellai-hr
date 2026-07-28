@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -150,11 +151,28 @@ def protected_client(tmp_path: Path) -> TestClient:
         data_dir=data_dir,
         upload_dir=data_dir / "uploads",
         database_url="sqlite://",
-        admin_token="test-admin-token",
-        legacy_admin_token_enabled=True,
+        session_secret="protected-client-test-session-secret",
+        transactional_email_provider="test",
+        public_app_url="http://testserver",
+        allow_unauthenticated=False,
         min_text_chars_per_page=20,
         mailbox_imap_allowed_hosts=TEST_MAILBOX_IMAP_HOSTS,
     )
     app = create_app(settings)
     with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/auth/register",
+            json={
+                "organization_name": "Protected client fixture workspace",
+                "full_name": "Protected client fixture owner",
+                "email": "protected-client@example.test",
+                "password": "protected-client-password",
+            },
+        )
+        assert response.status_code == 201, response.text
+        delivery = test_client.app.state.transactional_email_provider.deliveries[-1]
+        token = parse_qs(urlsplit(delivery.verification_url).query)["token"][0]
+        verified = test_client.post("/v1/auth/email-verification/complete", json={"token": token})
+        assert verified.status_code == 200, verified.text
+        assert test_client.post("/v1/auth/logout").status_code == 204
         yield test_client

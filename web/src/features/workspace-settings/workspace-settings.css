@@ -95,8 +95,23 @@
 
 .backoffice-ui-root .settings-page .settings-content,
 .backoffice-ui-root .settings-page .settings-content > .mailbox-page,
-.backoffice-ui-root .settings-page .settings-content > .candidate-data-page {
+.backoffice-ui-root .settings-page .settings-content > .candidate-data-page,
+.backoffice-ui-root .settings-page .settings-content > .legacy-workspace-adoption-panel {
   min-width: 0;
+}
+
+.backoffice-ui-root .legacy-workspace-adoption-panel {
+  max-width: 45rem;
+}
+
+.backoffice-ui-root .legacy-workspace-adoption-form {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.backoffice-ui-root .legacy-workspace-adoption-actions {
+  display: flex;
+  justify-content: flex-start;
 }
 
 @media (max-width: 47rem) {

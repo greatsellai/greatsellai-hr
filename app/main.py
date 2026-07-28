@@ -64,6 +64,8 @@ from app.schemas import (
     AiUsageTrendBucketResponse,
     EmailVerificationComplete,
     EmailVerificationResendResult,
+    LegacyWorkspaceAdoptionRequest,
+    LegacyWorkspaceAdoptionStatusResponse,
     OrganizationInvitationAccept,
     OrganizationInvitationCreate,
     OrganizationInvitationResponse,
@@ -195,7 +197,6 @@ from app.services.identity_service import (
     issue_password_reset,
     issue_email_verification,
     legacy_principal,
-    legacy_principal_from_session,
     list_product_plans,
     normalize_email,
     principal_from_mailbox_oauth_callback,
@@ -226,6 +227,11 @@ from app.services.registration_rate_limit import (
     record_login_account_backpressure_failure,
     record_login_failure,
 )
+from app.services.legacy_workspace_adoption_service import (
+    LegacyWorkspaceAdoptionError,
+    adopt_legacy_workspace,
+    legacy_workspace_adoption_available,
+)
 from app.services.public_auth_timing import (
     begin_password_reset_response,
     enforce_password_reset_minimum_response_time,
@@ -234,7 +240,13 @@ from app.services.transactional_email_outbox_service import (
     TransactionalEmailOutboxError,
     enqueue_password_reset_delivery,
 )
-from app.tenant_scope import organization_context_id, set_organization_context
+from app.tenant_scope import (
+    LEGACY_ORGANIZATION_ID,
+    SYSTEM_FALLBACK_ORGANIZATION_ID,
+    clear_organization_context,
+    organization_context_id,
+    set_organization_context,
+)
 from app.services.institution_service import (
     is_institution_registry_seeded,
     seed_institution_registry,
@@ -1550,18 +1562,20 @@ def _password_reset_rate_limit_email_key(value: str) -> str:
     return f"email:{email_key}"
 
 
-def _login_rate_limit_email_key(value: str | None) -> str:
+def _login_rate_limit_email_key(value: str) -> str:
     """Return a HMAC-only account namespace for failed-login buckets."""
 
-    if value is None or not value.strip():
-        # The optional no-email shape belongs only to an explicitly enabled
-        # legacy migration bridge. It still receives a durable budget.
-        return "legacy_static_token"
     try:
         _, email_key = normalize_email(value)
     except IdentityServiceError:
         return f"invalid:{value.strip().casefold()}"
     return f"email:{email_key}"
+
+
+def _legacy_workspace_adoption_rate_limit_key(user_id: str) -> str:
+    """Keep one-time handover failures independent from public email buckets."""
+
+    return f"legacy_workspace_adoption:{user_id}"
 
 
 def _public_auth_rate_limit_secret(settings: AppSettings) -> str:
@@ -1771,7 +1785,6 @@ def _resume_contacts(resume: object) -> list[ResumeContactResponse]:
 async def require_authenticated_member(
     request: Request,
     session: Session = Depends(get_session),
-    x_admin_token: Annotated[str | None, Header()] = None,
 ) -> AuthPrincipal:
     """Resolve one session member and bind its workspace to Session.
 
@@ -1781,28 +1794,19 @@ async def require_authenticated_member(
     """
 
     settings: AppSettings = request.app.state.settings
-    principal: AuthPrincipal | None = None
+    principal: AuthPrincipal | None
     if settings.allow_unauthenticated:
-        principal = legacy_principal(session)
+        try:
+            principal = legacy_principal(session)
+        except IdentityServiceError:
+            # A local test harness may deliberately retire the legacy account
+            # while still running with its explicit no-auth fixture enabled.
+            principal = None
     else:
         principal = principal_from_session(session, request.session)
-        # Existing signed browser sessions and the optional header remain a
-        # migration bridge into *only* the legacy workspace.
-        if principal is None:
-            principal = legacy_principal_from_session(session, request.session)
-        if (
-            principal is None
-            and settings.legacy_admin_token_enabled
-            and settings.admin_token
-            and x_admin_token
-            and hmac.compare_digest(x_admin_token, settings.admin_token)
-        ):
-            principal = legacy_principal(session)
     if principal is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            # Never reveal whether a legacy compatibility token exists or is
-            # enabled. New production access is always a named account.
             detail="authentication_required",
         )
 
@@ -1885,17 +1889,34 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             settings.database_url,
             pool_size=settings.database_pool_size,
             max_overflow=settings.database_max_overflow,
+            # The explicit no-auth mode exists only for deterministic local
+            # fixtures.  Production and all authenticated deployments start
+            # unscoped sessions in an empty system workspace, never in the
+            # historical workspace that can be adopted by a customer.
+            default_organization_id=(
+                LEGACY_ORGANIZATION_ID
+                if settings.allow_unauthenticated
+                else SYSTEM_FALLBACK_ORGANIZATION_ID
+            ),
         )
         if settings.auto_create_schema:
             database.create_all()
         with database.session_factory() as session:
-            ensure_identity_bootstrap(session)
-            if settings.seed_registry_on_startup:
-                seed_institution_registry(session)
-            elif not is_institution_registry_seeded(session):
-                raise RuntimeError("institution_registry_not_seeded")
-            reconcile_legacy_completed_ai_resumes(session)
-            session.commit()
+            # Bootstrap still needs a deterministic historic scope for its
+            # compatibility retention-policy seed and pre-tenant cleanup.
+            # This is an explicit startup operation, not the fallback used by
+            # ordinary unscoped ORM sessions after the workspace is adopted.
+            set_organization_context(session, LEGACY_ORGANIZATION_ID)
+            try:
+                ensure_identity_bootstrap(session)
+                if settings.seed_registry_on_startup:
+                    seed_institution_registry(session)
+                elif not is_institution_registry_seeded(session):
+                    raise RuntimeError("institution_registry_not_seeded")
+                reconcile_legacy_completed_ai_resumes(session)
+                session.commit()
+            finally:
+                clear_organization_context(session)
         app.state.settings = settings
         app.state.database = database
         app.state.transactional_email_provider = build_transactional_email_provider(settings)
@@ -1929,14 +1950,13 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         request: Request,
         session: Session = Depends(get_session),
     ) -> AuthSession:
-        principal = (
-            legacy_principal(session)
-            if settings.allow_unauthenticated
-            else principal_from_session(session, request.session)
-        )
-        # Preserve an existing migration session only as a legacy identity.
-        if principal is None:
-            principal = legacy_principal_from_session(session, request.session)
+        if settings.allow_unauthenticated:
+            try:
+                principal = legacy_principal(session)
+            except IdentityServiceError:
+                principal = None
+        else:
+            principal = principal_from_session(session, request.session)
         if principal is not None:
             set_organization_context(session, principal.organization_id)
         return auth_session_response(principal, login_required=not settings.allow_unauthenticated)
@@ -1981,29 +2001,14 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             if backpressure_delay > 0:
                 await asyncio.sleep(backpressure_delay)
         try:
-            if payload.email:
-                principal = authenticate_email_password(
-                    session,
-                    email_value=payload.email,
-                    password=payload.password,
-                )
-            elif (
-                settings.legacy_admin_token_enabled
-                and settings.admin_token
-                and hmac.compare_digest(payload.password, settings.admin_token)
-            ):
-                principal = legacy_principal(session)
-            elif settings.allow_unauthenticated:
-                principal = legacy_principal(session)
-            else:
-                raise IdentityServiceError("invalid_login_credentials")
+            principal = authenticate_email_password(
+                session,
+                email_value=payload.email,
+                password=payload.password,
+            )
         except IdentityServiceError as exc:
             try:
                 if not settings.allow_unauthenticated:
-                    # A failed static-token compatibility attempt and a
-                    # failed email/password attempt share the same durable
-                    # non-enumerating public limiter.
-                    #
                     # Commit the account-only progressive counter first. If
                     # the per-client hard limiter has already exhausted its
                     # short window, a distributed attack still cannot evade
@@ -2041,6 +2046,145 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         establish_session(request.session, principal)
         set_organization_context(session, principal.organization_id)
         return auth_session_response(principal, login_required=not settings.allow_unauthenticated)
+
+    @app.get(
+        "/v1/auth/legacy-workspace-adoption",
+        response_model=LegacyWorkspaceAdoptionStatusResponse,
+    )
+    async def get_legacy_workspace_adoption_status(
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> LegacyWorkspaceAdoptionStatusResponse:
+        """Expose a non-sensitive, one-time handover affordance to an admin.
+
+        The response deliberately says only whether a current verified admin
+        can start the flow. It does not identify the historic workspace,
+        legacy account, or configuration state to an unauthenticated caller.
+        """
+
+        del principal
+        return LegacyWorkspaceAdoptionStatusResponse(
+            available=bool(
+                settings.legacy_admin_token_enabled
+                and settings.admin_token
+                and legacy_workspace_adoption_available(session)
+            )
+        )
+
+    @app.post(
+        "/v1/auth/legacy-workspace-adoption",
+        response_model=AuthSession,
+    )
+    async def post_legacy_workspace_adoption(
+        payload: LegacyWorkspaceAdoptionRequest,
+        request: Request,
+        principal: AuthPrincipal = Depends(require_organization_admin),
+        session: Session = Depends(get_session),
+    ) -> AuthSession:
+        """Attach the historic workspace to the currently signed-in account.
+
+        A current verified admin must provide the prior management password.
+        It is compared in-process only and never persisted, logged, or sent
+        back to the browser. The workspace switch itself is transactional.
+        """
+
+        if not settings.legacy_admin_token_enabled or not settings.admin_token:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="legacy_workspace_adoption_unavailable",
+            )
+
+        rate_limit_kwargs = {
+            "secret": _public_auth_rate_limit_secret(settings),
+            "client_identifier": _registration_client_identifier(request, settings),
+            "email_key": _legacy_workspace_adoption_rate_limit_key(principal.user.id),
+            "client_limit": settings.login_rate_limit_client_limit,
+            "client_window_seconds": settings.login_rate_limit_client_window_seconds,
+            "email_limit": settings.login_rate_limit_email_limit,
+            "email_window_seconds": settings.login_rate_limit_email_window_seconds,
+        }
+        try:
+            ensure_login_rate_limit_available(session, **rate_limit_kwargs)
+        except LoginRateLimitError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="legacy_workspace_adoption_rate_limit_exceeded",
+            ) from exc
+
+        backpressure_delay = login_account_backpressure_delay_seconds(
+            session,
+            secret=rate_limit_kwargs["secret"],
+            email_key=rate_limit_kwargs["email_key"],
+            window_seconds=settings.login_account_backpressure_window_seconds,
+            free_failures=settings.login_account_backpressure_free_failures,
+            base_delay_seconds=settings.login_account_backpressure_base_delay_seconds,
+            max_delay_seconds=settings.login_account_backpressure_max_delay_seconds,
+        )
+        if backpressure_delay > 0:
+            await asyncio.sleep(backpressure_delay)
+
+        if not hmac.compare_digest(payload.legacy_admin_password, settings.admin_token):
+            try:
+                record_login_account_backpressure_failure(
+                    session,
+                    secret=rate_limit_kwargs["secret"],
+                    email_key=rate_limit_kwargs["email_key"],
+                    window_seconds=settings.login_account_backpressure_window_seconds,
+                )
+                _commit_or_raise(session)
+                record_login_failure(session, **rate_limit_kwargs)
+                _commit_or_raise(session)
+            except LoginRateLimitError as exc:
+                session.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="legacy_workspace_adoption_rate_limit_exceeded",
+                ) from exc
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="legacy_workspace_adoption_not_authorized",
+            )
+
+        try:
+            result = adopt_legacy_workspace(
+                session,
+                principal=principal,
+                request_id=request.headers.get("x-request-id"),
+            )
+            clear_login_account_backpressure(
+                session,
+                secret=rate_limit_kwargs["secret"],
+                email_key=rate_limit_kwargs["email_key"],
+            )
+            _commit_or_raise(session)
+        except LegacyWorkspaceAdoptionError as exc:
+            session.rollback()
+            code = str(exc)
+            response_status = (
+                status.HTTP_403_FORBIDDEN
+                if code in {
+                    "legacy_workspace_adoption_email_verification_required",
+                    "legacy_workspace_adoption_admin_required",
+                }
+                else status.HTTP_409_CONFLICT
+                if code
+                in {
+                    "legacy_workspace_already_current",
+                    "legacy_workspace_already_adopted",
+                    "legacy_workspace_adoption_account_unavailable",
+                    "legacy_workspace_adoption_target_workspace_not_empty",
+                    "legacy_workspace_adoption_source_workspace_not_ready",
+                    "legacy_workspace_adoption_unavailable",
+                    "legacy_workspace_adoption_inconsistent",
+                }
+                else status.HTTP_422_UNPROCESSABLE_CONTENT
+            )
+            raise HTTPException(status_code=response_status, detail=code) from exc
+
+        establish_session(request.session, result.principal)
+        set_organization_context(session, result.principal.organization_id)
+        return auth_session_response(result.principal, login_required=True)
 
     @app.get("/v1/auth/registration-offer", response_model=RegistrationOfferResponse)
     async def get_registration_offer(
@@ -2134,8 +2278,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> AuthSession:
         existing_principal = principal_from_session(session, request.session)
-        if existing_principal is None:
-            existing_principal = legacy_principal_from_session(session, request.session)
         try:
             principal = complete_email_verification(
                 session,
@@ -2306,25 +2448,16 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     async def post_auth_logout(
         request: Request,
         session: Session = Depends(get_session),
-        x_admin_token: Annotated[str | None, Header()] = None,
     ) -> None:
         """End the browser session and cancel its unfinished OAuth handoffs."""
 
-        principal = (
-            legacy_principal(session)
-            if settings.allow_unauthenticated
-            else principal_from_session(session, request.session)
-        )
-        if principal is None:
-            principal = legacy_principal_from_session(session, request.session)
-        if (
-            principal is None
-            and settings.legacy_admin_token_enabled
-            and settings.admin_token
-            and x_admin_token
-            and hmac.compare_digest(x_admin_token, settings.admin_token)
-        ):
-            principal = legacy_principal(session)
+        if settings.allow_unauthenticated:
+            try:
+                principal = legacy_principal(session)
+            except IdentityServiceError:
+                principal = None
+        else:
+            principal = principal_from_session(session, request.session)
 
         try:
             if principal is not None:

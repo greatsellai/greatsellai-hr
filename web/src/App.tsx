@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { isApiError } from "./api";
+import { api, isApiError } from "./api";
 import {
   LandingPage,
   ROOT_WORKSPACE_BASE_PATH,
@@ -85,6 +85,19 @@ function humanizeError(error: unknown): string {
       organization_access_suspended: "当前工作区暂不可用，请联系 GreatSell AI 团队。",
       invalid_admin_token: "管理口令无效。请在右上角连接配置中更新后重试。",
       server_missing_admin_token: "服务器尚未配置管理口令，暂时无法访问。",
+      legacy_workspace_adoption_not_authorized: "旧工作区管理口令不正确，请重试。",
+      legacy_workspace_adoption_target_workspace_not_empty:
+        "当前新建工作区已有内容，未执行接管。请先联系管理员处理该工作区。",
+      legacy_workspace_adoption_source_workspace_not_ready:
+        "旧工作区仍有其他成员或待处理邀请，未执行接管。请先联系管理员处理。",
+      legacy_workspace_adoption_unavailable:
+        "旧工作区暂时不能接管，请刷新后重试。",
+      legacy_workspace_already_adopted:
+        "旧工作区已被其他账号接管，当前操作未执行。",
+      legacy_workspace_adoption_account_unavailable:
+        "当前账号不能接管旧工作区，请重新登录后重试。",
+      legacy_workspace_adoption_rate_limit_exceeded:
+        "尝试次数过多，请稍后再试。",
       deepseek_api_key_not_configured:
         "AI 服务尚未配置。请先在服务器环境变量中配置后重试。",
       talent_search_profile_not_found: "这份人才画像已不存在或无法访问。",
@@ -489,6 +502,43 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     authSession?.role === "admin" &&
     authSession.plan?.feature_flags.mailbox_import === true;
   const canManageCandidateData = authSession?.role === "admin";
+  const [canAdoptLegacyWorkspace, setCanAdoptLegacyWorkspace] = useState(false);
+
+  useEffect(() => {
+    const canCheckAdoption = Boolean(
+      authState === "authenticated" &&
+      authSession?.email_verified &&
+      !authSession.email_verification_required &&
+      authSession.role === "admin" &&
+      authSession.user?.user_id &&
+      authSession.organization?.organization_id,
+    );
+    let active = true;
+    setCanAdoptLegacyWorkspace(false);
+    if (!canCheckAdoption) return () => {
+      active = false;
+    };
+
+    void api
+      .getLegacyWorkspaceAdoptionStatus()
+      .then((status) => {
+        if (active) setCanAdoptLegacyWorkspace(status.available);
+      })
+      .catch(() => {
+        if (active) setCanAdoptLegacyWorkspace(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    authSession?.email_verified,
+    authSession?.email_verification_required,
+    authSession?.organization?.organization_id,
+    authSession?.role,
+    authSession?.user?.user_id,
+    authState,
+  ]);
+
   const {
     canManageSettings,
     navigateToView,
@@ -497,6 +547,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     settingsSection,
     view,
   } = useWorkspaceNavigation({
+    canAdoptLegacyWorkspace,
     canManageCandidateData,
     canManageMailbox,
     hasSession: Boolean(authSession),
@@ -504,6 +555,18 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const canGenerateAiJd =
     authSession?.role === "admin" &&
     authSession.plan?.feature_flags.ai_jd_generation === true;
+
+  const adoptLegacyWorkspace = useCallback(
+    async (legacyAdminPassword: string) => {
+      const session = await api.adoptLegacyWorkspace(legacyAdminPassword);
+      if (!session.authenticated) {
+        throw new Error("legacy_workspace_adoption_unavailable");
+      }
+      clearWorkspaceAfterLogout();
+      window.location.replace(workspaceHref());
+    },
+    [clearWorkspaceAfterLogout, workspaceHref],
+  );
 
   const closeAgent = useCallback(() => {
     setAgentOpen(false);
@@ -706,10 +769,13 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         canManageSettings={canManageSettings}
         inert={drawerOpen || agentOpen}
         onChangeView={navigateToView}
-        onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
+        onOpenSettings={() => openSettings(
+          canManageMailbox ? "mailbox" : canManageCandidateData ? "data" : "account",
+        )}
       />
       <div className="app-area" inert={drawerOpen || agentOpen}>
       <Topbar
+        canAdoptLegacyWorkspace={canAdoptLegacyWorkspace}
         onOpenAgent={() => {
             closeDrawer();
             setAgentOpen(true);
@@ -725,7 +791,10 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           }}
           onLogout={() => void logout()}
           onNewUpload={() => navigateToView("upload")}
-          onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
+          onOpenSettings={() => openSettings(
+            canManageMailbox ? "mailbox" : canManageCandidateData ? "data" : "account",
+          )}
+          onOpenLegacyWorkspaceAdoption={() => openSettings("account")}
           organizationName={authSession?.organization?.name ?? null}
           platformAdmin={authSession?.is_platform_admin ?? false}
           platformAdminHref={platformHref()}
@@ -764,6 +833,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             }}
             navigation={{ navigateToView, openSettings }}
             permissions={{
+              canAdoptLegacyWorkspace,
               canGenerateAiJd,
               canManageCandidateData,
               canManageMailbox,
@@ -772,6 +842,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             }}
             settingsSection={settingsSection}
             view={view}
+            onAdoptLegacyWorkspace={adoptLegacyWorkspace}
             onLibraryChanged={refreshLibraryScores}
             onOpenCandidate={openCandidate}
             onOpenLibraryResume={openLibraryResume}

@@ -139,6 +139,7 @@ export function SideRail({
 }
 
 export function Topbar({
+  canAdoptLegacyWorkspace,
   onOpenAgent,
   onOpenFeedback,
   canManageSettings,
@@ -146,6 +147,7 @@ export function Topbar({
   onLogout,
   onNewUpload,
   onOpenSettings,
+  onOpenLegacyWorkspaceAdoption,
   organizationName,
   platformAdmin,
   platformAdminHref,
@@ -155,6 +157,7 @@ export function Topbar({
   userDisplayName,
   userEmail,
 }: {
+  canAdoptLegacyWorkspace: boolean;
   onOpenAgent: () => void;
   onOpenFeedback: () => void;
   canManageSettings: boolean;
@@ -162,6 +165,7 @@ export function Topbar({
   onLogout: () => void;
   onNewUpload: () => void;
   onOpenSettings: () => void;
+  onOpenLegacyWorkspaceAdoption: () => void;
   organizationName: string | null;
   platformAdmin: boolean;
   platformAdminHref: string;
@@ -217,10 +221,12 @@ export function Topbar({
           <span className="topbar-action-label">上传简历</span>
         </BackofficeButton>
         <AccountMenu
+          canAdoptLegacyWorkspace={canAdoptLegacyWorkspace}
           canManageSettings={canManageSettings}
           onOpen={onAccountMenuOpen}
           onOpenFeedback={onOpenFeedback}
           onOpenSettings={onOpenSettings}
+          onOpenLegacyWorkspaceAdoption={onOpenLegacyWorkspaceAdoption}
           onLogout={onLogout}
           organizationName={organizationName}
           platformAdmin={platformAdmin}
@@ -238,10 +244,12 @@ export function Topbar({
 }
 
 function AccountMenu({
+  canAdoptLegacyWorkspace,
   canManageSettings,
   onOpen,
   onOpenFeedback,
   onOpenSettings,
+  onOpenLegacyWorkspaceAdoption,
   onLogout,
   organizationName,
   platformAdmin,
@@ -253,10 +261,12 @@ function AccountMenu({
   userDisplayName,
   userEmail,
 }: {
+  canAdoptLegacyWorkspace: boolean;
   canManageSettings: boolean;
   onOpen: () => void;
   onOpenFeedback: () => void;
   onOpenSettings: () => void;
+  onOpenLegacyWorkspaceAdoption: () => void;
   onLogout: () => void;
   organizationName: string | null;
   platformAdmin: boolean;
@@ -448,6 +458,19 @@ function AccountMenu({
                 <small>提交后 5–10 分钟赠送 500 次 AI 调用</small>
               </span>
             </button>
+            {canAdoptLegacyWorkspace && (
+              <button
+                className="account-menu-action"
+                onClick={() => {
+                  closeMenu();
+                  onOpenLegacyWorkspaceAdoption();
+                }}
+                type="button"
+              >
+                <Icon name="arrow-right" size={16} />
+                接管旧工作区
+              </button>
+            )}
             {canManageSettings && (
               <button
                 className="account-menu-action"

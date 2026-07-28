@@ -54,21 +54,20 @@ def _register_and_verify(client: TestClient, *, email: str, password: str) -> No
     assert client.post("/v1/auth/logout").status_code == 204
 
 
-def test_legacy_static_token_is_disabled_without_explicit_compatibility_switch(
+def test_legacy_static_token_paths_are_rejected_even_if_compatibility_setting_is_enabled(
     tmp_path: Path,
 ) -> None:
     settings = _settings(
         tmp_path,
         admin_token="legacy-static-token-fixture",
-        legacy_admin_token_enabled=False,
+        legacy_admin_token_enabled=True,
     )
     with TestClient(create_app(settings)) as client:
         static_login = client.post(
             "/v1/auth/login",
             json={"password": "legacy-static-token-fixture"},
         )
-        assert static_login.status_code == 401
-        assert static_login.json()["detail"] == "invalid_login_credentials"
+        assert static_login.status_code == 422
 
         header_attempt = client.get(
             "/v1/resume-library",

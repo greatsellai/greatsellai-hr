@@ -19,6 +19,7 @@ class Database:
         *,
         pool_size: int = 5,
         max_overflow: int = 10,
+        default_organization_id: str | None = None,
     ) -> None:
         connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
         engine_options: dict[str, object] = {
@@ -33,11 +34,22 @@ class Database:
         self.engine = create_engine(database_url, **engine_options)
         if database_url.startswith("sqlite"):
             event.listen(self.engine, "connect", self._enable_sqlite_foreign_keys)
+        session_options: dict[str, object] = {
+            "bind": self.engine,
+            "autocommit": False,
+            "autoflush": False,
+            "expire_on_commit": False,
+        }
+        if default_organization_id:
+            # Session ``info`` is copied per Session by SQLAlchemy.  The web
+            # app uses the empty system workspace in production; the explicit
+            # no-auth test harness keeps its historical single-workspace
+            # fixture semantics without weakening production defaults.
+            session_options["info"] = {
+                "greatsell_organization_id": default_organization_id,
+            }
         self.session_factory = sessionmaker(
-            bind=self.engine,
-            autocommit=False,
-            autoflush=False,
-            expire_on_commit=False,
+            **session_options,
         )
 
     def create_all(self) -> None:

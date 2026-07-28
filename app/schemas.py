@@ -103,10 +103,20 @@ class ApiModel(BaseModel):
 
 
 class AuthLogin(ApiModel):
-    # ``email`` is optional only for the temporary legacy-admin compatibility
-    # path. New accounts always authenticate with email + password.
-    email: str | None = Field(default=None, max_length=320)
+    email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=512)
+
+
+class LegacyWorkspaceAdoptionRequest(ApiModel):
+    """A one-time proof for handing historic data to the current account."""
+
+    legacy_admin_password: str = Field(min_length=1, max_length=512)
+
+
+class LegacyWorkspaceAdoptionStatusResponse(ApiModel):
+    """Expose only whether the signed-in account may start the one-time flow."""
+
+    available: bool
 
 
 class AuthUserResponse(ApiModel):

@@ -39,9 +39,9 @@ class AppSettings:
     database_pool_size: int = 5
     database_max_overflow: int = 10
     admin_token: str | None = field(default=None, repr=False)
-    # Pre-tenant installations authenticated a shared legacy workspace with
-    # one static token.  New deployments must keep this bridge disabled: it
-    # has no human identity and cannot provide account-level attribution.
+    # Pre-tenant installations used one management token. It may authorize a
+    # verified account's one-time historic-workspace adoption, but it never
+    # authorizes a browser login or API access by itself.
     legacy_admin_token_enabled: bool = False
     session_secret: str | None = field(default=None, repr=False)
     session_cookie_secure: bool = False

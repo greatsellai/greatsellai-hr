@@ -12,4 +12,4 @@ export type WorkspaceNavigationView =
  */
 export type WorkspaceView = WorkspaceNavigationView | "settings" | "feedback";
 
-export type WorkspaceSettingsSection = "mailbox" | "data";
+export type WorkspaceSettingsSection = "mailbox" | "data" | "account";

@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Resume
+from app.tenant_scope import set_organization_context
 from test_resume_flow import make_pdf_with_text
 
 
@@ -115,14 +116,22 @@ def test_review_queue_requires_auth_and_paginates_non_active_uploads(
     unauthenticated = protected_client.get("/v1/resumes/review-queue")
     assert unauthenticated.status_code == 401
 
-    headers = {"X-Admin-Token": "test-admin-token"}
+    authenticated = protected_client.post(
+        "/v1/auth/login",
+        json={
+            "email": "protected-client@example.test",
+            "password": "protected-client-password",
+        },
+    )
+    assert authenticated.status_code == 200, authenticated.text
+    organization_id = authenticated.json()["organization"]["organization_id"]
+
     uploaded: list[str] = []
     for index, name in enumerate(("First", "Second", "Third"), start=1):
         response = _upload_new_resume(
             protected_client,
             content=make_pdf_with_text(f"resume {index} " * 30),
             filename=f"resume-{index}.pdf",
-            headers=headers,
         )
         assert response.status_code == 200, response.text
         uploaded.append(response.json()["resume_id"])
@@ -130,6 +139,7 @@ def test_review_queue_requires_auth_and_paginates_non_active_uploads(
     database = protected_client.app.state.database
     base_time = datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc)
     with database.session_factory() as session:
+        set_organization_context(session, organization_id)
         for index, resume_id in enumerate(uploaded):
             resume = session.get(Resume, resume_id)
             assert resume is not None
@@ -139,14 +149,8 @@ def test_review_queue_requires_auth_and_paginates_non_active_uploads(
         first_resume.is_active = True
         session.commit()
 
-    first_page = protected_client.get(
-        "/v1/resumes/review-queue?page=1&page_size=1",
-        headers=headers,
-    )
-    second_page = protected_client.get(
-        "/v1/resumes/review-queue?page=2&page_size=1",
-        headers=headers,
-    )
+    first_page = protected_client.get("/v1/resumes/review-queue?page=1&page_size=1")
+    second_page = protected_client.get("/v1/resumes/review-queue?page=2&page_size=1")
 
     assert first_page.status_code == 200, first_page.text
     assert second_page.status_code == 200, second_page.text

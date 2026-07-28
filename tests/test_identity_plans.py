@@ -10,19 +10,18 @@ from fastapi.testclient import TestClient
 
 from app.config import AppSettings
 from app.main import create_app
+from app.models import UserAccount
 
 
 @pytest.fixture
 def identity_client(tmp_path: Path) -> Iterator[TestClient]:
-    """A disposable identity/plan database with legacy-token compatibility."""
+    """A disposable identity/plan database with session-based administration."""
 
     settings = AppSettings(
         project_dir=tmp_path,
         data_dir=tmp_path / "data",
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
-        admin_token="legacy-platform-test-token",
-        legacy_admin_token_enabled=True,
         session_secret="identity-plan-test-session-secret",
         allow_unauthenticated=False,
         ai_provider_credentials={
@@ -52,6 +51,40 @@ def _register_workspace(client: TestClient) -> dict[str, object]:
     verified = client.post("/v1/auth/email-verification/complete", json={"token": token})
     assert verified.status_code == 200, verified.text
     return verified.json()
+
+
+def _promote_and_login_platform_admin(
+    client: TestClient,
+    registered: dict[str, object],
+) -> dict[str, object]:
+    """Promote one verified account in the test database, then establish a session.
+
+    Platform access is intentionally exercised through the ordinary email/password
+    sign-in path.  The legacy password-only compatibility route is not a test
+    fixture for the multi-user application.
+    """
+
+    user = registered["user"]
+    assert isinstance(user, dict)
+    user_id = user["user_id"]
+    email = user["email"]
+    assert isinstance(user_id, str)
+    assert isinstance(email, str)
+
+    with client.app.state.database.session_factory() as session:
+        account = session.get(UserAccount, user_id)
+        assert account is not None
+        account.is_platform_admin = True
+        session.commit()
+
+    response = client.post(
+        "/v1/auth/login",
+        json={"email": email, "password": "plan-fixture-password"},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["is_platform_admin"] is True
+    return payload
 
 
 def test_new_registration_uses_advanced_30_day_trial_and_cannot_manage_platform_plans(
@@ -85,7 +118,7 @@ def test_new_registration_uses_advanced_30_day_trial_and_cannot_manage_platform_
     assert denied.json()["detail"] == "platform_admin_required"
 
 
-def test_legacy_platform_admin_can_list_and_update_product_plans(
+def test_verified_platform_admin_can_list_and_update_product_plans(
     identity_client: TestClient,
 ) -> None:
     initial_offer = identity_client.get("/v1/auth/registration-offer")
@@ -97,11 +130,7 @@ def test_legacy_platform_admin_can_list_and_update_product_plans(
         "llm_call_limit": 1000,
     }
 
-    legacy_login = identity_client.post(
-        "/v1/auth/login",
-        json={"password": "legacy-platform-test-token"},
-    )
-    assert legacy_login.status_code == 200, legacy_login.text
+    _promote_and_login_platform_admin(identity_client, _register_workspace(identity_client))
 
     listed = identity_client.get("/v1/platform/plans")
     assert listed.status_code == 200, listed.text
@@ -139,7 +168,7 @@ def test_legacy_platform_admin_can_list_and_update_product_plans(
 def test_platform_admin_alone_can_publish_ai_model_route(
     identity_client: TestClient,
 ) -> None:
-    _register_workspace(identity_client)
+    registered = _register_workspace(identity_client)
 
     denied = identity_client.get("/v1/platform/ai/providers")
     assert denied.status_code == 403, denied.text
@@ -152,11 +181,7 @@ def test_platform_admin_alone_can_publish_ai_model_route(
     assert usage_trend_denied.status_code == 403, usage_trend_denied.text
     assert usage_trend_denied.json()["detail"] == "platform_admin_required"
 
-    legacy_login = identity_client.post(
-        "/v1/auth/login",
-        json={"password": "legacy-platform-test-token"},
-    )
-    assert legacy_login.status_code == 200, legacy_login.text
+    _promote_and_login_platform_admin(identity_client, registered)
 
     usage_runs = identity_client.get("/v1/platform/ai/usage/runs")
     assert usage_runs.status_code == 200, usage_runs.text
@@ -291,11 +316,7 @@ def test_platform_admin_alone_can_publish_ai_model_route(
 def test_platform_ai_route_cannot_publish_with_unconfigured_provider_credential(
     identity_client: TestClient,
 ) -> None:
-    legacy_login = identity_client.post(
-        "/v1/auth/login",
-        json={"password": "legacy-platform-test-token"},
-    )
-    assert legacy_login.status_code == 200, legacy_login.text
+    _promote_and_login_platform_admin(identity_client, _register_workspace(identity_client))
 
     provider = identity_client.post(
         "/v1/platform/ai/providers",

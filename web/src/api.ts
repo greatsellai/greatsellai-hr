@@ -31,6 +31,7 @@ import type {
   JobMatchCreate,
   JobVersion,
   JobVersionRequirementsUpdate,
+  LegacyWorkspaceAdoptionStatus,
   MailboxConfig,
   MailboxConfigCreate,
   MailboxConfigList,
@@ -280,6 +281,17 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return request<AuthSession>("/auth/login", {
         method: "POST",
         body: input,
+      });
+    },
+
+    getLegacyWorkspaceAdoptionStatus(): Promise<LegacyWorkspaceAdoptionStatus> {
+      return request<LegacyWorkspaceAdoptionStatus>("/auth/legacy-workspace-adoption");
+    },
+
+    adoptLegacyWorkspace(legacyAdminPassword: string): Promise<AuthSession> {
+      return request<AuthSession>("/auth/legacy-workspace-adoption", {
+        method: "POST",
+        body: { legacy_admin_password: legacyAdminPassword },
       });
     },
 

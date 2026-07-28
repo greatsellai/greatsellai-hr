@@ -44,6 +44,7 @@ from app.schemas import (
 )
 from app.tenant_scope import (
     LEGACY_ORGANIZATION_ID,
+    SYSTEM_FALLBACK_ORGANIZATION_ID,
     clear_organization_context,
     set_organization_context,
 )
@@ -98,10 +99,9 @@ class AuthPrincipal:
 
     @property
     def email_verified(self) -> bool:
-        # The historical password-only entry point is deliberately confined
-        # to its pre-existing legacy workspace.  It cannot be used to enter a
-        # newly registered tenant, so it remains compatible without a real
-        # deliverable email address.
+        # This compatibility identity exists only for explicitly enabled
+        # local/test fixtures. Production HTTP authentication always resolves
+        # a verified named account, never this placeholder identity.
         return self.legacy_compatibility or self.user.email_verified_at is not None
 
 
@@ -257,7 +257,7 @@ def _seed_plan_rows(session: Session) -> None:
 
 
 def ensure_identity_bootstrap(session: Session) -> None:
-    """Idempotently seed plans and a safe owner for pre-tenant records."""
+    """Idempotently seed plans and system identities for historical records."""
 
     _seed_plan_rows(session)
     advanced = session.scalar(select(ProductPlan).where(ProductPlan.code == "advanced"))
@@ -273,6 +273,25 @@ def ensure_identity_bootstrap(session: Session) -> None:
             plan_status="active",
         )
         session.add(legacy_organization)
+
+    # Never use a real customer workspace as an implicit ORM fallback. The
+    # historical organization may later be handed to a named account, while
+    # this organization intentionally has no member and no business data.
+    # Keep the historical seed first for development/test databases that
+    # intentionally select it by oldest creation time.
+    system_fallback_organization = session.get(
+        Organization,
+        SYSTEM_FALLBACK_ORGANIZATION_ID,
+    )
+    if system_fallback_organization is None:
+        session.add(
+            Organization(
+                id=SYSTEM_FALLBACK_ORGANIZATION_ID,
+                name="System fallback workspace",
+                plan=advanced,
+                plan_status="suspended",
+            )
+        )
 
     legacy_user = session.get(UserAccount, LEGACY_USER_ID)
     if legacy_user is None:
@@ -369,7 +388,10 @@ def legacy_principal(session: Session) -> AuthPrincipal:
         organization_id=LEGACY_ORGANIZATION_ID,
     )
     if principal is None:
-        raise RuntimeError("legacy_identity_not_initialized")
+        # The compatibility identity becomes intentionally unavailable after
+        # a successful handover. Returning a stable domain error lets the old
+        # static route fail closed instead of producing a server error.
+        raise IdentityServiceError("legacy_workspace_unavailable")
     return AuthPrincipal(
         user=principal.user,
         membership=principal.membership,
@@ -377,33 +399,6 @@ def legacy_principal(session: Session) -> AuthPrincipal:
         plan=principal.plan,
         legacy_compatibility=True,
     )
-
-
-def legacy_principal_from_session(
-    session: Session,
-    values: dict[str, object],
-) -> AuthPrincipal | None:
-    """Resolve an old boolean-only legacy cookie with version revocation.
-
-    Before tenant identity existed, the legacy workspace wrote only an
-    authenticated flag.  Treat that historical shape as session version 1 so
-    it continues to work after rollout, but no longer bypasses account-wide
-    session revocation after a password reset.
-    """
-
-    if values.get("resume_v3_authenticated") is not True:
-        return None
-    raw_version = values.get("resume_v3_auth_session_version", 1)
-    if (
-        isinstance(raw_version, bool)
-        or not isinstance(raw_version, int)
-        or raw_version < 1
-    ):
-        return None
-    principal = legacy_principal(session)
-    if principal.user.auth_session_version != raw_version:
-        return None
-    return principal
 
 
 def principal_from_session(session: Session, values: dict[str, object]) -> AuthPrincipal | None:
@@ -841,12 +836,41 @@ def create_invitation(
     principal: AuthPrincipal,
     payload: OrganizationInvitationCreate,
 ) -> OrganizationInvitationResponse:
+    # Lock the organization before its member rows. The legacy-workspace
+    # handover uses the same order, so an in-flight old-admin request cannot
+    # create an invitation after the handover or deadlock half-way through it.
+    organization = session.scalar(
+        select(Organization)
+        .where(Organization.id == principal.organization.id)
+        .with_for_update()
+    )
+    if organization is None:
+        raise IdentityServiceError("organization_not_found")
+
+    # Re-load and lock the caller's membership instead of trusting the
+    # request-time principal alone. A legacy-workspace handover can retire a
+    # membership between authentication and this write; without this check an
+    # in-flight old-admin request could create a fresh invitation afterwards.
+    current_membership = session.scalar(
+        select(OrganizationMembership)
+        .where(
+            OrganizationMembership.id == principal.membership.id,
+            OrganizationMembership.user_id == principal.user.id,
+            OrganizationMembership.organization_id == principal.organization.id,
+            OrganizationMembership.is_active.is_(True),
+            OrganizationMembership.role == "admin",
+        )
+        .with_for_update()
+    )
+    if current_membership is None:
+        raise IdentityServiceError("organization_membership_not_found")
+
     email_key: str | None = None
     if payload.email:
         _, email_key = normalize_email(payload.email)
     token = secrets.token_urlsafe(32)
     invitation = OrganizationInvitation(
-        organization_id=principal.organization.id,
+        organization_id=organization.id,
         email_key=email_key,
         token_digest=digest_token(token),
         role=payload.role,
@@ -869,10 +893,33 @@ def accept_invitation(
     *,
     payload: OrganizationInvitationAccept,
 ) -> AuthPrincipal:
+    # Resolve the opaque token first, then take the organization lock before
+    # locking the invitation. ``create_invitation`` and the legacy handover
+    # follow that same order, preventing an invite/hand-over deadlock while
+    # still re-checking every mutable condition under lock below.
+    invitation_reference = session.execute(
+        select(OrganizationInvitation.id, OrganizationInvitation.organization_id).where(
+            OrganizationInvitation.token_digest == digest_token(payload.invitation_token)
+        )
+    ).one_or_none()
+    if invitation_reference is None:
+        raise IdentityServiceError("invitation_invalid_or_expired")
+    invitation_id, invitation_organization_id = invitation_reference
+    organization = session.scalar(
+        select(Organization)
+        .options(joinedload(Organization.plan))
+        .where(Organization.id == invitation_organization_id)
+        .with_for_update()
+    )
+    if organization is None:
+        raise IdentityServiceError("invitation_invalid_or_expired")
     invitation = session.scalar(
         select(OrganizationInvitation)
-        .options(joinedload(OrganizationInvitation.organization).joinedload(Organization.plan))
-        .where(OrganizationInvitation.token_digest == digest_token(payload.invitation_token))
+        .where(
+            OrganizationInvitation.id == invitation_id,
+            OrganizationInvitation.token_digest == digest_token(payload.invitation_token),
+        )
+        .with_for_update()
     )
     if invitation is None or invitation.accepted_at is not None or _aware(invitation.expires_at) <= utcnow():
         raise IdentityServiceError("invitation_invalid_or_expired")
@@ -903,8 +950,8 @@ def accept_invitation(
     return AuthPrincipal(
         user=user,
         membership=membership,
-        organization=invitation.organization,
-        plan=invitation.organization.plan,
+        organization=organization,
+        plan=organization.plan,
     )
 
 

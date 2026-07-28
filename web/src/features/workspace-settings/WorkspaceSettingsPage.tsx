@@ -1,6 +1,7 @@
 import { Icon, type IconName } from "../../icons";
 import { CandidateDataLifecyclePage } from "../candidate-data/CandidateDataLifecyclePage";
 import { MailboxPage } from "../mailbox/MailboxPage";
+import { LegacyWorkspaceAdoptionPanel } from "./LegacyWorkspaceAdoptionPanel";
 import type { WorkspaceSettingsSection } from "../workspace-shell/workspace-navigation-types";
 import "./workspace-settings.css";
 
@@ -8,20 +9,24 @@ export type { WorkspaceSettingsSection } from "../workspace-shell/workspace-navi
 
 export function WorkspaceSettingsPage({
   activeSection,
+  canAdoptLegacyWorkspace,
   canManageCandidateData,
   canManageMailbox,
   formatError,
   notify,
+  onAdoptLegacyWorkspace,
   onImported,
   onOpenLibrary,
   onSelectSection,
   role,
 }: {
   activeSection: WorkspaceSettingsSection;
+  canAdoptLegacyWorkspace: boolean;
   canManageCandidateData: boolean;
   canManageMailbox: boolean;
   formatError: (error: unknown) => string;
   notify: (kind: "success" | "error", message: string) => void;
+  onAdoptLegacyWorkspace: (legacyAdminPassword: string) => Promise<void>;
   onImported: () => void;
   onOpenLibrary: () => void;
   onSelectSection: (section: WorkspaceSettingsSection) => void;
@@ -48,6 +53,14 @@ export function WorkspaceSettingsPage({
       label: "候选人数据与保留",
       description: "管理资料保留、导出、删除和访问记录。",
       icon: "gear",
+    });
+  }
+  if (canAdoptLegacyWorkspace) {
+    sections.push({
+      id: "account",
+      label: "账户接管",
+      description: "把历史工作区交给当前账号。",
+      icon: "user",
     });
   }
 
@@ -107,12 +120,17 @@ export function WorkspaceSettingsPage({
               onImported={onImported}
               role={role}
             />
-          ) : (
+          ) : currentSection === "data" ? (
             <CandidateDataLifecyclePage
               embedded
               formatError={formatError}
               notify={notify}
               onOpenLibrary={onOpenLibrary}
+            />
+          ) : (
+            <LegacyWorkspaceAdoptionPanel
+              formatError={formatError}
+              onAdopt={onAdoptLegacyWorkspace}
             />
           )}
         </section>

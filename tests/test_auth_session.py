@@ -20,19 +20,28 @@ def test_login_session_protects_resume_endpoints(protected_client) -> None:
     denied = protected_client.get("/v1/resume-library")
     assert denied.status_code == 401
 
-    invalid = protected_client.post("/v1/auth/login", json={"password": "wrong"})
+    password_only = protected_client.post("/v1/auth/login", json={"password": "wrong"})
+    assert password_only.status_code == 422
+
+    invalid = protected_client.post(
+        "/v1/auth/login",
+        json={"email": "protected-client@example.test", "password": "wrong"},
+    )
     assert invalid.status_code == 401
     assert invalid.json()["detail"] == "invalid_login_credentials"
 
     authenticated = protected_client.post(
         "/v1/auth/login",
-        json={"password": "test-admin-token"},
+        json={
+            "email": "protected-client@example.test",
+            "password": "protected-client-password",
+        },
     )
     assert authenticated.status_code == 200
     payload = authenticated.json()
     assert payload["authenticated"] is True
     assert payload["login_required"] is True
-    assert payload["organization"]["name"] == "Legacy workspace"
+    assert payload["organization"]["name"] == "Protected client fixture workspace"
     assert payload["role"] == "admin"
     assert "httponly" in authenticated.headers["set-cookie"].lower()
     assert "samesite=strict" in authenticated.headers["set-cookie"].lower()

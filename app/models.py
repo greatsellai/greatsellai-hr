@@ -326,6 +326,69 @@ class OrganizationMembership(Base):
     user: Mapped[UserAccount] = relationship(back_populates="memberships")
 
 
+class LegacyWorkspaceAdoption(Base):
+    """One immutable control-plane record for the historic workspace handover.
+
+    The row intentionally contains only opaque account, organization and
+    membership identifiers. It never stores a migration password, candidate
+    information, document paths, mailbox credentials or Agent content.
+    """
+
+    __tablename__ = "legacy_workspace_adoptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_organization_id",
+            name="uq_legacy_workspace_adoptions_source_organization",
+        ),
+        UniqueConstraint(
+            "target_membership_id",
+            name="uq_legacy_workspace_adoptions_target_membership",
+        ),
+        UniqueConstraint(
+            "retired_membership_id",
+            name="uq_legacy_workspace_adoptions_retired_membership",
+        ),
+        Index(
+            "ix_legacy_workspace_adoptions_target_user",
+            "target_user_id",
+            "adopted_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+    target_previous_organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id"),
+        nullable=False,
+        index=True,
+    )
+    target_user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=False,
+        index=True,
+    )
+    target_membership_id: Mapped[str] = mapped_column(
+        ForeignKey("organization_memberships.id"),
+        nullable=False,
+        index=True,
+    )
+    retired_membership_id: Mapped[str] = mapped_column(
+        ForeignKey("organization_memberships.id"),
+        nullable=False,
+        index=True,
+    )
+    adopted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        nullable=False,
+        index=True,
+    )
+
+
 class OrganizationInvitation(Base):
     """A single-use digest-only invitation to join an existing workspace."""
 

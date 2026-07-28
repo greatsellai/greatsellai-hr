@@ -22,6 +22,7 @@ function settingsSectionFromHash(
 
   if (value === "settings/mailbox" || value === "inbox") return "mailbox";
   if (value === "settings/data" || value === "data") return "data";
+  if (value === "settings/account" || value === "account") return "account";
   return null;
 }
 
@@ -34,6 +35,7 @@ function feedbackHash(): string {
 }
 
 interface UseWorkspaceNavigationOptions {
+  canAdoptLegacyWorkspace: boolean;
   canManageCandidateData: boolean;
   canManageMailbox: boolean;
   hasSession: boolean;
@@ -45,6 +47,7 @@ interface UseWorkspaceNavigationOptions {
  * person away from a settings section that their current session cannot use.
  */
 export function useWorkspaceNavigation({
+  canAdoptLegacyWorkspace,
   canManageCandidateData,
   canManageMailbox,
   hasSession,
@@ -60,7 +63,8 @@ export function useWorkspaceNavigation({
     useState<WorkspaceSettingsSection>(
       () => settingsSectionFromHash(window.location.hash) ?? "mailbox",
     );
-  const canManageSettings = canManageMailbox || canManageCandidateData;
+  const canManageSettings =
+    canManageMailbox || canManageCandidateData || canAdoptLegacyWorkspace;
 
   const updateSettingsHash = useCallback(
     (section: WorkspaceSettingsSection | null, replace = false) => {
@@ -133,14 +137,17 @@ export function useWorkspaceNavigation({
     if (!hasSession || view !== "settings") return;
     const sectionAllowed =
       (settingsSection === "mailbox" && canManageMailbox) ||
-      (settingsSection === "data" && canManageCandidateData);
+      (settingsSection === "data" && canManageCandidateData) ||
+      (settingsSection === "account" && canAdoptLegacyWorkspace);
     if (sectionAllowed) return;
 
     const fallbackSection = canManageMailbox
       ? "mailbox"
       : canManageCandidateData
         ? "data"
-        : null;
+        : canAdoptLegacyWorkspace
+          ? "account"
+          : null;
     if (!fallbackSection) {
       setView("library");
       updateSettingsHash(null, true);
@@ -149,6 +156,7 @@ export function useWorkspaceNavigation({
     setSettingsSection(fallbackSection);
     updateSettingsHash(fallbackSection, true);
   }, [
+    canAdoptLegacyWorkspace,
     canManageCandidateData,
     canManageMailbox,
     hasSession,

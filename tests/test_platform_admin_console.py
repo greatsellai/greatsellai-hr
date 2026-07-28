@@ -12,7 +12,6 @@ from sqlalchemy import select
 from app.config import AppSettings
 from app.main import create_app
 from app.models import Candidate, Organization, OrganizationMembership, Resume, UserAccount
-from app.services.identity_service import LEGACY_ORGANIZATION_ID, LEGACY_USER_ID
 from app.services.platform_admin_service import PlatformAdminServiceError
 from app.tenant_scope import set_organization_context
 
@@ -24,8 +23,6 @@ def platform_client(tmp_path: Path) -> Iterator[TestClient]:
         data_dir=tmp_path / "data",
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
-        admin_token="platform-console-test-token",
-        legacy_admin_token_enabled=True,
         session_secret="platform-console-session-secret",
         allow_unauthenticated=False,
         transactional_email_provider="test",
@@ -65,15 +62,52 @@ def _register_and_verify(
     return payload
 
 
-def _login_platform_admin(client: TestClient) -> dict[str, object]:
+def _promote_user_to_platform_admin(client: TestClient, *, user_id: str) -> None:
+    """Grant the test account platform authority after normal verification."""
+
+    with client.app.state.database.session_factory() as session:
+        user = session.get(UserAccount, user_id)
+        assert user is not None
+        assert user.email_verified_at is not None
+        user.is_platform_admin = True
+        session.commit()
+
+
+def _login_platform_admin(client: TestClient, *, email: str) -> dict[str, object]:
     response = client.post(
         "/v1/auth/login",
-        json={"password": "platform-console-test-token"},
+        json={
+            "email": email,
+            "password": "platform-console-user-password",
+        },
     )
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["is_platform_admin"] is True
     return payload
+
+
+def _register_and_login_platform_admin(
+    client: TestClient,
+    *,
+    organization_name: str,
+    full_name: str,
+    email: str,
+) -> dict[str, object]:
+    """Use the same registration and session flow as a real platform admin."""
+
+    registered = _register_and_verify(
+        client,
+        organization_name=organization_name,
+        full_name=full_name,
+        email=email,
+    )
+    user = registered["user"]
+    assert isinstance(user, dict)
+    user_id = user["user_id"]
+    assert isinstance(user_id, str)
+    _promote_user_to_platform_admin(client, user_id=user_id)
+    return _login_platform_admin(client, email=email)
 
 
 def test_platform_permission_is_independent_from_workspace_plan_access(
@@ -101,11 +135,18 @@ def test_platform_permission_is_independent_from_workspace_plan_access(
     assert denied.json()["detail"] == "platform_admin_required"
     assert platform_client.post("/v1/auth/logout").status_code == 204
 
-    _login_platform_admin(platform_client)
+    platform_admin = _register_and_login_platform_admin(
+        platform_client,
+        organization_name="Platform Control Workspace",
+        full_name="Platform Control Admin",
+        email="platform-control-admin@example.test",
+    )
     with platform_client.app.state.database.session_factory() as session:
-        legacy = session.get(Organization, LEGACY_ORGANIZATION_ID)
-        assert legacy is not None
-        legacy.plan_status = "suspended"
+        organization_id = platform_admin["organization"]["organization_id"]
+        assert isinstance(organization_id, str)
+        organization = session.get(Organization, organization_id)
+        assert organization is not None
+        organization.plan_status = "suspended"
         session.commit()
 
     dashboard = platform_client.get("/v1/platform/dashboard")
@@ -147,7 +188,12 @@ def test_platform_admin_cannot_open_another_workspace_resume_or_original(
         session.commit()
         resume_id = resume.id
 
-    _login_platform_admin(platform_client)
+    _register_and_login_platform_admin(
+        platform_client,
+        organization_name="Isolation Platform Workspace",
+        full_name="Isolation Platform Admin",
+        email="isolation-platform-admin@example.test",
+    )
     review = platform_client.get(f"/v1/resumes/{resume_id}")
     assert review.status_code == 404, review.text
     original = platform_client.get(f"/v1/resumes/{resume_id}/original-file")
@@ -169,13 +215,20 @@ def test_dashboard_organization_management_and_audit_are_safe_and_atomic(
         assert organization is not None
         organization.trial_ends_at = datetime.now(timezone.utc) - timedelta(days=1)
         session.commit()
-    _login_platform_admin(platform_client)
+    platform_admin = _register_and_login_platform_admin(
+        platform_client,
+        organization_name="Dashboard Platform Workspace",
+        full_name="Dashboard Platform Admin",
+        email="dashboard-platform-admin@example.test",
+    )
 
     dashboard = platform_client.get("/v1/platform/dashboard")
     assert dashboard.status_code == 200, dashboard.text
     dashboard_payload = dashboard.json()
-    assert dashboard_payload["organizations_total"] == 2
-    assert dashboard_payload["users_total"] == 2
+    # Bootstrap creates the retired legacy workspace and an empty system fallback;
+    # this test adds one customer workspace and one real platform-admin workspace.
+    assert dashboard_payload["organizations_total"] == 4
+    assert dashboard_payload["users_total"] == 3
     assert dashboard_payload["organizations_by_status"]["expired"] == 1
     assert dashboard_payload["resumes_total"] == 0
     assert dashboard_payload["ai_runs_total"] == 0
@@ -250,7 +303,7 @@ def test_dashboard_organization_management_and_audit_are_safe_and_atomic(
     audit_payload = audit.json()
     assert audit_payload["total"] == 1
     event = audit_payload["items"][0]
-    assert event["actor_user_id"] == LEGACY_USER_ID
+    assert event["actor_user_id"] == platform_admin["user"]["user_id"]
     assert event["reason"] == "Customer support adjustment"
     assert event["request_id"] == "platform-request-001"
     assert event["before_state"]["name"] == "Searchable Tenant"
@@ -301,15 +354,18 @@ def test_platform_user_management_protects_platform_administrators(
         email="other-platform@example.test",
     )
     other_admin_id = other_admin["user"]["user_id"]
-    with platform_client.app.state.database.session_factory() as session:
-        user = session.scalar(
-            select(UserAccount).where(UserAccount.id == other_admin_id)
-        )
-        assert user is not None
-        user.is_platform_admin = True
-        session.commit()
-
-    _login_platform_admin(platform_client)
+    assert isinstance(other_admin_id, str)
+    _promote_user_to_platform_admin(platform_client, user_id=other_admin_id)
+    platform_admin = _register_and_login_platform_admin(
+        platform_client,
+        organization_name="Primary Platform Tenant",
+        full_name="Primary Platform Admin",
+        email="primary-platform-admin@example.test",
+    )
+    platform_admin_user = platform_admin["user"]
+    assert isinstance(platform_admin_user, dict)
+    platform_admin_id = platform_admin_user["user_id"]
+    assert isinstance(platform_admin_id, str)
     listed = platform_client.get(
         "/v1/platform/users",
         params={"search": "managed-user", "is_active": True},
@@ -347,7 +403,7 @@ def test_platform_user_management_protects_platform_administrators(
     assert organization.json()["active_member_count"] == 0
 
     self_denied = platform_client.patch(
-        f"/v1/platform/users/{LEGACY_USER_ID}",
+        f"/v1/platform/users/{platform_admin_id}",
         json={"is_active": False, "reason": "Unsafe self disable"},
     )
     assert self_denied.status_code == 403
@@ -505,7 +561,12 @@ def test_platform_mutation_rolls_back_when_audit_append_fails(
         email="atomic-audit@example.test",
     )
     organization_id = workspace["organization"]["organization_id"]
-    _login_platform_admin(platform_client)
+    _register_and_login_platform_admin(
+        platform_client,
+        organization_name="Atomic Audit Platform Tenant",
+        full_name="Atomic Audit Platform Admin",
+        email="atomic-audit-platform-admin@example.test",
+    )
 
     def fail_audit(*_args: object, **_kwargs: object) -> None:
         raise PlatformAdminServiceError("forced_platform_audit_failure")

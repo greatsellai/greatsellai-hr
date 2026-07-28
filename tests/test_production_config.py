@@ -231,12 +231,12 @@ def test_compose_injects_tencent_ses_templates_into_api_and_worker() -> None:
         assert "    environment: *app-environment" in match.group("body")
 
 
-def test_compose_explicitly_wires_the_opt_in_legacy_admin_entry_flag() -> None:
-    """A configured compatibility login flag must reach the API process.
+def test_compose_explicitly_wires_the_one_time_legacy_adoption_flag() -> None:
+    """The one-time historic-workspace adoption flag reaches the API process.
 
-    The identity service keeps this password-only entry disabled by default,
-    but an operator must be able to enable the documented compatibility path
-    without editing the Compose source on a production host.
+    It remains disabled by default. When an operator explicitly enables it,
+    the token may authorize only a signed-in verified account's handover, not
+    a password-only browser login.
     """
 
     root = Path(__file__).resolve().parents[1]

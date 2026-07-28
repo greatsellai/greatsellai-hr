@@ -118,6 +118,11 @@ export interface AuthLoginInput {
   password: string;
 }
 
+/** A signed-in administrator may see this only before the one-time handover. */
+export interface LegacyWorkspaceAdoptionStatus {
+  available: boolean;
+}
+
 export interface AuthRegistrationInput {
   organization_name: string;
   full_name: string;

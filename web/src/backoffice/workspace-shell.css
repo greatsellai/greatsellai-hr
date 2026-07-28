@@ -456,6 +456,41 @@
   border-color: rgb(215 22 24 / 0.15);
 }
 
+.account-menu-feedback-action {
+  min-height: 3.25rem;
+  align-items: flex-start;
+  padding-block: 0.5rem;
+}
+
+.account-menu-feedback-action > svg {
+  flex: 0 0 auto;
+  margin-top: 0.125rem;
+  color: var(--red);
+}
+
+.account-menu-feedback-action > span {
+  display: grid;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.account-menu-feedback-action strong,
+.account-menu-feedback-action small {
+  display: block;
+}
+
+.account-menu-feedback-action strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+}
+
+.account-menu-feedback-action small {
+  color: var(--ink-soft);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
 .main-content {
   min-width: 0;
   min-height: 0;

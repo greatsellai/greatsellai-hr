@@ -170,6 +170,15 @@ class Organization(Base):
         default=0,
         server_default=text("0"),
     )
+    # A workspace-level, server-owned cooldown for the feedback incentive.
+    # It is intentionally stored on the organization rather than inferred from
+    # a newest-feedback query: a single conditional UPDATE of this field is the
+    # concurrency boundary that prevents two browser tabs or API replicas from
+    # queuing two rewards inside the same cooldown period.
+    feedback_reward_available_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -507,6 +516,148 @@ class RegistrationRateLimitBucket(Base):
         DateTime(timezone=True),
         default=utcnow,
         onupdate=utcnow,
+    )
+
+
+class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
+    """One complete workspace-feedback questionnaire and its automatic reward.
+
+    The four text answers are product feedback, not candidate data and never
+    belong in generic audit-event snapshots or application logs.  A durable
+    reward state lets the worker grant the fixed allowance after its delayed
+    due time without relying on a browser tab remaining open.
+    """
+
+    __tablename__ = "workspace_feedback_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            name="uq_workspace_feedback_id_organization",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "idempotency_key_hash",
+            name="uq_workspace_feedback_org_idempotency",
+        ),
+        CheckConstraint(
+            "reward_status IN ('queued', 'running', 'granted')",
+            name="ck_workspace_feedback_reward_status",
+        ),
+        CheckConstraint(
+            "reward_call_count = 500",
+            name="ck_workspace_feedback_reward_call_count",
+        ),
+        CheckConstraint(
+            "reward_attempt_count >= 0",
+            name="ck_workspace_feedback_reward_attempt_count",
+        ),
+        Index(
+            "ix_workspace_feedback_reward_due",
+            "reward_status",
+            "reward_due_at",
+            "created_at",
+        ),
+        Index(
+            "ix_workspace_feedback_org_created",
+            "organization_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    submitted_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        index=True,
+    )
+    # Only digests are retained so a transport retry key cannot become a
+    # durable browser identifier.  ``request_fingerprint`` detects accidental
+    # reuse of the same key for a different questionnaire payload.
+    idempotency_key_hash: Mapped[str] = mapped_column(String(64))
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    use_case: Mapped[str] = mapped_column(Text)
+    intended_outcome: Mapped[str] = mapped_column(Text)
+    friction: Mapped[str] = mapped_column(Text)
+    desired_change: Mapped[str] = mapped_column(Text)
+    reward_status: Mapped[str] = mapped_column(
+        String(32),
+        default="queued",
+        server_default=text("'queued'"),
+        index=True,
+    )
+    reward_call_count: Mapped[int] = mapped_column(
+        Integer,
+        default=500,
+        server_default=text("500"),
+    )
+    reward_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    reward_attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    reward_lease_owner: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    reward_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reward_last_error: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reward_granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    image_attachments: Mapped[list["WorkspaceFeedbackImageAttachment"]] = relationship(
+        back_populates="feedback_submission",
+        cascade="all, delete-orphan",
+    )
+
+
+class WorkspaceFeedbackImageAttachment(OrganizationScoped, Base):
+    """Metadata for an optional image already accepted by a trusted uploader.
+
+    The feedback service deliberately handles metadata only.  The HTTP upload
+    boundary owns byte validation and storage; this model keeps a scoped
+    reference so a future attachment-serving endpoint can authorize it without
+    trusting a browser-supplied path.
+    """
+
+    __tablename__ = "workspace_feedback_image_attachments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["feedback_submission_id", "organization_id"],
+            [
+                "workspace_feedback_submissions.id",
+                "workspace_feedback_submissions.organization_id",
+            ],
+            name="fk_workspace_feedback_image_submission_org",
+        ),
+        UniqueConstraint(
+            "feedback_submission_id",
+            "sort_order",
+            name="uq_workspace_feedback_image_order",
+        ),
+        CheckConstraint("sort_order >= 0", name="ck_workspace_feedback_image_order"),
+        CheckConstraint("size_bytes >= 0", name="ck_workspace_feedback_image_size"),
+        Index(
+            "ix_workspace_feedback_image_org_submission",
+            "organization_id",
+            "feedback_submission_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    feedback_submission_id: Mapped[str] = mapped_column(String(36), index=True)
+    sort_order: Mapped[int] = mapped_column(Integer)
+    original_filename: Mapped[str] = mapped_column(String(255))
+    content_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    storage_key: Mapped[str] = mapped_column(String(512))
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    feedback_submission: Mapped[WorkspaceFeedbackSubmission] = relationship(
+        back_populates="image_attachments",
     )
 
 

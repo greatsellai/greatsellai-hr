@@ -90,7 +90,20 @@ export function SideRail({
 }) {
   return (
     <aside aria-label="主导航" className="side-rail" inert={inert}>
-      <div aria-label="AI 简历筛选工作台" className="rail-mark" role="img" />
+      <div aria-label="大卖数智" className="rail-mark" role="img">
+        <img
+          alt=""
+          aria-hidden="true"
+          className="rail-brand-logo"
+          src="/brand/greatsell-logo-cn-white.png"
+        />
+        <img
+          alt=""
+          aria-hidden="true"
+          className="rail-brand-symbol"
+          src="/brand/greatsell-logo-symbol-red.png"
+        />
+      </div>
       <nav className="rail-nav">
         {navigation.map((item) => (
             <button

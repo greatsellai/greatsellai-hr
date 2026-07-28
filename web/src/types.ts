@@ -190,10 +190,11 @@ export interface MailboxSyncAlertSummary {
 
 export interface MailboxConfigCreate {
   display_name: string;
-  /** New clients always choose a reviewed provider instead of an IMAP host. */
+  /** A reviewed provider, including the explicit generic IMAP option. */
   provider_key?: string;
-  /** Compatibility fields for one legacy API release. New UI must not send them. */
+  /** Sent only when the selected provider allows a custom IMAP endpoint. */
   imap_host?: string;
+  /** Sent only with `imap_host`; generic IMAP currently uses encrypted 993. */
   imap_port?: number;
   email_address: string;
   mailbox: string;
@@ -229,11 +230,14 @@ export interface MailboxProvider {
   display_name: string;
   authentication_mode: MailboxAuthenticationMode;
   available: boolean;
-  imap_host: string;
+  /** Fixed providers expose their endpoint; generic IMAP asks for one at bind time. */
+  imap_host: string | null;
   imap_port: number;
   default_mailbox: string;
   credential_label: string;
   help_text: string;
+  /** Whether this reviewed option accepts a user-supplied IMAP hostname. */
+  allows_custom_endpoint: boolean;
 }
 
 export interface MailboxProviderList {

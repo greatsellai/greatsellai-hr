@@ -974,19 +974,37 @@ test.describe("招聘工作台关键路径", () => {
     await expect(composer).toHaveValue("第一行");
     expect(turnRequests).toHaveLength(0);
 
+    // Some Windows IMEs keep the legacy keyCode at 229 for a normal Enter
+    // after composition has already ended. The browser's isComposing flag is
+    // the authoritative signal, so this must still send.
+    await composer.dispatchEvent("keydown", {
+      key: "Enter",
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+      isComposing: false,
+    });
+    await expect.poll(() => turnRequests.length).toBe(1);
+    expect(turnRequests[0]).toEqual({
+      message: "第一行",
+      job_version_id: null,
+    });
+    await expect(composer).toHaveValue("");
+
+    await composer.fill("第一行");
     await composer.press("Shift+Enter");
     await composer.type("第二行");
     await expect(composer).toHaveValue("第一行\n第二行");
-    expect(turnRequests).toHaveLength(0);
+    expect(turnRequests).toHaveLength(1);
 
     await composer.press("Enter");
-    await expect.poll(() => turnRequests.length).toBe(1);
-    expect(turnRequests[0]).toEqual({
+    await expect.poll(() => turnRequests.length).toBe(2);
+    expect(turnRequests[1]).toMatchObject({
       message: "第一行\n第二行",
       job_version_id: null,
     });
     await expect(composer).toHaveValue("");
-    await expect(dialog.getByText("已收到多行请求。")).toBeVisible();
+    await expect(dialog.getByText("已收到多行请求。")).toHaveCount(2);
   });
 
   test("招聘助手错误说明 AI 服务，并在重发时不重复用户消息", async ({ page }) => {
@@ -1594,11 +1612,12 @@ test.describe("招聘工作台关键路径", () => {
     expect(await gridTrackCount(".mailbox-setup-shell")).toBe(1);
     await expect(page.getByRole("heading", { name: "收件通道" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "附件入库记录" })).toHaveCount(0);
-    await expect(page.getByText("系统固定使用经过审核的加密连接，不开放自定义服务器地址或端口。"))
+    await expect(page.getByText("选择常用服务商，或使用通用 IMAP 手动填写服务器域名。"))
       .toBeVisible();
     await expect(page.locator("#imap-host")).toHaveCount(0);
     await expect(page.locator("#imap-port")).toHaveCount(0);
     await expect(page.getByRole("radio", { name: /Gmail \/ Google Workspace/ })).toBeDisabled();
+    await expect(page.getByRole("radio", { name: /通用 IMAP 邮箱/ })).toBeVisible();
     await page.getByRole("radio", { name: /飞书邮箱/ }).click();
     await page.locator("#mailbox-display-name").fill("E2E 收件通道");
     await page.locator("#imap-address").fill("e2e-inbox@example.test");
@@ -1660,6 +1679,74 @@ test.describe("招聘工作台关键路径", () => {
     expect(await gridTrackCount(".settings-layout")).toBe(1);
   });
 
+  test("通用 IMAP 仅在选中后发送服务器域名与固定加密端口", async ({ page }) => {
+    let createPayload: Record<string, unknown> | null = null;
+
+    await page.route("**/v1/mailbox-providers", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            {
+              provider_key: "generic_imap",
+              display_name: "通用 IMAP 邮箱",
+              authentication_mode: "app_password",
+              available: true,
+              allows_custom_endpoint: true,
+              imap_host: null,
+              imap_port: 993,
+              default_mailbox: "INBOX",
+              credential_label: "专用授权码或客户端密码",
+              help_text: "填写邮箱服务商提供的 IMAP 服务器域名和专用授权码。",
+            },
+          ],
+        }),
+      });
+    });
+    await page.route("**/v1/mailboxes", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      createPayload = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 400,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "mailbox_imap_host_not_allowed" }),
+      });
+    });
+
+    await registerAndVerify(page, "generic-imap");
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+
+    const genericProvider = page.getByRole("radio", { name: /通用 IMAP 邮箱/ });
+    await genericProvider.click();
+    await expect(genericProvider).toHaveAttribute("aria-checked", "true");
+    await expect(genericProvider).toHaveClass(/is-selected/);
+    await expect(genericProvider.getByText("已选择", { exact: true })).toBeVisible();
+    await expect(page.locator("#imap-host")).toBeVisible();
+    await expect(page.locator("#imap-port")).toHaveCount(0);
+    await expect(page.getByText("SSL/TLS（IMAPS）· 端口 993", { exact: true })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "专用授权码或客户端密码" })).toBeVisible();
+
+    await page.locator("#mailbox-display-name").fill("E2E 通用 IMAP 通道");
+    await page.locator("#imap-address").fill("e2e-generic@example.test");
+    await page.locator("#imap-host").fill("imap.example.test");
+    await page.locator("#imap-password").fill("e2e-generic-imap-authorization-code");
+    await page.getByRole("button", { name: "创建并开始接收" }).click();
+
+    await expect.poll(() => createPayload).not.toBeNull();
+    if (!createPayload) throw new Error("Expected a generic IMAP create request.");
+    expect(createPayload).toMatchObject({
+      provider_key: "generic_imap",
+      imap_host: "imap.example.test",
+      imap_port: 993,
+      initial_sync_lookback_days: 0,
+    });
+    await expect(page.getByText("该 IMAP 服务器未通过安全准入，请检查域名或联系管理员。"))
+      .toBeVisible();
+  });
+
   test("旧邮箱入口会转入设置中的收件邮箱", async ({ page }) => {
     await registerAndVerify(page, "mailbox-hash");
     await page.goto("/#inbox");
@@ -1694,6 +1781,7 @@ test.describe("招聘工作台关键路径", () => {
               display_name: "Gmail / Google Workspace",
               authentication_mode: "oauth2",
               available: true,
+              allows_custom_endpoint: false,
               imap_host: "imap.gmail.com",
               imap_port: 993,
               default_mailbox: "INBOX",

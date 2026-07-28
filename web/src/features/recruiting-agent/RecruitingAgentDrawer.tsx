@@ -1236,7 +1236,6 @@ export function RecruitingAgentDrawer({
       || event.shiftKey
       || event.repeat
       || event.nativeEvent.isComposing
-      || event.nativeEvent.keyCode === 229
     ) {
       return;
     }

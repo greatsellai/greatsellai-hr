@@ -1200,7 +1200,8 @@ details[open] > .mailbox-disclosure-heading::after {
   font-size: 0.75rem;
 }
 
-.backoffice-ui-root .mailbox-oauth-explainer {
+.backoffice-ui-root .mailbox-oauth-explainer,
+.backoffice-ui-root .mailbox-imaps-security {
   display: flex;
   gap: 0.75rem;
   align-items: flex-start;
@@ -1211,7 +1212,8 @@ details[open] > .mailbox-disclosure-heading::after {
   border-radius: 0.375rem;
 }
 
-.backoffice-ui-root .mailbox-oauth-explainer-icon {
+.backoffice-ui-root .mailbox-oauth-explainer-icon,
+.backoffice-ui-root .mailbox-imaps-security-icon {
   display: grid;
   width: 2rem;
   height: 2rem;
@@ -1223,13 +1225,15 @@ details[open] > .mailbox-disclosure-heading::after {
   border-radius: 0.3125rem;
 }
 
-.backoffice-ui-root .mailbox-oauth-explainer strong {
+.backoffice-ui-root .mailbox-oauth-explainer strong,
+.backoffice-ui-root .mailbox-imaps-security strong {
   color: #344054;
   font-size: 0.8125rem;
   font-weight: 700;
 }
 
-.backoffice-ui-root .mailbox-oauth-explainer p {
+.backoffice-ui-root .mailbox-oauth-explainer p,
+.backoffice-ui-root .mailbox-imaps-security p {
   margin: 0.1875rem 0 0;
   color: #667085;
   font-size: 0.75rem;

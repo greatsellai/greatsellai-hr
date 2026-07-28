@@ -822,9 +822,11 @@ class AiUsageTrendBucketResponse(ApiModel):
 class MailboxConfigCreate(ApiModel):
     """Create one independently named ingestion source.
 
-    New product clients select a reviewed ``provider_key``.  The raw IMAPS
-    fields remain optional only for one compatibility release of older
-    integrations and are still checked against the deployment allowlist.
+    New product clients select a reviewed ``provider_key``.  The explicit
+    ``generic_imap`` provider additionally accepts a domain-only IMAPS host;
+    it is still fixed to TLS port 993 and receives the transport's public DNS
+    and certificate checks.  Raw fields for all other clients remain a
+    compatibility path with the deployment allowlist.
     """
 
     display_name: str = Field(min_length=1, max_length=32)
@@ -914,8 +916,12 @@ class MailboxProviderResponse(ApiModel):
     display_name: str
     authentication_mode: Literal["app_password", "oauth2"]
     available: bool
-    imap_host: str
+    # Fixed providers return their reviewed endpoint.  The generic IMAP
+    # provider intentionally returns ``null`` and asks for a domain at bind
+    # time instead.
+    imap_host: str | None = None
     imap_port: int
+    allows_custom_endpoint: bool = False
     default_mailbox: str
     credential_label: str
     help_text: str

@@ -1,11 +1,10 @@
 """Safe, pinned IMAPS transport for mailbox ingestion.
 
-Mailbox host names originate in a workspace configuration, so handing them
-directly to :class:`imaplib.IMAP4_SSL` would turn the application into an
-arbitrary network client.  This module accepts only deployment-owned exact
-host names, rejects non-public DNS results, then connects to the already
-validated socket address while preserving the original host name for TLS SNI
-and certificate verification.
+Fixed mailbox providers use deployment-owned exact host names.  The explicit
+``generic_imap`` product path may supply a domain name, but it still cannot
+choose an IP address or a port: the transport requires IMAPS 993, rejects
+non-public DNS results, pins the validated socket address and preserves the
+original hostname for TLS SNI and certificate verification.
 """
 from __future__ import annotations
 
@@ -81,8 +80,14 @@ def validate_imap_endpoint(
     *,
     host: str,
     port: int,
+    allow_custom_host: bool = False,
 ) -> str:
-    """Return a canonical permitted hostname without doing any network I/O."""
+    """Return a canonical IMAPS hostname without doing any network I/O.
+
+    ``allow_custom_host`` is intentionally only used by the explicit generic
+    provider path.  Existing and compatibility callers keep the stricter
+    deployment-owned exact-host allowlist by default.
+    """
 
     if port != IMAPS_PORT:
         raise MailboxImapTransportError("mailbox_imap_port_not_allowed")
@@ -91,7 +96,7 @@ def validate_imap_endpoint(
         _normalized_hostname(value)
         for value in settings.mailbox_imap_allowed_hosts
     }
-    if normalized_host not in allowed_hosts:
+    if not allow_custom_host and normalized_host not in allowed_hosts:
         raise MailboxImapTransportError("mailbox_imap_host_not_allowed")
     return normalized_host
 
@@ -333,10 +338,16 @@ def create_imap_client(
     *,
     host: str,
     port: int,
+    allow_custom_host: bool = False,
 ) -> imaplib.IMAP4_SSL:
     """Build a TLS-verified IMAP client for a permitted, pinned endpoint."""
 
-    hostname = validate_imap_endpoint(settings, host=host, port=port)
+    hostname = validate_imap_endpoint(
+        settings,
+        host=host,
+        port=port,
+        allow_custom_host=allow_custom_host,
+    )
     addresses = _resolve_public_addresses(
         hostname=hostname,
         port=port,

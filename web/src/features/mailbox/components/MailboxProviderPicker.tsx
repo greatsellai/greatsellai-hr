@@ -11,13 +11,13 @@ interface MailboxProviderPickerProps {
 }
 
 function authenticationLabel(provider: MailboxProvider): string {
+  if (provider.allows_custom_endpoint) return "服务器域名 + 授权码";
   return provider.authentication_mode === "oauth2" ? "网页授权" : "专用授权码";
 }
 
 /**
- * New channels can only select deployment-reviewed providers. The visual
- * selection deliberately uses buttons instead of a free-text endpoint field,
- * so no browser state can become an arbitrary IMAP destination.
+ * New channels select a reviewed provider. The generic IMAP option remains a
+ * reviewed provider too, while the server validates any hostname separately.
  */
 export function MailboxProviderPicker({
   disabled = false,
@@ -55,7 +55,9 @@ export function MailboxProviderPicker({
             type="button"
           >
             <span className="mailbox-provider-option-heading">
-              <span className="mailbox-provider-option-mark"><Icon name="inbox" size={16} /></span>
+              <span className="mailbox-provider-option-mark">
+                <Icon name={provider.allows_custom_endpoint ? "gear" : "inbox"} size={16} />
+              </span>
               <span>
                 <strong>{provider.display_name}</strong>
                 <small>{authenticationLabel(provider)}</small>

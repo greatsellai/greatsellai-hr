@@ -26,9 +26,16 @@ test.describe("招聘工作台关键路径", () => {
     const email = await registerAndVerify(page, "registration-login");
     await logout(page);
     await expect(page.getByRole("button", { name: "登录工作台" })).toBeVisible();
+    await expect(page.getByText("旧版工作区管理员？", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "使用旧管理口令", exact: true })).toHaveCount(0);
     await page.locator("#login-email").fill(email);
     await page.locator("#login-password").fill("E2E-password-2026");
+    const loginRequest = page.waitForRequest((request) => (
+      request.method() === "POST" && new URL(request.url()).pathname === "/v1/auth/login"
+    ));
     await page.getByRole("button", { name: "登录工作台" }).click();
+    const loginPayload = loginRequest.then((request) => request.postDataJSON() as Record<string, unknown>);
+    await expect(loginPayload).resolves.toMatchObject({ email });
     await expect(accountMenuTrigger(page)).toBeVisible();
   });
 

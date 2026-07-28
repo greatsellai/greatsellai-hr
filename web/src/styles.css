@@ -1420,7 +1420,6 @@ button {
 }
 
 .auth-consent,
-.auth-legacy-note,
 .auth-footer-copy {
   margin: 0;
   color: var(--ink-soft);
@@ -1431,40 +1430,6 @@ button {
 .auth-footer-copy {
   color: var(--ink-soft);
   text-align: center;
-}
-
-.auth-mode-row {
-  display: flex;
-  gap: var(--space-xs);
-  align-items: baseline;
-  justify-content: center;
-  margin: calc(var(--space-xs) * -0.25) 0 0;
-  color: var(--ink-muted);
-  font-size: 0.75rem;
-  line-height: 1.5;
-}
-
-.auth-mode-switch {
-  min-height: 1.75rem;
-  padding: 0;
-  color: var(--ink-soft);
-  font-size: inherit;
-  font-weight: 650;
-  text-decoration: underline;
-  text-decoration-color: rgb(94 87 84 / 0.4);
-  text-underline-offset: 0.15em;
-  background: transparent;
-}
-
-.auth-mode-switch:hover,
-.auth-mode-switch[aria-pressed="true"] {
-  color: var(--red-pressed);
-  text-decoration-color: currentcolor;
-}
-
-.auth-legacy-note {
-  padding-top: var(--space-sm);
-  border-top: 1px solid var(--line);
 }
 
 .auth-submit {

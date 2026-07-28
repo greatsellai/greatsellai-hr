@@ -7,6 +7,7 @@ import { TableSkeleton } from "../../backoffice/ui/TableSkeleton";
 import {
   AI_STATUS_POLL_INTERVAL_MS,
   aiExtractionIsInProgress,
+  aiSummaryIsInProgress,
 } from "../../backoffice/utils/ai-extraction";
 import { formatLibraryDate } from "../../backoffice/utils/formatters";
 import {
@@ -40,9 +41,6 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
   if (hasSupersededReparseVersion(item.quality_flags)) {
     return { label: "当前版本已更新", tone: "attention" };
   }
-  if (item.is_active && item.extraction_status === "ready") {
-    return { label: "已启用", tone: "ready" };
-  }
   if (item.ai_extraction_status === "running") {
     return { label: "AI 提取中", tone: "progress" };
   }
@@ -58,7 +56,37 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
   if (item.ai_extraction_status === "unavailable") {
     return { label: "等待 AI 服务", tone: "attention" };
   }
+  if (item.is_active && item.extraction_status === "ready") {
+    if (aiSummaryIsInProgress(item.ai_summary_status)) {
+      return { label: "AI 总结生成中", tone: "progress" };
+    }
+    if (item.ai_summary_status === "failed") {
+      return { label: "总结待重试", tone: "attention" };
+    }
+    if (item.ai_summary_status === "unavailable") {
+      return { label: "总结暂不可用", tone: "attention" };
+    }
+    return { label: "已启用", tone: "ready" };
+  }
   return { label: "等待启用", tone: "waiting" };
+}
+
+function summaryStatusLabel(item: ResumeLibraryItem): string {
+  if (aiSummaryIsInProgress(item.ai_summary_status)) {
+    return "AI 总结生成中";
+  }
+  if (item.ai_summary_status === "failed") {
+    return "AI 总结生成失败，打开后可重试";
+  }
+  if (item.ai_summary_status === "unavailable") {
+    return "AI 总结暂时不可用，稍后可重试";
+  }
+  if (item.ai_summary_status === "succeeded") {
+    return "AI 总结已生成，正在加载";
+  }
+  return item.is_active
+    ? "等待 AI 自动生成总结"
+    : "候选人信息提取完成后自动生成";
 }
 
 function resumeLibraryScoreNotice(status: string | null): string | null {
@@ -125,7 +153,8 @@ export function ResumeLibraryPage({
   useEffect(() => {
     if (
       !library?.items.some((item) =>
-        aiExtractionIsInProgress(item.ai_extraction_status),
+        aiExtractionIsInProgress(item.ai_extraction_status) ||
+        aiSummaryIsInProgress(item.ai_summary_status),
       )
     ) {
       return undefined;
@@ -326,10 +355,19 @@ export function ResumeLibraryPage({
                             {item.summary_preview}
                           </p>
                         ) : (
-                          <span className="library-empty-copy">
-                            {item.is_active
-                              ? "尚未生成，打开后可生成"
-                              : "完成提取后可生成"}
+                          <span
+                            className={`library-summary-status${
+                              item.ai_summary_status === "failed" ||
+                              item.ai_summary_status === "unavailable"
+                                ? " is-attention"
+                                : ""
+                            }`}
+                            title={item.ai_summary_error ?? undefined}
+                          >
+                            {aiSummaryIsInProgress(item.ai_summary_status) && (
+                              <i aria-hidden="true" className="spinner" />
+                            )}
+                            {summaryStatusLabel(item)}
                           </span>
                         )}
                       </td>

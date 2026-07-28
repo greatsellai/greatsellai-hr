@@ -652,6 +652,10 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
         back_populates="resume",
         cascade="all, delete-orphan",
     )
+    summary_jobs: Mapped[list["ResumeSummaryJob"]] = relationship(
+        back_populates="resume",
+        cascade="all, delete-orphan",
+    )
     job_matches: Mapped[list["JobMatch"]] = relationship(
         back_populates="resume",
         cascade="all, delete-orphan",
@@ -1839,6 +1843,83 @@ class ResumeAiExtractionJob(OrganizationScoped, Base):
     ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
 
 
+class ResumeSummaryJob(OrganizationScoped, Base):
+    """Durable, immutable-facts AI summary work for one resume revision.
+
+    A resume can have several fact revisions.  Each revision owns at most one
+    automatic summary task, which makes retries idempotent without conflating
+    summary failures with the preceding extraction job.
+    """
+
+    __tablename__ = "resume_summary_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "resume_id",
+            "facts_version",
+            name="uq_resume_summary_job_facts_version",
+        ),
+        Index(
+            "ix_resume_summary_job_claim",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_resume_summary_job_lease",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_resume_summary_job_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    resume_id: Mapped[str] = mapped_column(ForeignKey("resumes.id"), index=True)
+    fact_snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("resume_fact_snapshots.id"),
+        index=True,
+    )
+    facts_version: Mapped[int] = mapped_column(Integer)
+    # Queue creation freezes the published route that existed for this facts
+    # revision.  A later platform route change cannot silently alter a queued
+    # candidate conclusion.
+    ai_route_policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_route_policy_versions.id"),
+        nullable=True,
+        index=True,
+    )
+    summary_id: Mapped[str | None] = mapped_column(
+        ForeignKey("resume_summaries.id"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    resume: Mapped[Resume] = relationship(back_populates="summary_jobs")
+    fact_snapshot: Mapped["ResumeFactSnapshot"] = relationship(
+        back_populates="summary_jobs"
+    )
+    summary: Mapped["ResumeSummary | None"] = relationship()
+    ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
+
+
 class ResumeSourceBlock(Base):
     __tablename__ = "resume_source_blocks"
     __table_args__ = (UniqueConstraint("resume_id", "block_id", name="uq_resume_block_id"),)
@@ -2013,6 +2094,9 @@ class ResumeFactSnapshot(OrganizationScoped, Base):
     resume: Mapped[Resume] = relationship(back_populates="fact_snapshots")
     scores: Mapped[list["ResumeScore"]] = relationship(back_populates="fact_snapshot")
     job_matches: Mapped[list["JobMatch"]] = relationship(back_populates="fact_snapshot")
+    summary_jobs: Mapped[list["ResumeSummaryJob"]] = relationship(
+        back_populates="fact_snapshot"
+    )
 
 
 class Institution(Base):

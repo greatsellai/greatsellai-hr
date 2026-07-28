@@ -50,6 +50,19 @@ export type AiExtractionStatus =
   | "needs_attention"
   | "unavailable";
 
+/**
+ * Server-owned lifecycle for the automatic AI resume summary task.
+ * `null` means the current resume version has not reached a summary task yet,
+ * for example while fact extraction is still pending or for legacy data.
+ */
+export type AiSummaryStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "unavailable"
+  | null;
+
 export type JsonObject = Record<string, unknown>;
 
 /** Identity attached to the current server-side workspace session. */
@@ -540,6 +553,8 @@ export interface ResumeUploadResponse {
   extraction_status: string;
   ai_extraction_status: AiExtractionStatus;
   ai_extraction_error: string | null;
+  ai_summary_status: AiSummaryStatus;
+  ai_summary_error: string | null;
   source_page_count: number;
   parsed_page_count: number;
   quality_flags: string[];
@@ -553,6 +568,8 @@ export interface ResumeReviewQueueItem {
   extraction_status: string;
   ai_extraction_status: AiExtractionStatus;
   ai_extraction_error: string | null;
+  ai_summary_status: AiSummaryStatus;
+  ai_summary_error: string | null;
   quality_flags: string[];
   created_at: string;
 }
@@ -571,6 +588,8 @@ export interface ResumeDetail {
   extraction_status: string;
   ai_extraction_status: AiExtractionStatus;
   ai_extraction_error: string | null;
+  ai_summary_status: AiSummaryStatus;
+  ai_summary_error: string | null;
   is_active: boolean;
   retention_hold: boolean;
   /** null means the school decision still needs a reviewer. */
@@ -1232,6 +1251,8 @@ export interface ResumeLibraryItem {
   extraction_status: string;
   ai_extraction_status: AiExtractionStatus;
   ai_extraction_error: string | null;
+  ai_summary_status: AiSummaryStatus;
+  ai_summary_error: string | null;
   is_active: boolean;
   ingestion_source_type: string;
   source_mailbox_config_id: string | null;

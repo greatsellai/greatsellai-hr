@@ -304,6 +304,10 @@ from app.services.saved_filter_service import (
 )
 from app.services.search_service import SearchValidationError, search_candidates
 from app.services.resume_library_service import list_resume_library
+from app.services.resume_summary_job_service import (
+    enqueue_resume_summary_job,
+    summary_generation_state,
+)
 from app.services.recruiting_agent_service import (
     RecruitingAgentConversationConflictError,
     RecruitingAgentConversationNotFoundError,
@@ -448,6 +452,7 @@ logger = logging.getLogger(__name__)
 
 def _resume_detail(resume: object) -> ResumeDetail:
     ai_extraction_status, ai_extraction_error = ai_extraction_state(resume)
+    ai_summary_status, ai_summary_error = summary_generation_state(resume)
     return ResumeDetail(
         resume_id=resume.id,
         candidate_id=resume.candidate_id,
@@ -455,6 +460,8 @@ def _resume_detail(resume: object) -> ResumeDetail:
         extraction_status=resume.extraction_status,
         ai_extraction_status=ai_extraction_status,
         ai_extraction_error=ai_extraction_error,
+        ai_summary_status=ai_summary_status,
+        ai_summary_error=ai_summary_error,
         is_active=resume.is_active,
         retention_hold=resume.retention_hold,
         is_985_211=resume.is_985_211,
@@ -469,6 +476,7 @@ def _resume_detail(resume: object) -> ResumeDetail:
 
 def _resume_upload_response(resume: object) -> ResumeUploadResponse:
     ai_extraction_status, ai_extraction_error = ai_extraction_state(resume)
+    ai_summary_status, ai_summary_error = summary_generation_state(resume)
     return ResumeUploadResponse(
         resume_id=resume.id,
         candidate_id=resume.candidate_id,
@@ -476,6 +484,8 @@ def _resume_upload_response(resume: object) -> ResumeUploadResponse:
         extraction_status=resume.extraction_status,
         ai_extraction_status=ai_extraction_status,
         ai_extraction_error=ai_extraction_error,
+        ai_summary_status=ai_summary_status,
+        ai_summary_error=ai_summary_error,
         source_page_count=resume.source_page_count,
         parsed_page_count=resume.parsed_page_count,
         quality_flags=resume.quality_flags or [],
@@ -4249,6 +4259,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             .options(
                 selectinload(Resume.document_extraction_job),
                 selectinload(Resume.ai_extraction_job),
+                selectinload(Resume.summaries),
+                selectinload(Resume.summary_jobs),
             )
             .where(pending)
             .order_by(Resume.created_at.desc(), Resume.id.desc())
@@ -4265,6 +4277,8 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     extraction_status=resume.extraction_status,
                     ai_extraction_status=ai_extraction_state(resume)[0],
                     ai_extraction_error=ai_extraction_state(resume)[1],
+                    ai_summary_status=summary_generation_state(resume)[0],
+                    ai_summary_error=summary_generation_state(resume)[1],
                     quality_flags=resume.quality_flags or [],
                     created_at=resume.created_at,
                 )
@@ -4793,6 +4807,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     ) -> ResumeDetail:
         try:
             resume = save_facts(session, resume_id=resume_id, request=payload)
+            enqueue_resume_summary_job(
+                session,
+                resume=resume,
+                settings=settings,
+            )
         except NotFoundError as exc:
             session.rollback()
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -4820,6 +4839,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 session,
                 resume_id=resume_id,
                 note=payload.note,
+            )
+            enqueue_resume_summary_job(
+                session,
+                resume=resume,
+                settings=settings,
             )
         except NotFoundError as exc:
             session.rollback()

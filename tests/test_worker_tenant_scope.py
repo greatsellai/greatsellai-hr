@@ -23,12 +23,14 @@ from app.models import (
     ResumeAiExtractionJob,
     ResumeFactSnapshot,
     ResumeSourceBlock,
+    ResumeSummaryJob,
 )
 from app.services import (
     ai_extraction_job_service,
     job_match_batch_service,
     mailbox_background_job_service,
     mailbox_import_service,
+    resume_summary_job_service,
 )
 from app.services.ai_extraction_job_service import (
     AI_EXTRACTION_NEEDS_ATTENTION,
@@ -43,6 +45,7 @@ from app.services.job_match_batch_service import (
     run_job_match_batch_worker_once,
 )
 from app.services.mailbox_import_service import MailboxSyncResponse, sync_due_mailboxes
+from app.services.resume_summary_job_service import run_resume_summary_worker_once
 from app.tenant_scope import (
     bypass_organization_scope,
     clear_organization_context,
@@ -211,6 +214,90 @@ def test_ai_worker_marks_cross_workspace_job_safe_without_reading_foreign_resume
         assert other is not None
         assert other.status == AI_EXTRACTION_QUEUED
         assert other.attempt_count == 0
+
+    database.dispose()
+
+
+def test_summary_worker_never_sends_a_foreign_resume_to_the_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A malformed summary task must fail inside its own workspace boundary."""
+
+    database = _database(tmp_path)
+    settings = _settings(tmp_path)
+    organization_a, organization_b = _organizations(database)
+    now = extraction_utcnow()
+
+    with database.session_factory() as session:
+        with _workspace_session(session, organization_b):
+            foreign_resume = _resume(
+                session,
+                organization_id=organization_b,
+                label="foreign-summary",
+                active=True,
+            )
+            foreign_snapshot = _snapshot(session, resume=foreign_resume)
+            untouched_resume = _resume(
+                session,
+                organization_id=organization_b,
+                label="untouched-summary",
+                active=True,
+            )
+            untouched_snapshot = _snapshot(session, resume=untouched_resume)
+            untouched_job = ResumeSummaryJob(
+                resume_id=untouched_resume.id,
+                fact_snapshot_id=untouched_snapshot.id,
+                facts_version=untouched_snapshot.facts_version,
+                status="queued",
+                max_attempts=1,
+                next_attempt_at=now,
+                requested_at=now,
+            )
+            session.add(untouched_job)
+            session.flush()
+            untouched_job_id = untouched_job.id
+        with _workspace_session(session, organization_a):
+            cross_workspace_job = ResumeSummaryJob(
+                resume_id=foreign_resume.id,
+                fact_snapshot_id=foreign_snapshot.id,
+                facts_version=foreign_snapshot.facts_version,
+                status="queued",
+                max_attempts=1,
+                next_attempt_at=now - timedelta(seconds=10),
+                requested_at=now - timedelta(seconds=10),
+            )
+            session.add(cross_workspace_job)
+            session.commit()
+            cross_job_id = cross_workspace_job.id
+
+    def _provider_must_not_run(**_: object) -> object:
+        raise AssertionError("foreign resume facts reached automatic summary")
+
+    monkeypatch.setattr(
+        resume_summary_job_service,
+        "generate_resume_summary",
+        _provider_must_not_run,
+    )
+
+    assert run_resume_summary_worker_once(
+        database,
+        settings=settings,
+        worker_id="summary-scope-test",
+    )
+
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            failed = session.get(ResumeSummaryJob, cross_job_id)
+            untouched = session.get(ResumeSummaryJob, untouched_job_id)
+        assert failed is not None
+        assert failed.organization_id == organization_a
+        assert failed.status == "failed"
+        assert failed.last_error == "resume_summary_workspace_mismatch"
+        assert untouched is not None
+        assert untouched.organization_id == organization_b
+        assert untouched.status == "queued"
+        assert untouched.attempt_count == 0
 
     database.dispose()
 

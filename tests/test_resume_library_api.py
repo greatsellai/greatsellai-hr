@@ -55,6 +55,8 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
         "extraction_status",
         "ai_extraction_status",
         "ai_extraction_error",
+        "ai_summary_status",
+        "ai_summary_error",
         "is_active",
         "ingestion_source_type",
         "source_mailbox_config_id",
@@ -75,6 +77,8 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["extraction_status"] == "ready"
     assert item["ai_extraction_status"] == "queued"
     assert item["ai_extraction_error"] is None
+    assert item["ai_summary_status"] == "succeeded"
+    assert item["ai_summary_error"] is None
     assert item["is_active"] is True
     assert item["ingestion_source_type"] == "manual_upload"
     assert item["source_mailbox_config_id"] is None

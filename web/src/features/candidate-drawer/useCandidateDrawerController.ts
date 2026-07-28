@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
+import {
+  AI_STATUS_POLL_INTERVAL_MS,
+  aiSummaryIsInProgress,
+} from "../../backoffice/utils/ai-extraction";
 import { formatLibraryDate } from "../../backoffice/utils/formatters";
 import {
   hasSourceTextQualityIssue,
@@ -188,6 +192,25 @@ export function useCandidateDrawerController({
   useEffect(() => {
     if (
       !drawerOpen ||
+      drawerTab !== "summary" ||
+      !selectedResumeId ||
+      !review ||
+      review.resume_id !== selectedResumeId ||
+      hasSourceTextQualityIssue(review.quality_flags) ||
+      hasSupersededReparseVersion(review.quality_flags) ||
+      !aiSummaryIsInProgress(review.ai_summary_status)
+    ) {
+      return undefined;
+    }
+    const interval = window.setInterval(() => {
+      void refreshReview(selectedResumeId);
+    }, AI_STATUS_POLL_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [drawerOpen, drawerTab, refreshReview, review, selectedResumeId]);
+
+  useEffect(() => {
+    if (
+      !drawerOpen ||
       drawerTab !== "score" ||
       !selectedResumeId ||
       !review ||
@@ -338,6 +361,7 @@ export function useCandidateDrawerController({
           .map((item) => ({ ...item, is_current: false })),
       ]);
       onLibraryChanged();
+      void refreshReview(selectedResumeId);
       notify("success", "AI 简历总结已生成。");
     } catch (error) {
       notify("error", formatError(error));

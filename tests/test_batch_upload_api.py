@@ -53,10 +53,12 @@ def test_combined_upload_idempotency_replays_the_original_upload(client) -> None
             "candidate_id": first.json()["candidate_id"],
             "candidate_display_name": None,
                 "original_filename": "first-name.pdf",
-                "extraction_status": first.json()["extraction_status"],
-                "ai_extraction_status": first.json()["ai_extraction_status"],
-                "ai_extraction_error": first.json()["ai_extraction_error"],
-                "quality_flags": first.json()["quality_flags"],
+            "extraction_status": first.json()["extraction_status"],
+            "ai_extraction_status": first.json()["ai_extraction_status"],
+            "ai_extraction_error": first.json()["ai_extraction_error"],
+            "ai_summary_status": first.json()["ai_summary_status"],
+            "ai_summary_error": first.json()["ai_summary_error"],
+            "quality_flags": first.json()["quality_flags"],
             "created_at": queue.json()["items"][0]["created_at"],
         }
     ]

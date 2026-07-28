@@ -237,8 +237,11 @@ test.describe("招聘工作台关键路径", () => {
       "candidate-drawer-tab-summary",
     );
     await expect(
-      summaryPanel.getByRole("heading", { name: "还没有 AI 总结" }),
+      summaryPanel.getByRole("heading", { name: "等待 AI 自动生成总结" }),
     ).toBeVisible();
+    await expect(
+      summaryPanel.getByRole("button", { name: "生成 AI 总结" }),
+    ).toHaveCount(0);
 
     const evidenceTab = drawer.getByRole("tab", { name: "提取依据" });
     await evidenceTab.click();
@@ -251,6 +254,121 @@ test.describe("招聘工作台关键路径", () => {
       evidencePanel.getByRole("heading", { name: "原文证据块" }),
     ).toBeVisible();
     await expect(evidencePanel.getByText("Python · 原文依据：page-001")).toBeVisible();
+  });
+
+  test("AI 总结自动生成时展示进度，失败后允许重试", async ({ page }) => {
+    let summaryStatus: "running" | "failed" | "succeeded" = "running";
+    let reviewRequestCount = 0;
+    const retriedSummary = {
+      summary_id: "e2e-auto-summary-retry",
+      resume_id: "e2e-auto-summary-resume",
+      fact_snapshot_id: null,
+      facts_version: 1,
+      content: {
+        sections: {
+          candidate_positioning: {
+            content: "已通过重试生成可回溯的 AI 总结。",
+            fact_ids: ["skill-001"],
+          },
+        },
+      },
+      source: "ai_generated",
+      supersedes_id: null,
+      is_current: true,
+      status: "succeeded",
+      model_name: "e2e-fixture",
+      created_at: "2026-07-28T00:00:00Z",
+    };
+
+    await page.route("**/v1/resume-library**", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as {
+        items?: Array<Record<string, unknown>>;
+      };
+      await route.fulfill({
+        response,
+        json: {
+          ...payload,
+          items: (payload.items ?? []).map((item) =>
+            item.display_name === "E2E 推荐候选人"
+              ? {
+                  ...item,
+                  ai_summary_status: summaryStatus,
+                  ai_summary_error:
+                    summaryStatus === "failed" ? "本次自动总结未完成。" : null,
+                }
+              : item,
+          ),
+        },
+      });
+    });
+    await page.route("**/v1/resumes/*/review", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as Record<string, unknown>;
+      reviewRequestCount += 1;
+      await route.fulfill({
+        response,
+        json: {
+          ...payload,
+          ai_summary_status: summaryStatus,
+          ai_summary_error:
+            summaryStatus === "failed" ? "本次自动总结未完成。" : null,
+        },
+      });
+    });
+    await page.route("**/v1/resumes/*/summaries", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          json: summaryStatus === "succeeded" ? [retriedSummary] : [],
+        });
+        return;
+      }
+      summaryStatus = "succeeded";
+      await route.fulfill({
+        json: retriedSummary,
+      });
+    });
+
+    await registerAndVerify(page, "automatic-summary");
+    await seedWorkspaceFixture(page);
+    await page.reload();
+    await page.getByRole("button", { name: "简历库", exact: true }).click();
+
+    const candidateRow = page.locator("tr", { hasText: "E2E 推荐候选人" });
+    await expect(candidateRow.locator(".library-summary-status")).toHaveText(
+      "AI 总结生成中",
+    );
+
+    await candidateRow.getByRole("button", {
+      name: "查看 E2E 推荐候选人 的简历详情",
+    }).click();
+    const drawer = page.getByRole("dialog", {
+      name: "E2E 推荐候选人 的简历详情",
+    });
+    await expect(
+      drawer.getByRole("heading", { name: "AI 总结生成中" }),
+    ).toBeVisible();
+    await expect(
+      drawer.getByRole("button", { name: "重试生成" }),
+    ).toHaveCount(0);
+
+    summaryStatus = "failed";
+    await expect.poll(() => reviewRequestCount, { timeout: 8_000 }).toBeGreaterThan(1);
+    await expect(
+      drawer.getByRole("heading", { name: "AI 总结暂未生成" }),
+    ).toBeVisible();
+    await expect(drawer.getByText("本次自动总结未完成。", { exact: true })).toBeVisible();
+    const retryRequest = page.waitForRequest((request) =>
+      request.method() === "POST" && /\/v1\/resumes\/[^/]+\/summaries$/.test(new URL(request.url()).pathname),
+    );
+    await drawer.getByRole("button", { name: "重试生成" }).click();
+    await retryRequest;
+    await expect(
+      drawer.getByRole("heading", { name: "当前总结" }),
+    ).toBeVisible();
+    await expect(
+      drawer.getByText("已通过重试生成可回溯的 AI 总结。", { exact: true }),
+    ).toBeVisible();
   });
 
   test("简历库窄屏保留查看入口且表格只在自身区域横向滚动", async ({ page }) => {

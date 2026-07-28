@@ -9,6 +9,7 @@ from uuid import uuid4
 from app.config import AppSettings
 from app.database import Database
 from app.services.ai_extraction_job_service import run_ai_extraction_worker_once
+from app.services.resume_summary_job_service import run_resume_summary_worker_once
 from app.services.document_extraction_job_service import (
     run_document_extraction_worker_once,
 )
@@ -89,6 +90,11 @@ def run_forever(settings: AppSettings) -> None:
                 settings=settings,
                 worker_id=worker_id,
             )
+            ran_summary = run_resume_summary_worker_once(
+                database,
+                settings=settings,
+                worker_id=worker_id,
+            )
             ran_job_match = run_job_match_batch_worker_once(
                 database,
                 settings=settings,
@@ -132,6 +138,7 @@ def run_forever(settings: AppSettings) -> None:
             )
             if (
                 not ran_extraction
+                and not ran_summary
                 and not ran_document_extraction
                 and not ran_job_match
                 and not ran_score_batch
@@ -193,7 +200,14 @@ def main() -> None:
                 ran_extraction = True
         else:
             ran_extraction = True
+        ran_summary = False
         if not ran_extraction:
+            ran_summary = run_resume_summary_worker_once(
+                database,
+                settings=settings,
+                worker_id=_worker_id(),
+            )
+        if not ran_extraction and not ran_summary:
             ran_job_match = run_job_match_batch_worker_once(
                 database,
                 settings=settings,

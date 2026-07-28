@@ -12,6 +12,7 @@ from app.models import (
     RecruitingAgentCandidateSetItem,
     RecruitingAgentConversation,
     RecruitingAgentConversationTurn,
+    ResumeSummaryJob,
     TalentSearchRun,
 )
 
@@ -19,7 +20,7 @@ from app.models import (
 def test_alembic_history_has_one_canonical_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert script.get_heads() == ["20260728_0044"]
+    assert script.get_heads() == ["20260728_0045"]
 
 
 def test_recruiting_agent_context_ddl_identifiers_fit_postgresql() -> None:
@@ -46,3 +47,12 @@ def test_mailbox_initial_sync_backfill_ddl_identifiers_fit_postgresql() -> None:
         CreateTable(table).compile(dialect=dialect)
         for index in table.indexes:
             CreateIndex(index).compile(dialect=dialect)
+
+
+def test_resume_summary_job_ddl_identifiers_fit_postgresql() -> None:
+    """Automatic-summary queue identifiers must fit PostgreSQL's 63-byte limit."""
+
+    dialect = postgresql.dialect()
+    CreateTable(ResumeSummaryJob.__table__).compile(dialect=dialect)
+    for index in ResumeSummaryJob.__table__.indexes:
+        CreateIndex(index).compile(dialect=dialect)

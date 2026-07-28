@@ -12,7 +12,7 @@
 - [GitHub Actions CI/CD](docs/CI_CD.md)
 - [Text encoding policy](docs/ENCODING_POLICY.md)
 
-当前版本已覆盖：重新上传 PDF → 解析质量校验 → AI 从原文识别候选人姓名（不可靠则留空）并提取教育/经历/技能 → 字段级原文证据校验并自动启用 → 简历库汇总（AI 总结预览、最新 AI 评分、原 PDF）→ 条件筛选 → AI 评分、总结与 JD 匹配；React/Vite 工作台通过同域名 Caddy 静态部署，浏览器只请求同源的 `/v1/*` API。
+当前版本已覆盖：重新上传 PDF → 解析质量校验 → AI 从原文识别候选人姓名（不可靠则留空）并提取教育/经历/技能 → 字段级原文证据校验并自动启用 → 后台自动生成事实版本对应的 AI 总结 → 简历库汇总（AI 总结预览、最新 AI 评分、原 PDF）→ 条件筛选 → AI 评分、总结与 JD 匹配；React/Vite 工作台通过同域名 Caddy 静态部署，浏览器只请求同源的 `/v1/*` API。
 
 本地启动（开发环境会自动建 SQLite 表并写入院校名单）：
 
@@ -21,7 +21,7 @@ python -m pip install -e ".[dev]"
 uvicorn app.main:app --reload
 ```
 
-需要自动 AI 提取时，在另一个终端启动持久 worker。模型凭据只保留在服务端：旧 DeepSeek 兼容路径使用 `DEEPSEEK_API_KEY`，平台 Provider 使用 `RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON` 中与 `credential_ref` 对应的引用：
+需要自动 AI 提取和简历总结时，在另一个终端启动持久 worker。上传请求只持久化原件和任务；文本提取、事实提取与自动总结均在 worker 中按事实版本执行，不会让网页等待模型响应。模型凭据只保留在服务端：旧 DeepSeek 兼容路径使用 `DEEPSEEK_API_KEY`，平台 Provider 使用 `RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON` 中与 `credential_ref` 对应的引用：
 
 ```powershell
 python -m app.ai_extraction_worker
@@ -99,7 +99,7 @@ git pull --ff-only origin main
 - 简历库：`GET /v1/resume-library` 返回每份已上传 PDF 的处理状态、AI 总结预览与最新 AI 评分；不暴露结构化事实明细。
 - 原件核验：`GET /v1/resumes/{resume_id}/original-file` 受登录会话保护，以 `inline` PDF 返回；前端使用同源会话的 Blob 预览，不把口令暴露到 URL。
 - 评分：创建权重模板（所有维度统一 0 至 100 分制）、按不可变事实快照评分、保留评分历史，并可人工覆写单个维度；支持服务端后台一键批量评分、进度查询、重试和结果复用。
-- 总结：生成结构化 AI 总结；事实重存后旧总结会自动标记为历史，不能误作当前总结。
+- 总结：已启用且事实快照就绪的简历会自动进入持久总结队列；worker 只基于对应事实版本生成结构化 AI 总结。队列失败不会撤销简历的 `ready` 状态或筛选资格；事实重存后旧总结会自动标记为历史，不能误作当前总结。
 - JD：创建版本化 JD、AI 提取后人工确认需求、按确认版匹配，并返回 JD 条款与简历 fact 证据。
 
 需要模型的接口只读取服务端凭据：旧 DeepSeek 兼容路径读取 `DEEPSEEK_API_KEY`，平台 Provider 路由按 `credential_ref` 从 `RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON` 解析。浏览器、请求体、数据库和审计日志都不传递或保存密钥。接口文档在本地启动后访问 `/docs`。

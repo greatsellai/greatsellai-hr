@@ -1498,6 +1498,8 @@ class ResumeUploadResponse(ApiModel):
     extraction_status: str
     ai_extraction_status: str
     ai_extraction_error: str | None
+    ai_summary_status: str | None = None
+    ai_summary_error: str | None = None
     source_page_count: int
     parsed_page_count: int
     quality_flags: list[str]
@@ -1511,6 +1513,8 @@ class ResumeReviewQueueItem(ApiModel):
     extraction_status: str
     ai_extraction_status: str
     ai_extraction_error: str | None
+    ai_summary_status: str | None = None
+    ai_summary_error: str | None = None
     quality_flags: list[str]
     created_at: datetime
 
@@ -1529,6 +1533,8 @@ class ResumeDetail(ApiModel):
     extraction_status: str
     ai_extraction_status: str
     ai_extraction_error: str | None
+    ai_summary_status: str | None = None
+    ai_summary_error: str | None = None
     is_active: bool
     retention_hold: bool
     is_985_211: bool | None
@@ -2358,6 +2364,8 @@ class ResumeLibraryItem(ApiModel):
     extraction_status: str
     ai_extraction_status: str
     ai_extraction_error: str | None = None
+    ai_summary_status: str | None = None
+    ai_summary_error: str | None = None
     is_active: bool
     ingestion_source_type: str = "manual_upload"
     source_mailbox_config_id: str | None = None

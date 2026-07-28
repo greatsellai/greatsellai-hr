@@ -157,6 +157,18 @@ function errorMessage(status: number, payload: unknown): string {
   if (isPlainObject(payload) && typeof payload.detail === "string") {
     return payload.detail;
   }
+  if (isPlainObject(payload) && Array.isArray(payload.detail)) {
+    const validationMessage = payload.detail.find(
+      (item): item is { msg: string } =>
+        isPlainObject(item) && typeof item.msg === "string",
+    )?.msg;
+    if (validationMessage) {
+      const stableCode = validationMessage.match(
+        /^Value error, ([a-z0-9_]+)$/,
+      )?.[1];
+      return stableCode ?? validationMessage;
+    }
+  }
   if (typeof payload === "string" && payload.trim()) {
     return payload;
   }

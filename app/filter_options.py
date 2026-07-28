@@ -161,7 +161,7 @@ def filter_options_payload() -> dict[str, object]:
             {"value": "unknown", "label": "未知"},
         ],
         "keyword_modes": [
-            {"value": "broad", "label": "泛匹配"},
-            {"value": "precise", "label": "精准匹配"},
+            {"value": "broad", "label": "任一命中"},
+            {"value": "precise", "label": "全部命中"},
         ],
     }

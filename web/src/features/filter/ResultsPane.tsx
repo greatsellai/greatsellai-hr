@@ -10,6 +10,7 @@ import {
   sortInstitutionClassifications,
   type FilterDraft,
 } from "./filter-model";
+import { hasActiveGraduationFilter } from "./filter-search-model";
 import type {
   CandidateSearchDisplayFieldKey,
   CandidateSearchItem,
@@ -53,6 +54,12 @@ function activeResultDisplayColumns(draft: FilterDraft): ResultDisplayColumn[] {
 
   if (draft.minEmploymentOrInternshipMonths > 0) {
     add("employment_or_internship_months", "工作年限");
+  }
+  if (hasActiveGraduationFilter(draft)) {
+    add("graduation", "毕业时间");
+  }
+  if (draft.keywords.length) {
+    add("keywords", "关键词命中");
   }
 
   return columns;
@@ -276,6 +283,23 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
       `至少 ${formatDuration(draft.minEmploymentOrInternshipMonths)}`,
     );
   }
+  if (hasActiveGraduationFilter(draft)) {
+    const graduationLabel =
+      draft.graduationStatus === "fresh" ? "应届" : "往届";
+    const windowLabel =
+      draft.graduationStatus === "fresh"
+        ? `${draft.freshGraduateStartMonth} 至 ${draft.freshGraduateEndMonth}`
+        : `早于 ${draft.freshGraduateStartMonth}`;
+    add("毕业状态", `${graduationLabel}（${windowLabel}）`);
+  }
+  if (draft.keywords.length) {
+    const keywordModeLabel =
+      draft.keywordsMode === "precise" ? "全部命中" : "任一命中";
+    add(
+      "匹配关键词",
+      `${keywordModeLabel} · ${compactFilterValue(draft.keywords, 3)}`,
+    );
+  }
 
   return labels;
 }
@@ -310,7 +334,7 @@ export function ResultsPane({
   const displayColumns = activeResultDisplayColumns(appliedDraft);
   const hasAppliedDisplayColumns = displayColumns.length > 0;
   const appliedFilters = appliedFilterLabels(appliedDraft);
-  const visibleAppliedFilters = appliedFilters.slice(0, 4);
+  const visibleAppliedFilters = appliedFilters.slice(0, 5);
   const hiddenAppliedFilterCount =
     appliedFilters.length - visibleAppliedFilters.length;
 

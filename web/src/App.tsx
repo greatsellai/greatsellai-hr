@@ -213,6 +213,8 @@ function humanizeError(error: unknown): string {
       candidate_data_export_snapshot_unavailable: "导出所需的候选人快照已不可用，请重新创建导出。",
       candidate_data_export_original_unavailable: "部分原始文件不可用，无法创建包含原件的导出。",
       candidate_data_export_original_bytes_exceeded: "原始文件总量超过本次导出上限，请改为不含原件导出。",
+      sensitive_candidate_keyword_not_supported:
+        "匹配关键词不能包含年龄、性别或其他受保护个人属性。请改为岗位技能、经历或项目关键词。",
       ...mailboxImportErrorMessages,
       score_template_not_found: "评分模板不存在，请重新选择。",
       resume_score_batch_not_found: "评分任务不存在或已不可访问。",

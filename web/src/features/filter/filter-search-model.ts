@@ -56,6 +56,24 @@ const defaultFilterDraft: FilterDraft = {
   keywordsMode: "broad",
 };
 
+const MONTH_VALUE_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+export function hasActiveGraduationFilter(
+  draft: Pick<
+    FilterDraft,
+    | "graduationStatus"
+    | "freshGraduateStartMonth"
+    | "freshGraduateEndMonth"
+  >,
+): boolean {
+  return (
+    draft.graduationStatus !== "any" &&
+    MONTH_VALUE_PATTERN.test(draft.freshGraduateStartMonth) &&
+    MONTH_VALUE_PATTERN.test(draft.freshGraduateEndMonth) &&
+    draft.freshGraduateStartMonth <= draft.freshGraduateEndMonth
+  );
+}
+
 const degreeOptions: Array<{ value: DegreeLevel; label: string }> = [
   { value: "doctor", label: "博士" },
   { value: "master", label: "硕士" },
@@ -158,8 +176,8 @@ export const fallbackFilterOptions: FilterOptions = {
     { value: "unknown", label: "未知" },
   ],
   keyword_modes: [
-    { value: "broad", label: "泛匹配" },
-    { value: "precise", label: "精准匹配" },
+    { value: "broad", label: "任一命中" },
+    { value: "precise", label: "全部命中" },
   ],
 };
 
@@ -221,6 +239,11 @@ export function draftToSearchRequest(
     request.min_employment_or_internship_months =
       draft.minEmploymentOrInternshipMonths;
   }
+  if (hasActiveGraduationFilter(draft)) {
+    request.graduation_status = draft.graduationStatus;
+    request.fresh_graduate_start_month = draft.freshGraduateStartMonth;
+    request.fresh_graduate_end_month = draft.freshGraduateEndMonth;
+  }
   if (draft.degrees.length) request.highest_degree_in = draft.degrees;
   if (institutionClassifications.length) {
     request.education_any_of = [
@@ -228,6 +251,10 @@ export function draftToSearchRequest(
         institution_classifications_any_of: institutionClassifications,
       },
     ];
+  }
+  if (draft.keywords.length) {
+    request.keywords = draft.keywords;
+    request.keyword_match_mode = draft.keywordsMode;
   }
   if (scoreTemplateId) request.score_template_id = scoreTemplateId;
   return request;
@@ -324,9 +351,27 @@ export function searchRequestToDraft(
   }
   const savedDegrees =
     request.highest_degree_in ?? request.education_any_of?.[0]?.degree_in ?? [];
+  const defaults = freshDefaultFilter();
+  const savedKeywords = request.keywords?.length
+    ? request.keywords
+    : request.keywords_all_of?.length
+      ? request.keywords_all_of
+      : request.keywords_any_of ?? [];
+  const keywordMode = request.keywords?.length
+    ? (request.keyword_match_mode ?? "broad")
+    : request.keywords_all_of?.length
+      ? "precise"
+      : "broad";
+  const graduationDraft = {
+    graduationStatus: request.graduation_status ?? "any",
+    freshGraduateStartMonth:
+      request.fresh_graduate_start_month ?? defaults.freshGraduateStartMonth,
+    freshGraduateEndMonth:
+      request.fresh_graduate_end_month ?? defaults.freshGraduateEndMonth,
+  } as const;
   return {
     draft: {
-      ...freshDefaultFilter(),
+      ...defaults,
       // Historical saved filters can have a formal-work threshold. The current
       // first-pass UI deliberately uses one combined tenure threshold instead.
       minEmploymentOrInternshipMonths: Math.max(
@@ -335,6 +380,13 @@ export function searchRequestToDraft(
       ),
       degrees: savedDegrees.filter((degree) => degree !== "unknown"),
       institutionClassifications: institutionMigration.classifications,
+      graduationStatus: hasActiveGraduationFilter(graduationDraft)
+        ? graduationDraft.graduationStatus
+        : "any",
+      freshGraduateStartMonth: graduationDraft.freshGraduateStartMonth,
+      freshGraduateEndMonth: graduationDraft.freshGraduateEndMonth,
+      keywords: [...new Set(savedKeywords)],
+      keywordsMode: keywordMode,
     },
     error: null,
   };

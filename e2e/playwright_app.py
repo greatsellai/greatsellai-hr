@@ -232,7 +232,7 @@ def _seed_ready_resume(
     source_text = (
         f"{candidate_name}\n"
         f"{contact_header}"
-        "清华大学 计算机科学 本科\n"
+        "清华大学 计算机科学 本科 2022-09 至 2026-06\n"
         "Python 后端经验 分布式系统\n"
         "负责服务端开发与系统设计。"
     )
@@ -277,6 +277,8 @@ def _seed_ready_resume(
                             "school_name_raw": "清华大学",
                             "degree": "bachelor",
                             "major_raw": "计算机科学",
+                            "start_month": "2022-09",
+                            "end_month": "2026-06",
                             "evidence_block_ids": ["page-001"],
                         }
                     ],

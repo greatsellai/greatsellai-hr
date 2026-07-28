@@ -81,6 +81,91 @@ CANDIDATE_NAME_LABEL_PATTERN = re.compile(
 )
 CANDIDATE_NAME_UNSAFE_CHARACTER_PATTERN = re.compile(r"[\r\n@]")
 AI_CONFIG_SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
+_PROTECTED_CANDIDATE_KEYWORD_EXACT_KEYS = frozenset(
+    normalized_key(value)
+    for value in (
+        "年龄",
+        "年纪",
+        "性别",
+        "男",
+        "女",
+        "男性",
+        "女性",
+        "男女",
+        "出生年月",
+        "出生日期",
+        "生日",
+        "婚姻",
+        "婚育",
+        "已婚",
+        "未婚",
+        "生育",
+        "怀孕",
+        "民族",
+        "宗教",
+        "籍贯",
+        "户籍",
+        "国籍",
+        "残障",
+        "健康",
+        "age",
+        "gender",
+        "male",
+        "female",
+        "sex",
+        "date of birth",
+        "birthday",
+        "marital status",
+        "marriage",
+        "pregnancy",
+        "ethnicity",
+        "religion",
+        "hometown",
+        "household registration",
+        "nationality",
+        "disability",
+        "health",
+    )
+)
+_PROTECTED_CANDIDATE_KEYWORD_PREFIXES = tuple(
+    normalized_key(value)
+    for value in (
+        "年龄",
+        "年纪",
+        "性别",
+        "男性",
+        "女性",
+        "男生",
+        "女生",
+        "出生",
+        "婚姻",
+        "婚育",
+        "生育",
+        "孕",
+        "民族",
+        "宗教",
+        "籍贯",
+        "户籍",
+        "国籍",
+        "gender",
+        "male",
+        "female",
+        "sex",
+        "birthday",
+        "date of birth",
+        "marital",
+        "pregnan",
+        "ethnic",
+        "religion",
+        "hometown",
+        "household registration",
+        "nationality",
+        "disability",
+    )
+)
+_PROTECTED_CANDIDATE_AGE_KEY = re.compile(
+    r"^(?:\d{1,3}岁(?:以下|以上|及以下|及以上|左右)?|(?:age)?(?:under|over|below|above)\d{1,3}|age\d{1,3})$"
+)
 
 
 def clean_string_list(values: list[str]) -> list[str]:
@@ -96,6 +181,18 @@ def clean_string_list(values: list[str]) -> list[str]:
             seen.add(normalized)
             cleaned.append(normalized)
     return cleaned
+
+
+def _is_protected_candidate_keyword(value: str) -> bool:
+    key = normalized_key(value)
+    return bool(
+        key
+        and (
+            key in _PROTECTED_CANDIDATE_KEYWORD_EXACT_KEYS
+            or key.startswith(_PROTECTED_CANDIDATE_KEYWORD_PREFIXES)
+            or _PROTECTED_CANDIDATE_AGE_KEY.fullmatch(key)
+        )
+    )
 
 
 class ApiModel(BaseModel):
@@ -2082,6 +2179,16 @@ class CandidateSearchRequest(ApiModel):
             self.scholarship_levels_any_of or self.scholarship_name_contains
         ):
             raise ValueError("unknown scholarship status cannot include detail filters")
+        if any(
+            _is_protected_candidate_keyword(keyword)
+            for keywords in (
+                self.keywords,
+                self.keywords_all_of,
+                self.keywords_any_of,
+            )
+            for keyword in keywords
+        ):
+            raise ValueError("sensitive_candidate_keyword_not_supported")
         return self
 
 

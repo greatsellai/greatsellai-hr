@@ -1456,6 +1456,7 @@ class RecruitingAgentResponse(ApiModel):
         "draft_talent_search_profile",
         "refine_active_talent_search_profile",
         "search_candidates",
+        "read_resume_content",
         "run_job_matching",
         "run_workspace_scoring",
         "show_job_ranking",

@@ -423,3 +423,105 @@ def test_filter_scope_rejects_stale_cross_tenant_and_expired_scope(
     )
     assert expired.status_code == 404, expired.text
     assert expired.json()["detail"] == "agent_filter_scope_not_found"
+
+
+def test_agent_full_resume_tool_never_reads_a_foreign_resume_even_from_corrupt_scope(
+    workspace_clients,
+    monkeypatch,
+) -> None:
+    """Tenant filtering remains the final boundary for Agent source-text reads."""
+
+    client_a, client_b = workspace_clients
+    _register_and_login(
+        client_a,
+        organization_name="Agent resume scope alpha",
+        full_name="Agent Alpha",
+        email="agent-resume-alpha@example.test",
+        password="tenant-test-password",
+    )
+    _register_and_login(
+        client_b,
+        organization_name="Agent resume scope beta",
+        full_name="Agent Beta",
+        email="agent-resume-beta@example.test",
+        password="tenant-test-password",
+    )
+    foreign_resume_id = _save_ready_resume(
+        client_b,
+        skills=["Python"],
+        source_suffix="foreign-resume-secret-text",
+    )
+    bound = client_a.post(
+        "/v1/recruiting-agent/conversations/filter-scope",
+        json={"filter": {}},
+    )
+    assert bound.status_code == 200, bound.text
+    bound_payload = bound.json()
+
+    # Simulate a damaged database row that cannot be created through the
+    # product API. The runtime read must still not expose workspace B's text.
+    database = client_a.app.state.database
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            conversation = session.get(
+                RecruitingAgentConversation,
+                bound_payload["conversation_id"],
+            )
+            assert conversation is not None
+            assert conversation.active_candidate_set_id is not None
+            session.add(
+                RecruitingAgentCandidateSetItem(
+                    organization_id=conversation.organization_id,
+                    candidate_set_id=conversation.active_candidate_set_id,
+                    resume_id=foreign_resume_id,
+                    ordinal=1,
+                )
+            )
+            session.commit()
+
+    calls = 0
+    captured: dict[str, object] = {}
+
+    def fake_completion(*, settings, messages):
+        nonlocal calls
+        del settings
+        calls += 1
+        if calls == 1:
+            return {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "read-foreign-resume",
+                        "type": "function",
+                        "function": {
+                            "name": "read_candidate_resume_content",
+                            "arguments": json.dumps({"candidate_position": 1}),
+                        },
+                    }
+                ],
+            }
+        captured["tool_payload"] = json.loads(messages[-1]["content"])
+        return {"content": "当前范围内没有可读取的候选人简历。"}
+
+    monkeypatch.setattr(
+        recruiting_agent_service,
+        "_model_completion",
+        fake_completion,
+    )
+
+    response = client_a.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "请查看第 1 位候选人的完整简历。",
+            "conversation_id": bound_payload["conversation_id"],
+            "context_version": bound_payload["context_version"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["tool_payload"] == {
+        "error": "当前会话没有可读取的候选人范围；请先完成一次筛选或从筛选结果进入 Agent。"
+    }
+    serialized_response = json.dumps(response.json(), ensure_ascii=False)
+    assert "foreign-resume-secret-text" not in serialized_response
+    assert foreign_resume_id not in serialized_response

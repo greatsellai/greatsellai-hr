@@ -4,7 +4,6 @@ import { TableSkeleton } from "../../backoffice/ui/TableSkeleton";
 import { Icon } from "../../icons";
 import {
   degreeLabels,
-  experienceTypeOptions,
   formatDuration,
   institutionClassificationLabel,
   institutionClassificationLabels,
@@ -52,18 +51,8 @@ function activeResultDisplayColumns(draft: FilterDraft): ResultDisplayColumn[] {
     }
   };
 
-  if (draft.minEmploymentMonths > 0) {
-    add("employment_months", "正式工作年限");
-  }
   if (draft.minEmploymentOrInternshipMonths > 0) {
-    add("employment_or_internship_months", "工作 + 实习年限");
-  }
-  if (
-    draft.experienceTypes.some(
-      (type) => type === "employment" || type === "internship",
-    )
-  ) {
-    add("experience_type", "经历要求");
+    add("employment_or_internship_months", "工作年限");
   }
 
   return columns;
@@ -85,12 +74,6 @@ function resultDisplayValueLabel(
   }
   if (key === "highest_degree" || key === "education_degree") {
     return degreeLabels[normalized as DegreeLevel] ?? normalized;
-  }
-  if (key === "experience_type") {
-    return (
-      experienceTypeOptions.find((option) => option.value === normalized)
-        ?.label ?? normalized
-    );
   }
   if (
     key === "employment_months" ||
@@ -198,19 +181,18 @@ function CandidateEducationCell({ item }: { item: CandidateSearchItem }) {
 }
 
 function CandidateExperienceCell({ item }: { item: CandidateSearchItem }) {
-  const experienceType = experienceTypeOptions.find(
-    (option) => option.value === item.latest_experience_type,
-  )?.label;
   const role = [
     item.latest_experience_title,
     item.latest_experience_organization,
   ]
     .filter(Boolean)
     .join(" · ");
-  const hasVerifiedEmployment = item.employment_months > 0;
-  const hasAdditionalInternshipTenure =
-    item.employment_or_internship_months > item.employment_months;
-  if (!hasVerifiedEmployment && !role) {
+  const totalTenureMonths = Math.max(
+    item.employment_or_internship_months ?? 0,
+    item.employment_months ?? 0,
+  );
+  const hasVerifiedTenure = totalTenureMonths > 0;
+  if (!hasVerifiedTenure && !role) {
     return <span className="candidate-meta">待核实</span>;
   }
   return (
@@ -218,28 +200,20 @@ function CandidateExperienceCell({ item }: { item: CandidateSearchItem }) {
       <div className="candidate-profile-primary">
         <span
           aria-label={
-            hasVerifiedEmployment
-              ? `正式工作 ${formatDuration(item.employment_months)}`
-              : "正式工作年限待核实"
+            hasVerifiedTenure
+              ? `工作年限 ${formatDuration(totalTenureMonths)}`
+              : "工作年限待核实"
           }
           className="candidate-profile-title"
-          title="正式工作年限仅累计有明确工作类型、公司、职位和起止日期的工作经历；实习单独计入“工作 + 实习”。"
+          title="工作年限累计有明确起止日期的工作或实习经历。"
         >
-          {hasVerifiedEmployment
-            ? `${formatDuration(item.employment_months)} 正式工作`
+          {hasVerifiedTenure
+            ? `${formatDuration(totalTenureMonths)} 工作年限`
             : "工作年限待核实"}
         </span>
       </div>
-      {hasAdditionalInternshipTenure && (
-        <span className="candidate-meta">
-          工作 + 实习 {formatDuration(item.employment_or_internship_months)}
-        </span>
-      )}
       {role ? (
-        <span className="candidate-meta">
-          {experienceType ? `${experienceType} · ` : ""}
-          {role}
-        </span>
+        <span className="candidate-meta">{role}</span>
       ) : null}
     </div>
   );
@@ -296,28 +270,10 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
       compactFilterValue(draft.degrees.map((degree) => degreeLabels[degree])),
     );
   }
-  if (draft.minEmploymentMonths > 0) {
-    add("正式工作", `至少 ${formatDuration(draft.minEmploymentMonths)}`);
-  }
   if (draft.minEmploymentOrInternshipMonths > 0) {
     add(
-      "工作 + 实习",
+      "工作年限",
       `至少 ${formatDuration(draft.minEmploymentOrInternshipMonths)}`,
-    );
-  }
-  const initialExperienceTypes = draft.experienceTypes.filter(
-    (type) => type === "employment" || type === "internship",
-  );
-  if (initialExperienceTypes.length) {
-    add(
-      "经历",
-      compactFilterValue(
-        initialExperienceTypes.map(
-          (type) =>
-            experienceTypeOptions.find((option) => option.value === type)
-              ?.label ?? type,
-        ),
-      ),
     );
   }
 

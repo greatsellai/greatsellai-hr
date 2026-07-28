@@ -30,10 +30,6 @@ export function FilterPanel({
   const institutionClassifications = resolvedInstitutionClassificationOptions(
     filterOptions,
   );
-  const initialExperienceTypes = filterOptions.experience_types.filter(
-    (option) =>
-      option.value === "employment" || option.value === "internship",
-  );
 
   const update = (patch: Partial<FilterDraft>) =>
     onDraftChange({ ...draft, ...patch });
@@ -122,34 +118,11 @@ export function FilterPanel({
           </div>
           <div className="field-stack">
             <label className="field-label" htmlFor="min-experience">
-              最低正式工作年限
+              最低工作年限
             </label>
             <input
               className="range-input"
               id="min-experience"
-              max="240"
-              min="0"
-              onChange={(event) =>
-                updateAfterTyping({
-                  minEmploymentMonths: clampMonths(Number(event.target.value)),
-                })
-              }
-              step="12"
-              type="range"
-              value={draft.minEmploymentMonths}
-            />
-            <div className="range-values" aria-live="polite">
-              <span>{formatMinimumDuration(draft.minEmploymentMonths)}</span>
-              <span>20 年</span>
-            </div>
-          </div>
-          <div className="field-stack">
-            <label className="field-label" htmlFor="min-work-internship">
-              最低工作 + 实习年限
-            </label>
-            <input
-              className="range-input"
-              id="min-work-internship"
               max="240"
               min="0"
               onChange={(event) =>
@@ -165,38 +138,10 @@ export function FilterPanel({
             />
             <div className="range-values" aria-live="polite">
               <span>
-                {formatMinimumDuration(
-                  draft.minEmploymentOrInternshipMonths,
-                )}
+                {formatMinimumDuration(draft.minEmploymentOrInternshipMonths)}
               </span>
               <span>20 年</span>
             </div>
-          </div>
-        </section>
-
-        <section className="filter-section">
-          <div className="filter-section-heading">
-            <h3>经历要求</h3>
-          </div>
-          <div aria-label="经历类型条件" className="choice-grid" role="group">
-            {initialExperienceTypes.map((option) => (
-              <label className="choice-row" key={option.value}>
-                <input
-                  checked={draft.experienceTypes.includes(option.value)}
-                  onChange={() =>
-                    update({
-                      experienceTypes: draft.experienceTypes.includes(option.value)
-                        ? draft.experienceTypes.filter(
-                            (value) => value !== option.value,
-                          )
-                        : [...draft.experienceTypes, option.value],
-                    })
-                  }
-                  type="checkbox"
-                />
-                {option.label}
-              </label>
-            ))}
           </div>
         </section>
       </div>

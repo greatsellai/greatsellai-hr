@@ -19,7 +19,6 @@ export type KeywordMode = "broad" | "precise";
  * the filter UI, saved-filter migration, and result-column presentation.
  */
 export interface FilterDraft {
-  minEmploymentMonths: number;
   minEmploymentOrInternshipMonths: number;
   degrees: DegreeLevel[];
   institutionClassifications: InstitutionClassification[];
@@ -32,7 +31,6 @@ export interface FilterDraft {
   minGpaPercent: string;
   maxRankPosition: string;
   maxRankPercent: string;
-  experienceTypes: ExperienceType[];
   experienceName: string;
   company: string;
   title: string;

@@ -22,7 +22,6 @@ export const emptyCandidateSearch: CandidateSearchResponse = {
 };
 
 const defaultFilterDraft: FilterDraft = {
-  minEmploymentMonths: 0,
   minEmploymentOrInternshipMonths: 0,
   degrees: [],
   institutionClassifications: [],
@@ -35,7 +34,6 @@ const defaultFilterDraft: FilterDraft = {
   minGpaPercent: "",
   maxRankPosition: "",
   maxRankPercent: "",
-  experienceTypes: [],
   experienceName: "",
   company: "",
   title: "",
@@ -170,7 +168,6 @@ export function freshDefaultFilter(): FilterDraft {
     ...defaultFilterDraft,
     degrees: [],
     institutionClassifications: [],
-    experienceTypes: [],
     experienceAwardLevels: [],
     skills: [],
     skillCategories: [],
@@ -194,7 +191,6 @@ export function snapshotFilterDraft(draft: FilterDraft): FilterDraft {
     ...draft,
     degrees: [...draft.degrees],
     institutionClassifications: [...draft.institutionClassifications],
-    experienceTypes: [...draft.experienceTypes],
     experienceAwardLevels: [...draft.experienceAwardLevels],
     skills: [...draft.skills],
     skillCategories: [...draft.skillCategories],
@@ -220,13 +216,7 @@ export function draftToSearchRequest(
   const institutionClassifications = sortInstitutionClassifications(
     draft.institutionClassifications,
   );
-  const initialExperienceTypes = draft.experienceTypes.filter(
-    (type) => type === "employment" || type === "internship",
-  );
 
-  if (draft.minEmploymentMonths > 0) {
-    request.min_employment_months = draft.minEmploymentMonths;
-  }
   if (draft.minEmploymentOrInternshipMonths > 0) {
     request.min_employment_or_internship_months =
       draft.minEmploymentOrInternshipMonths;
@@ -236,13 +226,6 @@ export function draftToSearchRequest(
     request.education_any_of = [
       {
         institution_classifications_any_of: institutionClassifications,
-      },
-    ];
-  }
-  if (initialExperienceTypes.length) {
-    request.experience_any_of = [
-      {
-        experience_types: initialExperienceTypes,
       },
     ];
   }
@@ -341,20 +324,17 @@ export function searchRequestToDraft(
   }
   const savedDegrees =
     request.highest_degree_in ?? request.education_any_of?.[0]?.degree_in ?? [];
-  const savedExperienceTypes = (
-    request.experience_any_of?.[0]?.experience_types ??
-    request.experience_types_all_of ??
-    []
-  ).filter((type) => type === "employment" || type === "internship");
   return {
     draft: {
       ...freshDefaultFilter(),
-      minEmploymentMonths: request.min_employment_months ?? 0,
-      minEmploymentOrInternshipMonths:
+      // Historical saved filters can have a formal-work threshold. The current
+      // first-pass UI deliberately uses one combined tenure threshold instead.
+      minEmploymentOrInternshipMonths: Math.max(
         request.min_employment_or_internship_months ?? 0,
+        request.min_employment_months ?? 0,
+      ),
       degrees: savedDegrees.filter((degree) => degree !== "unknown"),
       institutionClassifications: institutionMigration.classifications,
-      experienceTypes: savedExperienceTypes,
     },
     error: null,
   };

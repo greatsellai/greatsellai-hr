@@ -217,15 +217,21 @@ export function draftToSearchRequest(
     limit: 50,
     cursor,
   };
-  // Historical saved filters can still hydrate the broader draft shape. The
-  // current first-pass UI intentionally sends only these two school tiers.
-  const institutionClassifications = draft.institutionClassifications.filter(
-    (classification) => classification === "985" || classification === "211",
+  const institutionClassifications = sortInstitutionClassifications(
+    draft.institutionClassifications,
+  );
+  const initialExperienceTypes = draft.experienceTypes.filter(
+    (type) => type === "employment" || type === "internship",
   );
 
   if (draft.minEmploymentMonths > 0) {
     request.min_employment_months = draft.minEmploymentMonths;
   }
+  if (draft.minEmploymentOrInternshipMonths > 0) {
+    request.min_employment_or_internship_months =
+      draft.minEmploymentOrInternshipMonths;
+  }
+  if (draft.degrees.length) request.highest_degree_in = draft.degrees;
   if (institutionClassifications.length) {
     request.education_any_of = [
       {
@@ -233,8 +239,12 @@ export function draftToSearchRequest(
       },
     ];
   }
-  if (draft.experienceTypes.includes("internship")) {
-    request.experience_types_all_of = ["internship"];
+  if (initialExperienceTypes.length) {
+    request.experience_any_of = [
+      {
+        experience_types: initialExperienceTypes,
+      },
+    ];
   }
   if (scoreTemplateId) request.score_template_id = scoreTemplateId;
   return request;
@@ -329,16 +339,22 @@ export function searchRequestToDraft(
   if (institutionMigration.error) {
     return { draft: null, error: institutionMigration.error };
   }
+  const savedDegrees =
+    request.highest_degree_in ?? request.education_any_of?.[0]?.degree_in ?? [];
+  const savedExperienceTypes = (
+    request.experience_any_of?.[0]?.experience_types ??
+    request.experience_types_all_of ??
+    []
+  ).filter((type) => type === "employment" || type === "internship");
   return {
     draft: {
       ...freshDefaultFilter(),
       minEmploymentMonths: request.min_employment_months ?? 0,
-      institutionClassifications: institutionMigration.classifications.filter(
-        (classification) => classification === "985" || classification === "211",
-      ),
-      experienceTypes: request.experience_types_all_of?.includes("internship")
-        ? ["internship"]
-        : [],
+      minEmploymentOrInternshipMonths:
+        request.min_employment_or_internship_months ?? 0,
+      degrees: savedDegrees.filter((degree) => degree !== "unknown"),
+      institutionClassifications: institutionMigration.classifications,
+      experienceTypes: savedExperienceTypes,
     },
     error: null,
   };

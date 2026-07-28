@@ -241,6 +241,11 @@
 .landing-pricing-grid .is-featured ul { color: rgb(255 255 255 / 0.78); }
 .landing-pricing-grid li { display: flex; align-items: flex-start; gap: 0.5rem; }
 .landing-pricing-grid li svg { flex: 0 0 auto; color: var(--gs-red); }
+.landing-plan-audience { display: flex; align-items: center; gap: 0.45rem; min-height: 1.5rem; margin: 0 0 1rem; color: var(--gs-gray); font-size: 0.78rem; font-weight: 750; }
+.landing-plan-audience svg { flex: 0 0 auto; color: var(--gs-red); }
+.is-featured .landing-plan-audience { color: rgb(255 255 255 / 0.68); }
+.is-featured .landing-plan-audience svg { color: #ff7375; }
+.is-coming-soon .landing-plan-audience { color: #667171; }
 .landing-pricing-grid .landing-button { width: 100%; margin-top: auto; }
 
 .landing-faq-section { background: #fff; }

@@ -111,12 +111,14 @@ const pricing = [
     name: "基础版",
     price: "99",
     eyebrow: "适合需要统一筛选与判断口径的团队",
+    audience: "1–2 人",
     items: ["简历库与批量上传", "多条件组合筛选", "自定义权重评分与 AI 总结", "JD 匹配与招聘 Agent"],
   },
   {
     name: "进阶版",
     price: "199",
     eyebrow: "适合希望减少简历整理与 JD 撰写工作的团队",
+    audience: "3–5 人",
     featured: true,
     items: ["包含基础版全部能力", "招聘邮箱自动收简历", "AI-JD 撰写与确认", "30 天免费试用默认版本"],
   },
@@ -125,6 +127,7 @@ const pricing = [
     price: null,
     comingSoon: true,
     eyebrow: "面试辅助与 HRBP 参考能力正在筹备，暂未开放订阅",
+    audience: "6–10 人",
     items: ["包含进阶版全部能力", "线上面试题撰写（筹备中）", "线下面试题撰写（筹备中）", "HRBP AI 面试结果参考（筹备中）"],
   },
 ];
@@ -420,6 +423,7 @@ export function LandingPage({
                     {!plan.comingSoon && <span>/ 月</span>}
                   </p>
                   <ul>{plan.items.map((item) => <li key={item}><Icon name="check" size={17} />{item}</li>)}</ul>
+                  <p className="landing-plan-audience"><Icon name="user" size={16} /><span>适用人数：{plan.audience}</span></p>
                   {plan.comingSoon ? (
                     <span aria-disabled="true" className="landing-button landing-button-disabled">专业版筹备中</span>
                   ) : (

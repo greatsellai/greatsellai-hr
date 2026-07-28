@@ -36,6 +36,9 @@ from app.services.recruiting_agent_service import (
 from app.services.transactional_email_outbox_service import (
     run_transactional_email_outbox_worker_once,
 )
+from app.services.workspace_feedback_service import (
+    run_workspace_feedback_reward_worker_once,
+)
 from app.services.institution_service import (
     is_institution_registry_seeded,
     seed_institution_registry,
@@ -70,6 +73,10 @@ def run_forever(settings: AppSettings) -> None:
     worker_id = _worker_id()
     try:
         while True:
+            ran_workspace_feedback_reward = run_workspace_feedback_reward_worker_once(
+                database,
+                worker_id=worker_id,
+            )
             ran_transactional_email = run_transactional_email_outbox_worker_once(
                 database,
                 settings=settings,
@@ -142,6 +149,7 @@ def run_forever(settings: AppSettings) -> None:
                 and not ran_document_extraction
                 and not ran_job_match
                 and not ran_score_batch
+                and not ran_workspace_feedback_reward
                 and not ran_transactional_email
                 and not ran_mailbox_job
                 and not queued_due_mailbox_sync
@@ -174,6 +182,10 @@ def main() -> None:
 
     database = _create_worker_database(settings)
     try:
+        run_workspace_feedback_reward_worker_once(
+            database,
+            worker_id=_worker_id(),
+        )
         ran_transactional_email = run_transactional_email_outbox_worker_once(
             database,
             settings=settings,

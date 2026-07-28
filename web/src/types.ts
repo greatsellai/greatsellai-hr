@@ -149,6 +149,44 @@ export interface PasswordResetCompleteInput {
   password: string;
 }
 
+/** A server-owned reward state, shared by the current workspace. */
+export type WorkspaceFeedbackRewardStatus = "queued" | "running" | "granted";
+
+export interface WorkspaceFeedbackAttachment {
+  attachment_id: string;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+}
+
+export interface WorkspaceFeedback {
+  feedback_id: string;
+  use_case: string;
+  intended_outcome: string;
+  friction: string;
+  desired_change: string;
+  reward_status: WorkspaceFeedbackRewardStatus;
+  reward_due_at: string | null;
+  reward_granted_at: string | null;
+  reward_call_count: number;
+  attachments: WorkspaceFeedbackAttachment[];
+  created_at: string;
+}
+
+export interface WorkspaceFeedbackHistory {
+  items: WorkspaceFeedback[];
+  next_submission_at: string | null;
+}
+
+export interface WorkspaceFeedbackSubmitInput {
+  use_case: string;
+  intended_outcome: string;
+  friction: string;
+  desired_change: string;
+  attachments: File[];
+  idempotency_key: string;
+}
+
 export interface CandidateCreateInput {
   display_name?: string | null;
 }

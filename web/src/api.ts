@@ -78,6 +78,9 @@ import type {
   TalentSearchProfileRefineInput,
   TalentSearchProfileRunInput,
   TalentSearchRun,
+  WorkspaceFeedback,
+  WorkspaceFeedbackHistory,
+  WorkspaceFeedbackSubmitInput,
   SavedFilter,
   SavedFilterCreate,
   ScoreTemplate,
@@ -319,6 +322,30 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     logout(): Promise<void> {
       return request<void>("/auth/logout", { method: "POST" });
+    },
+
+    listWorkspaceFeedback(): Promise<WorkspaceFeedbackHistory> {
+      return request<WorkspaceFeedbackHistory>("/workspace-feedback");
+    },
+
+    submitWorkspaceFeedback(input: WorkspaceFeedbackSubmitInput): Promise<WorkspaceFeedbackHistory> {
+      const formData = new FormData();
+      formData.set("use_case", input.use_case);
+      formData.set("intended_outcome", input.intended_outcome);
+      formData.set("friction", input.friction);
+      formData.set("desired_change", input.desired_change);
+      input.attachments.forEach((attachment) => formData.append("attachments", attachment));
+      return requestForm<WorkspaceFeedbackHistory>("/workspace-feedback", formData, {
+        method: "POST",
+        headers: { "Idempotency-Key": input.idempotency_key },
+      });
+    },
+
+    workspaceFeedbackAttachmentUrl(feedbackId: string, attachmentId: string): string {
+      return endpoint(
+        baseUrl,
+        `/workspace-feedback/${resourcePath(feedbackId)}/attachments/${resourcePath(attachmentId)}`,
+      );
     },
 
     listMailboxConfigs(includeArchived = false): Promise<MailboxConfigList> {

@@ -5,6 +5,11 @@ export type WorkspaceNavigationView =
   | "score"
   | "match";
 
-export type WorkspaceView = WorkspaceNavigationView | "settings";
+/**
+ * Feedback is intentionally reached from the account menu rather than the
+ * recruitment side rail. It is a short product-research task, not a primary
+ * recruiting workflow.
+ */
+export type WorkspaceView = WorkspaceNavigationView | "settings" | "feedback";
 
 export type WorkspaceSettingsSection = "mailbox" | "data";

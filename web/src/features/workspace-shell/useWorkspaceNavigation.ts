@@ -29,6 +29,10 @@ function settingsHash(section: WorkspaceSettingsSection): string {
   return `#settings/${section}`;
 }
 
+function feedbackHash(): string {
+  return "#feedback";
+}
+
 interface UseWorkspaceNavigationOptions {
   canManageCandidateData: boolean;
   canManageMailbox: boolean;
@@ -46,7 +50,11 @@ export function useWorkspaceNavigation({
   hasSession,
 }: UseWorkspaceNavigationOptions) {
   const [view, setView] = useState<WorkspaceView>(() =>
-    settingsSectionFromHash(window.location.hash) ? "settings" : "library",
+    window.location.hash.replace(/^#/, "").trim().toLowerCase() === "feedback"
+      ? "feedback"
+      : settingsSectionFromHash(window.location.hash)
+        ? "settings"
+        : "library",
   );
   const [settingsSection, setSettingsSection] =
     useState<WorkspaceSettingsSection>(
@@ -85,8 +93,23 @@ export function useWorkspaceNavigation({
     [updateSettingsHash],
   );
 
+  const openFeedback = useCallback(() => {
+    setView("feedback");
+    const nextHash = feedbackHash();
+    if (window.location.hash === nextHash) return;
+    window.history.pushState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${window.location.search}${nextHash}`,
+    );
+  }, []);
+
   useEffect(() => {
     const syncSettingsFromHash = () => {
+      if (window.location.hash.replace(/^#/, "").trim().toLowerCase() === "feedback") {
+        setView("feedback");
+        return;
+      }
       const section = settingsSectionFromHash(window.location.hash);
       if (!section) {
         setView((current) => (current === "settings" ? "library" : current));
@@ -137,6 +160,7 @@ export function useWorkspaceNavigation({
   return {
     canManageSettings,
     navigateToView,
+    openFeedback,
     openSettings,
     settingsSection,
     view,

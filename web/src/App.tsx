@@ -132,6 +132,32 @@ function humanizeError(error: unknown): string {
       invalid_idempotency_key: "上传请求标识无效。请重新选择该简历后重试。",
       idempotency_key_reused_with_different_pdf:
         "该简历的重试标识已被其他文件使用。请重新选择文件后上传。",
+      workspace_feedback_cooldown:
+        "当前工作区刚提交过问卷，请在页面提示的时间后再提交。",
+      workspace_feedback_idempotency_key_required:
+        "问卷提交标识无效，请刷新页面后重试。",
+      invalid_workspace_feedback_idempotency_key:
+        "问卷提交标识无效，请刷新页面后重试。",
+      workspace_feedback_idempotency_key_reused:
+        "这次问卷提交已被其他内容使用，请刷新后重新填写。",
+      workspace_feedback_use_case_required:
+        "请完整填写四个问卷问题后再提交。",
+      workspace_feedback_intended_outcome_required:
+        "请完整填写四个问卷问题后再提交。",
+      workspace_feedback_friction_required:
+        "请完整填写四个问卷问题后再提交。",
+      workspace_feedback_desired_change_required:
+        "请完整填写四个问卷问题后再提交。",
+      workspace_feedback_answer_too_long:
+        "单项回答请控制在 4,000 个字符以内。",
+      workspace_feedback_too_many_attachments:
+        "最多可附加 5 张图片。",
+      workspace_feedback_attachment_type_invalid:
+        "截图仅支持 PNG、JPG 或 WebP 图片。",
+      workspace_feedback_attachment_too_large:
+        "单张截图不能超过 10 MB。",
+      workspace_feedback_attachment_size_invalid:
+        "单张截图不能超过 10 MB。",
       resume_not_found: "这份简历已不存在或无法访问。",
       mailbox_not_configured: "请先保存邮箱配置。",
       mailbox_config_not_found: "这个收件通道已不存在或无法访问。",
@@ -466,6 +492,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   const {
     canManageSettings,
     navigateToView,
+    openFeedback,
     openSettings,
     settingsSection,
     view,
@@ -687,6 +714,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             closeDrawer();
             setAgentOpen(true);
           }}
+          onOpenFeedback={() => {
+            closeDrawer();
+            setAgentOpen(false);
+            openFeedback();
+          }}
           canManageSettings={canManageSettings}
           onAccountMenuOpen={() => {
             void refreshAuthSession();
@@ -706,7 +738,13 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         <TrialStatusBanner trial={authSession?.trial ?? null} />
         <main className="main-content" id="main-content">
           <WorkspaceViewRouter
-            feedback={{ formatError: humanizeError, notify }}
+            feedback={{
+              formatError: humanizeError,
+              notify,
+              onRewardGranted: () => {
+                void refreshAuthSession();
+              },
+            }}
             filter={{
               appliedFilter,
               changeScoreTemplate,

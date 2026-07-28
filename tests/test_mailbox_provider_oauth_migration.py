@@ -196,6 +196,6 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
                     "updated_at": now,
                 },
             )
-            assert connection.scalar(select(alembic_version.c.version_num)) == "20260728_0045"
+            assert connection.scalar(select(alembic_version.c.version_num)) == "20260728_0046"
     finally:
         engine.dispose()

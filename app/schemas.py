@@ -137,6 +137,66 @@ class TrialAccessResponse(ApiModel):
     access_enabled: bool
 
 
+class WorkspaceFeedbackAttachmentResponse(ApiModel):
+    attachment_id: str
+    original_filename: str
+    content_type: str
+    size_bytes: int = Field(ge=0)
+
+
+class WorkspaceFeedbackResponse(ApiModel):
+    feedback_id: str
+    use_case: str
+    intended_outcome: str
+    friction: str
+    desired_change: str
+    reward_status: Literal["queued", "running", "granted"]
+    reward_due_at: datetime
+    reward_granted_at: datetime | None = None
+    reward_call_count: int = Field(ge=0)
+    attachments: list[WorkspaceFeedbackAttachmentResponse] = Field(default_factory=list)
+    created_at: datetime
+
+
+class WorkspaceFeedbackListResponse(ApiModel):
+    items: list[WorkspaceFeedbackResponse] = Field(default_factory=list)
+    next_submission_at: datetime | None = None
+
+
+class WorkspaceFeedbackSubmitResponse(ApiModel):
+    item: WorkspaceFeedbackResponse
+    next_submission_at: datetime | None = None
+    replayed: bool = False
+
+
+class PlatformWorkspaceFeedbackResponse(ApiModel):
+    """Platform-only view of feedback, including its submitter and workspace."""
+
+    feedback_id: str
+    organization_id: str
+    organization_name: str
+    submitted_by_user_id: str
+    submitter_name: str
+    submitter_email: str
+    use_case: str
+    intended_outcome: str
+    friction: str
+    desired_change: str
+    reward_status: Literal["queued", "running", "granted"]
+    reward_due_at: datetime
+    reward_granted_at: datetime | None = None
+    reward_call_count: int = Field(ge=0)
+    attachments: list[WorkspaceFeedbackAttachmentResponse] = Field(default_factory=list)
+    created_at: datetime
+
+
+class PlatformWorkspaceFeedbackListResponse(ApiModel):
+    items: list[PlatformWorkspaceFeedbackResponse] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
 class AuthSession(ApiModel):
     authenticated: bool
     login_required: bool

@@ -12,6 +12,7 @@ import { ScoreWorkspace } from "../scoring/ScoreWorkspace";
 import { MatchWorkspace } from "../job-match/MatchWorkspace";
 import { UploadPage } from "../upload/UploadPage";
 import { WorkspaceSettingsPage } from "../workspace-settings/WorkspaceSettingsPage";
+import { WorkspaceFeedbackPage } from "../workspace-feedback/WorkspaceFeedbackPage";
 import type { CandidateDrawerTab } from "../candidate-drawer/candidate-drawer-types";
 import type {
   WorkspaceNavigationView,
@@ -42,6 +43,7 @@ export interface WorkspaceViewRouterProps {
   feedback: {
     formatError: (error: unknown) => string;
     notify: (kind: ToastKind, message: string) => void;
+    onRewardGranted: () => void;
   };
   filter: FilterWorkspaceController;
   library: {
@@ -160,6 +162,13 @@ export function WorkspaceViewRouter({
           onOpenLibrary={() => navigation.navigateToView("library")}
           onSelectSection={navigation.openSettings}
           role={permissions.role}
+        />
+      )}
+      {view === "feedback" && (
+        <WorkspaceFeedbackPage
+          formatError={feedback.formatError}
+          notify={feedback.notify}
+          onRewardGranted={feedback.onRewardGranted}
         />
       )}
     </>

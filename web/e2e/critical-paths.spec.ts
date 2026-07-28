@@ -1005,6 +1005,63 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("dialog", { name: "招聘助手" })).toBeVisible();
   });
 
+  test("招聘助手输入框使用 Enter 发送并保留 Shift 加 Enter 换行", async ({ page }) => {
+    await registerAndVerify(page, "agent-composer-keyboard");
+    const turnRequests: Array<Record<string, unknown>> = [];
+    await page.route("**/v1/recruiting-agent/turns", async (route) => {
+      turnRequests.push(route.request().postDataJSON() as Record<string, unknown>);
+      await route.fulfill({
+        json: {
+          conversation_id: "e2e-agent-composer-conversation",
+          context_version: 1,
+          active_context: {
+            candidate_set_source: null,
+            candidate_count: 0,
+            active_job_version_id: null,
+            active_job_title: null,
+            active_talent_profile: null,
+            expires_at: "2026-07-28T10:00:00Z",
+          },
+          message: "已收到多行请求。",
+          intent: "help",
+          job_version_id: null,
+          candidates: [],
+          actions: [],
+          tool_trace: [],
+          search_summary: null,
+          batch_id: null,
+        },
+      });
+    });
+
+    await page.getByRole("button", { name: "招聘助手", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    const composer = dialog.getByLabel("向招聘助手提问");
+    await composer.fill("第一行");
+    await composer.dispatchEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+      isComposing: true,
+    });
+    await expect(composer).toHaveValue("第一行");
+    expect(turnRequests).toHaveLength(0);
+
+    await composer.press("Shift+Enter");
+    await composer.type("第二行");
+    await expect(composer).toHaveValue("第一行\n第二行");
+    expect(turnRequests).toHaveLength(0);
+
+    await composer.press("Enter");
+    await expect.poll(() => turnRequests.length).toBe(1);
+    expect(turnRequests[0]).toEqual({
+      message: "第一行\n第二行",
+      job_version_id: null,
+    });
+    await expect(composer).toHaveValue("");
+    await expect(dialog.getByText("已收到多行请求。")).toBeVisible();
+  });
+
   test("招聘助手错误说明 AI 服务，并在重发时不重复用户消息", async ({ page }) => {
     await registerAndVerify(page, "agent-retry");
     let attempts = 0;

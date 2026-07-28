@@ -1231,6 +1231,22 @@ export function RecruitingAgentDrawer({
     }
   };
 
+  const handleComposerKeyDown = (
+    event: ReactKeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    if (
+      event.key !== "Enter"
+      || event.shiftKey
+      || event.repeat
+      || event.nativeEvent.isComposing
+      || event.nativeEvent.keyCode === 229
+    ) {
+      return;
+    }
+    event.preventDefault();
+    void send(input);
+  };
+
   return (
     <aside
       aria-label="招聘助手"
@@ -1475,6 +1491,7 @@ export function RecruitingAgentDrawer({
             disabled={interactionPending}
             id="agent-message"
             onChange={(event) => setInput(event.target.value)}
+            onKeyDown={handleComposerKeyDown}
             placeholder={
               conversation?.active_context.candidate_set_source === "candidate_filter"
                 ? "在当前初筛结果中描述精筛要求，例如：有 Agent 落地经验"

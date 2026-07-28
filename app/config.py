@@ -99,9 +99,9 @@ class AppSettings:
     # following run resumes older unseen message UIDs after newer ones are
     # recorded, so the worker remains responsive on large mailboxes.
     mailbox_sync_attachment_limit: int = 20
-    # IMAP endpoints are deployment-owned infrastructure, never arbitrary
-    # destinations supplied by a workspace. The transport resolves these
-    # exact names again for every connection and pins the verified address.
+    # Fixed-provider and legacy IMAP endpoints are deployment-owned exact
+    # names. The explicit generic-IMAP path has a separate domain-only guard:
+    # it is still limited to IMAPS 993, public DNS and TLS-pinned transport.
     mailbox_imap_allowed_hosts: tuple[str, ...] = (
         "imap.feishu.cn",
         "imap.exmail.qq.com",

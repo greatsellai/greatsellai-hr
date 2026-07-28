@@ -10,6 +10,7 @@ import type {
 export interface MailboxDraft {
   displayName: string;
   providerKey: string;
+  imapHost: string;
   emailAddress: string;
   mailbox: string;
   password: string;
@@ -39,6 +40,7 @@ export function newMailboxDraft(): MailboxDraft {
   return {
     displayName: "",
     providerKey: "",
+    imapHost: "",
     emailAddress: "",
     mailbox: "INBOX",
     password: "",
@@ -51,6 +53,7 @@ export function mailboxDraftFromConfig(config: MailboxConfig): MailboxDraft {
   return {
     displayName: config.display_name,
     providerKey: config.provider_key || "",
+    imapHost: config.imap_host || "",
     emailAddress: config.email_address || "",
     mailbox: config.mailbox || "INBOX",
     password: "",
@@ -71,6 +74,7 @@ export function mailboxDraftIsDirty(
   return (
     draft.displayName !== baseline.displayName
     || draft.providerKey !== baseline.providerKey
+    || draft.imapHost !== baseline.imapHost
     || draft.emailAddress !== baseline.emailAddress
     || draft.mailbox !== baseline.mailbox
     || draft.enabled !== baseline.enabled
@@ -84,6 +88,7 @@ export function mailboxAuthenticationModeLabel(mode: MailboxAuthenticationMode |
 }
 
 export function mailboxProviderDisplayName(config: MailboxConfig): string {
+  if (config.provider_key === "generic_imap") return "通用 IMAP 邮箱";
   return config.provider_display_name || "已配置 IMAP 邮箱";
 }
 
@@ -154,7 +159,8 @@ export const mailboxImportErrorMessages: Record<string, string> = {
   mailbox_config_archived: "该收件通道已归档，不能再同步新邮件。",
   mailbox_not_enabled: "该收件邮箱已暂停，请启用后重试。",
   mailbox_credentials_unavailable: "邮箱授权码无法读取，请重新保存后再同步。",
-  mailbox_imap_host_not_allowed: "该 IMAP 地址不在当前部署允许的服务商范围内。",
+  mailbox_imap_host_required: "请填写 IMAP 服务器域名。",
+  mailbox_imap_host_not_allowed: "该 IMAP 服务器未通过安全准入，请检查域名或联系管理员。",
   mailbox_imap_port_not_allowed: "只支持加密 IMAPS 的 993 端口。",
   mailbox_imap_address_not_allowed: "该 IMAP 地址解析到不安全网络，系统已拒绝连接。",
   mailbox_imap_dns_failed: "无法安全解析该 IMAP 地址，请检查服务商配置。",

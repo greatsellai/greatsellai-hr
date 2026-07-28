@@ -1,9 +1,10 @@
-"""Deployment-controlled mailbox provider catalogue.
+"""Mailbox provider catalogue and its endpoint-ownership contract.
 
-The mailbox importer deliberately never accepts an arbitrary network target
-from a workspace.  This module gives the product a small set of reviewed
-providers while :mod:`mailbox_imap_transport` remains the final exact-host,
-TLS and DNS-rebinding guard at connection time.
+Most providers have a reviewed, fixed IMAPS endpoint.  ``generic_imap`` is a
+deliberate exception for corporate mail systems not represented by a preset:
+it accepts a domain name, but the transport still enforces IMAPS 993, public
+DNS-only resolution, TLS hostname verification and DNS-pinned connections.
+It is never an IP-address or arbitrary-port escape hatch.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
 
 MailboxAuthenticationMode = Literal["app_password", "oauth2"]
+GENERIC_IMAP_PROVIDER_KEY = "generic_imap"
 
 
 class MailboxProviderError(RuntimeError):
@@ -28,16 +30,22 @@ class MailboxProviderError(RuntimeError):
 
 @dataclass(frozen=True)
 class MailboxProvider:
-    """One reviewed, fixed IMAPS endpoint and its user-facing guidance."""
+    """One mailbox connection type and its user-facing guidance.
+
+    Fixed providers own their endpoint in this catalogue.  The one generic
+    provider deliberately has no static host and asks the workspace admin for
+    a domain that is validated again by the transport at every connection.
+    """
 
     key: str
     display_name: str
-    imap_host: str
+    imap_host: str | None
     authentication_mode: MailboxAuthenticationMode
     credential_label: str
     help_text: str
     imap_port: int = 993
     default_mailbox: str = "INBOX"
+    allows_custom_endpoint: bool = False
 
 
 _PROVIDERS: tuple[MailboxProvider, ...] = (
@@ -81,6 +89,18 @@ _PROVIDERS: tuple[MailboxProvider, ...] = (
         credential_label="Microsoft 授权",
         help_text="通过 Microsoft 登录授权，不收集或保存 Microsoft 登录密码。",
     ),
+    MailboxProvider(
+        key=GENERIC_IMAP_PROVIDER_KEY,
+        display_name="通用 IMAP 邮箱",
+        imap_host=None,
+        authentication_mode="app_password",
+        credential_label="专用授权码或客户端密码",
+        help_text=(
+            "填写邮箱服务商提供的 IMAP 服务器域名。系统只接受 SSL/TLS 的 993 "
+            "端口，并在保存和同步时校验公网地址与证书。"
+        ),
+        allows_custom_endpoint=True,
+    ),
 )
 
 _PROVIDERS_BY_KEY = {provider.key: provider for provider in _PROVIDERS}
@@ -121,8 +141,19 @@ def provider_endpoint_is_enabled(
     settings: "AppSettings",
     provider: MailboxProvider,
 ) -> bool:
-    """Check the deployment's exact IMAPS allowlist without any DNS I/O."""
+    """Check whether this provider can be connected in the deployment.
 
+    Fixed providers must appear in the deployment allowlist.  Generic IMAP
+    has no static host to preflight and is instead validated when the admin
+    supplies its domain and whenever a worker reconnects.
+    """
+
+    if provider.allows_custom_endpoint:
+        # A generic connection has no deployment-owned host to preflight.
+        # The submitted hostname is checked by the transport when it is bound
+        # and again on every later worker connection.
+        return True
+    assert provider.imap_host is not None
     try:
         validate_imap_endpoint(
             settings,
@@ -185,6 +216,7 @@ def resolved_provider_key(
 
 __all__ = [
     "MailboxAuthenticationMode",
+    "GENERIC_IMAP_PROVIDER_KEY",
     "MailboxProvider",
     "MailboxProviderError",
     "all_mailbox_providers",

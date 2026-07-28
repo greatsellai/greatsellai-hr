@@ -142,7 +142,7 @@ def _copy_mailbox_oauth_correlation_cookie(
     raise AssertionError("mailbox OAuth correlation cookie was not issued")
 
 
-def test_provider_catalog_exposes_only_reviewed_preset_metadata(client) -> None:
+def test_provider_catalog_exposes_fixed_presets_and_generic_imap_metadata(client) -> None:
     response = client.get("/v1/mailbox-providers")
 
     assert response.status_code == 200, response.text
@@ -153,6 +153,7 @@ def test_provider_catalog_exposes_only_reviewed_preset_metadata(client) -> None:
         "qq_mail_app_password",
         "gmail_oauth",
         "microsoft_oauth",
+        "generic_imap",
     ]
     feishu = payload["items"][0]
     assert feishu["available"] is True
@@ -164,6 +165,13 @@ def test_provider_catalog_exposes_only_reviewed_preset_metadata(client) -> None:
     gmail = next(item for item in payload["items"] if item["provider_key"] == "gmail_oauth")
     assert gmail["available"] is False
     assert gmail["authentication_mode"] == "oauth2"
+    generic = next(item for item in payload["items"] if item["provider_key"] == "generic_imap")
+    assert generic["display_name"] == "通用 IMAP 邮箱"
+    assert generic["authentication_mode"] == "app_password"
+    assert generic["available"] is True
+    assert generic["imap_host"] is None
+    assert generic["imap_port"] == 993
+    assert generic["allows_custom_endpoint"] is True
     # The authentication *mode* is intentionally public (for example,
     # ``app_password``), but the catalogue must never return a credential,
     # OAuth client secret, or an authorization token.
@@ -173,6 +181,140 @@ def test_provider_catalog_exposes_only_reviewed_preset_metadata(client) -> None:
         for item in payload["items"]
         for key in item
     )
+
+
+def test_generic_imap_provider_binds_a_custom_domain_with_fixed_imaps(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    """The generic product path is explicit, encrypted and never a raw API fallback."""
+
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "_read_initial_mailbox_watermark",
+        lambda **_: (9, 42),
+    )
+    response = client.post(
+        "/v1/mailboxes",
+        json={
+            "display_name": "海外招聘邮箱",
+            "provider_key": "generic_imap",
+            "imap_host": "imap.corporate-mail.example",
+            "imap_port": 993,
+            "email_address": "recruiting@corporate-mail.example",
+            "mailbox": "INBOX",
+            "password": "test-only-authorization-code",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["provider_key"] == "generic_imap"
+    assert payload["provider_display_name"] == "通用 IMAP 邮箱"
+    assert payload["authentication_mode"] == "app_password"
+    assert payload["imap_host"] == "imap.corporate-mail.example"
+    assert payload["imap_port"] == 993
+    assert payload["password_configured"] is True
+    assert "password" not in payload
+
+
+def test_generic_imap_connection_factory_is_the_only_custom_host_escape_hatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Fixed and legacy callers must retain the exact-host default guard."""
+
+    settings = AppSettings(
+        project_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        upload_dir=tmp_path / "data" / "uploads",
+        database_url="sqlite://",
+    )
+    calls: list[dict[str, object]] = []
+
+    def create_client_stub(*args, **kwargs):
+        del args
+        calls.append(dict(kwargs))
+        return object()
+
+    monkeypatch.setattr(mailbox_import_service, "create_imap_client", create_client_stub)
+
+    mailbox_import_service._create_imap_client_for_provider(
+        settings,
+        provider_key="generic_imap",
+        host="imap.corporate-mail.example",
+        port=993,
+    )
+    mailbox_import_service._create_imap_client_for_provider(
+        settings,
+        provider_key="feishu_app_password",
+        host="imap.feishu.cn",
+        port=993,
+    )
+    mailbox_import_service._create_imap_client_for_provider(
+        settings,
+        provider_key="legacy_imap",
+        host="imap.feishu.cn",
+        port=993,
+    )
+
+    assert calls == [
+        {
+            "host": "imap.corporate-mail.example",
+            "port": 993,
+            "allow_custom_host": True,
+        },
+        {"host": "imap.feishu.cn", "port": 993},
+        {"host": "imap.feishu.cn", "port": 993},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_code"),
+    [
+        (
+            {
+                "provider_key": "generic_imap",
+                "imap_port": 993,
+            },
+            "mailbox_imap_host_required",
+        ),
+        (
+            {
+                "provider_key": "generic_imap",
+                "imap_host": "imap.corporate-mail.example",
+                "imap_port": 143,
+            },
+            "mailbox_imap_port_not_allowed",
+        ),
+        (
+            {
+                "provider_key": "generic_imap",
+                "imap_host": "127.0.0.1",
+                "imap_port": 993,
+            },
+            "mailbox_imap_host_not_allowed",
+        ),
+    ],
+)
+def test_generic_imap_provider_rejects_unsafe_endpoint_inputs(
+    client: TestClient,
+    payload: dict[str, object],
+    error_code: str,
+) -> None:
+    response = client.post(
+        "/v1/mailboxes",
+        json={
+            "display_name": "通用安全测试",
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+            "password": "test-only-authorization-code",
+            **payload,
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == error_code
 
 
 def test_reviewed_provider_endpoint_cannot_be_overridden_by_a_browser(client) -> None:

@@ -103,6 +103,7 @@ export function MailboxPage({
     ? mailboxes.find((item) => item.mailbox_id === selectedMailboxId) ?? null
     : null;
   const draftProvider = providers.find((item) => item.provider_key === draft.providerKey) ?? null;
+  const draftProviderAllowsCustomEndpoint = draftProvider?.allows_custom_endpoint === true;
   const selectedMailboxRequiresAuthorization = Boolean(
     selectedConfig && mailboxRequiresAuthorization(selectedConfig),
   );
@@ -229,6 +230,7 @@ export function MailboxPage({
     setDraft((current) => ({
       ...current,
       providerKey: provider.provider_key,
+      imapHost: "",
       mailbox: provider.default_mailbox,
       password: "",
     }));
@@ -450,6 +452,10 @@ export function MailboxPage({
       notify("error", "该邮箱服务商尚未在当前部署启用，请联系部署管理员。");
       return;
     }
+    if (isCreating && draftProviderAllowsCustomEndpoint && !draft.imapHost.trim()) {
+      notify("error", "请填写 IMAP 服务器域名。");
+      return;
+    }
     if (isCreating && draftProvider?.authentication_mode === "oauth2") {
       notify("error", "此服务商需要通过网页授权连接，请点击下方授权按钮。");
       return;
@@ -473,6 +479,9 @@ export function MailboxPage({
         ? await api.createMailboxConfig({
           display_name: draft.displayName.trim(),
           provider_key: draftProvider!.provider_key,
+          ...(draftProviderAllowsCustomEndpoint
+            ? { imap_host: draft.imapHost.trim(), imap_port: 993 }
+            : {}),
           email_address: draft.emailAddress.trim(),
           mailbox: draft.mailbox.trim() || draftProvider!.default_mailbox,
           password: draft.password,
@@ -720,11 +729,26 @@ export function MailboxPage({
   const formUsesOAuth = isCreating
     ? draftProvider?.authentication_mode === "oauth2"
     : selectedConfig?.authentication_mode === "oauth2";
+  const formUsesCustomEndpoint = isCreating && draftProviderAllowsCustomEndpoint;
   const formProviderName = isCreating
     ? draftProvider?.display_name ?? "尚未选择"
     : selectedConfig ? mailboxProviderDisplayName(selectedConfig) : "已配置 IMAP 邮箱";
-  const formCredentialLabel = draftProvider?.credential_label
-    ?? (selectedConfig?.authentication_mode === "app_password" ? "邮箱授权码" : "邮箱授权");
+  const formCredentialLabel = formUsesCustomEndpoint
+    ? "专用授权码或客户端密码"
+    : (
+      draftProvider?.credential_label
+      ?? (selectedConfig?.authentication_mode === "app_password" ? "邮箱授权码" : "邮箱授权")
+    );
+  const formProviderDescription = !isCreating
+    ? "服务商和收件来源已固定。需要改用其他邮箱或服务器时，请新建收件通道。"
+    : !draftProvider
+      ? "选择常用服务商，或使用通用 IMAP 手动填写服务器域名。"
+      : formUsesCustomEndpoint
+        ? "仅支持 SSL/TLS 加密的 IMAPS 连接。服务器域名会在保存时进行安全校验。"
+        : "服务器地址、端口和加密方式已按所选服务商预填。";
+  const savedGenericEndpoint = selectedConfig?.provider_key === "generic_imap" && selectedConfig.imap_host
+    ? ` · ${selectedConfig.imap_host}:${selectedConfig.imap_port ?? 993}`
+    : "";
 
   const mailboxConnectionFields = (
     <div className="mailbox-connection-form">
@@ -732,7 +756,7 @@ export function MailboxPage({
         <div className="mailbox-form-section-heading">
           <div>
             <h3 id="mailbox-provider-heading">邮箱服务商</h3>
-            <p>系统固定使用经过审核的加密连接，不开放自定义服务器地址或端口。</p>
+            <p>{formProviderDescription}</p>
           </div>
         </div>
         {isCreating ? (
@@ -755,7 +779,7 @@ export function MailboxPage({
           <div className="mailbox-provider-locked">
             <div>
               <strong>{formProviderName}</strong>
-              <span>{mailboxAuthenticationModeLabel(selectedConfig?.authentication_mode ?? null)}</span>
+              <span>{mailboxAuthenticationModeLabel(selectedConfig?.authentication_mode ?? null)}{savedGenericEndpoint}</span>
             </div>
             <span className={`status-pill${selectedConfig?.authorization_status === "connected" ? " is-success" : selectedConfig?.authorization_status === "reauthorization_required" ? " is-error" : " is-warning"}`}>
               {selectedConfig?.authorization_status === "connected"
@@ -850,6 +874,33 @@ export function MailboxPage({
           </div>
         </div>
         <div className="form-grid mailbox-form-grid">
+          {isCreating && formUsesCustomEndpoint && (
+            <>
+              <div className="field-stack span-full">
+                <label className="field-label" htmlFor="imap-host">IMAP 服务器域名</label>
+                <BackofficeInput
+                  aria-describedby="imap-host-hint"
+                  autoComplete="off"
+                  disabled={saving || authorizing || !draftProvider?.available}
+                  id="imap-host"
+                  onChange={(value) => updateDraft("imapHost", value)}
+                  placeholder="例如：imap.example.com"
+                  spellCheck={false}
+                  value={draft.imapHost}
+                />
+                <p className="field-help" id="imap-host-hint">
+                  仅填写服务器域名，不要填写 https://、路径或端口。保存时会校验连接目标。
+                </p>
+              </div>
+              <div className="mailbox-imaps-security span-full" role="note">
+                <span className="mailbox-imaps-security-icon"><Icon name="check" size={16} /></span>
+                <div>
+                  <strong>加密连接已固定</strong>
+                  <p>SSL/TLS（IMAPS）· 端口 993</p>
+                </div>
+              </div>
+            </>
+          )}
           <div className="field-stack">
             <label className="field-label" htmlFor="imap-folder">邮箱文件夹</label>
             <BackofficeInput

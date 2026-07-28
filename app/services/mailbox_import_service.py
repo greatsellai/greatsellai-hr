@@ -79,6 +79,7 @@ from app.services.mailbox_oauth_service import (
     refresh_access_token,
 )
 from app.services.mailbox_provider_catalog import (
+    GENERIC_IMAP_PROVIDER_KEY,
     MailboxProvider,
     MailboxProviderError,
     all_mailbox_providers,
@@ -606,8 +607,9 @@ def _read_initial_mailbox_watermark(
             mailbox=mailbox,
             credential=credential,
         )
-        client = create_imap_client(
+        client = _create_imap_client_for_provider(
             settings,
+            provider_key=provider_key,
             host=imap_host,
             port=imap_port,
         )
@@ -985,7 +987,7 @@ def _mark_oauth_reauthorization_required(
 
 
 def mailbox_provider_list(settings: AppSettings) -> MailboxProviderListResponse:
-    """Expose reviewed provider metadata, never hosts supplied by a user."""
+    """Expose provider metadata, never hosts supplied by another user."""
 
     credential_storage_available = _mailbox_credential_storage_available(settings)
     return MailboxProviderListResponse(
@@ -1000,6 +1002,7 @@ def mailbox_provider_list(settings: AppSettings) -> MailboxProviderListResponse:
                 ),
                 imap_host=provider.imap_host,
                 imap_port=provider.imap_port,
+                allows_custom_endpoint=provider.allows_custom_endpoint,
                 default_mailbox=provider.default_mailbox,
                 credential_label=provider.credential_label,
                 help_text=provider.help_text,
@@ -1017,15 +1020,40 @@ def _resolve_mailbox_connection(
     imap_host: str | None,
     imap_port: int | None,
 ) -> tuple[str, Literal["app_password", "oauth2"], str, int]:
-    """Resolve a reviewed provider to one exact, server-approved endpoint."""
+    """Resolve a provider to a safe IMAPS endpoint.
+
+    Fixed providers own one exact deployment-reviewed endpoint.  The explicit
+    generic provider can supply a domain but remains pinned to IMAPS 993 and
+    must clear the transport's public-address and TLS checks.
+    """
 
     if provider_key not in {None, "legacy_imap"}:
         try:
             provider = mailbox_provider_by_key(provider_key)
         except MailboxProviderError as exc:
             raise MailboxImportError(str(exc)) from exc
+        if provider.allows_custom_endpoint:
+            if imap_host is None or not imap_host.strip():
+                raise MailboxImportError("mailbox_imap_host_required")
+            port = imap_port if imap_port is not None else provider.imap_port
+            try:
+                normalized_host = validate_imap_endpoint(
+                    settings,
+                    host=imap_host,
+                    port=port,
+                    allow_custom_host=True,
+                )
+            except MailboxImapTransportError as exc:
+                raise MailboxImportError(str(exc)) from exc
+            return (
+                provider.key,
+                provider.authentication_mode,
+                normalized_host,
+                port,
+            )
         if not provider_endpoint_is_enabled(settings, provider):
             raise MailboxImportError("mailbox_provider_not_available")
+        assert provider.imap_host is not None
         if imap_host is not None and imap_host.strip().rstrip(".").casefold() != provider.imap_host:
             raise MailboxImportError("mailbox_provider_endpoint_mismatch")
         if imap_port is not None and imap_port != provider.imap_port:
@@ -1059,6 +1087,25 @@ def _resolve_mailbox_connection(
         normalized_host,
         port,
     )
+
+
+def _create_imap_client_for_provider(
+    settings: AppSettings,
+    *,
+    provider_key: str,
+    host: str,
+    port: int,
+) -> imaplib.IMAP4_SSL:
+    """Build a pinned client without weakening legacy provider validation."""
+
+    if provider_key == GENERIC_IMAP_PROVIDER_KEY:
+        return create_imap_client(
+            settings,
+            host=host,
+            port=port,
+            allow_custom_host=True,
+        )
+    return create_imap_client(settings, host=host, port=port)
 
 
 def _store_oauth_refresh_token(
@@ -1844,7 +1891,12 @@ def _verify_mailbox_connection(
             mailbox=mailbox,
             credential=credential,
         )
-        client = create_imap_client(settings, host=imap_host, port=imap_port)
+        client = _create_imap_client_for_provider(
+            settings,
+            provider_key=provider_key,
+            host=imap_host,
+            port=imap_port,
+        )
         login_status, _ = _authenticate_imap_client(
             client,
             settings=settings,
@@ -4022,8 +4074,9 @@ def retry_mailbox_attachment(
                 credential=credential,
             )
             pulse()
-            client = create_imap_client(
+            client = _create_imap_client_for_provider(
                 settings,
+                provider_key=_effective_provider_key(config),
                 host=config.imap_host,
                 port=config.imap_port,
             )
@@ -4484,8 +4537,9 @@ def sync_mailbox(
             credential=credential,
         )
         pulse()
-        client = create_imap_client(
+        client = _create_imap_client_for_provider(
             settings,
+            provider_key=_effective_provider_key(config),
             host=config.imap_host,
             port=config.imap_port,
         )

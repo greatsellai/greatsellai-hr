@@ -48,6 +48,55 @@ def test_validate_imap_endpoint_refuses_user_controlled_destinations(
     assert str(exc_info.value) == error_code
 
 
+@pytest.mark.parametrize(
+    ("host", "port", "error_code"),
+    [
+        ("127.0.0.1", 993, "mailbox_imap_host_not_allowed"),
+        ("https://imap.example.test", 993, "mailbox_imap_host_not_allowed"),
+        ("imap.example.test", 143, "mailbox_imap_port_not_allowed"),
+    ],
+)
+def test_generic_imap_validation_keeps_domain_and_imaps_only_guards(
+    tmp_path: Path,
+    host: str,
+    port: int,
+    error_code: str,
+) -> None:
+    settings = _settings(tmp_path)
+
+    with pytest.raises(mailbox_imap_transport.MailboxImapTransportError) as exc_info:
+        mailbox_imap_transport.validate_imap_endpoint(
+            settings,
+            host=host,
+            port=port,
+            allow_custom_host=True,
+        )
+
+    assert str(exc_info.value) == error_code
+
+
+def test_generic_imap_validation_accepts_a_domain_without_weakening_default_allowlist(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+
+    assert mailbox_imap_transport.validate_imap_endpoint(
+        settings,
+        host="imap.corporate-mail.example",
+        port=993,
+        allow_custom_host=True,
+    ) == "imap.corporate-mail.example"
+
+    with pytest.raises(mailbox_imap_transport.MailboxImapTransportError) as exc_info:
+        mailbox_imap_transport.validate_imap_endpoint(
+            settings,
+            host="imap.corporate-mail.example",
+            port=993,
+        )
+
+    assert str(exc_info.value) == "mailbox_imap_host_not_allowed"
+
+
 @pytest.mark.parametrize("host", ("imap.feishu.cn:993", "127.0.0.1", "*.feishu.cn"))
 def test_runtime_validation_rejects_a_malformed_deployment_allowlist(
     tmp_path: Path,

@@ -311,7 +311,7 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByText("原版已发布", { exact: true })).toBeVisible();
   });
 
-  test("初筛仅保留院校、正式工作和实习，评分与 JD 仍按全量批处理", async ({ page }) => {
+  test("初筛支持院校、学历与经历范围，评分与 JD 仍按全量批处理", async ({ page }) => {
     await registerAndVerify(page, "screen-score-match");
     const fixture = await seedWorkspaceFixture(page);
     await page.reload();
@@ -321,23 +321,40 @@ test.describe("招聘工作台关键路径", () => {
       page.getByText("E2E 评分规则 · v1", { exact: true }),
     ).toBeVisible();
     const basicFilters = page.getByRole("complementary", { name: "初筛条件" });
+    const institutionGroup = basicFilters.getByRole("group", { name: "院校等级条件" });
+    const degreeGroup = basicFilters.getByRole("group", { name: "最高学历条件" });
+    const experienceGroup = basicFilters.getByRole("group", { name: "经历类型条件" });
+    const formalExperienceRange = basicFilters.locator("#min-experience");
+    const workInternshipRange = basicFilters.locator("#min-work-internship");
     await expect(basicFilters).toBeVisible();
     await expect(page.locator("details.filter-match-rules")).toHaveCount(0);
     await expect(page.locator("#saved-filter")).toHaveCount(0);
     await expect(page.locator("#school-name")).toHaveCount(0);
     await expect(page.locator("#filter-rule-language")).toHaveCount(0);
-    await expect(basicFilters.locator("select")).toHaveCount(1);
-    await expect(basicFilters.locator("#min-formal-work")).toHaveCount(1);
-    await expect(basicFilters.getByRole("checkbox")).toHaveCount(3);
-    const institution985 = basicFilters.getByRole("checkbox", { name: "985" });
-    await expect(basicFilters.getByRole("checkbox", { name: "211" })).toBeVisible();
-    await expect(
-      basicFilters.getByRole("checkbox", { name: "要求有实习经历" }),
-    ).toBeVisible();
-    const searchFor985 = page.waitForResponse((response) => {
+    await expect(basicFilters.getByRole("heading", { name: "英语能力", exact: true })).toHaveCount(0);
+    await expect(basicFilters.getByRole("heading", { name: "技能", exact: true })).toHaveCount(0);
+    await expect(basicFilters.getByRole("heading", { name: "关键词", exact: true })).toHaveCount(0);
+    await expect(basicFilters.locator("select")).toHaveCount(0);
+    await expect(institutionGroup.getByRole("checkbox")).toHaveCount(6);
+    for (const label of ["985", "211", "本科", "大专", "中专", "海外院校"]) {
+      await expect(institutionGroup.getByRole("checkbox", { name: label })).toBeVisible();
+    }
+    await expect(degreeGroup.getByRole("checkbox")).toHaveCount(6);
+    await expect(degreeGroup.getByRole("checkbox", { name: "本科" })).toBeVisible();
+    await expect(experienceGroup.getByRole("checkbox")).toHaveCount(2);
+    await expect(experienceGroup.getByRole("checkbox", { name: "正式工作" })).toBeVisible();
+    await expect(experienceGroup.getByRole("checkbox", { name: "实习" })).toBeVisible();
+    for (const range of [formalExperienceRange, workInternshipRange]) {
+      await expect(range).toHaveAttribute("type", "range");
+      await expect(range).toHaveAttribute("min", "0");
+      await expect(range).toHaveAttribute("max", "240");
+      await expect(range).toHaveAttribute("step", "12");
+    }
+
+    const fullInitialFilterRequest = (response: import("@playwright/test").Response) => {
       if (
-        response.request().method() !== "POST" ||
-        new URL(response.url()).pathname !== "/v1/candidates/search"
+        response.request().method() !== "POST"
+        || new URL(response.url()).pathname !== "/v1/candidates/search"
       ) {
         return false;
       }
@@ -345,16 +362,80 @@ test.describe("招聘工作台关键路径", () => {
         education_any_of?: Array<{
           institution_classifications_any_of?: string[];
         }>;
+        highest_degree_in?: string[];
+        min_employment_months?: number;
+        min_employment_or_internship_months?: number;
+        experience_any_of?: Array<{ experience_types?: string[] }>;
       };
-      return request.education_any_of?.some((condition) =>
-        condition.institution_classifications_any_of?.includes("985"),
-      ) ?? false;
-    });
+      const experienceTypes = request.experience_any_of?.[0]?.experience_types ?? [];
+      return Boolean(
+        request.education_any_of?.[0]?.institution_classifications_any_of?.includes("985")
+        && request.highest_degree_in?.includes("bachelor")
+        && request.min_employment_months === 36
+        && request.min_employment_or_internship_months === 48
+        && experienceTypes.includes("employment")
+        && experienceTypes.includes("internship"),
+      );
+    };
+    const increaseRange = async (
+      range: typeof formalExperienceRange,
+      steps: number,
+    ) => {
+      await range.focus();
+      for (let index = 0; index < steps; index += 1) {
+        await range.press("ArrowRight");
+      }
+    };
+
+    const institution985 = institutionGroup.getByRole("checkbox", { name: "985" });
     await institution985.check();
-    await searchFor985;
+    await degreeGroup.getByRole("checkbox", { name: "本科" }).check();
+    const formalRangeSearch = page.waitForResponse((response) => {
+      if (response.request().method() !== "POST") return false;
+      const request = response.request().postDataJSON() as {
+        min_employment_months?: number;
+      };
+      return new URL(response.url()).pathname === "/v1/candidates/search"
+        && request.min_employment_months === 36;
+    });
+    await increaseRange(formalExperienceRange, 3);
+    await formalRangeSearch;
+    const combinedRangeSearch = page.waitForResponse((response) => {
+      if (response.request().method() !== "POST") return false;
+      const request = response.request().postDataJSON() as {
+        min_employment_months?: number;
+        min_employment_or_internship_months?: number;
+      };
+      return new URL(response.url()).pathname === "/v1/candidates/search"
+        && request.min_employment_months === 36
+        && request.min_employment_or_internship_months === 48;
+    });
+    await increaseRange(workInternshipRange, 4);
+    await combinedRangeSearch;
+    await experienceGroup.getByRole("checkbox", { name: "正式工作" }).check();
+    const completeInitialSearch = page.waitForResponse(fullInitialFilterRequest);
+    await experienceGroup.getByRole("checkbox", { name: "实习" }).check();
+    await completeInitialSearch;
     await expect(institution985).toBeChecked();
     const appliedFilterBar = page.getByLabel("已应用的筛选条件");
     await expect(appliedFilterBar).toContainText("院校：985");
+    await expect(appliedFilterBar).toContainText("最高学历：本科");
+    await expect(appliedFilterBar).toContainText("正式工作：至少 3 年");
+    await expect(appliedFilterBar).toContainText("工作 + 实习：至少 4 年");
+
+    const resetSearch = page.waitForResponse((response) => {
+      if (response.request().method() !== "POST") return false;
+      const request = response.request().postDataJSON() as Record<string, unknown>;
+      return new URL(response.url()).pathname === "/v1/candidates/search"
+        && !request.education_any_of
+        && !request.highest_degree_in
+        && !request.min_employment_months
+        && !request.min_employment_or_internship_months
+        && !request.experience_any_of;
+    });
+    await basicFilters.getByRole("button", { name: "清空", exact: true }).click();
+    await resetSearch;
+    await expect(appliedFilterBar).toHaveCount(0);
     await expect(page.getByText("E2E 推荐候选人")).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "学历 / 院校", exact: true })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "经历", exact: true })).toBeVisible();
@@ -482,14 +563,22 @@ test.describe("招聘工作台关键路径", () => {
         education_any_of?: Array<{
           institution_classifications_any_of?: string[];
         }>;
+        highest_degree_in?: string[];
         min_employment_months?: number;
-        experience_types_all_of?: string[];
+        min_employment_or_internship_months?: number;
+        experience_any_of?: Array<{ experience_types?: string[] }>;
       };
-      return body.min_employment_months === 36
+      const experienceTypes = body.experience_any_of?.[0]?.experience_types ?? [];
+      return Boolean(
+        body.min_employment_months === 36
+        && body.min_employment_or_internship_months === 48
         && body.education_any_of?.some((condition) =>
           condition.institution_classifications_any_of?.includes("985"),
         )
-        && body.experience_types_all_of?.includes("internship");
+        && body.highest_degree_in?.includes("bachelor")
+        && experienceTypes.includes("employment")
+        && experienceTypes.includes("internship"),
+      );
     };
 
     let replacedResultPage = false;
@@ -512,6 +601,11 @@ test.describe("招聘工作台关键路径", () => {
     });
 
     const basicFilters = page.getByRole("complementary", { name: "初筛条件" });
+    const institutionGroup = basicFilters.getByRole("group", { name: "院校等级条件" });
+    const degreeGroup = basicFilters.getByRole("group", { name: "最高学历条件" });
+    const experienceGroup = basicFilters.getByRole("group", { name: "经历类型条件" });
+    const formalExperienceRange = basicFilters.locator("#min-experience");
+    const workInternshipRange = basicFilters.locator("#min-work-internship");
     const searchFor985 = page.waitForResponse((response) => {
       const request = response.request();
       if (
@@ -529,8 +623,9 @@ test.describe("招聘工作台关键路径", () => {
         condition.institution_classifications_any_of?.includes("985"),
       ) ?? false;
     });
-    await basicFilters.getByRole("checkbox", { name: "985" }).check();
+    await institutionGroup.getByRole("checkbox", { name: "985" }).check();
     await searchFor985;
+    await degreeGroup.getByRole("checkbox", { name: "本科" }).check();
 
     const searchForFormalWork = page.waitForResponse((response) => {
       const request = response.request();
@@ -543,11 +638,36 @@ test.describe("招聘工作台关键路径", () => {
       return (request.postDataJSON() as { min_employment_months?: number })
         .min_employment_months === 36;
     });
-    await basicFilters.locator("#min-formal-work").selectOption("36");
+    await formalExperienceRange.focus();
+    await formalExperienceRange.press("ArrowRight");
+    await formalExperienceRange.press("ArrowRight");
+    await formalExperienceRange.press("ArrowRight");
     await searchForFormalWork;
 
+    const searchForCombinedTenure = page.waitForResponse((response) => {
+      const request = response.request();
+      if (
+        request.method() !== "POST"
+        || new URL(request.url()).pathname !== "/v1/candidates/search"
+      ) {
+        return false;
+      }
+      const body = request.postDataJSON() as {
+        min_employment_months?: number;
+        min_employment_or_internship_months?: number;
+      };
+      return body.min_employment_months === 36
+        && body.min_employment_or_internship_months === 48;
+    });
+    await workInternshipRange.focus();
+    await workInternshipRange.press("ArrowRight");
+    await workInternshipRange.press("ArrowRight");
+    await workInternshipRange.press("ArrowRight");
+    await workInternshipRange.press("ArrowRight");
+    await searchForCombinedTenure;
+    await experienceGroup.getByRole("checkbox", { name: "正式工作" }).check();
     const firstPassResponse = page.waitForResponse((response) => isCompleteFirstPass(response.request()));
-    await basicFilters.getByRole("checkbox", { name: "要求有实习经历" }).check();
+    await experienceGroup.getByRole("checkbox", { name: "实习" }).check();
     await firstPassResponse;
 
     const filterScopeRequests: Array<Record<string, unknown>> = [];
@@ -593,15 +713,19 @@ test.describe("招聘工作台关键路径", () => {
         filter: {
           schema_version: "candidate_filter.v2",
           education_any_of: [{ institution_classifications_any_of: ["985"] }],
+          highest_degree_in: ["bachelor"],
           min_employment_months: 36,
-          experience_types_all_of: ["internship"],
+          min_employment_or_internship_months: 48,
+          experience_any_of: [{ experience_types: ["employment", "internship"] }],
         },
       });
       const scopeFilter = scopePayload.filter as Record<string, unknown>;
       expect(Object.keys(scopeFilter).sort()).toEqual([
         "education_any_of",
-        "experience_types_all_of",
+        "experience_any_of",
+        "highest_degree_in",
         "min_employment_months",
+        "min_employment_or_internship_months",
         "schema_version",
       ]);
       expect(JSON.stringify(scopePayload)).not.toMatch(
@@ -619,7 +743,9 @@ test.describe("招聘工作台关键路径", () => {
           && (request.postDataJSON() as { min_employment_months?: number })
             .min_employment_months === 60;
       });
-      await basicFilters.locator("#min-formal-work").selectOption("60");
+      await formalExperienceRange.focus();
+      await formalExperienceRange.press("ArrowRight");
+      await formalExperienceRange.press("ArrowRight");
       await changedFilterResponse;
       await page.getByRole("button", { name: "招聘助手", exact: true }).click();
       await expect(dialog.getByText("初筛结果 · 17 位候选人", { exact: true })).toBeVisible();
@@ -821,10 +947,10 @@ test.describe("招聘工作台关键路径", () => {
     const filters = page.getByRole("complementary", { name: "初筛条件" });
     const toggle = page.getByRole("button", { name: "展开", exact: true });
     await expect(toggle).toBeVisible();
-    await expect(filters.locator("#min-formal-work")).not.toBeVisible();
+    await expect(filters.locator("#min-experience")).not.toBeVisible();
 
     await toggle.click();
-    await expect(filters.locator("#min-formal-work")).toBeVisible();
+    await expect(filters.locator("#min-experience")).toBeVisible();
     const searchFor985 = page.waitForResponse((response) => {
       if (
         response.request().method() !== "POST"

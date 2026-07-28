@@ -55,8 +55,15 @@ function activeResultDisplayColumns(draft: FilterDraft): ResultDisplayColumn[] {
   if (draft.minEmploymentMonths > 0) {
     add("employment_months", "正式工作年限");
   }
-  if (draft.experienceTypes.includes("internship")) {
-    add("experience_type", "实习经历");
+  if (draft.minEmploymentOrInternshipMonths > 0) {
+    add("employment_or_internship_months", "工作 + 实习年限");
+  }
+  if (
+    draft.experienceTypes.some(
+      (type) => type === "employment" || type === "internship",
+    )
+  ) {
+    add("experience_type", "经历要求");
   }
 
   return columns;
@@ -270,8 +277,8 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
     if (normalizedValue) labels.push(`${label}：${normalizedValue}`);
   };
 
-  const institutionClassifications = draft.institutionClassifications.filter(
-    (classification) => classification === "985" || classification === "211",
+  const institutionClassifications = sortInstitutionClassifications(
+    draft.institutionClassifications,
   );
   if (institutionClassifications.length) {
     add(
@@ -283,10 +290,36 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
       ),
     );
   }
+  if (draft.degrees.length) {
+    add(
+      "最高学历",
+      compactFilterValue(draft.degrees.map((degree) => degreeLabels[degree])),
+    );
+  }
   if (draft.minEmploymentMonths > 0) {
     add("正式工作", `至少 ${formatDuration(draft.minEmploymentMonths)}`);
   }
-  if (draft.experienceTypes.includes("internship")) add("实习", "有实习经历");
+  if (draft.minEmploymentOrInternshipMonths > 0) {
+    add(
+      "工作 + 实习",
+      `至少 ${formatDuration(draft.minEmploymentOrInternshipMonths)}`,
+    );
+  }
+  const initialExperienceTypes = draft.experienceTypes.filter(
+    (type) => type === "employment" || type === "internship",
+  );
+  if (initialExperienceTypes.length) {
+    add(
+      "经历",
+      compactFilterValue(
+        initialExperienceTypes.map(
+          (type) =>
+            experienceTypeOptions.find((option) => option.value === type)
+              ?.label ?? type,
+        ),
+      ),
+    );
+  }
 
   return labels;
 }

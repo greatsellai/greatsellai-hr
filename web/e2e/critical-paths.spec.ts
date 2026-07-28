@@ -1077,7 +1077,6 @@ test.describe("招聘工作台关键路径", () => {
       graduation_status: "any",
       fresh_graduate_start_month: null,
       fresh_graduate_end_month: null,
-      min_employment_months: null,
       min_employment_or_internship_months: null,
       experience_types_all_of: [],
       skills_all_of: ["Python"],
@@ -1127,7 +1126,7 @@ test.describe("招聘工作台关键路径", () => {
     const refinedHardFilters = {
       ...hardFilters,
       institution_classifications_any_of: ["985"],
-      min_employment_months: 60,
+      min_employment_or_internship_months: 60,
     };
     const refinedProfile = {
       ...draftProfile,
@@ -1202,7 +1201,7 @@ test.describe("招聘工作台关键路径", () => {
       }
       expect(agentTurnCount).toBe(2);
       expect(body).toEqual({
-        message: "再加 985，正式工作年限改成 5 年",
+        message: "再加 985，工作年限改成 5 年",
         job_version_id: null,
         conversation_id: "e2e-profile-agent-context",
         context_version: 2,
@@ -1385,10 +1384,10 @@ test.describe("招聘工作台关键路径", () => {
     dialog = page.getByRole("dialog", { name: "招聘助手" });
     await expect(dialog.getByText("教育经历：含本科（任一）")).toBeVisible();
     await expect(dialog.getByText("具备 LangChain 的项目、实习或工作实践")).toBeVisible();
-    await dialog.getByLabel("向招聘助手提问").fill("再加 985，正式工作年限改成 5 年");
+    await dialog.getByLabel("向招聘助手提问").fill("再加 985，工作年限改成 5 年");
     await dialog.getByRole("button", { name: "发送提问" }).click();
     await expect(dialog.getByText("院校类型：985（任一）")).toBeVisible();
-    await expect(dialog.getByText("正式工作不少于 5 年")).toBeVisible();
+    await expect(dialog.getByText("工作年限不少于 5 年")).toBeVisible();
 
     await dialog.getByRole("button", { name: "确认画像" }).last().click();
     await dialog.getByRole("button", { name: "开始找人" }).last().click();

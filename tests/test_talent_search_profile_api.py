@@ -48,7 +48,6 @@ def _profile_hard_filters(
         "graduation_status": "any",
         "fresh_graduate_start_month": None,
         "fresh_graduate_end_month": None,
-        "min_employment_months": None,
         "min_employment_or_internship_months": None,
         "experience_types_all_of": [],
         "skills_all_of": skills_all_of or [],

@@ -187,11 +187,8 @@ function talentProfileHardFilterLabels(filters: TalentSearchHardFilters): string
       `毕业：${graduationLabel}${filters.fresh_graduate_start_month && filters.fresh_graduate_end_month ? ` ${filters.fresh_graduate_start_month} 至 ${filters.fresh_graduate_end_month}` : ""}`,
     );
   }
-  if (filters.min_employment_months !== null) {
-    labels.push(`正式工作不少于 ${Math.round(filters.min_employment_months / 12 * 10) / 10} 年`);
-  }
   if (filters.min_employment_or_internship_months !== null) {
-    labels.push(`工作加实习不少于 ${Math.round(filters.min_employment_or_internship_months / 12 * 10) / 10} 年`);
+    labels.push(`工作年限不少于 ${Math.round(filters.min_employment_or_internship_months / 12 * 10) / 10} 年`);
   }
   if (filters.experience_types_all_of.length) {
     labels.push(

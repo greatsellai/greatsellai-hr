@@ -1077,7 +1077,6 @@ export interface TalentSearchHardFilters {
   graduation_status: "any" | "fresh" | "previous";
   fresh_graduate_start_month: string | null;
   fresh_graduate_end_month: string | null;
-  min_employment_months: number | null;
   min_employment_or_internship_months: number | null;
   experience_types_all_of: ExperienceType[];
   skills_all_of: string[];

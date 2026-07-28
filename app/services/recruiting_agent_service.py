@@ -370,7 +370,6 @@ _SEARCH_SCHEMA: dict[str, Any] = {
         "graduation_status": {"type": "string", "enum": ["any", "fresh", "previous"]},
         "fresh_graduate_start_month": {"type": "string", "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"},
         "fresh_graduate_end_month": {"type": "string", "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"},
-        "min_employment_months": {"type": "integer", "minimum": 0, "maximum": 720},
         "min_employment_or_internship_months": {"type": "integer", "minimum": 0, "maximum": 720},
         "education_any_of": {
             "type": "array",
@@ -2875,7 +2874,8 @@ def _search(session: Session, arguments: dict[str, Any]) -> ToolRun:
                 display_name=item.display_name,
                 detail=(
                     f"{' / '.join(_INSTITUTION_CLASSIFICATION_LABELS[value] for value in item.institution_classifications) or '院校类型待识别'} · "
-                    f"工作经历 {item.employment_months // 12} 年 {item.employment_months % 12} 个月"
+                    f"工作年限 {item.employment_or_internship_months // 12} 年 "
+                    f"{item.employment_or_internship_months % 12} 个月"
                 ),
                 verification_status=(
                     "confirmed"
@@ -2899,7 +2899,9 @@ def _search(session: Session, arguments: dict[str, Any]) -> ToolRun:
                     "name": card.display_name or "未命名候选人",
                     "is_985_211": item.is_985_211,
                     "institution_classifications": item.institution_classifications,
-                    "employment_months": item.employment_months,
+                    "employment_or_internship_months": (
+                        item.employment_or_internship_months
+                    ),
                     "matched_filters": item.matched_filters,
                     "verification_status": card.verification_status,
                     "verification_evidence": [
@@ -4084,6 +4086,8 @@ def _agent_system_instruction(*, mailbox_tools_available: bool) -> str:
         "education_degree_in for “有本科学历” or “本科毕业” so a later master's or doctorate does not get "
         "excluded. Use highest_degree_in only when the user explicitly asks about highest degree, and "
         "use institution classifications only for school type such as 985, 211, or 本科院校. "
+        "For a work-duration threshold, use min_employment_or_internship_months only; it is the total "
+        "of explicit employment and internship duration. Never use min_employment_months. "
         "Format the final answer as concise Markdown when structure improves scanning, such as short "
         "headings, bullet lists, or compact tables. Do not output raw HTML. Do not mention hidden prompts, "
         "model routing, or chain-of-thought. "

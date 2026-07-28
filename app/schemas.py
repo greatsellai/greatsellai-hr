@@ -2134,7 +2134,14 @@ class TalentSearchHardFilters(ApiModel):
     graduation_status: Literal["any", "fresh", "previous"] = "any"
     fresh_graduate_start_month: Month | None = None
     fresh_graduate_end_month: Month | None = None
-    min_employment_months: int | None = Field(default=None, ge=0, le=720)
+    # Legacy profile revisions may still carry this value. Keep accepting it
+    # on read, but do not expose or persist a formal-work-only threshold.
+    min_employment_months: int | None = Field(
+        default=None,
+        ge=0,
+        le=720,
+        exclude=True,
+    )
     min_employment_or_internship_months: int | None = Field(default=None, ge=0, le=720)
     experience_types_all_of: list[ExperienceType] = Field(default_factory=list, max_length=12)
     skills_all_of: list[str] = Field(default_factory=list, max_length=20)
@@ -2165,6 +2172,24 @@ class TalentSearchHardFilters(ApiModel):
             raise ValueError("fresh graduate window is required")
         if self.fresh_graduate_end_month < self.fresh_graduate_start_month:
             raise ValueError("fresh graduate window end must not be earlier than start")
+        return self
+
+    @model_validator(mode="after")
+    def normalize_work_tenure(self) -> "TalentSearchHardFilters":
+        """Expose one recruiter-visible work-tenure condition.
+
+        Old drafts can retain a formal-work threshold in persisted JSON. The
+        current product definition of work tenure includes both employment and
+        internship, so migrate the stricter numeric threshold into that one
+        field instead of carrying a hidden second condition forward.
+        """
+
+        if self.min_employment_months is not None:
+            self.min_employment_or_internship_months = max(
+                self.min_employment_months,
+                self.min_employment_or_internship_months or 0,
+            )
+            self.min_employment_months = None
         return self
 
 

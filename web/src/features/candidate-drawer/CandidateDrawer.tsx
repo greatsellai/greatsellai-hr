@@ -1118,10 +1118,7 @@ function EvidenceTab({
             <div className="fact-row">
               <strong>年限统计</strong>
               <span>
-                {review.employment_months > 0
-                  ? `正式工作 ${formatDuration(review.employment_months)}；`
-                  : "正式工作年限待核实；"}
-                工作 + 实习 {formatDuration(review.employment_or_internship_months)}。
+                工作年限 {formatDuration(review.employment_or_internship_months)}。
               </span>
             </div>
           </div>

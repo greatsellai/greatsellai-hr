@@ -2345,7 +2345,6 @@ def talent_search_profile_tool_schema() -> dict[str, Any]:
             },
             "fresh_graduate_start_month": nullable_month,
             "fresh_graduate_end_month": nullable_month,
-            "min_employment_months": nullable_integer,
             "min_employment_or_internship_months": nullable_integer,
             "experience_types_all_of": {
                 "type": "array",
@@ -2386,7 +2385,6 @@ def talent_search_profile_tool_schema() -> dict[str, Any]:
             "graduation_status",
             "fresh_graduate_start_month",
             "fresh_graduate_end_month",
-            "min_employment_months",
             "min_employment_or_internship_months",
             "experience_types_all_of",
             "skills_all_of",
@@ -2832,9 +2830,10 @@ def generate_talent_search_profile(
                 "experience types the recruiter accepts. Use terms_all_of when every named term must be "
                 "explicitly used in the same experience; use terms_any_of when the recruiter explicitly "
                 "accepts any one named term. Leave the unused terms list empty. A skill list, a related technology, or a different "
-                "experience type is not enough to prove that policy. Formal employment "
-                "months must use only explicit formal work duration; projects, contests, research and "
-                "internships may evidence ability but must never be counted as formal work months. State "
+                "experience type is not enough to prove that policy. When the recruiter sets a work-duration "
+                "threshold, use min_employment_or_internship_months only. It means the non-overlapping total "
+                "of explicit employment and internship duration; projects, contests, and research must never "
+                "be counted. Never set min_employment_months. State "
                 "what a recruiter should verify from resume facts. If the recruiter asks to 精简、简化、精炼、"
                 "压缩、浓缩或删减 a current draft, preserve its hiring target and every explicit hard filter, "
                 "but remove duplicated, vague, or nonessential wording and requirements. Do not invent new "

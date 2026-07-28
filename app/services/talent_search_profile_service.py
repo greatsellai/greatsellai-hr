@@ -1932,11 +1932,6 @@ def _search_request_from_hard_filters(
             if include("graduation_status")
             else None
         ),
-        min_employment_months=(
-            hard_filters.min_employment_months
-            if include("min_employment_months")
-            else None
-        ),
         min_employment_or_internship_months=(
             hard_filters.min_employment_or_internship_months
             if include("min_employment_or_internship_months")
@@ -1988,18 +1983,11 @@ def _recall_filter_steps(
     if hard_filters.graduation_status != "any":
         status_label = "应届" if hard_filters.graduation_status == "fresh" else "往届"
         steps.append(("graduation_status", f"毕业状态：{status_label}"))
-    if hard_filters.min_employment_months is not None:
-        steps.append(
-            (
-                "min_employment_months",
-                f"正式工作不少于 {hard_filters.min_employment_months} 个月",
-            )
-        )
     if hard_filters.min_employment_or_internship_months is not None:
         steps.append(
             (
                 "min_employment_or_internship_months",
-                "工作加实习不少于 "
+                "工作年限不少于 "
                 f"{hard_filters.min_employment_or_internship_months} 个月",
             )
         )

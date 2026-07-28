@@ -27,6 +27,7 @@ from app.services.ai_gateway_service import AiGatewayError
 from app.services import talent_search_profile_service as profile_service
 from app.services.deepseek_provider import DeepSeekProviderError
 from app.services.recruiting_agent_service import ResolvedJob, _TOOLS, _resolve_job
+from app.schemas import TalentSearchHardFilters
 from app.services.trial_quota_service import TRIAL_LLM_CALL_QUOTA_EXHAUSTED_CODE
 from app.tenant_scope import bypass_organization_scope
 from test_score_service import _template_payload
@@ -41,7 +42,6 @@ def _agent_profile_hard_filters() -> dict[str, object]:
         "graduation_status": "any",
         "fresh_graduate_start_month": None,
         "fresh_graduate_end_month": None,
-        "min_employment_months": None,
         "min_employment_or_internship_months": None,
         "experience_types_all_of": [],
         "skills_all_of": ["Python"],
@@ -61,7 +61,7 @@ def _install_agent_profile_provider_stub(monkeypatch) -> list[dict[str, object]]
         if "985" in request_message:
             hard_filters["institution_classifications_any_of"] = ["985"]
         if "5年" in request_message or "5 年" in request_message or "五年" in request_message:
-            hard_filters["min_employment_months"] = 60
+            hard_filters["min_employment_or_internship_months"] = 60
         return {
             "schema_version": "talent_search_profile.v1",
             "title": "AI 应用工程师人才画像",
@@ -140,6 +140,19 @@ def test_agent_fails_visibly_when_model_is_not_configured(client: TestClient) ->
     assert response.json()["detail"] == "agent_model_not_configured"
 
 
+def test_talent_profile_migrates_legacy_formal_tenure_to_unified_work_tenure() -> None:
+    hard_filters = TalentSearchHardFilters.model_validate(
+        {
+            "min_employment_months": 36,
+            "min_employment_or_internship_months": 24,
+        }
+    )
+
+    assert hard_filters.min_employment_months is None
+    assert hard_filters.min_employment_or_internship_months == 36
+    assert "min_employment_months" not in hard_filters.model_dump(mode="json")
+
+
 def test_agent_executes_model_selected_search_tool(
     ai_client: TestClient,
     monkeypatch,
@@ -161,7 +174,7 @@ def test_agent_executes_model_selected_search_tool(
                             "arguments": json.dumps(
                                 {
                                     "is_985_211": True,
-                                    "min_employment_months": 36,
+                                    "min_employment_or_internship_months": 36,
                                     "skills_all_of": ["Python"],
                                     "limit": None,
                                 }
@@ -1076,7 +1089,7 @@ def test_agent_refines_the_server_saved_profile_with_bounded_chat_history(
     second = ai_client.post(
         "/v1/recruiting-agent/turns",
         json={
-            "message": "再加 985，正式工作年限改成 5 年",
+            "message": "再加 985，工作年限改成 5 年",
             "conversation_id": first_payload["conversation_id"],
             "context_version": first_payload["context_version"],
         },
@@ -1090,7 +1103,11 @@ def test_agent_refines_the_server_saved_profile_with_bounded_chat_history(
     assert refined["current_revision"]["revision_id"] != first_revision_id
     assert refined["current_revision"]["revision_number"] == 2
     assert refined["current_revision"]["hard_filters"]["institution_classifications_any_of"] == ["985"]
-    assert refined["current_revision"]["hard_filters"]["min_employment_months"] == 60
+    assert (
+        refined["current_revision"]["hard_filters"]
+        ["min_employment_or_internship_months"]
+        == 60
+    )
     assert "找做过 Agent 的本科毕业工程师" not in follow_up_context
     assert "active_talent_profile" in follow_up_context
     assert "candidate_id" not in follow_up_context
@@ -1903,7 +1920,6 @@ def test_agent_search_supports_full_recruiter_filter_contract(
                             "arguments": json.dumps(
                                 {
                                     "is_985_211": True,
-                                    "min_employment_months": 36,
                                     "min_employment_or_internship_months": 42,
                                     "education_any_of": [
                                         {
@@ -1972,14 +1988,14 @@ def test_agent_search_supports_full_recruiter_filter_contract(
 
     response = ai_client.post(
         "/v1/recruiting-agent/turns",
-        json={"message": "筛 985/211、清华计算机硕士、3 年工作且工作加实习 42 个月的 Python 人才"},
+        json={"message": "筛 985/211、清华计算机硕士、工作年限至少 42 个月的 Python 人才"},
     )
 
     assert response.status_code == 200, response.text
     assert response.json()["intent"] == "search_candidates"
     request = captured["requests"][0]
     assert request.is_985_211 is True
-    assert request.min_employment_months == 36
+    assert request.min_employment_months is None
     assert request.min_employment_or_internship_months == 42
     assert request.education_any_of[0].degree_in == ["master"]
     assert request.education_any_of[0].school_name_contains == ["清华大学"]
@@ -2022,6 +2038,8 @@ def test_agent_search_supports_full_recruiter_filter_contract(
         "competition_award_status", "leadership_any_of", "keywords",
         "keyword_match_mode", "keywords_all_of", "keywords_any_of",
     }.issubset(properties)
+    assert "min_employment_or_internship_months" in properties
+    assert "min_employment_months" not in properties
 
 
 def test_agent_rejects_client_supplied_candidate_binding(client: TestClient) -> None:

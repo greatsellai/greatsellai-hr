@@ -90,16 +90,15 @@ export function SideRail({
 }) {
   return (
     <aside aria-label="主导航" className="side-rail" inert={inert}>
-      <div aria-label="大卖数智" className="rail-mark" role="img">
+      <div className="rail-mark">
         <img
-          alt=""
-          aria-hidden="true"
+          alt="大卖数智"
           className="rail-brand-logo"
           src="/brand/greatsell-logo-cn-white.png"
         />
+        <p className="rail-brand-tagline">让每一次招聘决策，都拥有 AI 驱动的判断能力。</p>
         <img
-          alt=""
-          aria-hidden="true"
+          alt="大卖数智"
           className="rail-brand-symbol"
           src="/brand/greatsell-logo-symbol-red.png"
         />

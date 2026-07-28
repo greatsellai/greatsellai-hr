@@ -39,6 +39,11 @@
   object-fit: contain;
 }
 
+.rail-brand-tagline {
+  display: none;
+  margin: 0;
+}
+
 .rail-brand-symbol {
   display: block;
   width: 1.375rem;
@@ -485,13 +490,27 @@
 }
 
 .backoffice-ui-root .rail-mark {
+  flex-direction: column;
+  align-items: flex-start;
   justify-content: flex-start;
-  height: 4.5rem;
-  padding: 0 1.125rem;
+  height: 5.25rem;
+  gap: 0.1875rem;
+  padding: 0.625rem 1.125rem;
 }
 
 .backoffice-ui-root .rail-brand-logo {
   display: block;
+  height: 2.5rem;
+}
+
+.backoffice-ui-root .rail-brand-tagline {
+  display: block;
+  color: rgb(255 255 255 / 0.58);
+  font-size: 0.5625rem;
+  font-weight: 500;
+  letter-spacing: 0.025em;
+  line-height: 1.35;
+  white-space: nowrap;
 }
 
 .backoffice-ui-root .rail-brand-symbol {
@@ -763,6 +782,7 @@
   }
 
   .backoffice-ui-root .rail-brand-logo,
+  .backoffice-ui-root .rail-brand-tagline,
   .backoffice-ui-root .rail-label {
     display: none;
   }

@@ -165,6 +165,89 @@ def test_binding_rejects_imap_control_characters_before_network(
     assert opened is False
 
 
+def test_new_mailbox_rejects_non_inbox_before_network(client, monkeypatch) -> None:
+    opened = False
+
+    def unexpected_client(*args, **kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("a non-INBOX channel must fail before network I/O")
+
+    monkeypatch.setattr(mailbox_import_service, "create_imap_client", unexpected_client)
+
+    response = client.post(
+        "/v1/mailboxes",
+        json={
+            "display_name": "非收件箱测试",
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "email_address": "owner@example.test",
+            "mailbox": "Archive",
+            "password": "test-authorization-code",
+            "enabled": True,
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "mailbox_folder_fixed_to_inbox"
+    assert opened is False
+    with client.app.state.database.session_factory() as session:
+        assert session.scalars(select(MailboxConfig)).all() == []
+
+
+def test_new_mailbox_defaults_to_inbox_when_mailbox_is_omitted(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "_read_initial_mailbox_watermark",
+        lambda **_: (9, 42),
+    )
+
+    response = client.post(
+        "/v1/mailboxes",
+        json={
+            "display_name": "默认收件箱测试",
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "email_address": "owner@example.test",
+            "password": "test-authorization-code",
+            "enabled": True,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    config_id = response.json()["mailbox_id"]
+    assert response.json()["mailbox"] == "INBOX"
+    with client.app.state.database.session_factory() as session:
+        config = session.get(MailboxConfig, config_id)
+        assert config is not None
+        assert config.mailbox == "INBOX"
+
+
+def test_existing_mailbox_rejects_folder_change_without_rebinding(client, monkeypatch) -> None:
+    config_id = _stored_mailbox(client)
+    opened = False
+
+    def unexpected_client(*args, **kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("a rejected mailbox change must not open IMAP")
+
+    monkeypatch.setattr(mailbox_import_service, "create_imap_client", unexpected_client)
+
+    response = client.patch(
+        f"/v1/mailboxes/{config_id}",
+        json={"mailbox": "Archive"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "mailbox_folder_fixed_to_inbox"
+    assert opened is False
+    with client.app.state.database.session_factory() as session:
+        config = session.get(MailboxConfig, config_id)
+        assert config is not None
+        assert config.mailbox == "INBOX"
+
+
 def test_sync_revalidates_stored_imap_arguments_before_network(client, monkeypatch) -> None:
     config_id = _stored_mailbox(client, mailbox="INBOX\r\nX1 STORE 1 +FLAGS (\\Seen)")
     monkeypatch.setattr(

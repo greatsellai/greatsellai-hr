@@ -1219,6 +1219,32 @@ def test_oauth_start_rejects_callback_origin_mismatch(oauth_client: TestClient) 
         assert session.scalar(select(MailboxOAuthConnectIntent)) is None
 
 
+def test_oauth_start_rejects_non_inbox_without_creating_intent(
+    oauth_client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "authorization_url",
+        lambda *args, **kwargs: pytest.fail("a non-INBOX channel must not start OAuth"),
+    )
+
+    response = oauth_client.post(
+        "/v1/mailbox-oauth/start",
+        json={
+            "provider_key": "gmail_oauth",
+            "display_name": "Non-INBOX OAuth test",
+            "email_address": "recruiting@example.test",
+            "mailbox": "Archive",
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "mailbox_folder_fixed_to_inbox"
+    with oauth_client.app.state.database.session_factory() as session:
+        assert session.scalar(select(MailboxOAuthConnectIntent)) is None
+
+
 def test_oauth_compatibility_entry_can_finish_on_canonical_callback_host(
     tmp_path: Path,
     monkeypatch,

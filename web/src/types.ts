@@ -210,7 +210,6 @@ export interface MailboxConfig {
   imap_host: string | null;
   imap_port: number | null;
   email_address: string | null;
-  mailbox: string | null;
   enabled: boolean;
   /** Archived sources no longer receive new mail, but keep their import audit trail. */
   archived_at: string | null;
@@ -248,7 +247,6 @@ export interface MailboxConfigCreate {
   /** Sent only with `imap_host`; generic IMAP currently uses encrypted 993. */
   imap_port?: number;
   email_address: string;
-  mailbox: string;
   password?: string;
   enabled: boolean;
   /** The immutable historical window chosen while creating this channel. */
@@ -262,7 +260,6 @@ export interface MailboxConfigPatch {
   imap_host?: string;
   imap_port?: number;
   email_address?: string;
-  mailbox?: string;
   password?: string;
   enabled?: boolean;
 }
@@ -284,7 +281,6 @@ export interface MailboxProvider {
   /** Fixed providers expose their endpoint; generic IMAP asks for one at bind time. */
   imap_host: string | null;
   imap_port: number;
-  default_mailbox: string;
   credential_label: string;
   help_text: string;
   /** Whether this reviewed option accepts a user-supplied IMAP hostname. */
@@ -299,7 +295,6 @@ export interface MailboxOAuthStartRequest {
   provider_key: string;
   display_name: string;
   email_address: string;
-  mailbox: string;
   /** Preserved through the OAuth handoff and applied to the new channel. */
   initial_sync_lookback_days: number;
 }

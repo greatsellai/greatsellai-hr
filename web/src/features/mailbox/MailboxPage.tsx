@@ -231,7 +231,6 @@ export function MailboxPage({
       ...current,
       providerKey: provider.provider_key,
       imapHost: "",
-      mailbox: provider.default_mailbox,
       password: "",
     }));
   };
@@ -483,7 +482,6 @@ export function MailboxPage({
             ? { imap_host: draft.imapHost.trim(), imap_port: 993 }
             : {}),
           email_address: draft.emailAddress.trim(),
-          mailbox: draft.mailbox.trim() || draftProvider!.default_mailbox,
           password: draft.password,
           enabled: draft.enabled,
           initial_sync_lookback_days: draft.initialSyncLookbackDays,
@@ -538,7 +536,6 @@ export function MailboxPage({
         provider_key: draftProvider.provider_key,
         display_name: draft.displayName.trim(),
         email_address: draft.emailAddress.trim(),
-        mailbox: draft.mailbox.trim() || draftProvider.default_mailbox,
         initial_sync_lookback_days: draft.initialSyncLookbackDays,
       });
       window.location.assign(result.authorization_url);
@@ -870,7 +867,7 @@ export function MailboxPage({
         <div className="mailbox-form-section-heading">
           <div>
             <h3 id="mailbox-connection-heading">连接与同步</h3>
-            <p>{formUsesOAuth ? "授权将在服务商页面完成，系统不会收集网页登录密码。" : "请使用服务商生成的专用授权码或客户端密码。"}</p>
+            <p>系统只同步收件箱（INBOX）。{formUsesOAuth ? "授权将在服务商页面完成，系统不会收集网页登录密码。" : "请使用服务商生成的专用授权码或客户端密码。"}</p>
           </div>
         </div>
         <div className="form-grid mailbox-form-grid">
@@ -901,16 +898,6 @@ export function MailboxPage({
               </div>
             </>
           )}
-          <div className="field-stack">
-            <label className="field-label" htmlFor="imap-folder">邮箱文件夹</label>
-            <BackofficeInput
-              disabled={!isCreating || selectedMailboxArchived || selectedSyncInProgress || authorizing}
-              id="imap-folder"
-              onChange={(value) => updateDraft("mailbox", value)}
-              value={draft.mailbox}
-            />
-            {!isCreating && <p className="field-help">文件夹会保持当前来源位置，不能直接改写。</p>}
-          </div>
           {isCreating && !draftProvider ? (
             <p className="mailbox-connection-pending span-full">先选择一个可用的邮箱服务商，再填写连接所需信息。</p>
           ) : formUsesOAuth ? (
@@ -922,7 +909,7 @@ export function MailboxPage({
               </div>
             </div>
           ) : (
-            <div className="field-stack">
+            <div className="field-stack span-full">
               <label className="field-label" htmlFor="imap-password">{formCredentialLabel}</label>
               <BackofficeInput
                 aria-describedby="imap-password-hint"
@@ -1038,7 +1025,7 @@ export function MailboxPage({
               <h2>{selectedConfig.display_name}</h2>
               <span className={`status-pill${mailboxChannelStatusClass(selectedConfig)}`}>{mailboxChannelStatus(selectedConfig)}</span>
             </div>
-            <p>{mailboxProviderDisplayName(selectedConfig)} · {selectedConfig.email_address || "尚未配置接收邮箱"} · {selectedConfig.mailbox || "INBOX"}</p>
+            <p>{mailboxProviderDisplayName(selectedConfig)} · {selectedConfig.email_address || "尚未配置接收邮箱"}</p>
           </div>
         </div>
         <div className="mailbox-operation-actions">

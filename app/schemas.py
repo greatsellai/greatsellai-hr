@@ -894,6 +894,8 @@ class MailboxConfigCreate(ApiModel):
     imap_host: str | None = Field(default=None, min_length=1, max_length=255)
     imap_port: int | None = Field(default=None, ge=1, le=65535)
     email_address: str = Field(min_length=3, max_length=320)
+    # Deprecated compatibility input. New product clients omit this field; all
+    # newly created channels are constrained to INBOX by the service layer.
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=512)
     enabled: bool = True
@@ -911,6 +913,8 @@ class MailboxConfigPatch(ApiModel):
     imap_host: str | None = Field(default=None, min_length=1, max_length=255)
     imap_port: int | None = Field(default=None, ge=1, le=65535)
     email_address: str | None = Field(default=None, min_length=3, max_length=320)
+    # Deprecated compatibility input. Existing historical channels may only
+    # retain their current source mailbox; no arbitrary folder switch is allowed.
     mailbox: str | None = Field(default=None, min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=512)
     enabled: bool | None = None
@@ -927,6 +931,7 @@ class MailboxConfigUpdate(ApiModel):
     imap_host: str = Field(min_length=1, max_length=255)
     imap_port: int = Field(default=993, ge=1, le=65535)
     email_address: str = Field(min_length=3, max_length=320)
+    # Deprecated compatibility input for the former single-mailbox endpoint.
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=512)
     enabled: bool = True
@@ -997,6 +1002,7 @@ class MailboxOAuthStartRequest(ApiModel):
     provider_key: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=32)
     email_address: str = Field(min_length=3, max_length=320)
+    # Deprecated compatibility input. New OAuth starts are fixed to INBOX.
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
     initial_sync_lookback_days: int = Field(default=0, ge=0, le=365)
 

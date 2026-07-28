@@ -1747,6 +1747,7 @@ test.describe("招聘工作台关键路径", () => {
       .toBeVisible();
     await expect(page.locator("#imap-host")).toHaveCount(0);
     await expect(page.locator("#imap-port")).toHaveCount(0);
+    await expect(page.locator("#imap-folder")).toHaveCount(0);
     await expect(page.getByRole("radio", { name: /Gmail \/ Google Workspace/ })).toBeDisabled();
     await expect(page.getByRole("radio", { name: /通用 IMAP 邮箱/ })).toBeVisible();
     await page.getByRole("radio", { name: /飞书邮箱/ }).click();
@@ -1765,6 +1766,7 @@ test.describe("招聘工作台关键路径", () => {
     });
     await expect(createPayload).resolves.not.toHaveProperty("imap_host");
     await expect(createPayload).resolves.not.toHaveProperty("imap_port");
+    await expect(createPayload).resolves.not.toHaveProperty("mailbox");
     await expect(page.getByText("收件通道已创建，不导入历史邮件，后续只接收新邮件。")).toBeVisible();
     await expect(page.getByRole("heading", { name: "E2E 收件通道" })).toBeVisible();
     await expect(page.getByLabel("来源", { exact: true })).toContainText("E2E 收件通道");
@@ -1775,6 +1777,7 @@ test.describe("招聘工作台关键路径", () => {
     await page.getByRole("button", { name: "编辑连接" }).click();
     await expect(page.getByRole("button", { name: "返回概览" })).toBeVisible();
     await expect(page.locator("#initial-sync-lookback-days")).toHaveCount(0);
+    await expect(page.locator("#imap-folder")).toHaveCount(0);
     expect(await gridTrackCount(".mailbox-detail-grid")).toBe(1);
     await page.locator("#mailbox-display-name").fill("E2E 未保存收件通道");
     page.once("dialog", (dialog) => dialog.dismiss());
@@ -1826,7 +1829,7 @@ test.describe("招聘工作台关键路径", () => {
               allows_custom_endpoint: true,
               imap_host: null,
               imap_port: 993,
-              default_mailbox: "INBOX",
+              default_mailbox: "Archive",
               credential_label: "专用授权码或客户端密码",
               help_text: "填写邮箱服务商提供的 IMAP 服务器域名和专用授权码。",
             },
@@ -1879,6 +1882,7 @@ test.describe("招聘工作台关键路径", () => {
       imap_port: 993,
       initial_sync_lookback_days: 0,
     });
+    expect(createPayload).not.toHaveProperty("mailbox");
     await expect(page.getByText("该 IMAP 服务器未通过安全准入，请检查域名或联系管理员。"))
       .toBeVisible();
   });
@@ -1920,7 +1924,7 @@ test.describe("招聘工作台关键路径", () => {
               allows_custom_endpoint: false,
               imap_host: "imap.gmail.com",
               imap_port: 993,
-              default_mailbox: "INBOX",
+              default_mailbox: "Archive",
               credential_label: "Google 授权",
               help_text: "通过 Google 登录授权，不收集或保存 Google 登录密码。",
             },
@@ -1966,9 +1970,9 @@ test.describe("招聘工作台关键路径", () => {
       provider_key: "gmail_oauth",
       display_name: "E2E Google 收件通道",
       email_address: "e2e-google@example.test",
-      mailbox: "INBOX",
       initial_sync_lookback_days: 7,
     });
+    await expect(oauthPayload).resolves.not.toHaveProperty("mailbox");
     await expect(oauthPayload).resolves.not.toHaveProperty("password");
     await expect(page).toHaveURL(new RegExp(`${oauthLandingPath}$`));
   });

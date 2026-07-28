@@ -1842,7 +1842,12 @@ test.describe("招聘工作台关键路径", () => {
     await expect(genericProvider).toHaveAttribute("aria-checked", "true");
     await expect(genericProvider).toHaveClass(/is-selected/);
     await expect(genericProvider.getByText("已选择", { exact: true })).toBeVisible();
-    await expect(page.locator("#imap-host")).toBeVisible();
+    const imapHost = page.locator("#imap-host");
+    await expect(imapHost).toBeVisible();
+    await expect(imapHost.locator("xpath=..")).toHaveClass(/semi-input-wrapper/);
+    await imapHost.focus();
+    await expect(imapHost).toHaveCSS("outline-style", "none");
+    await expect(imapHost.locator("xpath=..")).toHaveClass(/semi-input-wrapper-focus/);
     await expect(page.locator("#imap-port")).toHaveCount(0);
     await expect(page.getByText("SSL/TLS（IMAPS）· 端口 993", { exact: true })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "专用授权码或客户端密码" })).toBeVisible();

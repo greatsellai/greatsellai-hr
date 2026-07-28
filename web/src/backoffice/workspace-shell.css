@@ -744,6 +744,13 @@
   color: var(--workspace-text);
 }
 
+/* Semi renders the visible focus treatment on its wrapper.  Suppress the
+ * global native-input outline inside that wrapper so keyboard focus remains
+ * a single border plus halo rather than two nested red rectangles. */
+.backoffice-ui-root .backoffice-input .semi-input:focus-visible {
+  outline: none;
+}
+
 .backoffice-ui-root .backoffice-action-button,
 .backoffice-ui-root .button {
   min-height: var(--workspace-control-height);

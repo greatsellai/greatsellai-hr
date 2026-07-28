@@ -1047,19 +1047,37 @@ test.describe("招聘工作台关键路径", () => {
     await expect(composer).toHaveValue("第一行");
     expect(turnRequests).toHaveLength(0);
 
+    // Some Windows IMEs keep the legacy keyCode at 229 for a normal Enter
+    // after composition has already ended. The browser's isComposing flag is
+    // the authoritative signal, so this must still send.
+    await composer.dispatchEvent("keydown", {
+      key: "Enter",
+      keyCode: 229,
+      bubbles: true,
+      cancelable: true,
+      isComposing: false,
+    });
+    await expect.poll(() => turnRequests.length).toBe(1);
+    expect(turnRequests[0]).toEqual({
+      message: "第一行",
+      job_version_id: null,
+    });
+    await expect(composer).toHaveValue("");
+
+    await composer.fill("第一行");
     await composer.press("Shift+Enter");
     await composer.type("第二行");
     await expect(composer).toHaveValue("第一行\n第二行");
-    expect(turnRequests).toHaveLength(0);
+    expect(turnRequests).toHaveLength(1);
 
     await composer.press("Enter");
-    await expect.poll(() => turnRequests.length).toBe(1);
-    expect(turnRequests[0]).toEqual({
+    await expect.poll(() => turnRequests.length).toBe(2);
+    expect(turnRequests[1]).toMatchObject({
       message: "第一行\n第二行",
       job_version_id: null,
     });
     await expect(composer).toHaveValue("");
-    await expect(dialog.getByText("已收到多行请求。")).toBeVisible();
+    await expect(dialog.getByText("已收到多行请求。")).toHaveCount(2);
   });
 
   test("招聘助手错误说明 AI 服务，并在重发时不重复用户消息", async ({ page }) => {

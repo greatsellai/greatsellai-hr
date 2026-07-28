@@ -674,6 +674,118 @@ def test_agent_refines_the_server_saved_profile_with_bounded_chat_history(
             assert session.scalar(select(TalentSearchRun.id)) is None
 
 
+def test_agent_condenses_active_profile_without_planner_model_call(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """An explicit “精简画像” command always creates the next draft revision."""
+
+    profile_calls = _install_agent_profile_provider_stub(monkeypatch)
+    model_calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal model_calls
+        del settings, messages
+        model_calls += 1
+        if model_calls != 1:
+            raise AssertionError("profile condensation must not depend on planner routing")
+        return {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "draft-profile",
+                    "type": "function",
+                    "function": {
+                        "name": "draft_talent_search_profile",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+    initial = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "找做过 Agent 的本科毕业工程师，重点看真实项目交付。"},
+    )
+    assert initial.status_code == 200, initial.text
+    initial_payload = initial.json()
+
+    condensed = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "请把当前人才画像精简一下",
+            "conversation_id": initial_payload["conversation_id"],
+            "context_version": initial_payload["context_version"],
+        },
+    )
+
+    assert condensed.status_code == 200, condensed.text
+    payload = condensed.json()
+    assert payload["intent"] == "refine_active_talent_search_profile"
+    assert payload["talent_profile"]["profile_id"] == initial_payload["talent_profile"]["profile_id"]
+    assert payload["talent_profile"]["current_revision"]["revision_number"] == 2
+    assert model_calls == 1
+    assert len(profile_calls) == 2
+    assert profile_calls[-1]["request_message"] == "请把当前人才画像精简一下"
+
+
+def test_agent_does_not_treat_candidate_list_condense_as_profile_edit(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """Only profile-targeted wording can bypass normal Agent planning."""
+
+    _install_agent_profile_provider_stub(monkeypatch)
+    model_calls = 0
+
+    def fake_completion(*, settings, messages):
+        nonlocal model_calls
+        del settings, messages
+        model_calls += 1
+        if model_calls == 1:
+            return {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "draft-profile",
+                        "type": "function",
+                        "function": {
+                            "name": "draft_talent_search_profile",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            }
+        return {"content": "我会按当前结果继续收敛候选人范围。", "tool_calls": []}
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+    initial = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "找做过 Agent 的本科毕业工程师。"},
+    )
+    assert initial.status_code == 200, initial.text
+
+    response = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "请精简候选人列表",
+            "conversation_id": initial.json()["conversation_id"],
+            "context_version": initial.json()["context_version"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["intent"] == "help"
+    assert model_calls == 2
+
+
 def test_agent_profile_provider_failure_returns_a_stable_retryable_error(
     ai_client: TestClient,
     monkeypatch,

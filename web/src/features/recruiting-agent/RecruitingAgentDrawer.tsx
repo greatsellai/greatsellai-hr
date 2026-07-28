@@ -467,7 +467,7 @@ function TalentSearchProfileCard({
   profile,
   run,
   onSupplement,
-  onRegenerate,
+  onCondense,
   onConfirm,
   onStart,
   onUseAsAgentContext,
@@ -481,7 +481,7 @@ function TalentSearchProfileCard({
   profile: TalentSearchProfile;
   run?: TalentSearchRun;
   onSupplement: () => void;
-  onRegenerate: () => void;
+  onCondense: () => void;
   onConfirm: () => void;
   onStart: () => void;
   onUseAsAgentContext: () => void;
@@ -571,16 +571,14 @@ function TalentSearchProfileCard({
         >
           补充条件
         </button>
-        {!confirmed && (
-          <button
-            className="button button-ghost"
-            disabled={loading}
-            onClick={onRegenerate}
-            type="button"
-          >
-            <Icon name="refresh" size={14} />重新生成
-          </button>
-        )}
+        <button
+          className="button button-ghost"
+          disabled={loading}
+          onClick={onCondense}
+          type="button"
+        >
+          <Icon name="refresh" size={14} />精简画像
+        </button>
         {confirmed && !run ? (
           <button className="button button-primary" disabled={loading} onClick={onStart} type="button">
             <Icon name="match" size={15} />{startLabel}
@@ -865,13 +863,13 @@ export function RecruitingAgentDrawer({
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
   };
 
-  const regenerateTalentProfile = async (profile: TalentSearchProfile) => {
+  const condenseTalentProfile = async (profile: TalentSearchProfile) => {
     if (interactionPending) return;
     setLoading(true);
     try {
       const next = await api.refineTalentSearchProfile(profile.profile_id, {
         revision_id: profile.current_revision.revision_id,
-        message: "请保留原始招聘目标，重新梳理一版人才画像。删去不明确的硬条件，并给出需要 HR 核验的重点。",
+        message: "请精简当前人才画像：保留原始招聘目标和已明确硬条件；合并重复内容，删除模糊或非必要的要求；不要新增或放宽任何条件；将摘要和核验重点写得更短。",
       });
       await bindTalentSearchProfile({
         profileId: next.profile_id,
@@ -879,7 +877,10 @@ export function RecruitingAgentDrawer({
         jobVersionId,
       });
       rememberTalentProfile(next);
-      updateTalentProfileMessage(next);
+      appendTalentProfileReply(
+        next,
+        `已精简人才画像，已生成待确认的第 ${next.current_revision.revision_number} 版。`,
+      );
     } catch (error) {
       addTalentProfileFailure(error);
     } finally {
@@ -1406,7 +1407,7 @@ export function RecruitingAgentDrawer({
                     void refreshTalentProfileRun(item.talentProfile!, item.talentRun);
                   }
                 }}
-                onRegenerate={() => void regenerateTalentProfile(item.talentProfile!)}
+                onCondense={() => void condenseTalentProfile(item.talentProfile!)}
                 onStart={() => void startTalentProfileSearch(item.talentProfile!)}
                 onUseAsAgentContext={() => {
                   if (item.talentRun) {

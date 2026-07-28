@@ -363,6 +363,124 @@ def test_talent_profile_generation_retries_one_invalid_structured_draft(
     assert "correction retry" in str(calls[1]["system_prompt"])
 
 
+def test_talent_profile_refinement_instructs_the_model_how_to_condense(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_call(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return _generated_talent_profile()
+
+    monkeypatch.setattr(provider, "call_strict_function", fake_call)
+    provider.generate_talent_search_profile(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        request_message="请精简当前人才画像",
+        previous_profile={
+            "title": "AI 应用工程师人才画像",
+            "summary": "旧画像摘要",
+            "hard_filters": {"skills_all_of": ["Python"]},
+            "verification_requirements": [],
+            "preferred_requirements": [],
+            "aliases": [],
+            "clarifying_questions": [],
+        },
+    )
+
+    assert len(calls) == 1
+    assert "preserve its hiring target and every explicit hard filter" in str(
+        calls[0]["system_prompt"]
+    )
+    assert "remove duplicated, vague, or nonessential wording" in str(
+        calls[0]["system_prompt"]
+    )
+    assert "All recruiter-visible title, summary, requirement label" in str(
+        calls[0]["system_prompt"]
+    )
+    assert "Current draft to refine" in str(calls[0]["user_prompt"])
+
+
+@pytest.mark.parametrize(
+    ("field", "error_code"),
+    [
+        ("title", "talent_profile_title_language"),
+        ("summary", "talent_profile_summary_language"),
+        (
+            "verification_label",
+            "talent_profile_verification_requirements_label_language",
+        ),
+        (
+            "verification_hint",
+            "talent_profile_verification_requirements_evidence_hint_language",
+        ),
+        ("alias", "talent_profile_aliases_language"),
+        ("question", "talent_profile_clarifying_questions_language"),
+    ],
+)
+def test_talent_profile_rejects_english_recruiter_visible_text(
+    field: str,
+    error_code: str,
+) -> None:
+    invalid = _generated_talent_profile()
+    english_sentence = "No experience fact of allowed types explicitly mentions this requirement."
+    if field == "title":
+        invalid["title"] = english_sentence
+    elif field == "summary":
+        invalid["summary"] = english_sentence
+    elif field == "verification_label":
+        requirements = invalid["verification_requirements"]
+        assert isinstance(requirements, list)
+        assert isinstance(requirements[0], dict)
+        requirements[0]["label"] = english_sentence
+    elif field == "verification_hint":
+        requirements = invalid["verification_requirements"]
+        assert isinstance(requirements, list)
+        assert isinstance(requirements[0], dict)
+        requirements[0]["evidence_hint"] = english_sentence
+    elif field == "alias":
+        invalid["aliases"] = [english_sentence]
+    elif field == "question":
+        invalid["clarifying_questions"] = [english_sentence]
+    else:  # pragma: no cover - keeps future parametrization exhaustive.
+        raise AssertionError(f"unsupported field: {field}")
+
+    with pytest.raises(provider.DeepSeekProviderError, match=error_code):
+        provider.validate_talent_search_profile_output(invalid)
+
+
+def test_talent_profile_generation_retries_english_visible_prose_in_chinese(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    english_hint = _generated_talent_profile()
+    requirements = english_hint["verification_requirements"]
+    assert isinstance(requirements, list)
+    assert isinstance(requirements[0], dict)
+    requirements[0]["evidence_hint"] = (
+        "No experience fact of allowed types explicitly mentions this requirement."
+    )
+
+    def fake_call(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return english_hint if len(calls) == 1 else _generated_talent_profile()
+
+    monkeypatch.setattr(provider, "call_strict_function", fake_call)
+    result = provider.generate_talent_search_profile(
+        api_key="not-used",
+        model="not-used",
+        timeout_seconds=1,
+        request_message="寻找有 Agent 项目经验的工程师",
+    )
+
+    assert result["verification_requirements"][0]["evidence_hint"] == "核验项目职责、技术方案和结果。"
+    assert len(calls) == 2
+    assert "All recruiter-visible prose must be Simplified Chinese" in str(
+        calls[1]["system_prompt"]
+    )
+
+
 def test_talent_profile_generation_retries_when_requirement_omits_evidence_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

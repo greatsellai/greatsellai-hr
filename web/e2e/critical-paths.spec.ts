@@ -1030,6 +1030,24 @@ test.describe("招聘工作台关键路径", () => {
       },
       updated_at: "2026-07-24T10:00:30Z",
     };
+    const condensedProfile = {
+      ...refinedProfile,
+      status: "draft",
+      current_revision: {
+        ...refinedProfile.current_revision,
+        revision_id: "e2e-profile-revision-3",
+        revision_number: 3,
+        summary: "保留本科、Python 与真实 Agent 项目交付要求，重点核验项目职责。",
+        verification_requirements: [
+          {
+            ...refinedProfile.current_revision.verification_requirements[0],
+            label: "具备真实的 Agent 项目交付经历",
+            evidence_hint: "核验项目中的职责、实现内容和交付结果。",
+          },
+        ],
+      },
+      updated_at: "2026-07-24T10:03:00Z",
+    };
     const activeProfileContext = (profile: typeof draftProfile) => ({
       profile_id: profile.profile_id,
       revision_id: profile.current_revision.revision_id,
@@ -1118,6 +1136,13 @@ test.describe("招聘工作台关键路径", () => {
         },
       });
     });
+    await page.route(/\/v1\/talent-search-profiles\/e2e-profile\/refine$/, async (route) => {
+      expect(route.request().postDataJSON()).toEqual({
+        revision_id: "e2e-profile-revision-2",
+        message: "请精简当前人才画像：保留原始招聘目标和已明确硬条件；合并重复内容，删除模糊或非必要的要求；不要新增或放宽任何条件；将摘要和核验重点写得更短。",
+      });
+      await route.fulfill({ json: condensedProfile });
+    });
     await page.route(/\/v1\/talent-search-profiles\/e2e-profile\/runs$/, async (route) => {
       expect(route.request().postDataJSON()).toMatchObject({
         revision_id: "e2e-profile-revision-2",
@@ -1166,19 +1191,27 @@ test.describe("招聘工作台关键路径", () => {
         },
       });
     });
+    let profileContextBindCount = 0;
     await page.route("**/v1/recruiting-agent/conversations/context", async (route) => {
       const body = route.request().postDataJSON();
       const isProfileBind = body.context_ref.kind === "talent_search_profile";
+      if (isProfileBind) profileContextBindCount += 1;
+      const expectedProfileRevisionId = profileContextBindCount === 1
+        ? "e2e-profile-revision-2"
+        : "e2e-profile-revision-3";
+      const activeProfile = profileContextBindCount === 1
+        ? { ...refinedProfile, status: "confirmed" }
+        : condensedProfile;
       expect(body).toMatchObject(
         isProfileBind
           ? {
             context_ref: {
               kind: "talent_search_profile",
               profile_id: "e2e-profile",
-              revision_id: "e2e-profile-revision-2",
+              revision_id: expectedProfileRevisionId,
             },
             conversation_id: "e2e-profile-agent-context",
-            context_version: 3,
+            context_version: profileContextBindCount === 1 ? 3 : 5,
           }
           : {
             context_ref: { kind: "talent_search_run", run_id: "e2e-profile-run" },
@@ -1189,16 +1222,15 @@ test.describe("招聘工作台关键路径", () => {
       await route.fulfill({
         json: {
           conversation_id: "e2e-profile-agent-context",
-          context_version: isProfileBind ? 4 : 5,
+          context_version: isProfileBind
+            ? (profileContextBindCount === 1 ? 4 : 6)
+            : 5,
           active_context: {
             candidate_set_source: isProfileBind ? null : "talent_search_run",
             candidate_count: 0,
             active_job_version_id: null,
             active_job_title: null,
-            active_talent_profile: activeProfileContext({
-              ...refinedProfile,
-              status: "confirmed",
-            }),
+            active_talent_profile: activeProfileContext(activeProfile),
             expires_at: "2026-07-25T10:00:00Z",
           },
         },
@@ -1255,6 +1287,15 @@ test.describe("招聘工作台关键路径", () => {
     await expect(dialog.getByText("筛掉 3，剩余 0").last()).toBeVisible();
     await expect(dialog.getByRole("button", { name: "调整条件" })).toBeVisible();
     await expect(dialog.getByText("人才画像找人结果 · 0 位候选人")).toBeVisible();
+    await dialog.getByRole("button", { name: "精简画像" }).last().click();
+    await expect(
+      dialog.getByText("已精简人才画像，已生成待确认的第 3 版。"),
+    ).toBeVisible();
+    await expect(dialog.getByText("版本 3", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("具备真实的 Agent 项目交付经历")).toBeVisible();
+    await expect(
+      dialog.getByText("核验项目中的职责、实现内容和交付结果。"),
+    ).toBeVisible();
   });
 
   test("招聘助手将简历依据和未确认状态以招聘语言展示", async ({ page }) => {

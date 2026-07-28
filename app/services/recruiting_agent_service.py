@@ -185,6 +185,7 @@ class _RecruitingAgentGraphState(TypedDict, total=False):
     tool_steps: int
     tool_call_limit_exceeded: bool
     profile_lifecycle_completed: bool
+    force_active_profile_refinement: bool
     pending_search_resume_ids: list[str] | None
     response: RecruitingAgentResponse
 
@@ -205,6 +206,38 @@ _PROFILE_LIFECYCLE_TOOL_NAMES = frozenset(
         "refine_active_talent_search_profile",
     }
 )
+_PROFILE_CONDENSE_VERBS = (
+    "精简",
+    "简化",
+    "精炼",
+    "压缩",
+    "浓缩",
+    "删减",
+)
+
+
+def _requests_active_profile_condense(
+    message: str,
+    *,
+    active_profile: TalentSearchProfileResponse | None,
+) -> bool:
+    """Recognize an unambiguous request to condense the active profile.
+
+    This is deliberately narrower than a generic word match: the request must
+    explicitly name the talent profile. Phrases about a candidate list or
+    sidebar filter must still go through the normal model/tool route.
+    """
+
+    if active_profile is None:
+        return False
+    normalized = "".join(
+        unicodedata.normalize("NFKC", message).strip().casefold().split()
+    ).strip("。！!？?")
+    if not normalized:
+        return False
+    if "画像" not in normalized:
+        return False
+    return any(verb in normalized for verb in _PROFILE_CONDENSE_VERBS)
 
 
 _STRING_ARRAY_SCHEMA: dict[str, Any] = {
@@ -3608,6 +3641,9 @@ def _agent_system_instruction(*, mailbox_tools_available: bool) -> str:
         "ranking, scoring, confirmation, or starting a run in the same response. When the "
         "conversation_work_state includes an active_talent_profile and the recruiter clearly adds, "
         "removes, or changes its hiring conditions, call refine_active_talent_search_profile. "
+        "Treat 精简画像、简化画像、精炼画像、压缩画像 or 浓缩画像 "
+        "as a request to refine that active profile: preserve the hiring target and explicit hard conditions, "
+        "remove duplicate, vague, or nonessential content, and do not invent new conditions. "
         "Use the current profile work state to understand the existing conditions, but never expose "
         "or request profile IDs, revision IDs, candidate IDs, resume text, prompts, or internal tool data. "
         "Do not use the generic search_candidates tool as a substitute for a new confirmation-first "
@@ -3698,6 +3734,10 @@ def _prepare_graph_turn(state: _RecruitingAgentGraphState) -> dict[str, Any]:
         session,
         conversation=conversation,
     )
+    force_active_profile_refinement = _requests_active_profile_condense(
+        payload.message,
+        active_profile=active_profile,
+    )
     context = {
         "current_job": {"job_version_id": job.job_version_id, "title": job.title} if job else None,
         "conversation_work_state": {
@@ -3749,6 +3789,7 @@ def _prepare_graph_turn(state: _RecruitingAgentGraphState) -> dict[str, Any]:
         "tool_steps": 0,
         "tool_call_limit_exceeded": False,
         "profile_lifecycle_completed": False,
+        "force_active_profile_refinement": force_active_profile_refinement,
         "pending_search_resume_ids": None,
     }
 
@@ -3758,6 +3799,26 @@ def _call_agent_model(state: _RecruitingAgentGraphState) -> dict[str, Any]:
 
     if state["tool_steps"] >= _MAX_TOOL_ROUNDS_PER_TURN:
         raise RecruitingAgentServiceError("agent_model_tool_loop_limit")
+    if state.get("force_active_profile_refinement"):
+        # The existing profile is server-owned and already verified above. A
+        # concise edit request must not depend on a planner model deciding to
+        # call the right tool; use the normal tool path so revision, tenancy,
+        # confirmation-first behavior and the final visible reply stay intact.
+        return {
+            "assistant_message": {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "forced-refine-active-talent-profile",
+                        "type": "function",
+                        "function": {
+                            "name": "refine_active_talent_search_profile",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            }
+        }
     return {
         "assistant_message": _model_completion(
             settings=state["settings"],

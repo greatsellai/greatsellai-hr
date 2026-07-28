@@ -112,6 +112,21 @@ revision label 标记。**Production release** 在同一受信任 Runner 上校�
    `ROLLBACK`。数据库与原文件恢复不属于自动回滚范围，必须基于同一 backup ID 的成对
    备份、兼容性评审和显式 `restore-production-backup.sh --confirm-restore` 单独决策。
 
+### 连续合并多个 PR
+
+多个 PR 都显示绿灯时，不能把它们都按同一个旧 `main` 基线连续 squash merge。每合并一个
+PR，下一条 PR 必须先执行：
+
+```bash
+git fetch origin --prune --tags
+git rebase origin/main
+git push --force-with-lease
+```
+
+然后等待该更新后提交的完整 PR CI 与文本完整性检查重新成功，再进行下一次 squash merge。
+这保证发布候选的代码树正是经过验证的代码树；若跳过这一步，`Main release provenance`
+会在镜像构建、标签和服务器连接之前失败关闭。
+
 如果历史环境存在无法自动清除的 legacy pending 记录，不能把 `backup=none` 当成无数据，
 也不能手工删除该文件。先运行 **Production legacy pending reconciliation**：它会确认 current
 记录恰好等于 pending 所记录的前序版本，且数据库和两个持久化卷仍存在，完成新的一组受校验

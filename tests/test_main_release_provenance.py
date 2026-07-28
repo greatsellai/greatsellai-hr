@@ -181,14 +181,17 @@ def test_tree_change_after_pr_ci_is_rejected() -> None:
         )
 
 
-def test_main_commit_with_a_non_base_parent_is_rejected() -> None:
+def test_main_commit_with_a_non_base_parent_explains_how_to_recover() -> None:
     responses = _success_responses()
     responses[f"/repos/{REPOSITORY}/git/commits/{RELEASE_SHA}"] = _commit(
         TREE_SHA,
         parent_sha="e" * 40,
     )
 
-    with pytest.raises(PROVENANCE.ProvenanceError, match="direct squash merge"):
+    with pytest.raises(
+        PROVENANCE.ProvenanceError,
+        match="update or rebase the PR onto the latest main",
+    ):
         PROVENANCE.verify_main_release_provenance(
             repository=REPOSITORY,
             release_sha=RELEASE_SHA,

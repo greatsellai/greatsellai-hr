@@ -312,7 +312,9 @@ def verify_main_release_provenance(
     )
     if _single_parent_sha(release_commit) != base_sha:
         raise ProvenanceError(
-            "main release commit is not a direct squash merge from the verified PR base"
+            "main release commit is not a direct squash merge from the verified PR base; "
+            "update or rebase the PR onto the latest main, rerun its full PR checks, "
+            "then squash merge it"
         )
     if _tree_sha(release_commit, context="main release commit") != _tree_sha(
         pull_request_commit,

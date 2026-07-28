@@ -13,6 +13,7 @@ from app.config import AppSettings
 from app.main import create_app
 from app.models import (
     Organization,
+    UserAccount,
     WorkspaceFeedbackImageAttachment,
     WorkspaceFeedbackSubmission,
     utcnow,
@@ -41,8 +42,6 @@ def feedback_clients(tmp_path: Path) -> Iterator[tuple[TestClient, TestClient, T
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
         allow_unauthenticated=False,
-        admin_token="workspace-feedback-platform-token",
-        legacy_admin_token_enabled=True,
         session_secret="workspace-feedback-test-session-secret",
         transactional_email_provider="test",
         public_app_url="http://testserver",
@@ -85,6 +84,40 @@ def _register_and_login(
     assert verified.status_code == 200, verified.text
     logged_in = client.post("/v1/auth/login", json={"email": email, "password": password})
     assert logged_in.status_code == 200, logged_in.text
+    return logged_in.json()
+
+
+def _register_and_login_platform_admin(
+    client: TestClient,
+    *,
+    organization_name: str,
+    full_name: str,
+    email: str,
+) -> dict[str, object]:
+    """Create a real verified session, then grant test-only platform authority."""
+
+    session_payload = _register_and_login(
+        client,
+        organization_name=organization_name,
+        full_name=full_name,
+        email=email,
+    )
+    user = session_payload["user"]
+    assert isinstance(user, dict)
+    user_id = user["user_id"]
+    assert isinstance(user_id, str)
+    with client.app.state.database.session_factory() as database_session:
+        account = database_session.get(UserAccount, user_id)
+        assert account is not None
+        account.is_platform_admin = True
+        database_session.commit()
+    assert client.post("/v1/auth/logout").status_code == 204
+    logged_in = client.post(
+        "/v1/auth/login",
+        json={"email": email, "password": "workspace-feedback-password"},
+    )
+    assert logged_in.status_code == 200, logged_in.text
+    assert logged_in.json()["is_platform_admin"] is True
     return logged_in.json()
 
 
@@ -275,10 +308,12 @@ def test_due_feedback_reward_grants_exactly_once_and_platform_can_read(
     assert history.status_code == 200, history.text
     assert history.json()["items"][0]["reward_status"] == "granted"
 
-    assert platform_client.post(
-        "/v1/auth/login",
-        json={"password": "workspace-feedback-platform-token"},
-    ).status_code == 200
+    _register_and_login_platform_admin(
+        platform_client,
+        organization_name="Feedback platform workspace",
+        full_name="Feedback platform administrator",
+        email="feedback-platform-admin@example.test",
+    )
     platform_rows = platform_client.get("/v1/platform/workspace-feedback")
     assert platform_rows.status_code == 200, platform_rows.text
     row = next(

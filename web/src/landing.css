@@ -290,14 +290,17 @@
 }
 
 @media (max-width: 74rem) {
-  .landing-nav { display: none; }
-  .landing-header-actions { margin-left: auto; }
   .landing-hero-grid { grid-template-columns: minmax(0, 1fr) minmax(20rem, 0.68fr); gap: 2rem; }
   .landing-pain-grid { grid-template-columns: repeat(2, 1fr); }
   .landing-efficiency-dashboard { grid-template-columns: 1fr; }
   .landing-efficiency-primary { min-height: 18rem; }
   .landing-capability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .landing-capability-copy { padding: 1rem 1.2rem 1.3rem; }
+}
+
+@media (max-width: 60rem) {
+  .landing-nav { display: none; }
+  .landing-header-actions { margin-left: auto; }
 }
 
 @media (max-width: 58rem) {

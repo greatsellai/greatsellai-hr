@@ -41,11 +41,11 @@ const comparisons = [
     items: ["手动下载附件再逐份归档", "通读简历才能提取关键信息", "依靠个人经验记录评分", "拿着 JD 再逐条核对"],
   },
   {
-    label: "大卖数智 AI 招聘工作台",
+    label: "大卖智聘｜AI 招聘决策工作台",
     title: "时间用来做判断",
     description: "系统先整理候选人事实、匹配依据与待核实项，HR 直接进入判断。",
     image: "/landing/hr/comparison-ai-workbench.webp",
-    imageAlt: "HR 人员使用 AI 招聘工作台比较候选人的场景",
+    imageAlt: "HR 人员使用大卖智聘比较候选人的场景",
     items: ["批量上传，进阶版支持邮箱自动入库", "AI 提取事实并关联原文证据", "按团队权重统一评分和总结", "输出 JD 匹配项、缺口与风险"],
     featured: true,
   },
@@ -199,14 +199,14 @@ export function LandingPage({
 }) {
   useEffect(() => {
     const canonical = "https://hr.greatsellai.net/";
-    const description = "大卖数智 AI 招聘工作台帮助 HR 自动收集简历、快速筛选、统一评分并查看 JD 匹配依据，让招聘团队更快作出下一步判断。";
-    document.title = "大卖数智 AI 招聘工作台｜AI 简历筛选、评分与 JD 匹配";
+    const description = "大卖智聘帮助 HR 自动收集简历、快速筛选、统一评分并查看 JD 匹配依据，让招聘团队更快作出下一步判断。";
+    document.title = "大卖智聘｜AI 简历筛选与招聘决策工作台｜大卖数智";
     setMeta('meta[name="description"]', description);
-    setMeta('meta[property="og:title"]', "大卖数智 AI 招聘工作台");
+    setMeta('meta[property="og:title"]', "大卖智聘｜AI 招聘决策工作台");
     setMeta('meta[property="og:description"]', "让每一次招聘决策，都拥有AI驱动的判断能力。");
     setMeta('meta[property="og:url"]', canonical);
     setMeta('meta[property="og:image"]', `${canonical}landing/hr/og-hr-recruiting.webp`);
-    setMeta('meta[name="twitter:title"]', "大卖数智 AI 招聘工作台");
+    setMeta('meta[name="twitter:title"]', "大卖智聘｜AI 招聘决策工作台");
     setMeta('meta[name="twitter:description"]', "让 HR 少翻资料，更快看清候选人是否值得推进。");
     setMeta('meta[name="twitter:image"]', `${canonical}landing/hr/og-hr-recruiting.webp`);
     setCanonical(canonical);
@@ -238,7 +238,7 @@ export function LandingPage({
           <div className="landing-hero-overlay" />
           <div className="landing-shell landing-hero-grid">
             <div className="landing-hero-copy">
-              <p className="landing-product-badge">大卖数智 AI 招聘工作台</p>
+              <p className="landing-product-badge">大卖智聘｜AI 招聘决策工作台</p>
               <h1>
                 <span>让每一次招聘决策，</span>
                 <span><span className="landing-hero-phrase">都拥有AI驱动的</span><span className="landing-hero-phrase">判断能力。</span></span>

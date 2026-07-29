@@ -3,6 +3,7 @@
 这是一个独立重写项目。旧系统和旧的 resume_text 不会被导入为 V3 的可筛选事实。
 
 - [产品需求文档](docs/PRD.md)
+- [产品命名与文案对齐规范](docs/PRODUCT_NAMING_GUIDE.md)
 - [全项目实施计划](docs/IMPLEMENTATION_PLAN.md)
 - [AI 提取后台任务](docs/AI_EXTRACTION_WORKER.md)
 - [邮箱服务商接入说明](docs/MAILBOX_PROVIDER_SETUP.md)

@@ -86,6 +86,25 @@ project_dir="$1"
 history_dir="$2"
 release_commit="$3"
 
+compose_content() {
+  # Review the effective YAML lines only. A documentation comment mentioning a
+  # forbidden production resource must not make staging preflight fail, while
+  # an actual Compose reference must still fail closed.
+  sed -E '/^[[:space:]]*#/d; s/[[:space:]]+#.*$//' "$1"
+}
+
+compose_has_line() {
+  compose_content "$1" | grep -Fxq -- "$2"
+}
+
+compose_contains() {
+  compose_content "$1" | grep -Fq -- "$2"
+}
+
+compose_matches() {
+  compose_content "$1" | grep -Eq -- "$2"
+}
+
 umask 077
 command -v realpath >/dev/null
 canonical_project_dir="$(realpath -e -- "$project_dir")"
@@ -118,21 +137,21 @@ temporary_compose="$(mktemp "/tmp/greatsell-staging-preflight-${release_commit}.
 temporary_rendered="$(mktemp "/tmp/greatsell-staging-rendered-${release_commit}.XXXXXX")"
 trap 'rm -f -- "$temporary_compose" "$temporary_rendered"' EXIT
 cat > "$temporary_compose"
-grep -Fqx 'name: resume-screening-v3-staging' "$temporary_compose"
-grep -Fq 'RESUME_V3_ENVIRONMENT: staging' "$temporary_compose"
-grep -Fq '172.31.0.0/24' "$temporary_compose"
-grep -Fq '172.31.1.0/24' "$temporary_compose"
-grep -Fq '"172.17.0.1:18080:80"' "$temporary_compose"
-grep -Fq 'resume-screening-v3-staging_postgres_data' "$temporary_compose"
-grep -Fq 'resume-screening-v3-staging_uploads_data' "$temporary_compose"
-grep -Fq 'resume-screening-v3-staging_caddy_data' "$temporary_compose"
-grep -Fq 'resume-screening-v3-staging_caddy_config' "$temporary_compose"
-grep -Fq 'resume-screening-v3-staging_proxy' "$temporary_compose"
-grep -Fq 'resume-screening-v3-staging_backend' "$temporary_compose"
-! grep -Eq 'resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)' "$temporary_compose"
-! grep -Fq '.env.production' "$temporary_compose"
-! grep -Eq '(^|[^0-9])80:80([^0-9]|$)|(^|[^0-9])443:443([^0-9]|$)' "$temporary_compose"
-! grep -Eq '^[[:space:]]*build:' "$temporary_compose"
+compose_has_line "$temporary_compose" 'name: resume-screening-v3-staging'
+compose_contains "$temporary_compose" 'RESUME_V3_ENVIRONMENT: production'
+compose_contains "$temporary_compose" '172.31.0.0/24'
+compose_contains "$temporary_compose" '172.31.1.0/24'
+compose_contains "$temporary_compose" '"172.17.0.1:18080:80"'
+compose_contains "$temporary_compose" 'resume-screening-v3-staging_postgres_data'
+compose_contains "$temporary_compose" 'resume-screening-v3-staging_uploads_data'
+compose_contains "$temporary_compose" 'resume-screening-v3-staging_caddy_data'
+compose_contains "$temporary_compose" 'resume-screening-v3-staging_caddy_config'
+compose_contains "$temporary_compose" 'resume-screening-v3-staging_proxy'
+compose_contains "$temporary_compose" 'resume-screening-v3-staging_backend'
+! compose_matches "$temporary_compose" 'resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)'
+! compose_contains "$temporary_compose" '.env.production'
+! compose_matches "$temporary_compose" '(^|[^0-9])80:80([^0-9]|$)|(^|[^0-9])443:443([^0-9]|$)'
+! compose_matches "$temporary_compose" '^[[:space:]]*build:'
 sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" docker compose \
   --project-directory "$project_dir" \
   -f "$temporary_compose" \
@@ -142,7 +161,7 @@ sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" docker compose \
   -f "$temporary_compose" \
   --env-file "$project_dir/.env.staging" config > "$temporary_rendered"
 grep -Fqx 'name: resume-screening-v3-staging' "$temporary_rendered"
-grep -Fq 'RESUME_V3_ENVIRONMENT: staging' "$temporary_rendered"
+grep -Fq 'RESUME_V3_ENVIRONMENT: production' "$temporary_rendered"
 grep -Fq 'host_ip: 172.17.0.1' "$temporary_rendered"
 grep -Fq 'published: "18080"' "$temporary_rendered"
 grep -Fq 'subnet: 172.31.0.0/24' "$temporary_rendered"

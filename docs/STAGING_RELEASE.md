@@ -14,15 +14,21 @@ PR 完整 CI
 生产不会因为 `main` 合并自动发布。预发布未完成、冒烟检查失败、`main` 在验收期间前进、镜像
 ID 不一致或生产主机没有预发布已验镜像时，晋级都会失败关闭。
 
-当前预发布和生产同机，但它们是两个独立 Compose 项目：
+当前预发布和生产同机，但它们是两个独立 Compose 项目。预发布应用以
+`RESUME_V3_ENVIRONMENT=production` 运行，以覆盖生产专属的 HTTPS、安全、数据生命周期和投递逻辑；隔离由独立项目、数据库、数据卷、网络、代理地址与预发布域名保证：
 
 - production：`resume-screening-v3`、生产 `.env.production`、生产数据卷和 `172.30.0.0/24`；
 - staging：`resume-screening-v3-staging`、独立 `.env.staging`、独立数据卷和 `172.31.0.0/24`；
 - staging Caddy 仅监听宿主机私有 `172.17.0.1:18080`；公网 HTTPS 仅由生产 Caddy 对
   `staging.hr.greatsellai.net` 的精确路由代理。
 
-预发布默认不携带生产数据库、PDF、邮件授权、AI/OCR 密钥或事务邮件凭据。生产数据快照是另一个
-显式、单向、脱敏优先的运维任务，绝不能被部署工作流自动执行。
+预发布不携带生产数据库、PDF 或任何生产数据快照。`.env.staging` 必须逐项人工复制当前
+生产实际运行值（包含非密钥开关、模型、限额和超时），但它仍是独立文件，绝不能直接引用
+`.env.production`；仅数据库连接、文件卷、网络、Trusted Proxy、公开 URL 和 OAuth 回调保持
+staging 值。生产数据快照是另一个显式、单向、脱敏优先的运维任务，绝不能被部署工作流自动执行。
+
+同一 Google 或 Microsoft OAuth Client 还必须在供应商控制台额外允许 staging 的两个回调地址，
+否则会出现 `redirect_uri_mismatch`。
 
 ## GitHub Environments
 
@@ -58,8 +64,9 @@ reviewer；这会让 **Production promotion** 在验证完 staging 后暂停，�
 
 1. 创建 `/home/ubuntu/resume-screening-v3-staging`，只放置 `.env.staging` 和由发布流程写入的
    `compose.yml`；不要创建 `.env.production`。
-2. 从 `.env.staging.example` 生成 staging 专用随机数据库密码、管理员令牌和 session secret。
-   不复制生产值。
+2. 从 `.env.staging.example` 创建独立 `.env.staging`：只为 staging 数据库生成专用密码；其余
+   运行时服务值必须逐项复制当前生产实际值，但必须保留 staging 的 Trusted Proxy、公开 URL 和 OAuth
+   回调地址，且不得直接引用或挂载 `.env.production`。
 3. 创建 staging history 目录，例如
    `/home/ubuntu/greatsellai-hr-staging-deployments`，仅部署用户可写。
 4. DNS 将 `staging.hr.greatsellai.net` 指向同一服务器。生产 Caddy 的受版本控制配置只声明这个

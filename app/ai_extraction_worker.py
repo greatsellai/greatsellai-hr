@@ -98,7 +98,7 @@ def _log_worker_lifecycle_event(
     """
 
     try:
-        from app.observability import log_event
+        from app.observability import configure_observability_logging, log_event
     except ModuleNotFoundError as exc:
         if exc.name == "app.observability":
             return
@@ -106,6 +106,10 @@ def _log_worker_lifecycle_event(
 
     if event not in _SAFE_WORKER_LIFECYCLE_EVENTS:
         return
+    # The worker process does not construct the FastAPI application, so it
+    # must install the same isolated stdout handler before emitting its own
+    # events. The setup is idempotent and never changes legacy loggers.
+    configure_observability_logging()
     if event == "worker_cycle_failed":
         log_event(event, level=logging.ERROR, error_code="worker_cycle_failed")
         return

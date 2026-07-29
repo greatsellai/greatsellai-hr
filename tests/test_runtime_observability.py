@@ -118,11 +118,16 @@ def test_worker_lifecycle_logging_uses_only_fixed_safe_event_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[tuple[str, int, dict[str, object]]] = []
+    configured: list[bool] = []
     observability = ModuleType("app.observability")
 
     def capture(event: str, *, level: int = logging.INFO, **fields: object) -> None:
         captured.append((event, level, fields))
 
+    def configure() -> None:
+        configured.append(True)
+
+    observability.configure_observability_logging = configure  # type: ignore[attr-defined]
     observability.log_event = capture  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "app.observability", observability)
 
@@ -131,6 +136,7 @@ def test_worker_lifecycle_logging_uses_only_fixed_safe_event_fields(
     _log_worker_lifecycle_event("worker_cycle_failed")
     _log_worker_lifecycle_event("untrusted_event_name")
 
+    assert configured == [True, True, True]
     assert captured == [
         ("worker_started", logging.INFO, {}),
         ("worker_cycle_completed", logging.INFO, {}),

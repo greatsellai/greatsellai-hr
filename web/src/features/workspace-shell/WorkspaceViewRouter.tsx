@@ -109,6 +109,16 @@ export function WorkspaceViewRouter({
           onUpload={() => navigation.navigateToView("upload")}
         />
       )}
+      {view === "favorites" && (
+        <ResumeLibraryPage
+          formatError={feedback.formatError}
+          mode="favorites"
+          refreshToken={library.refreshToken}
+          selectedResumeId={library.selectedResumeId}
+          onOpenResume={onOpenLibraryResume}
+          onUpload={() => navigation.navigateToView("upload")}
+        />
+      )}
       {view === "filter" && (
         <FilterWorkspace
           appliedDraft={filter.appliedFilter}

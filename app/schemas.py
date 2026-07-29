@@ -1604,6 +1604,10 @@ class ResumeDetail(ApiModel):
     source_page_count: int
     parsed_page_count: int
     quality_flags: list[str]
+    # This is scoped to the authenticated recruiter, never a shared candidate
+    # property.  It lets the detail drawer render the correct action without
+    # exposing another member's saved list.
+    is_favorited: bool = False
 
 
 class ResumeSourceBlockResponse(ApiModel):
@@ -2441,6 +2445,7 @@ class ResumeLibraryItem(ApiModel):
     score_status: str | None = None
     score_template_name: str | None = None
     score_created_at: str | None = None
+    is_favorited: bool = False
 
 
 class ResumeLibraryResponse(ApiModel):
@@ -2448,6 +2453,11 @@ class ResumeLibraryResponse(ApiModel):
     total: int
     page: int
     page_size: int
+
+
+class CandidateFavoriteResponse(ApiModel):
+    candidate_id: str
+    is_favorited: bool
 
 
 class SavedFilterCreate(ApiModel):

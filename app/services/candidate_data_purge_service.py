@@ -21,6 +21,7 @@ from app.database import Database
 from app.models import (
     AiRun,
     Candidate,
+    CandidateFavorite,
     CandidateDataDeletionBatch,
     CandidateDataDeletionBatchItem,
     CandidateDataFileAccessGrant,
@@ -462,6 +463,12 @@ def _purge_database_rows(
             )
             if remaining is None:
                 session.execute(
+                    delete(CandidateFavorite).where(
+                        CandidateFavorite.organization_id == organization_id,
+                        CandidateFavorite.candidate_id == candidate_id,
+                    )
+                )
+                session.execute(
                     delete(Candidate).where(
                         Candidate.id == candidate_id,
                         Candidate.organization_id == organization_id,
@@ -641,6 +648,12 @@ def _purge_database_rows(
             )
         )
         if remaining is None:
+            session.execute(
+                delete(CandidateFavorite).where(
+                    CandidateFavorite.organization_id == organization_id,
+                    CandidateFavorite.candidate_id == candidate_id,
+                )
+            )
             session.execute(
                 delete(Candidate).where(
                     Candidate.id == candidate_id,

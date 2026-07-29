@@ -4,6 +4,7 @@ import type {
   AuthSession,
   CandidateCreateInput,
   CandidateCreated,
+  CandidateFavoriteResponse,
   CandidateDataAuditEventList,
   CandidateDataDeletionBatchList,
   CandidateDataDeletionRequest,
@@ -492,6 +493,20 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return request<CandidateCreated>("/candidates", { method: "POST", body: input });
     },
 
+    favoriteCandidate(candidateId: string): Promise<CandidateFavoriteResponse> {
+      return request<CandidateFavoriteResponse>(
+        `/candidates/${resourcePath(candidateId)}/favorite`,
+        { method: "PUT" },
+      );
+    },
+
+    unfavoriteCandidate(candidateId: string): Promise<CandidateFavoriteResponse> {
+      return request<CandidateFavoriteResponse>(
+        `/candidates/${resourcePath(candidateId)}/favorite`,
+        { method: "DELETE" },
+      );
+    },
+
     uploadResume(
       file: File,
       options: { idempotencyKey?: string | null } = {},
@@ -803,6 +818,14 @@ export function createApiClient(options: ApiClientOptions = {}) {
       const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (mailboxId) query.set("mailbox_id", mailboxId);
       return request<ResumeLibraryResponse>(`/resume-library?${query.toString()}`);
+    },
+
+    listCandidateFavorites(
+      page = 1,
+      pageSize = 50,
+    ): Promise<ResumeLibraryResponse> {
+      const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+      return request<ResumeLibraryResponse>(`/candidate-favorites?${query.toString()}`);
     },
 
     listSavedFilters(): Promise<SavedFilter[]> {

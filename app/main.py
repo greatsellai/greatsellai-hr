@@ -104,6 +104,7 @@ from app.schemas import (
     MailboxRetentionSummaryResponse,
     CandidateCreate,
     CandidateCreated,
+    CandidateFavoriteResponse,
     CandidateDataAuditEventListResponse,
     CandidateDataDeletionBatchListResponse,
     CandidateDataDeletionRequest,
@@ -306,6 +307,12 @@ from app.services.saved_filter_service import (
     list_saved_filters,
 )
 from app.services.search_service import SearchValidationError, search_candidates
+from app.services.candidate_favorite_service import (
+    CandidateFavoriteError,
+    favorite_candidate,
+    is_candidate_favorited,
+    unfavorite_candidate,
+)
 from app.services.resume_library_service import list_resume_library
 from app.services.resume_summary_job_service import (
     enqueue_resume_summary_job,
@@ -467,7 +474,7 @@ from app.services.workspace_feedback_service import (
 logger = logging.getLogger(__name__)
 
 
-def _resume_detail(resume: object) -> ResumeDetail:
+def _resume_detail(resume: object, *, is_favorited: bool = False) -> ResumeDetail:
     ai_extraction_status, ai_extraction_error = ai_extraction_state(resume)
     ai_summary_status, ai_summary_error = summary_generation_state(resume)
     return ResumeDetail(
@@ -488,6 +495,7 @@ def _resume_detail(resume: object) -> ResumeDetail:
         source_page_count=resume.source_page_count,
         parsed_page_count=resume.parsed_page_count,
         quality_flags=resume.quality_flags or [],
+        is_favorited=is_favorited,
     )
 
 
@@ -1622,8 +1630,12 @@ def _raise_talent_search_profile_error(exc: TalentSearchProfileServiceError) -> 
     raise HTTPException(status_code=response_status, detail=code) from exc
 
 
-def _resume_review_detail(resume: object) -> ResumeReviewDetail:
-    base = _resume_detail(resume)
+def _resume_review_detail(
+    resume: object,
+    *,
+    is_favorited: bool = False,
+) -> ResumeReviewDetail:
+    base = _resume_detail(resume, is_favorited=is_favorited)
     return ResumeReviewDetail(
         **base.model_dump(),
         original_filename=resume.original_filename,
@@ -4444,6 +4456,54 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         _commit_or_raise(session)
         return CandidateCreated(candidate_id=candidate.id)
 
+    @app.put(
+        "/v1/candidates/{candidate_id}/favorite",
+        response_model=CandidateFavoriteResponse,
+    )
+    def put_candidate_favorite(
+        candidate_id: str,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateFavoriteResponse:
+        try:
+            is_favorited = favorite_candidate(
+                session,
+                candidate_id=candidate_id,
+                user_id=principal.user.id,
+            )
+            _commit_or_raise(session)
+        except CandidateFavoriteError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return CandidateFavoriteResponse(
+            candidate_id=candidate_id,
+            is_favorited=is_favorited,
+        )
+
+    @app.delete(
+        "/v1/candidates/{candidate_id}/favorite",
+        response_model=CandidateFavoriteResponse,
+    )
+    def delete_candidate_favorite(
+        candidate_id: str,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> CandidateFavoriteResponse:
+        try:
+            is_favorited = unfavorite_candidate(
+                session,
+                candidate_id=candidate_id,
+                user_id=principal.user.id,
+            )
+            _commit_or_raise(session)
+        except CandidateFavoriteError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return CandidateFavoriteResponse(
+            candidate_id=candidate_id,
+            is_favorited=is_favorited,
+        )
+
     @app.post(
         "/v1/candidates/{candidate_id}/resumes",
         response_model=ResumeUploadResponse,
@@ -4696,32 +4756,46 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     @app.get(
         "/v1/resumes/{resume_id}",
         response_model=ResumeDetail,
-        dependencies=[Depends(require_single_admin)],
     )
     def get_resume_detail(
         resume_id: str,
+        principal: AuthPrincipal = Depends(require_single_admin),
         session: Session = Depends(get_session),
     ) -> ResumeDetail:
         try:
             resume = get_resume(session, resume_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-        return _resume_detail(resume)
+        return _resume_detail(
+            resume,
+            is_favorited=is_candidate_favorited(
+                session,
+                candidate_id=resume.candidate_id,
+                user_id=principal.user.id,
+            ),
+        )
 
     @app.get(
         "/v1/resumes/{resume_id}/review",
         response_model=ResumeReviewDetail,
-        dependencies=[Depends(require_single_admin)],
     )
     def get_resume_review_detail(
         resume_id: str,
+        principal: AuthPrincipal = Depends(require_single_admin),
         session: Session = Depends(get_session),
     ) -> ResumeReviewDetail:
         try:
             resume = get_resume(session, resume_id)
         except NotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-        return _resume_review_detail(resume)
+        return _resume_review_detail(
+            resume,
+            is_favorited=is_candidate_favorited(
+                session,
+                candidate_id=resume.candidate_id,
+                user_id=principal.user.id,
+            ),
+        )
 
     @app.post(
         "/v1/resumes/{resume_id}/file-access",
@@ -5441,6 +5515,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 50,
         mailbox_id: str | None = Query(default=None, min_length=1, max_length=64),
+        principal: AuthPrincipal = Depends(require_single_admin),
         session: Session = Depends(get_session),
     ) -> ResumeLibraryResponse:
         if mailbox_id is not None and session.scalar(
@@ -5455,6 +5530,25 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             page=page,
             page_size=page_size,
             mailbox_config_id=mailbox_id,
+            user_id=principal.user.id,
+        )
+
+    @app.get(
+        "/v1/candidate-favorites",
+        response_model=ResumeLibraryResponse,
+    )
+    def get_candidate_favorites(
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+        principal: AuthPrincipal = Depends(require_single_admin),
+        session: Session = Depends(get_session),
+    ) -> ResumeLibraryResponse:
+        return list_resume_library(
+            session,
+            page=page,
+            page_size=page_size,
+            user_id=principal.user.id,
+            favorites_only=True,
         )
 
     @app.post(

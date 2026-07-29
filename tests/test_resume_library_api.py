@@ -68,6 +68,7 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
         "score_status",
         "score_template_name",
         "score_created_at",
+        "is_favorited",
     }
     assert item["resume_id"] == resume_id
     assert item["candidate_id"] == candidate_id
@@ -92,6 +93,7 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["score_status"] == "succeeded"
     assert item["score_template_name"] == "Backend Engineer"
     assert item["score_created_at"] == score.json()["created_at"]
+    assert item["is_favorited"] is False
 
 
 def test_resume_library_keeps_pending_upload_visible_without_ai_outputs(client) -> None:

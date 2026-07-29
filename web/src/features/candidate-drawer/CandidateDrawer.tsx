@@ -50,7 +50,10 @@ export interface CandidateDrawerProps {
   languageCredentialOptions: FilterOptions["language_credentials"];
   scoreLoading: boolean;
   scoreError: string | null;
+  isFavorited: boolean;
+  favoriteLoading: boolean;
   onGenerateSummary: () => void;
+  onToggleFavorite: () => void;
   onCreateManualSummary: (
     summaryId: string,
     content: Record<string, string>,
@@ -85,7 +88,10 @@ export function CandidateDrawer({
   languageCredentialOptions,
   scoreLoading,
   scoreError,
+  isFavorited,
+  favoriteLoading,
   onGenerateSummary,
+  onToggleFavorite,
   onCreateManualSummary,
   onReparseSource,
   reparsingSource,
@@ -155,6 +161,20 @@ export function CandidateDrawer({
           </h2>
         </div>
         <div className="drawer-actions">
+          {candidate && (
+            <button
+              aria-busy={favoriteLoading}
+              aria-label={isFavorited ? "从收藏库移除候选人" : "收藏候选人"}
+              aria-pressed={isFavorited}
+              className={`button button-ghost candidate-favorite-button${isFavorited ? " is-favorited" : ""}`}
+              disabled={favoriteLoading}
+              onClick={onToggleFavorite}
+              type="button"
+            >
+              <Icon name="star" size={16} />
+              {favoriteLoading ? "正在保存" : isFavorited ? "已收藏" : "收藏候选人"}
+            </button>
+          )}
           {canManageCandidateData && candidate && (
             <button
               aria-busy={deleting}

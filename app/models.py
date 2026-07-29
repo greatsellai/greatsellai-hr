@@ -683,6 +683,42 @@ class Candidate(OrganizationScoped, CandidateDataLifecycle, Base):
     )
 
 
+class CandidateFavorite(OrganizationScoped, Base):
+    """One recruiter's private saved-candidate marker within a workspace.
+
+    A favorite intentionally belongs to both the workspace and the user.  A
+    shared boolean on ``Candidate`` would leak one recruiter's short list to
+    every other recruiter in the same workspace.
+    """
+
+    __tablename__ = "candidate_favorites"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "user_id",
+            "candidate_id",
+            name="uq_candidate_favorites_org_user_candidate",
+        ),
+        Index(
+            "ix_candidate_favorites_org_user_created",
+            "organization_id",
+            "user_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("candidates.id", ondelete="CASCADE"),
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"),
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
     __tablename__ = "resumes"
     __table_args__ = (

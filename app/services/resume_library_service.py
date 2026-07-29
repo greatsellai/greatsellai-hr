@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Resume, ResumeScore, ResumeSummary
+from app.models import CandidateFavorite, Resume, ResumeScore, ResumeSummary
 from app.schemas import ResumeLibraryItem, ResumeLibraryResponse
 from app.services.ai_extraction_job_service import ai_extraction_state
+from app.services.candidate_favorite_service import favorite_candidate_ids
 from app.services.resume_summary_job_service import summary_generation_state
 
 
@@ -101,15 +102,45 @@ def list_resume_library(
     page: int,
     page_size: int,
     mailbox_config_id: str | None = None,
+    user_id: str | None = None,
+    favorites_only: bool = False,
 ) -> ResumeLibraryResponse:
     """List uploaded resume versions without exposing raw extracted facts."""
 
     filters = []
     if mailbox_config_id is not None:
         filters.append(Resume.source_mailbox_config_id == mailbox_config_id)
-    total = int(
-        session.scalar(select(func.count(Resume.id)).where(*filters)) or 0
-    )
+    if favorites_only:
+        if not user_id:
+            raise ValueError("favorite_library_user_required")
+
+        # A favorite belongs to the candidate, not to one particular resume
+        # version.  Prefer the active version when one exists, but keep a
+        # newly uploaded or review-needed version visible as well.  Otherwise
+        # a recruiter could save a candidate and immediately lose it from the
+        # favorites library until asynchronous processing completes.
+        preferred_resume_id = (
+            select(Resume.id)
+            .where(Resume.candidate_id == CandidateFavorite.candidate_id)
+            .order_by(
+                Resume.is_active.desc(),
+                Resume.created_at.desc(),
+                Resume.id.desc(),
+            )
+            .limit(1)
+            .correlate(CandidateFavorite)
+            .scalar_subquery()
+        )
+        total_statement = (
+            select(func.count(CandidateFavorite.id))
+            .where(
+                CandidateFavorite.user_id == user_id,
+                preferred_resume_id.is_not(None),
+            )
+        )
+    else:
+        total_statement = select(func.count(Resume.id)).where(*filters)
+    total = int(session.scalar(total_statement) or 0)
     statement = (
         select(Resume)
         .options(
@@ -120,12 +151,34 @@ def list_resume_library(
             selectinload(Resume.summary_jobs),
             selectinload(Resume.scores).selectinload(ResumeScore.template),
         )
-        .where(*filters)
-        .order_by(Resume.created_at.desc(), Resume.id.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
     )
+    if favorites_only:
+        statement = (
+            statement.join(
+                CandidateFavorite,
+                CandidateFavorite.candidate_id == Resume.candidate_id,
+            )
+            .where(
+                CandidateFavorite.user_id == user_id,
+                Resume.id == preferred_resume_id,
+            )
+            .order_by(CandidateFavorite.created_at.desc(), CandidateFavorite.id.desc())
+        )
+    else:
+        statement = statement.where(*filters).order_by(
+            Resume.created_at.desc(), Resume.id.desc()
+        )
+    statement = statement.offset((page - 1) * page_size).limit(page_size)
     resumes = session.scalars(statement).all()
+    favorited_candidate_ids = (
+        favorite_candidate_ids(
+            session,
+            user_id=user_id,
+            candidate_ids=(resume.candidate_id for resume in resumes),
+        )
+        if user_id is not None
+        else set()
+    )
     items: list[ResumeLibraryItem] = []
     for resume in resumes:
         summary = _current_summary(resume)
@@ -155,6 +208,7 @@ def list_resume_library(
                 score_status=score.status if score else None,
                 score_template_name=score.template.name if score and score.template else None,
                 score_created_at=_isoformat(score.created_at) if score else None,
+                is_favorited=resume.candidate_id in favorited_candidate_ids,
             )
         )
     return ResumeLibraryResponse(

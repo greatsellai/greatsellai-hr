@@ -58,6 +58,8 @@ export function useCandidateDrawerController({
   const [drawerScoreError, setDrawerScoreError] = useState<string | null>(null);
   const [reparsingSource, setReparsingSource] = useState(false);
   const [enrichingFacts, setEnrichingFacts] = useState(false);
+  const [isFavorited, setIsFavorited] = useState(false);
+  const [favoriteLoading, setFavoriteLoading] = useState(false);
   const reviewRequestRef = useRef(0);
   const summaryRequestRef = useRef(0);
   const drawerScoreRequestRef = useRef(0);
@@ -82,6 +84,7 @@ export function useCandidateDrawerController({
         const detail = await api.getReview(resumeId);
         if (requestId === reviewRequestRef.current) {
           setReview(detail);
+          setIsFavorited(Boolean(detail.is_favorited));
           setSelectedResume((current) => {
             if (!current || current.resumeId !== detail.resume_id)
               return current;
@@ -156,6 +159,7 @@ export function useCandidateDrawerController({
       summaryRequestRef.current += 1;
       setReview(null);
       setSummaries([]);
+      setIsFavorited(false);
       setSelectedResume({ resumeId, candidateId, candidateName });
       setDrawerTab(tab);
       setDrawerOpen(true);
@@ -170,6 +174,7 @@ export function useCandidateDrawerController({
 
   const resetDrawer = useCallback(() => {
     setSelectedResume(null);
+    setIsFavorited(false);
     setDrawerOpen(false);
   }, []);
 
@@ -443,6 +448,32 @@ export function useCandidateDrawerController({
     }
   }, [enrichingFacts, formatError, notify, refreshReview, selectedResumeId]);
 
+  const toggleFavorite = useCallback(async () => {
+    const candidateId = selectedResume?.candidateId;
+    if (!candidateId || favoriteLoading) return;
+    setFavoriteLoading(true);
+    try {
+      const response = isFavorited
+        ? await api.unfavoriteCandidate(candidateId)
+        : await api.favoriteCandidate(candidateId);
+      setIsFavorited(response.is_favorited);
+      setReview((current) => (
+        current?.candidate_id === candidateId
+          ? { ...current, is_favorited: response.is_favorited }
+          : current
+      ));
+      onLibraryChanged();
+      notify(
+        "success",
+        response.is_favorited ? "已加入收藏库。" : "已从收藏库移除。",
+      );
+    } catch (error) {
+      notify("error", formatError(error));
+    } finally {
+      setFavoriteLoading(false);
+    }
+  }, [favoriteLoading, formatError, isFavorited, notify, onLibraryChanged, selectedResume?.candidateId]);
+
   const deleteSelectedResumeData = useCallback(
     async (): Promise<void> => {
       if (!selectedResumeId) throw new Error("resume_not_found");
@@ -478,6 +509,7 @@ export function useCandidateDrawerController({
     candidate: selectedResume,
     drawerTab,
     enrichingFacts,
+    favoriteLoading,
     isOpen: drawerOpen,
     onClose: closeDrawer,
     onCreateManualSummary: createManualSummary,
@@ -485,6 +517,7 @@ export function useCandidateDrawerController({
     onDownloadOriginal: downloadOriginalFile,
     onEnrichFacts: () => void enrichSelectedFacts(),
     onGenerateSummary: () => void generateSummary(),
+    onToggleFavorite: () => void toggleFavorite(),
     onNotify: notify,
     onPreviewOriginal: () => void previewOriginalFile(),
     onRefreshScores: () => {
@@ -499,6 +532,7 @@ export function useCandidateDrawerController({
     reparsingSource,
     review,
     reviewLoading,
+    isFavorited,
     scoreError: drawerScoreError,
     scoreLoading: drawerScoreLoading,
     scores: drawerScores,

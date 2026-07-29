@@ -638,6 +638,7 @@ export interface ResumeDetail {
   source_page_count: number;
   parsed_page_count: number;
   quality_flags: string[];
+  is_favorited: boolean;
 }
 
 /**
@@ -1303,6 +1304,7 @@ export interface ResumeLibraryItem {
   score_status: string | null;
   score_template_name: string | null;
   score_created_at: string | null;
+  is_favorited: boolean;
 }
 
 export interface ResumeLibraryResponse {
@@ -1310,6 +1312,11 @@ export interface ResumeLibraryResponse {
   total: number;
   page: number;
   page_size: number;
+}
+
+export interface CandidateFavoriteResponse {
+  candidate_id: string;
+  is_favorited: boolean;
 }
 
 export interface SavedFilterCreate {

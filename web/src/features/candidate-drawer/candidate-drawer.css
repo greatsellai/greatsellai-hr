@@ -62,6 +62,18 @@
   align-items: center;
 }
 
+.backoffice-ui-root .candidate-drawer .candidate-favorite-button.is-favorited {
+  color: var(--red);
+  background: var(--red-tint);
+  border-color: rgb(215 22 24 / 0.18);
+}
+
+.backoffice-ui-root .candidate-drawer .candidate-favorite-button.is-favorited:hover:not(:disabled) {
+  color: var(--red-pressed);
+  background: #fbdedb;
+  border-color: rgb(215 22 24 / 0.28);
+}
+
 .backoffice-ui-root .candidate-drawer .source-quality-notice {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

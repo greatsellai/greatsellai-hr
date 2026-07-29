@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Icon } from "../../icons";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
@@ -25,6 +25,7 @@ const RESUME_LIBRARY_PAGE_SIZE = 50;
 
 interface ResumeLibraryPageProps {
   formatError: (error: unknown) => string;
+  mode?: "library" | "favorites";
   onOpenResume: (item: ResumeLibraryItem) => void;
   onUpload: () => void;
   refreshToken: number;
@@ -104,41 +105,56 @@ function resumeLibraryScoreNotice(status: string | null): string | null {
 
 export function ResumeLibraryPage({
   formatError,
+  mode = "library",
   selectedResumeId,
   refreshToken,
   onOpenResume,
   onUpload,
 }: ResumeLibraryPageProps) {
+  const favoritesOnly = mode === "favorites";
   const [library, setLibrary] = useState<ResumeLibraryResponse | null>(null);
   const [mailboxSources, setMailboxSources] = useState<MailboxConfig[]>([]);
   const [sourceMailboxId, setSourceMailboxId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const libraryRequestRef = useRef(0);
 
   const loadLibrary = useCallback(async () => {
+    const requestId = ++libraryRequestRef.current;
     setLoading(true);
     setError(null);
     try {
-      setLibrary(
-        await api.listResumeLibrary(
-          page,
-          RESUME_LIBRARY_PAGE_SIZE,
-          sourceMailboxId,
-        ),
-      );
+      const response = favoritesOnly
+        ? await api.listCandidateFavorites(page, RESUME_LIBRARY_PAGE_SIZE)
+        : await api.listResumeLibrary(
+            page,
+            RESUME_LIBRARY_PAGE_SIZE,
+            sourceMailboxId,
+          );
+      if (requestId === libraryRequestRef.current) setLibrary(response);
     } catch (loadError) {
-      setError(formatError(loadError));
+      if (requestId === libraryRequestRef.current) {
+        setError(formatError(loadError));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === libraryRequestRef.current) setLoading(false);
     }
-  }, [formatError, page, sourceMailboxId]);
+  }, [favoritesOnly, formatError, page, sourceMailboxId]);
 
   useEffect(() => {
     void loadLibrary();
+    return () => {
+      libraryRequestRef.current += 1;
+    };
   }, [loadLibrary, refreshToken]);
 
   useEffect(() => {
+    if (favoritesOnly) {
+      setMailboxSources([]);
+      setSourceMailboxId(null);
+      return undefined;
+    }
     let cancelled = false;
     void api.listMailboxConfigs(true)
       .then((response) => {
@@ -148,7 +164,7 @@ export function ResumeLibraryPage({
       // ingestion. In that case there is simply no source-specific filter.
       .catch(() => undefined);
     return () => { cancelled = true; };
-  }, []);
+  }, [favoritesOnly]);
 
   useEffect(() => {
     if (
@@ -199,10 +215,10 @@ export function ResumeLibraryPage({
     <div className="page-frame resume-library-page">
       <header className="page-heading">
         <div>
-          <h1>简历库</h1>
+          <h1>{favoritesOnly ? "收藏库" : "简历库"}</h1>
         </div>
         <div className="resume-library-actions">
-          {mailboxSources.length ? (
+          {!favoritesOnly && mailboxSources.length ? (
             <div className="resume-library-source-filter">
               <label className="sr-only" id="resume-library-source-label">
                 按收件通道筛选
@@ -227,13 +243,15 @@ export function ResumeLibraryPage({
           >
             刷新
           </BackofficeButton>
-          <BackofficeButton
-            icon={<Icon name="upload" size={16} />}
-            onClick={onUpload}
-            tone="primary"
-          >
-            上传简历
-          </BackofficeButton>
+          {!favoritesOnly && (
+            <BackofficeButton
+              icon={<Icon name="upload" size={16} />}
+              onClick={onUpload}
+              tone="primary"
+            >
+              上传简历
+            </BackofficeButton>
+          )}
         </div>
       </header>
 
@@ -268,7 +286,7 @@ export function ResumeLibraryPage({
         </p>
       )}
 
-      <section aria-label="简历库列表" className="library-table-frame">
+      <section aria-label={favoritesOnly ? "收藏候选人列表" : "简历库列表"} className="library-table-frame">
         {loading && !library ? (
           <TableSkeleton />
         ) : items.length ? (
@@ -429,17 +447,21 @@ export function ResumeLibraryPage({
               <span className="empty-glyph">
                 <Icon name="folder" size={24} />
               </span>
-              <h2>简历库还是空的</h2>
+              <h2>{favoritesOnly ? "还没有收藏候选人" : "简历库还是空的"}</h2>
               <p>
-                上传简历后，它会立即出现在这里；AI 提取、总结和评分会逐步更新。
+                {favoritesOnly
+                  ? "在候选人详情中点击收藏，即可在这里集中查看。"
+                  : "上传简历后，它会立即出现在这里；AI 提取、总结和评分会逐步更新。"}
               </p>
-              <BackofficeButton
-                icon={<Icon name="upload" size={16} />}
-                onClick={onUpload}
-                tone="primary"
-              >
-                上传简历
-              </BackofficeButton>
+              {!favoritesOnly && (
+                <BackofficeButton
+                  icon={<Icon name="upload" size={16} />}
+                  onClick={onUpload}
+                  tone="primary"
+                >
+                  上传简历
+                </BackofficeButton>
+              )}
             </div>
           </div>
         )}

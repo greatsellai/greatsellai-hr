@@ -1,5 +1,6 @@
 export type WorkspaceNavigationView =
   | "library"
+  | "favorites"
   | "filter"
   | "upload"
   | "score"

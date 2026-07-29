@@ -19,6 +19,7 @@ const navigation: Array<{
   icon: IconName;
 }> = [
   { view: "library", label: "简历库", icon: "folder" },
+  { view: "favorites", label: "收藏库", icon: "star" },
   { view: "filter", label: "筛选工作台", icon: "filter" },
   { view: "upload", label: "上传简历", icon: "upload" },
   { view: "score", label: "评分模板", icon: "layers" },

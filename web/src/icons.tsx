@@ -23,6 +23,7 @@ export type IconName =
   | "refresh"
   | "search"
   | "spark"
+  | "star"
   | "upload"
   | "user";
 
@@ -54,6 +55,7 @@ const paths: Record<IconName, ReactNode> = {
   refresh: <><path d="M20 11a8 8 0 1 0 2 5.4" /><path d="M20 4v7h-7" /></>,
   search: <><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></>,
   spark: <><path d="m12 3 1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6zM19 16l.7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7z" /></>,
+  star: <><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z" /></>,
   upload: <><path d="M12 16V4M7 9l5-5 5 5M5 20h14" /></>,
   user: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></>
 };

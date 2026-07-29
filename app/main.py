@@ -46,6 +46,10 @@ from app.models import (
     ProductPlan,
     Resume,
 )
+from app.observability import (
+    RequestCorrelationMiddleware,
+    configure_observability_logging,
+)
 from app.schemas import (
     AuthLogin,
     AuthRegistration,
@@ -1876,6 +1880,7 @@ async def require_ai_jd_feature(
 
 def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     settings = settings_override or AppSettings.from_env()
+    configure_observability_logging()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1919,6 +1924,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         same_site="strict",
         https_only=settings.session_cookie_secure,
     )
+    app.add_middleware(RequestCorrelationMiddleware)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

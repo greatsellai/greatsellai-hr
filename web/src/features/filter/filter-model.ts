@@ -27,10 +27,11 @@ export interface FilterDraft {
   freshGraduateEndMonth: string;
   schoolName: string;
   major: string;
+  minAcademicScorePercent: number;
   minAverageScore: string;
   minGpaPercent: string;
   maxRankPosition: string;
-  maxRankPercent: string;
+  maxRankPercent: number;
   experienceName: string;
   company: string;
   title: string;
@@ -102,6 +103,11 @@ export function clampMonths(value: number): number {
   return Math.max(0, Math.min(240, Math.round(value / 12) * 12));
 }
 
+export function clampPercentage(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 export function formatDuration(months: number): string {
   if (months <= 0) return "0 个月";
   const years = Math.floor(months / 12);
@@ -111,6 +117,16 @@ export function formatDuration(months: number): string {
 
 export function formatMinimumDuration(months: number): string {
   return months <= 0 ? "不限" : formatDuration(months);
+}
+
+export function formatMinimumAcademicScore(percent: number): string {
+  return percent <= 0 ? "不限" : `不低于 ${percent} 分`;
+}
+
+export function formatMaximumRankPercent(percent: number): string {
+  if (percent <= 0) return "不限";
+  if (percent === 100) return "排名前 100%（仅有排名记录）";
+  return `排名前 ${percent}%`;
 }
 
 export function resolvedInstitutionClassificationOptions(

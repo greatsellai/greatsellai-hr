@@ -2039,6 +2039,11 @@ class EducationFilter(ApiModel):
         max_length=6,
     )
     institution_tiers_any_of: list[InstitutionTier] = Field(default_factory=list, max_length=10)
+    # A recruiter-facing convenience threshold.  A record satisfies it when
+    # either its explicit percentage average or its normalized GPA percentage
+    # reaches the selected value.  The more specific fields below remain
+    # available for API and Agent callers that intentionally require both.
+    min_academic_score_percent: float | None = Field(default=None, gt=0, le=100)
     min_average_score: float | None = Field(default=None, ge=0, le=100)
     min_gpa_percent: float | None = Field(default=None, ge=0, le=100)
     max_rank_position: int | None = Field(default=None, ge=1, le=1_000_000)

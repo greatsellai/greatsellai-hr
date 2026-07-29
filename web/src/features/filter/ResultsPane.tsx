@@ -5,6 +5,8 @@ import { Icon } from "../../icons";
 import {
   degreeLabels,
   formatDuration,
+  formatMaximumRankPercent,
+  formatMinimumAcademicScore,
   institutionClassificationLabel,
   institutionClassificationLabels,
   sortInstitutionClassifications,
@@ -54,6 +56,9 @@ function activeResultDisplayColumns(draft: FilterDraft): ResultDisplayColumn[] {
 
   if (draft.minEmploymentOrInternshipMonths > 0) {
     add("employment_or_internship_months", "工作年限");
+  }
+  if (draft.minAcademicScorePercent > 0 || draft.maxRankPercent > 0) {
+    add("academic_performance", "学业表现");
   }
   if (hasActiveGraduationFilter(draft)) {
     add("graduation", "毕业时间");
@@ -283,6 +288,17 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
       `至少 ${formatDuration(draft.minEmploymentOrInternshipMonths)}`,
     );
   }
+  const academicConditions = [
+    draft.minAcademicScorePercent > 0
+      ? formatMinimumAcademicScore(draft.minAcademicScorePercent)
+      : null,
+    draft.maxRankPercent > 0
+      ? formatMaximumRankPercent(draft.maxRankPercent)
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  if (academicConditions.length) {
+    add("学业表现", academicConditions.join(" · "));
+  }
   if (hasActiveGraduationFilter(draft)) {
     const graduationLabel =
       draft.graduationStatus === "fresh" ? "应届" : "往届";
@@ -334,7 +350,7 @@ export function ResultsPane({
   const displayColumns = activeResultDisplayColumns(appliedDraft);
   const hasAppliedDisplayColumns = displayColumns.length > 0;
   const appliedFilters = appliedFilterLabels(appliedDraft);
-  const visibleAppliedFilters = appliedFilters.slice(0, 5);
+  const visibleAppliedFilters = appliedFilters.slice(0, 6);
   const hiddenAppliedFilterCount =
     appliedFilters.length - visibleAppliedFilters.length;
 

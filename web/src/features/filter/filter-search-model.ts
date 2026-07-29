@@ -2,12 +2,14 @@ import type {
   CandidateSearchRequest,
   CandidateSearchResponse,
   DegreeLevel,
+  EducationFilter,
   FilterOptions,
   InstitutionClassification,
   InstitutionTier,
 } from "../../types";
 import {
   experienceTypeOptions,
+  clampPercentage,
   institutionClassificationLabels,
   institutionClassificationOptions,
   sortInstitutionClassifications,
@@ -30,10 +32,11 @@ const defaultFilterDraft: FilterDraft = {
   freshGraduateEndMonth: `${new Date().getFullYear() + 1}-12`,
   schoolName: "",
   major: "",
+  minAcademicScorePercent: 0,
   minAverageScore: "",
   minGpaPercent: "",
   maxRankPosition: "",
-  maxRankPercent: "",
+  maxRankPercent: 0,
   experienceName: "",
   company: "",
   title: "",
@@ -245,12 +248,18 @@ export function draftToSearchRequest(
     request.fresh_graduate_end_month = draft.freshGraduateEndMonth;
   }
   if (draft.degrees.length) request.highest_degree_in = draft.degrees;
+  const educationFilter: EducationFilter = {};
   if (institutionClassifications.length) {
-    request.education_any_of = [
-      {
-        institution_classifications_any_of: institutionClassifications,
-      },
-    ];
+    educationFilter.institution_classifications_any_of = institutionClassifications;
+  }
+  if (draft.minAcademicScorePercent > 0) {
+    educationFilter.min_academic_score_percent = draft.minAcademicScorePercent;
+  }
+  if (draft.maxRankPercent > 0) {
+    educationFilter.max_rank_percent = draft.maxRankPercent;
+  }
+  if (Object.keys(educationFilter).length) {
+    request.education_any_of = [educationFilter];
   }
   if (draft.keywords.length) {
     request.keywords = draft.keywords;
@@ -351,6 +360,7 @@ export function searchRequestToDraft(
   }
   const savedDegrees =
     request.highest_degree_in ?? request.education_any_of?.[0]?.degree_in ?? [];
+  const savedEducation = request.education_any_of?.[0];
   const defaults = freshDefaultFilter();
   const savedKeywords = request.keywords?.length
     ? request.keywords
@@ -385,6 +395,10 @@ export function searchRequestToDraft(
         : "any",
       freshGraduateStartMonth: graduationDraft.freshGraduateStartMonth,
       freshGraduateEndMonth: graduationDraft.freshGraduateEndMonth,
+      minAcademicScorePercent: clampPercentage(
+        savedEducation?.min_academic_score_percent ?? 0,
+      ),
+      maxRankPercent: clampPercentage(savedEducation?.max_rank_percent ?? 0),
       keywords: [...new Set(savedKeywords)],
       keywordsMode: keywordMode,
     },

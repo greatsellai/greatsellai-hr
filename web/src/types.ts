@@ -940,6 +940,8 @@ export interface EducationFilter {
    * It remains typed only so saved historical filters can be handled safely.
    */
   institution_tiers_any_of?: InstitutionTier[];
+  /** Matches either an explicit average score or a normalized GPA percentage. */
+  min_academic_score_percent?: number | null;
   min_average_score?: number | null;
   min_gpa_percent?: number | null;
   max_rank_position?: number | null;

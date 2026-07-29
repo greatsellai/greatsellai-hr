@@ -1,7 +1,10 @@
 import { type KeyboardEvent, useState } from "react";
 import { Icon } from "../../icons";
 import {
+  clampPercentage,
   clampMonths,
+  formatMaximumRankPercent,
+  formatMinimumAcademicScore,
   formatMinimumDuration,
   resolvedInstitutionClassificationOptions,
   sortInstitutionClassifications,
@@ -172,6 +175,72 @@ export function FilterPanel({
                 </label>
               ))}
             </div>
+          </div>
+        </section>
+
+        <section className="filter-section">
+          <div className="filter-section-heading">
+            <h3>学业表现</h3>
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="min-academic-score">
+              最低成绩 / GPA（百分制）
+            </label>
+            <input
+              aria-describedby="min-academic-score-note"
+              aria-valuetext={formatMinimumAcademicScore(
+                draft.minAcademicScorePercent,
+              )}
+              className="range-input"
+              id="min-academic-score"
+              max="100"
+              min="0"
+              onChange={(event) =>
+                updateAfterTyping({
+                  minAcademicScorePercent: clampPercentage(
+                    Number(event.target.value),
+                  ),
+                })
+              }
+              step="1"
+              type="range"
+              value={draft.minAcademicScorePercent}
+            />
+            <div className="range-values" aria-live="polite">
+              <span>{formatMinimumAcademicScore(draft.minAcademicScorePercent)}</span>
+              <span>100 分</span>
+            </div>
+            <p className="filter-field-note" id="min-academic-score-note">
+              平均分或标准化 GPA 达到门槛即可命中，仅使用简历原文明确写出的分数。
+            </p>
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="max-rank-percent">
+              成绩排名前
+            </label>
+            <input
+              aria-describedby="max-rank-percent-note"
+              aria-valuetext={formatMaximumRankPercent(draft.maxRankPercent)}
+              className="range-input"
+              id="max-rank-percent"
+              max="100"
+              min="0"
+              onChange={(event) =>
+                updateAfterTyping({
+                  maxRankPercent: clampPercentage(Number(event.target.value)),
+                })
+              }
+              step="1"
+              type="range"
+              value={draft.maxRankPercent}
+            />
+            <div className="range-values" aria-live="polite">
+              <span>{formatMaximumRankPercent(draft.maxRankPercent)}</span>
+              <span>排名前 100%（需有排名）</span>
+            </div>
+            <p className="filter-field-note" id="max-rank-percent-note">
+              仅匹配简历明确给出的名次和总人数。选择 100% 时仍只返回有明确排名记录的简历；当前不区分专业、班级或院系的排名范围。
+            </p>
           </div>
         </section>
 

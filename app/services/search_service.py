@@ -250,6 +250,17 @@ def _matches_education(
             )
         )
         and (
+            filter_item.min_academic_score_percent is None
+            or (
+                education.average_score is not None
+                and education.average_score >= filter_item.min_academic_score_percent
+            )
+            or (
+                education.gpa_percent is not None
+                and education.gpa_percent >= filter_item.min_academic_score_percent
+            )
+        )
+        and (
             filter_item.min_average_score is None
             or (
                 education.average_score is not None
@@ -1088,6 +1099,27 @@ def search_candidates(
                         evidence_block_ids=education_block_ids,
                     )
                 academic_values: list[str | None] = []
+                if (
+                    filter_item.min_academic_score_percent is not None
+                    and education.average_score is not None
+                    and education.average_score
+                    >= filter_item.min_academic_score_percent
+                ):
+                    academic_values.append(f"平均分 {education.average_score:g}")
+                if (
+                    filter_item.min_academic_score_percent is not None
+                    and education.gpa_percent is not None
+                    and education.gpa_percent
+                    >= filter_item.min_academic_score_percent
+                ):
+                    if education.gpa_value is not None and education.gpa_scale is not None:
+                        academic_values.append(
+                            "GPA "
+                            f"{education.gpa_value:g}/{education.gpa_scale:g} "
+                            f"({education.gpa_percent:g}%)"
+                        )
+                    else:
+                        academic_values.append(f"GPA {education.gpa_percent:g}%")
                 if (
                     filter_item.min_average_score is not None
                     and education.average_score is not None

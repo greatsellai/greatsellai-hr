@@ -290,6 +290,9 @@ _EDUCATION_FILTER_SCHEMA: dict[str, Any] = {
             ]},
             "maxItems": 6,
         },
+        "min_academic_score_percent": {
+            "type": "number", "exclusiveMinimum": 0, "maximum": 100,
+        },
         "min_average_score": {"type": "number", "minimum": 0, "maximum": 100},
         "min_gpa_percent": {"type": "number", "minimum": 0, "maximum": 100},
         "max_rank_position": {"type": "integer", "minimum": 1},

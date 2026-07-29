@@ -9,6 +9,7 @@ export type AdminView =
   | "feedback"
   | "plans"
   | "ai"
+  | "runtime"
   | "audit";
 
 export type RequestState = "idle" | "loading" | "ready" | "error";
@@ -33,6 +34,41 @@ export interface PlatformDashboard {
   ai_runs_failed: number;
   ai_cost_cny_micros: number;
   ai_cost_unavailable_runs: number;
+}
+
+export type RuntimeLiveness = "live" | "stale" | "stopped" | "missing";
+
+export interface PlatformRuntimeWorker {
+  worker_kind: string;
+  liveness: RuntimeLiveness;
+  started_at: string | null;
+  last_seen_at: string | null;
+  last_cycle_completed_at: string | null;
+  last_error_code: string | null;
+}
+
+export interface PlatformRuntimeQueue {
+  queue_key: string;
+  queued_count: number;
+  running_count: number;
+  failed_count: number;
+  oldest_pending_at: string | null;
+}
+
+export interface PlatformRuntimeFailure {
+  queue_key: string;
+  error_code: string;
+  occurred_at: string;
+  attempt_count: number | null;
+}
+
+export interface PlatformRuntimeOverview {
+  generated_at: string;
+  worker_stale_after_seconds: number;
+  worker_liveness: RuntimeLiveness;
+  workers: PlatformRuntimeWorker[];
+  queues: PlatformRuntimeQueue[];
+  recent_failures: PlatformRuntimeFailure[];
 }
 
 export interface PlatformOrganizationSummary {

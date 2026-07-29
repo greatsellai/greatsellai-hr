@@ -12,6 +12,7 @@ import type { AdminView } from "./admin-types";
 import { AdminOverviewPage } from "./pages/AdminOverviewPage";
 import { AdminOrganizationsPage } from "./pages/AdminOrganizationsPage";
 import { AdminFeedbackPage } from "./pages/AdminFeedbackPage";
+import { AdminRuntimePage } from "./pages/AdminRuntimePage";
 import {
   AdminAiPage,
   AdminAuditPage,
@@ -33,6 +34,7 @@ const navigation: Array<{
   { view: "feedback", label: "用户反馈", description: "原始反馈与奖励", icon: "document", group: "运营" },
   { view: "plans", label: "套餐与试用", description: "价格与功能范围", icon: "layers", group: "运营" },
   { view: "ai", label: "AI 运营", description: "运行、用量与配置", icon: "spark", group: "运营" },
+  { view: "runtime", label: "运行诊断", description: "服务、Worker 与队列", icon: "activity", group: "治理" },
   { view: "audit", label: "操作审计", description: "平台变更记录", icon: "history", group: "治理" },
 ];
 
@@ -48,6 +50,7 @@ const viewPaths: Record<AdminView, string> = {
   feedback: `${platformBasePath}/feedback`,
   plans: `${platformBasePath}/plans`,
   ai: `${platformBasePath}/ai`,
+  runtime: `${platformBasePath}/runtime`,
   audit: `${platformBasePath}/audit`,
 };
 
@@ -58,6 +61,7 @@ function viewFromPath(pathname = window.location.pathname): AdminView {
   if (segment === "feedback") return "feedback";
   if (segment === "plans") return "plans";
   if (segment === "ai") return "ai";
+  if (segment === "runtime") return "runtime";
   if (segment === "audit") return "audit";
   return "overview";
 }
@@ -307,6 +311,8 @@ export default function AdminApp() {
             <AdminPlansPage />
           ) : view === "ai" ? (
             <AdminAiPage />
+          ) : view === "runtime" ? (
+            <AdminRuntimePage />
           ) : (
             <AdminAuditPage />
           )}

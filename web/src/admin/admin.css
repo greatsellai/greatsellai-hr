@@ -641,6 +641,105 @@
   font-size: 0.75rem;
 }
 
+.admin-runtime-metric-strip strong .admin-status {
+  margin-top: 0.125rem;
+  font-size: 0.875rem;
+}
+
+.admin-runtime-panel {
+  margin-top: 1rem;
+}
+
+.admin-runtime-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+
+.admin-runtime-table {
+  width: 100%;
+  min-width: 43rem;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.admin-runtime-table th,
+.admin-runtime-table td {
+  padding: 0.75rem;
+  color: var(--ink-soft);
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-runtime-table thead th {
+  color: var(--ink-soft);
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+.admin-runtime-table tbody th {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.admin-runtime-table tbody tr:last-child th,
+.admin-runtime-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.admin-runtime-table code,
+.admin-runtime-failure-list code {
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.admin-runtime-failure-list {
+  display: grid;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+}
+
+.admin-runtime-failure-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  min-height: 4rem;
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-runtime-failure-list li:last-child {
+  border-bottom: 0;
+}
+
+.admin-runtime-failure-list li > span:nth-child(2) {
+  display: grid;
+  gap: 0.175rem;
+  min-width: 0;
+}
+
+.admin-runtime-failure-list strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+}
+
+.admin-runtime-failure-list small,
+.admin-runtime-failure-list time {
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+}
+
+.admin-runtime-failure-list time {
+  white-space: nowrap;
+}
+
 .admin-compact-list {
   padding: 0;
   margin: 0;

@@ -16,6 +16,7 @@ import type {
   OrganizationQuery,
   PlatformAuditPage,
   PlatformDashboard,
+  PlatformRuntimeOverview,
   PlatformOrganizationDetail,
   PlatformOrganizationPage,
   PlatformOrganizationUpdate,
@@ -151,6 +152,7 @@ export const adminApi = {
   getSession: () => request<AuthSession>("/auth/session"),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
   getDashboard: () => request<PlatformDashboard>("/platform/dashboard"),
+  getRuntimeOverview: () => request<PlatformRuntimeOverview>("/platform/runtime/overview"),
   listOrganizations: (query: OrganizationQuery = {}) =>
     request<PlatformOrganizationPage>(`/platform/organizations${queryString(query)}`),
   getOrganization: (organizationId: string) =>

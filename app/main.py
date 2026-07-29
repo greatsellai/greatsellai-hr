@@ -49,6 +49,7 @@ from app.models import (
 from app.observability import (
     RequestCorrelationMiddleware,
     configure_observability_logging,
+    current_request_id,
 )
 from app.schemas import (
     AuthLogin,
@@ -1437,13 +1438,16 @@ def _candidate_data_session_nonce(request: Request) -> str:
 
 
 def _candidate_data_request_id(request: Request) -> str | None:
-    value = request.headers.get("x-request-id")
-    if value is None:
-        return None
-    normalized = value.strip()
-    if not normalized or len(normalized) > 128:
-        return None
-    return normalized
+    """Return the middleware-issued opaque ID for a durable audit record.
+
+    Request headers are untrusted input: using their raw value here would turn
+    the audit ledger into a storage channel for candidate data or credentials.
+    The request-correlation middleware has already generated or validated the
+    only ID allowed to cross this boundary.
+    """
+
+    del request
+    return current_request_id()
 
 
 def _deliver_email_verification(
@@ -2524,7 +2528,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: PlatformOrganizationPatch,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
-        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> PlatformOrganizationDetailResponse:
         try:
             response = patch_platform_organization(
@@ -2532,7 +2535,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 organization_id=organization_id,
                 payload=payload,
                 actor_user_id=principal.user.id,
-                request_id=x_request_id,
+                request_id=current_request_id(),
             )
             _commit_or_raise(session)
             return response
@@ -2583,7 +2586,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: PlatformUserPatch,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
-        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> PlatformUserDetailResponse:
         try:
             response = patch_platform_user(
@@ -2591,7 +2593,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 user_id=user_id,
                 payload=payload,
                 actor_user_id=principal.user.id,
-                request_id=x_request_id,
+                request_id=current_request_id(),
             )
             _commit_or_raise(session)
             return response
@@ -2643,7 +2645,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: ProductPlanUpdate,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
-        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> ProductPlanResponse:
         try:
             plan = session.scalar(select(ProductPlan).where(ProductPlan.code == plan_code))
@@ -2659,7 +2660,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 reason=payload.reason or "platform_plan_updated",
                 before_state=before,
                 after_state=product_plan_snapshot(plan) if plan is not None else {},
-                request_id=x_request_id,
+                request_id=current_request_id(),
             )
             _commit_or_raise(session)
             return response
@@ -2683,7 +2684,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: OrganizationPlanAssign,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
-        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> OrganizationPlanResponse:
         try:
             organization = session.get(Organization, organization_id)
@@ -2708,7 +2708,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     if organization is not None
                     else {}
                 ),
-                request_id=x_request_id,
+                request_id=current_request_id(),
             )
             _commit_or_raise(session)
             return response
@@ -2735,7 +2735,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: AiProviderProfileCreate,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
-        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiProviderProfileResponse:
         try:
             response = create_provider_profile(
@@ -2756,7 +2755,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     "driver": response.driver,
                     "is_enabled": response.is_enabled,
                 },
-                request_id=x_request_id,
+                request_id=current_request_id(),
             )
             _commit_or_raise(session)
             return response
@@ -2783,7 +2782,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: AiModelProfileCreate,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
-        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiModelProfileResponse:
         try:
             response = create_model_profile(session, payload=payload)
@@ -2801,7 +2799,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     "capabilities": list(response.capabilities),
                     "is_enabled": response.is_enabled,
                 },
-                request_id=x_request_id,
+                request_id=current_request_id(),
             )
             _commit_or_raise(session)
             return response
@@ -2828,7 +2826,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: AiModelPriceVersionCreate,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
-        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiModelPriceVersionResponse:
         try:
             response = create_model_price_version(
@@ -2875,7 +2872,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     ),
                     "is_active": response.is_active,
                 },
-                request_id=x_request_id,
+                request_id=current_request_id(),
             )
             _commit_or_raise(session)
             return response
@@ -2916,7 +2913,6 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         payload: AiRoutePolicyPublish,
         principal: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
-        x_request_id: Annotated[str | None, Header(max_length=128)] = None,
     ) -> AiRoutePolicyVersionResponse:
         try:
             current_policy = next(
@@ -2958,7 +2954,7 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                         for target in response.targets
                     ],
                 },
-                request_id=x_request_id,
+                request_id=current_request_id(),
             )
             _commit_or_raise(session)
             return response

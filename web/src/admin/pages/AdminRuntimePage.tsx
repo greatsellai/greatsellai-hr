@@ -12,15 +12,15 @@ import {
 import type { PlatformRuntimeOverview, RequestState, RuntimeLiveness } from "../admin-types";
 
 const workerLabels: Record<string, string> = {
-  extraction: "解析与 AI 任务 Worker",
+  background: "后台任务 Worker",
 };
 
 const queueLabels: Record<string, string> = {
   document_extraction: "文档解析",
   ai_extraction: "AI 提取",
   resume_summary: "自动总结",
-  job_match_batch: "JD 匹配",
-  resume_score_batch: "批量评分",
+  jd_match_item: "JD 匹配",
+  resume_score_item: "批量评分",
   mailbox_background: "邮箱同步",
   transactional_email: "事务邮件",
   workspace_feedback_reward: "反馈奖励",

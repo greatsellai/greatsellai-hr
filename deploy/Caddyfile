@@ -8,6 +8,11 @@
 	handle @health {
 		reverse_proxy api:8000
 	}
+
+	@readyz path /readyz
+	handle @readyz {
+		reverse_proxy api:8000
+	}
 }
 
 (frontend) {
@@ -44,6 +49,12 @@
 
 	@compat_health path /greatsellhr/health
 	handle @compat_health {
+		uri strip_prefix /greatsellhr
+		reverse_proxy api:8000
+	}
+
+	@compat_readyz path /greatsellhr/readyz
+	handle @compat_readyz {
 		uri strip_prefix /greatsellhr
 		reverse_proxy api:8000
 	}

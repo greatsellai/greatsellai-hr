@@ -56,6 +56,12 @@ def test_combined_upload_idempotency_replays_the_original_upload(client) -> None
             "extraction_status": first.json()["extraction_status"],
             "ai_extraction_status": first.json()["ai_extraction_status"],
             "ai_extraction_error": first.json()["ai_extraction_error"],
+            "candidate_name_extraction_status": first.json()[
+                "candidate_name_extraction_status"
+            ],
+            "candidate_name_extraction_error": first.json()[
+                "candidate_name_extraction_error"
+            ],
             "ai_summary_status": first.json()["ai_summary_status"],
             "ai_summary_error": first.json()["ai_summary_error"],
             "quality_flags": first.json()["quality_flags"],

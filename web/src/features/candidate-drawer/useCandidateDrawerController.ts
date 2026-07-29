@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import {
   AI_STATUS_POLL_INTERVAL_MS,
+  aiExtractionIsInProgress,
   aiSummaryIsInProgress,
 } from "../../backoffice/utils/ai-extraction";
 import { formatLibraryDate } from "../../backoffice/utils/formatters";
@@ -23,6 +24,10 @@ import type {
 
 type ToastKind = "success" | "error";
 
+/**
+ * The API added this after the original review contract. Keep the reader
+ * optional so an older deployed API remains safe during a rolling release.
+ */
 interface UseCandidateDrawerControllerOptions {
   formatError: (error: unknown) => string;
   notify: (kind: ToastKind, message: string) => void;
@@ -192,16 +197,36 @@ export function useCandidateDrawerController({
   useEffect(() => {
     if (
       !drawerOpen ||
-      drawerTab !== "summary" ||
       !selectedResumeId ||
       !review ||
-      review.resume_id !== selectedResumeId ||
-      hasSourceTextQualityIssue(review.quality_flags) ||
-      hasSupersededReparseVersion(review.quality_flags) ||
-      !aiSummaryIsInProgress(review.ai_summary_status)
+      review.resume_id !== selectedResumeId
     ) {
       return undefined;
     }
+
+    // A newly-uploaded resume opens with an intentionally blank display name.
+    // Keep the detail fresh on every tab while the extraction worker is still
+    // running so a source-grounded name replaces that placeholder without the
+    // recruiter having to close and reopen the drawer.
+    const extractionIsInProgress = aiExtractionIsInProgress(
+      review.ai_extraction_status,
+    );
+    const candidateNameExtractionIsInProgress = aiExtractionIsInProgress(
+      review.candidate_name_extraction_status,
+    );
+    const summaryIsInProgress =
+      drawerTab === "summary" &&
+      !hasSourceTextQualityIssue(review.quality_flags) &&
+      !hasSupersededReparseVersion(review.quality_flags) &&
+      aiSummaryIsInProgress(review.ai_summary_status);
+    if (
+      !extractionIsInProgress &&
+      !candidateNameExtractionIsInProgress &&
+      !summaryIsInProgress
+    ) {
+      return undefined;
+    }
+
     const interval = window.setInterval(() => {
       void refreshReview(selectedResumeId);
     }, AI_STATUS_POLL_INTERVAL_MS);

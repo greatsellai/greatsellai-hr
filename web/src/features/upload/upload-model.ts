@@ -42,9 +42,14 @@ export function withLatestAiExtractionStatus(
 ): ResumeUploadResponse {
   return {
     ...uploaded,
+    candidate_display_name: detail.candidate_display_name,
     extraction_status: detail.extraction_status,
     ai_extraction_status: detail.ai_extraction_status,
     ai_extraction_error: detail.ai_extraction_error,
+    candidate_name_extraction_status: detail.candidate_name_extraction_status,
+    candidate_name_extraction_error: detail.candidate_name_extraction_error,
+    ai_summary_status: detail.ai_summary_status,
+    ai_summary_error: detail.ai_summary_error,
     source_page_count: detail.source_page_count,
     parsed_page_count: detail.parsed_page_count,
     quality_flags: detail.quality_flags,

@@ -12,6 +12,7 @@ from app.config import AppSettings
 from app.database import Database
 from app.models import (
     Candidate,
+    CandidateNameExtractionJob,
     EmailAttachmentImport,
     Job,
     JobMatchBatch,
@@ -27,6 +28,7 @@ from app.models import (
 )
 from app.services import (
     ai_extraction_job_service,
+    candidate_name_job_service,
     job_match_batch_service,
     mailbox_background_job_service,
     mailbox_import_service,
@@ -37,6 +39,11 @@ from app.services.ai_extraction_job_service import (
     AI_EXTRACTION_QUEUED,
     run_ai_extraction_worker_once,
     utcnow as extraction_utcnow,
+)
+from app.services.candidate_name_job_service import (
+    CANDIDATE_NAME_JOB_QUEUED,
+    CANDIDATE_NAME_JOB_SUPERSEDED,
+    run_candidate_name_extraction_worker_once,
 )
 from app.services.job_match_batch_service import (
     BATCH_QUEUED,
@@ -214,6 +221,92 @@ def test_ai_worker_marks_cross_workspace_job_safe_without_reading_foreign_resume
         assert other is not None
         assert other.status == AI_EXTRACTION_QUEUED
         assert other.attempt_count == 0
+
+    database.dispose()
+
+
+def test_name_worker_never_sends_a_foreign_resume_to_the_provider(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A malformed name task may not cross a workspace source boundary."""
+
+    database = _database(tmp_path)
+    settings = _settings(tmp_path)
+    organization_a, organization_b = _organizations(database)
+    now = extraction_utcnow()
+
+    with database.session_factory() as session:
+        with _workspace_session(session, organization_b):
+            foreign_resume = _resume(
+                session,
+                organization_id=organization_b,
+                label="foreign-name",
+                active=True,
+            )
+            session.add(
+                ResumeSourceBlock(
+                    resume_id=foreign_resume.id,
+                    block_id="page-001",
+                    page_no=1,
+                    block_type="text",
+                    text="Foreign workspace source must remain private.",
+                )
+            )
+            untouched_resume = _resume(
+                session,
+                organization_id=organization_b,
+                label="untouched-name",
+                active=True,
+            )
+            untouched_job = CandidateNameExtractionJob(
+                resume_id=untouched_resume.id,
+                status=CANDIDATE_NAME_JOB_QUEUED,
+                max_attempts=1,
+                next_attempt_at=now,
+                requested_at=now,
+            )
+            session.add(untouched_job)
+            session.flush()
+            untouched_job_id = untouched_job.id
+        with _workspace_session(session, organization_a):
+            cross_workspace_job = CandidateNameExtractionJob(
+                resume_id=foreign_resume.id,
+                status=CANDIDATE_NAME_JOB_QUEUED,
+                max_attempts=1,
+                next_attempt_at=now - timedelta(seconds=10),
+                requested_at=now - timedelta(seconds=10),
+            )
+            session.add(cross_workspace_job)
+            session.commit()
+            cross_job_id = cross_workspace_job.id
+
+    def provider_must_not_run(**_: object) -> object:
+        raise AssertionError("foreign resume text reached candidate-name provider")
+
+    monkeypatch.setattr(
+        candidate_name_job_service,
+        "extract_resume_candidate_name",
+        provider_must_not_run,
+    )
+    assert run_candidate_name_extraction_worker_once(
+        database,
+        settings=settings,
+        worker_id="candidate-name-scope-test",
+    )
+
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            failed = session.get(CandidateNameExtractionJob, cross_job_id)
+            untouched = session.get(CandidateNameExtractionJob, untouched_job_id)
+        assert failed is not None
+        assert failed.organization_id == organization_a
+        assert failed.status == CANDIDATE_NAME_JOB_SUPERSEDED
+        assert failed.last_error == "candidate_name_resume_not_found"
+        assert untouched is not None
+        assert untouched.organization_id == organization_b
+        assert untouched.status == CANDIDATE_NAME_JOB_QUEUED
+        assert untouched.attempt_count == 0
 
     database.dispose()
 

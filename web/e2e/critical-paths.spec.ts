@@ -256,6 +256,58 @@ test.describe("招聘工作台关键路径", () => {
     await expect(evidencePanel.getByText("Python · 原文依据：page-001")).toBeVisible();
   });
 
+  test("原始文件页会跨 AI 提取和姓名补全刷新候选人姓名", async ({ page }) => {
+    let reviewRequestCount = 0;
+    await page.route("**/v1/resumes/*/review", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as Record<string, unknown>;
+      reviewRequestCount += 1;
+      const extractionIsStillRunning = reviewRequestCount === 1;
+      const nameExtractionIsStillRunning = reviewRequestCount === 2;
+      const candidateName =
+        reviewRequestCount < 3 ? null : "E2E 自动补全姓名";
+      await route.fulfill({
+        response,
+        json: {
+          ...payload,
+          candidate_display_name: candidateName,
+          ai_extraction_status: extractionIsStillRunning ? "running" : "completed",
+          candidate_name_extraction_status: nameExtractionIsStillRunning
+            ? "queued"
+            : "succeeded",
+          ai_summary_status: "succeeded",
+          ai_summary_error: null,
+        },
+      });
+    });
+
+    await registerAndVerify(page, "drawer-name-refresh");
+    await seedWorkspaceFixture(page);
+    await page.reload();
+    await page.getByRole("button", { name: "简历库", exact: true }).click();
+    await page.getByRole("button", {
+      name: "查看 E2E 推荐候选人 的简历详情",
+    }).click();
+
+    const initialDrawer = page.getByRole("dialog", {
+      name: "未命名候选人 的简历详情",
+    });
+    await expect(initialDrawer).toBeVisible();
+    const originalTab = initialDrawer.getByRole("tab", { name: "原始文件" });
+    await originalTab.click();
+    await expect(originalTab).toHaveAttribute("aria-selected", "true");
+
+    await expect.poll(() => reviewRequestCount, { timeout: 10_000 }).toBeGreaterThan(2);
+    const updatedDrawer = page.getByRole("dialog", {
+      name: "E2E 自动补全姓名 的简历详情",
+    });
+    await expect(updatedDrawer).toBeVisible();
+    await expect(updatedDrawer.getByRole("tab", { name: "原始文件" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
   test("AI 总结自动生成时展示进度，失败后允许重试", async ({ page }) => {
     let summaryStatus: "running" | "failed" | "succeeded" = "running";
     let reviewRequestCount = 0;

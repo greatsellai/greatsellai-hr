@@ -22,6 +22,7 @@ from app.models import (
     Candidate,
     CandidateDataDeletionBatch,
     CandidateDataPurgeJob,
+    CandidateNameExtractionJob,
     Resume,
     ResumeAiExtractionJob,
     ResumeDocumentExtractionJob,
@@ -172,6 +173,8 @@ def test_due_purge_removes_original_before_dependencies_and_roots(
     original_path = _resume_storage_path(client, resume_id=resume_id)
     database = client.app.state.database
     with database.session_factory() as session:
+        resume = session.get(Resume, resume_id)
+        assert resume is not None
         source_block = ResumeSourceBlock(
             resume_id=resume_id,
             block_id="fixture-block",
@@ -201,6 +204,15 @@ def test_due_purge_removes_original_before_dependencies_and_roots(
                 is_current=True,
                 status="succeeded",
                 model_name=None,
+            )
+        )
+        session.add(
+            CandidateNameExtractionJob(
+                organization_id=resume.organization_id,
+                resume_id=resume_id,
+                status="queued",
+                attempt_count=0,
+                max_attempts=3,
             )
         )
         session.commit()
@@ -245,6 +257,11 @@ def test_due_purge_removes_original_before_dependencies_and_roots(
         assert session.scalar(
             select(func.count(ResumeAiExtractionJob.id)).where(
                 ResumeAiExtractionJob.resume_id == resume_id
+            )
+        ) == 0
+        assert session.scalar(
+            select(func.count(CandidateNameExtractionJob.id)).where(
+                CandidateNameExtractionJob.resume_id == resume_id
             )
         ) == 0
         assert session.scalar(

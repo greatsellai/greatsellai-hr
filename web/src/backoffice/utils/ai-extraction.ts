@@ -4,7 +4,7 @@ import type { AiExtractionStatus, AiSummaryStatus } from "../../types";
 export const AI_STATUS_POLL_INTERVAL_MS = 2_500;
 
 export function aiExtractionIsInProgress(
-  status: AiExtractionStatus | undefined,
+  status: string | null | undefined,
 ): boolean {
   return status === "queued" || status === "running";
 }

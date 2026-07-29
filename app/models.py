@@ -807,6 +807,13 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
         back_populates="resume",
         cascade="all, delete-orphan",
     )
+    candidate_name_extraction_job: Mapped["CandidateNameExtractionJob | None"] = (
+        relationship(
+            back_populates="resume",
+            cascade="all, delete-orphan",
+            uselist=False,
+        )
+    )
     job_matches: Mapped[list["JobMatch"]] = relationship(
         back_populates="resume",
         cascade="all, delete-orphan",
@@ -1991,6 +1998,70 @@ class ResumeAiExtractionJob(OrganizationScoped, Base):
     )
 
     resume: Mapped[Resume] = relationship(back_populates="ai_extraction_job")
+    ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
+
+
+class CandidateNameExtractionJob(OrganizationScoped, Base):
+    """Durable, source-grounded candidate-name completion work.
+
+    The task is intentionally separate from structured-facts extraction. A
+    name-only provider failure must never retract otherwise usable facts,
+    scores, summaries, or screening eligibility. One mutable task belongs to
+    each resume source so retries remain idempotent and a user-owned name is
+    never overwritten.
+    """
+
+    __tablename__ = "candidate_name_extraction_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "resume_id",
+            name="uq_candidate_name_extraction_job_resume",
+        ),
+        Index(
+            "ix_candidate_name_extraction_job_claim",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_candidate_name_extraction_job_lease",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_candidate_name_extraction_job_organization_claim",
+            "organization_id",
+            "status",
+            "next_attempt_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    resume_id: Mapped[str] = mapped_column(ForeignKey("resumes.id"), index=True)
+    # A queued task pins the published route that existed when it was created.
+    # Name extraction is independently retryable, so a later route change
+    # cannot silently alter an already queued candidate conclusion.
+    ai_route_policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_route_policy_versions.id"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    resume: Mapped[Resume] = relationship(back_populates="candidate_name_extraction_job")
     ai_route_policy_version: Mapped["AiRoutePolicyVersion | None"] = relationship()
 
 

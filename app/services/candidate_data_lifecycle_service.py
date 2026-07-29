@@ -30,6 +30,7 @@ from app.models import (
     CandidateDataPurgeJob,
     CandidateDataRetentionCleanupRun,
     CandidateDataRetentionPolicy,
+    CandidateNameExtractionJob,
     CandidateDataExport,
     EmailAttachmentImport,
     JobMatchBatchItem,
@@ -515,6 +516,23 @@ def _cancel_resume_async_work(
             ResumeSummaryJob.organization_id == organization_id,
             ResumeSummaryJob.resume_id.in_(identifiers),
             ResumeSummaryJob.status.in_(("queued", "running")),
+        )
+        .values(
+            status="cancelled",
+            next_attempt_at=None,
+            lease_owner=None,
+            lease_expires_at=None,
+            last_error="candidate_data_deleted",
+            completed_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    session.execute(
+        update(CandidateNameExtractionJob)
+        .where(
+            CandidateNameExtractionJob.organization_id == organization_id,
+            CandidateNameExtractionJob.resume_id.in_(identifiers),
+            CandidateNameExtractionJob.status.in_(("queued", "running")),
         )
         .values(
             status="cancelled",

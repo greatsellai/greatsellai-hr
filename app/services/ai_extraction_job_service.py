@@ -41,6 +41,7 @@ from app.services.resume_service import (
     save_facts,
 )
 from app.services.resume_summary_job_service import enqueue_resume_summary_job
+from app.services.candidate_name_job_service import enqueue_candidate_name_extraction_job
 
 
 logger = logging.getLogger(__name__)
@@ -929,8 +930,19 @@ def _save_completed_ai_facts(
                 elif saved_resume.extraction_status != "needs_review" or saved_resume.is_active:
                     raise AiExtractionJobError("stale_reparse_must_remain_inactive")
                 # Facts are now durable and active.  Queue the independent
-                # summary stage in this same transaction, never in the HTTP
-                # upload request and never by reusing the extraction lease.
+                # name stage before the independent summary stage. The core
+                # fallback intentionally omits identity; a separate durable,
+                # source-grounded task must therefore repair only a still
+                # empty display name without ever delaying or rolling back
+                # searchable facts.
+                enqueue_candidate_name_extraction_job(
+                    session,
+                    resume=saved_resume,
+                    settings=settings,
+                )
+                # Queue the independent summary stage in this same
+                # transaction, never in the HTTP upload request and never by
+                # reusing the extraction lease.
                 # A route/credential problem creates an actionable
                 # ``unavailable`` summary job rather than rolling back a
                 # valid searchable candidate.

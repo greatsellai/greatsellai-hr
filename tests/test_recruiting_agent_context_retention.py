@@ -575,6 +575,7 @@ def test_worker_invokes_agent_context_expiry_cleanup(monkeypatch, tmp_path: Path
             "run_mailbox_background_job_worker_once",
                 "run_document_extraction_worker_once",
                 "run_ai_extraction_worker_once",
+                "run_candidate_name_extraction_worker_once",
                 "run_resume_summary_worker_once",
                 "run_job_match_batch_worker_once",
             "run_resume_score_batch_worker_once",

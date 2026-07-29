@@ -78,7 +78,12 @@ export function UploadPage({
       .filter(
         (item) =>
           item.response &&
-          aiExtractionIsInProgress(item.response.ai_extraction_status),
+          (
+            aiExtractionIsInProgress(item.response.ai_extraction_status) ||
+            aiExtractionIsInProgress(
+              item.response.candidate_name_extraction_status,
+            )
+          ),
       )
       .map((item) => item.response!.resume_id);
     if (!resumeIds.length) return undefined;
@@ -115,7 +120,13 @@ export function UploadPage({
             item.response.extraction_status === response.extraction_status &&
             item.response.ai_extraction_status ===
               response.ai_extraction_status &&
-            item.response.ai_extraction_error === response.ai_extraction_error
+            item.response.ai_extraction_error === response.ai_extraction_error &&
+            item.response.candidate_name_extraction_status ===
+              response.candidate_name_extraction_status &&
+            item.response.candidate_name_extraction_error ===
+              response.candidate_name_extraction_error &&
+            item.response.candidate_display_name ===
+              response.candidate_display_name
           )
             return item;
           return { ...item, response, status, error: undefined };

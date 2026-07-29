@@ -25,6 +25,7 @@ from app.models import (
     CandidateDataDeletionBatchItem,
     CandidateDataFileAccessGrant,
     CandidateDataPurgeJob,
+    CandidateNameExtractionJob,
     EmailAttachmentImport,
     EmailAttachmentImportAttempt,
     JobMatch,
@@ -371,6 +372,7 @@ def _scrub_ai_ledger(
     organization_id: str,
     resume_ids: tuple[str, ...],
     extraction_job_ids: tuple[str, ...],
+    candidate_name_job_ids: tuple[str, ...],
     score_item_ids: tuple[str, ...],
     match_item_ids: tuple[str, ...],
 ) -> None:
@@ -406,6 +408,13 @@ def _scrub_ai_ledger(
             and_(
                 AiRun.business_ref_type == "resume_ai_extraction_job",
                 AiRun.business_ref_id.in_(extraction_job_ids),
+            )
+        )
+    if candidate_name_job_ids:
+        predicates.append(
+            and_(
+                AiRun.business_ref_type == "candidate_name_extraction_job",
+                AiRun.business_ref_id.in_(candidate_name_job_ids),
             )
         )
     if score_item_ids:
@@ -505,6 +514,13 @@ def _purge_database_rows(
             select(ResumeAiExtractionJob.id).where(ResumeAiExtractionJob.resume_id.in_(resume_ids))
         ).all()
     )
+    candidate_name_job_ids = tuple(
+        session.scalars(
+            select(CandidateNameExtractionJob.id).where(
+                CandidateNameExtractionJob.resume_id.in_(resume_ids)
+            )
+        ).all()
+    )
     score_item_ids = tuple(
         session.scalars(
             select(ResumeScoreBatchItem.id).where(ResumeScoreBatchItem.resume_id.in_(resume_ids))
@@ -521,6 +537,7 @@ def _purge_database_rows(
         organization_id=organization_id,
         resume_ids=resume_ids,
         extraction_job_ids=extraction_job_ids,
+        candidate_name_job_ids=candidate_name_job_ids,
         score_item_ids=score_item_ids,
         match_item_ids=match_item_ids,
     )
@@ -581,6 +598,11 @@ def _purge_database_rows(
     ):
         session.execute(delete(model).where(model.resume_id.in_(resume_ids)))
     session.execute(delete(ResumeAiExtractionJob).where(ResumeAiExtractionJob.resume_id.in_(resume_ids)))
+    session.execute(
+        delete(CandidateNameExtractionJob).where(
+            CandidateNameExtractionJob.resume_id.in_(resume_ids)
+        )
+    )
     session.execute(
         delete(ResumeDocumentExtractionJob).where(
             ResumeDocumentExtractionJob.resume_id.in_(resume_ids)

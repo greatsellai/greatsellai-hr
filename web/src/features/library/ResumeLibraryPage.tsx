@@ -154,6 +154,7 @@ export function ResumeLibraryPage({
     if (
       !library?.items.some((item) =>
         aiExtractionIsInProgress(item.ai_extraction_status) ||
+        aiExtractionIsInProgress(item.candidate_name_extraction_status) ||
         aiSummaryIsInProgress(item.ai_summary_status),
       )
     ) {

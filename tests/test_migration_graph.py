@@ -6,6 +6,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from app.models import (
+    CandidateNameExtractionJob,
     MailboxConfig,
     MailboxOAuthConnectIntent,
     RecruitingAgentCandidateSet,
@@ -22,7 +23,7 @@ from app.models import (
 def test_alembic_history_has_one_canonical_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert script.get_heads() == ["20260728_0046"]
+    assert script.get_heads() == ["20260729_0047"]
 
 
 def test_recruiting_agent_context_ddl_identifiers_fit_postgresql() -> None:
@@ -57,6 +58,15 @@ def test_resume_summary_job_ddl_identifiers_fit_postgresql() -> None:
     dialect = postgresql.dialect()
     CreateTable(ResumeSummaryJob.__table__).compile(dialect=dialect)
     for index in ResumeSummaryJob.__table__.indexes:
+        CreateIndex(index).compile(dialect=dialect)
+
+
+def test_candidate_name_extraction_job_ddl_identifiers_fit_postgresql() -> None:
+    """Name-only task identifiers must remain valid in production PostgreSQL."""
+
+    dialect = postgresql.dialect()
+    CreateTable(CandidateNameExtractionJob.__table__).compile(dialect=dialect)
+    for index in CandidateNameExtractionJob.__table__.indexes:
         CreateIndex(index).compile(dialect=dialect)
 
 

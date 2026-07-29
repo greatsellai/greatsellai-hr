@@ -178,6 +178,7 @@ class PlatformWorkspaceFeedbackResponse(ApiModel):
     submitted_by_user_id: str
     submitter_name: str
     submitter_email: str
+    contact_phone: str | None = Field(default=None, max_length=32)
     use_case: str
     intended_outcome: str
     friction: str

@@ -183,6 +183,7 @@ export interface WorkspaceFeedbackSubmitInput {
   intended_outcome: string;
   friction: string;
   desired_change: string;
+  contact_phone: string;
   attachments: File[];
   idempotency_key: string;
 }

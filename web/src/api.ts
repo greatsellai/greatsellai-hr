@@ -334,6 +334,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       formData.set("intended_outcome", input.intended_outcome);
       formData.set("friction", input.friction);
       formData.set("desired_change", input.desired_change);
+      formData.set("contact_phone", input.contact_phone);
       input.attachments.forEach((attachment) => formData.append("attachments", attachment));
       return requestForm<WorkspaceFeedbackHistory>("/workspace-feedback", formData, {
         method: "POST",

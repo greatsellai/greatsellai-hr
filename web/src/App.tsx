@@ -148,6 +148,8 @@ function humanizeError(error: unknown): string {
         "请完整填写四个问卷问题后再提交。",
       workspace_feedback_desired_change_required:
         "请完整填写四个问卷问题后再提交。",
+      workspace_feedback_contact_phone_required: "请填写联系电话后再提交。",
+      workspace_feedback_contact_phone_invalid: "请填写有效的联系电话。",
       workspace_feedback_answer_too_long:
         "单项回答请控制在 4,000 个字符以内。",
       workspace_feedback_too_many_attachments:

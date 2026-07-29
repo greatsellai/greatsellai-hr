@@ -520,12 +520,13 @@ class RegistrationRateLimitBucket(Base):
 
 
 class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
-    """One complete workspace-feedback questionnaire and its automatic reward.
+    """One complete workspace-feedback questionnaire and its quota reward.
 
-    The four text answers are product feedback, not candidate data and never
-    belong in generic audit-event snapshots or application logs.  A durable
-    reward state lets the worker grant the fixed allowance after its delayed
-    due time without relying on a browser tab remaining open.
+    The four text answers and contact number are product feedback, not
+    candidate data.  They never belong in generic audit-event snapshots or
+    application logs.  A durable reward state lets the worker grant the fixed
+    allowance after server-side review processing without relying on a browser
+    tab remaining open.
     """
 
     __tablename__ = "workspace_feedback_submissions"
@@ -579,6 +580,10 @@ class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
     intended_outcome: Mapped[str] = mapped_column(Text)
     friction: Mapped[str] = mapped_column(Text)
     desired_change: Mapped[str] = mapped_column(Text)
+    # Existing questionnaire rows predate contact collection.  New submissions
+    # are validated as required at the service boundary, while the column stays
+    # nullable so the migration never fabricates or invalidates historical PII.
+    contact_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     reward_status: Mapped[str] = mapped_column(
         String(32),
         default="queued",

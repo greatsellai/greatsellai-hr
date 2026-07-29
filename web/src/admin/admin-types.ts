@@ -175,6 +175,7 @@ export interface PlatformWorkspaceFeedback {
   submitted_by_user_id: string;
   submitter_name: string;
   submitter_email: string;
+  contact_phone: string | null;
   use_case: string;
   intended_outcome: string;
   friction: string;

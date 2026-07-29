@@ -19,7 +19,7 @@ test.describe("使用体验反馈", () => {
 
     await expect(page).toHaveURL(/#feedback$/);
     await expect(page.locator(".feedback-page")).toBeVisible();
-    await expect(page.locator(".feedback-page")).toContainText("审核通过后");
+    await expect(page.locator(".feedback-page")).toContainText("系统审核通过后");
 
     await page.getByLabel("联系电话").fill("138 0013 8000");
 
@@ -38,7 +38,7 @@ test.describe("使用体验反馈", () => {
 
     await page.locator(".feedback-form .button-primary").click();
 
-    await expect(page.locator(".feedback-history-list")).toContainText("审核中，审核通过后发放 500 次 AI 调用额度");
+    await expect(page.locator(".feedback-history-list")).toContainText("系统审核中，审核通过后发放 500 次 AI 调用额度");
     await expect(page.locator(".feedback-form")).toContainText("下一次可提交意见的时间");
     await expect(page.locator(".feedback-form .button-primary")).toBeDisabled();
     await expect(page.locator(".feedback-history-list")).toContainText("查看填写内容");

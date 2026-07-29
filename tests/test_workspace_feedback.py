@@ -175,6 +175,7 @@ def test_workspace_feedback_is_complete_private_and_attachment_is_scoped(
     other_history = client_b.get("/v1/workspace-feedback")
     assert other_history.status_code == 200, other_history.text
     assert other_history.json()["items"] == []
+    assert client_b.get("/v1/platform/workspace-feedback").status_code == 403
 
     attachment_id = feedback["attachments"][0]["attachment_id"]
     own_attachment = client_a.get(
@@ -187,6 +188,9 @@ def test_workspace_feedback_is_complete_private_and_attachment_is_scoped(
     assert client_b.get(
         f"/v1/workspace-feedback/{feedback['feedback_id']}/attachments/{attachment_id}"
     ).status_code == 404
+    assert client_b.get(
+        f"/v1/platform/workspace-feedback/{feedback['feedback_id']}/attachments/{attachment_id}"
+    ).status_code == 403
 
     # The test's raw database check verifies the attachment remains attached
     # to A's workspace rather than trusting only the serialized response.

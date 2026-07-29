@@ -25,7 +25,7 @@ import {
 const PAGE_SIZE = 30;
 
 const rewardPresentation: Record<WorkspaceFeedbackRewardStatus, { label: string; status: string }> = {
-  queued: { label: "待审核", status: "queued" },
+  queued: { label: "系统审核中", status: "queued" },
   running: { label: "发放中", status: "running" },
   granted: { label: "已发放", status: "succeeded" },
 };

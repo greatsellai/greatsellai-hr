@@ -445,7 +445,7 @@ function AccountMenu({
               <Icon name="document" size={16} />
               <span>
                 <strong>提交宝贵意见</strong>
-                <small>审核通过后赠送 500 次 AI 调用额度</small>
+                <small>系统审核通过后赠送 500 次 AI 调用额度</small>
               </span>
             </button>
             {canManageSettings && (

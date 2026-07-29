@@ -46,9 +46,9 @@ function rewardStatusCopy(item: WorkspaceFeedback): { label: string; tone: strin
         tone: "is-granted",
       };
     case "running":
-      return { label: "审核通过，正在发放当前工作区额度", tone: "is-pending" };
+      return { label: "系统审核通过，正在发放当前工作区额度", tone: "is-pending" };
     default:
-      return { label: `审核中，审核通过后发放 ${item.reward_call_count} 次 AI 调用额度`, tone: "is-pending" };
+      return { label: `系统审核中，审核通过后发放 ${item.reward_call_count} 次 AI 调用额度`, tone: "is-pending" };
   }
 }
 
@@ -265,7 +265,7 @@ export function WorkspaceFeedbackPage({
       setContactPhone("");
       setAttachments([]);
       idempotencyKeyRef.current = null;
-      notify("success", "意见已提交，审核通过后将向当前工作区发放 500 次 AI 调用额度。");
+      notify("success", "意见已提交，系统审核通过后将向当前工作区发放 500 次 AI 调用额度。");
     } catch (error) {
       notify("error", formatError(error));
       void load();
@@ -279,7 +279,7 @@ export function WorkspaceFeedbackPage({
       <header className="page-heading feedback-page-heading">
         <div>
           <h1 id="feedback-page-title">提交宝贵意见</h1>
-          <p>写下真实使用体验。审核通过后，当前工作区将获得 500 次 AI 调用额度。</p>
+          <p>写下真实使用体验。系统审核通过后，当前工作区将获得 500 次 AI 调用额度。</p>
         </div>
         <span className="feedback-reward-note">每 8 小时可提交一次</span>
       </header>
@@ -307,7 +307,7 @@ export function WorkspaceFeedbackPage({
                 type="tel"
                 value={contactPhone}
               />
-              <span className="field-hint">仅用于必要时跟进意见，不会在当前工作区公开。</span>
+              <span className="field-hint">仅供平台管理员在必要时跟进意见使用，不会在当前工作区公开。</span>
             </label>
             <label>
               <span className="field-label">你这次主要怎样使用 GreatSell AI？</span>

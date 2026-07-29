@@ -26,6 +26,7 @@ from app.schemas import (
     PlatformAuditEventListResponse,
     PlatformAuditEventResponse,
     PlatformDashboardResponse,
+    PlatformRuntimeOverviewResponse,
     PlatformOrganizationDetailResponse,
     PlatformOrganizationListItem,
     PlatformOrganizationListResponse,
@@ -37,6 +38,7 @@ from app.schemas import (
     PlatformUserMembershipResponse,
     PlatformUserPatch,
 )
+from app.services.runtime_observability_service import build_platform_runtime_overview
 
 
 class PlatformAdminServiceError(RuntimeError):
@@ -225,6 +227,25 @@ def get_platform_dashboard(session: Session) -> PlatformDashboardResponse:
             session,
             select(func.count(AiRun.id)).where(AiRun.cost_status == "unavailable"),
         ),
+    )
+
+
+def get_platform_runtime_overview(
+    session: Session,
+    *,
+    now: datetime | None = None,
+) -> PlatformRuntimeOverviewResponse:
+    """Return content-free global diagnostics through the control plane.
+
+    ``_platform_statement`` is deliberately supplied here rather than inside
+    the generic runtime helper. This keeps the ability to bypass workspace
+    criteria in this one reviewed platform-admin service.
+    """
+
+    return build_platform_runtime_overview(
+        session,
+        global_statement=_platform_statement,
+        now=now,
     )
 
 

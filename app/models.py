@@ -519,6 +519,61 @@ class RegistrationRateLimitBucket(Base):
     )
 
 
+class RuntimeWorkerHeartbeat(Base):
+    """Durable, content-free liveness record for a background worker.
+
+    The row is deliberately platform-scoped rather than organization-scoped:
+    it records process health only and must never carry a candidate, mailbox,
+    user, request body, or provider payload.  ``worker_id`` is internal
+    process correlation; platform APIs expose only aggregate liveness fields.
+    """
+
+    __tablename__ = "runtime_worker_heartbeats"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'stopped')",
+            name="ck_runtime_worker_heartbeat_status",
+        ),
+        Index(
+            "ix_runtime_worker_heartbeat_kind_seen",
+            "worker_kind",
+            "last_seen_at",
+        ),
+        Index(
+            "ix_runtime_worker_heartbeat_status_seen",
+            "status",
+            "last_seen_at",
+        ),
+        Index("ix_runtime_worker_heartbeat_last_seen", "last_seen_at"),
+    )
+
+    worker_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    worker_kind: Mapped[str] = mapped_column(String(64), default="background")
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="running",
+        server_default=text("'running'"),
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )
+    last_cycle_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # This holds a normalized operational code only. Raw exception text and
+    # external provider responses must remain outside the runtime ledger.
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
     """One complete workspace-feedback questionnaire and its automatic reward.
 

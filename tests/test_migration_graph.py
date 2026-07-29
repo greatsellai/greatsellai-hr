@@ -13,6 +13,7 @@ from app.models import (
     RecruitingAgentConversation,
     RecruitingAgentConversationTurn,
     ResumeSummaryJob,
+    RuntimeWorkerHeartbeat,
     TalentSearchRun,
     WorkspaceFeedbackImageAttachment,
     WorkspaceFeedbackSubmission,
@@ -22,7 +23,7 @@ from app.models import (
 def test_alembic_history_has_one_canonical_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert script.get_heads() == ["20260728_0046"]
+    assert script.get_heads() == ["20260729_0047"]
 
 
 def test_recruiting_agent_context_ddl_identifiers_fit_postgresql() -> None:
@@ -71,3 +72,12 @@ def test_workspace_feedback_reward_ddl_identifiers_fit_postgresql() -> None:
         CreateTable(table).compile(dialect=dialect)
         for index in table.indexes:
             CreateIndex(index).compile(dialect=dialect)
+
+
+def test_runtime_observability_ddl_identifiers_fit_postgresql() -> None:
+    """Durable worker liveness identifiers must fit production PostgreSQL."""
+
+    dialect = postgresql.dialect()
+    CreateTable(RuntimeWorkerHeartbeat.__table__).compile(dialect=dialect)
+    for index in RuntimeWorkerHeartbeat.__table__.indexes:
+        CreateIndex(index).compile(dialect=dialect)

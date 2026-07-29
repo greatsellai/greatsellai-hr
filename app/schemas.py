@@ -350,6 +350,49 @@ class PlatformDashboardResponse(ApiModel):
     ai_cost_unavailable_runs: int
 
 
+class PlatformRuntimeWorkerResponse(ApiModel):
+    """Content-free health of one recent worker process.
+
+    Worker and host identifiers deliberately stay server-side. The platform
+    console needs liveness, not a process-to-customer correlation handle.
+    """
+
+    worker_kind: Literal["background", "unknown"]
+    liveness: Literal["live", "stale", "stopped"]
+    started_at: datetime
+    last_seen_at: datetime
+    last_cycle_completed_at: datetime | None = None
+    last_error_code: str | None = None
+
+
+class PlatformRuntimeQueueResponse(ApiModel):
+    """Aggregate durable-queue state without task or workspace identifiers."""
+
+    queue_key: str
+    queued_count: int = 0
+    running_count: int = 0
+    failed_count: int = 0
+    oldest_pending_at: datetime | None = None
+
+
+class PlatformRuntimeFailureResponse(ApiModel):
+    """A normalized operational failure, never a raw exception or task row."""
+
+    queue_key: str
+    error_code: str
+    occurred_at: datetime
+    attempt_count: int | None = None
+
+
+class PlatformRuntimeOverviewResponse(ApiModel):
+    generated_at: datetime
+    worker_stale_after_seconds: int
+    worker_liveness: Literal["live", "stale", "stopped", "missing"]
+    workers: list[PlatformRuntimeWorkerResponse] = Field(default_factory=list)
+    queues: list[PlatformRuntimeQueueResponse] = Field(default_factory=list)
+    recent_failures: list[PlatformRuntimeFailureResponse] = Field(default_factory=list)
+
+
 class PlatformOrganizationListItem(ApiModel):
     organization_id: str
     name: str

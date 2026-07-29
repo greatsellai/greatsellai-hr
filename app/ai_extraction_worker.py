@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import socket
 import time
@@ -43,6 +44,21 @@ from app.services.institution_service import (
     is_institution_registry_seeded,
     seed_institution_registry,
 )
+from app.services.runtime_observability_service import (
+    mark_worker_stopped,
+    record_worker_heartbeat,
+)
+
+
+_WORKER_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_SAFE_WORKER_LIFECYCLE_EVENTS = frozenset(
+    {
+        "worker_started",
+        "worker_cycle_completed",
+        "worker_stopped",
+        "worker_cycle_failed",
+    }
+)
 
 
 def _worker_id() -> str:
@@ -68,11 +84,86 @@ def _create_worker_database(settings: AppSettings) -> Database:
     return database
 
 
+def _log_worker_lifecycle_event(
+    event: str,
+) -> None:
+    """Emit a fixed, content-free worker lifecycle event.
+
+    ``app.observability`` is provided by the request-correlation/logging
+    baseline. The import stays local so this worker module remains importable
+    while that independently-reviewed baseline is being merged. If an older
+    image is temporarily running without that module, heartbeat processing
+    continues rather than failing all background work; the combined release
+    emits the event through the strict JSON logger.
+    """
+
+    try:
+        from app.observability import log_event
+    except ModuleNotFoundError as exc:
+        if exc.name == "app.observability":
+            return
+        raise
+
+    if event not in _SAFE_WORKER_LIFECYCLE_EVENTS:
+        return
+    if event == "worker_cycle_failed":
+        log_event(event, level=logging.ERROR, error_code="worker_cycle_failed")
+        return
+    log_event(event)
+
+
+def _touch_worker_heartbeat(
+    database: Database,
+    *,
+    worker_id: str,
+    last_heartbeat_monotonic: float,
+    force: bool = False,
+    cycle_completed: bool = False,
+    clear_last_error: bool = False,
+) -> tuple[float, bool]:
+    """Persist a bounded-rate, best-effort liveness signal.
+
+    The durable worker queues remain the source of truth for business work.
+    This intentionally writes at most once per short interval so an idle
+    worker does not create unnecessary database load just to prove it is live.
+    """
+
+    current_monotonic = time.monotonic()
+    if (
+        not force
+        and current_monotonic - last_heartbeat_monotonic
+        < _WORKER_HEARTBEAT_INTERVAL_SECONDS
+    ):
+        return last_heartbeat_monotonic, False
+    record_worker_heartbeat(
+        database,
+        worker_id=worker_id,
+        cycle_completed=cycle_completed,
+        clear_last_error=clear_last_error,
+    )
+    # A failed observability write is still throttled. It must not turn a
+    # temporary missing migration or database issue into a write storm.
+    return current_monotonic, True
+
+
 def run_forever(settings: AppSettings) -> None:
     database = _create_worker_database(settings)
     worker_id = _worker_id()
+    last_heartbeat_monotonic, _ = _touch_worker_heartbeat(
+        database,
+        worker_id=worker_id,
+        last_heartbeat_monotonic=0.0,
+        force=True,
+    )
+    _log_worker_lifecycle_event("worker_started")
+    worker_failed = False
     try:
         while True:
+            last_heartbeat_monotonic, _ = _touch_worker_heartbeat(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             ran_workspace_feedback_reward = run_workspace_feedback_reward_worker_once(
                 database,
                 worker_id=worker_id,
@@ -143,6 +234,15 @@ def run_forever(settings: AppSettings) -> None:
             purged_recruiting_agent_contexts = (
                 purge_expired_recruiting_agent_conversations(database)
             )
+            last_heartbeat_monotonic, heartbeat_recorded = _touch_worker_heartbeat(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+                cycle_completed=True,
+                clear_last_error=True,
+            )
+            if heartbeat_recorded:
+                _log_worker_lifecycle_event("worker_cycle_completed")
             if (
                 not ran_extraction
                 and not ran_summary
@@ -161,7 +261,19 @@ def run_forever(settings: AppSettings) -> None:
                 and not purged_recruiting_agent_contexts
             ):
                 time.sleep(settings.ai_extraction_worker_poll_seconds)
+    except Exception:
+        worker_failed = True
+        mark_worker_stopped(
+            database,
+            worker_id=worker_id,
+            last_error_code="worker_cycle_failed",
+        )
+        _log_worker_lifecycle_event("worker_cycle_failed")
+        raise
     finally:
+        if not worker_failed:
+            mark_worker_stopped(database, worker_id=worker_id)
+            _log_worker_lifecycle_event("worker_stopped")
         database.dispose()
 
 
@@ -181,32 +293,41 @@ def main() -> None:
         return
 
     database = _create_worker_database(settings)
+    worker_id = _worker_id()
+    _, _ = _touch_worker_heartbeat(
+        database,
+        worker_id=worker_id,
+        last_heartbeat_monotonic=0.0,
+        force=True,
+    )
+    _log_worker_lifecycle_event("worker_started")
+    worker_failed = False
     try:
         run_workspace_feedback_reward_worker_once(
             database,
-            worker_id=_worker_id(),
+            worker_id=worker_id,
         )
         ran_transactional_email = run_transactional_email_outbox_worker_once(
             database,
             settings=settings,
-            worker_id=_worker_id(),
+            worker_id=worker_id,
         )
         ran_mailbox_job = run_mailbox_background_job_worker_once(
             database,
             settings=settings,
-            worker_id=_worker_id(),
+            worker_id=worker_id,
         )
         if not ran_transactional_email and not ran_mailbox_job:
             ran_document_extraction = run_document_extraction_worker_once(
                 database,
                 settings=settings,
-                worker_id=_worker_id(),
+                worker_id=worker_id,
             )
             if not ran_document_extraction:
                 ran_extraction = run_ai_extraction_worker_once(
                     database,
                     settings=settings,
-                    worker_id=_worker_id(),
+                    worker_id=worker_id,
                 )
             else:
                 ran_extraction = True
@@ -217,19 +338,19 @@ def main() -> None:
             ran_summary = run_resume_summary_worker_once(
                 database,
                 settings=settings,
-                worker_id=_worker_id(),
+                worker_id=worker_id,
             )
         if not ran_extraction and not ran_summary:
             ran_job_match = run_job_match_batch_worker_once(
                 database,
                 settings=settings,
-                worker_id=_worker_id(),
+                worker_id=worker_id,
             )
             if not ran_job_match:
                 run_resume_score_batch_worker_once(
                     database,
                     settings=settings,
-                    worker_id=_worker_id(),
+                    worker_id=worker_id,
                 )
         enqueue_due_mailbox_sync_jobs(database=database, settings=settings)
         cleanup_due_mailbox_retention(database=database, settings=settings)
@@ -237,16 +358,37 @@ def main() -> None:
         run_candidate_data_purge_worker_once(
             database,
             settings=settings,
-            worker_id=_worker_id(),
+            worker_id=worker_id,
         )
         run_candidate_data_export_worker_once(
             database,
             settings=settings,
-            worker_id=_worker_id(),
+            worker_id=worker_id,
         )
         cleanup_expired_candidate_data_exports(database, settings=settings)
         purge_expired_recruiting_agent_conversations(database)
+        _, _ = _touch_worker_heartbeat(
+            database,
+            worker_id=worker_id,
+            last_heartbeat_monotonic=0.0,
+            force=True,
+            cycle_completed=True,
+            clear_last_error=True,
+        )
+        _log_worker_lifecycle_event("worker_cycle_completed")
+    except Exception:
+        worker_failed = True
+        mark_worker_stopped(
+            database,
+            worker_id=worker_id,
+            last_error_code="worker_cycle_failed",
+        )
+        _log_worker_lifecycle_event("worker_cycle_failed")
+        raise
     finally:
+        if not worker_failed:
+            mark_worker_stopped(database, worker_id=worker_id)
+            _log_worker_lifecycle_event("worker_stopped")
         database.dispose()
 
 

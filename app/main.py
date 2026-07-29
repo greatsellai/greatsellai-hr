@@ -80,6 +80,7 @@ from app.schemas import (
     ProductPlanUpdate,
     PlatformAuditEventListResponse,
     PlatformDashboardResponse,
+    PlatformRuntimeOverviewResponse,
     PlatformOrganizationDetailResponse,
     PlatformOrganizationListResponse,
     PlatformOrganizationPatch,
@@ -266,6 +267,7 @@ from app.services.ai_usage_reporting_service import (
 from app.services.platform_admin_service import (
     PlatformAdminServiceError,
     get_platform_dashboard,
+    get_platform_runtime_overview,
     get_platform_organization,
     get_platform_user,
     list_platform_audit_events,
@@ -276,6 +278,10 @@ from app.services.platform_admin_service import (
     patch_platform_user,
     product_plan_snapshot,
     record_platform_audit_event,
+)
+from app.services.runtime_observability_service import (
+    RuntimeReadinessError,
+    check_database_ready,
 )
 from app.services.ai_extraction_job_service import (
     AiExtractionJobError,
@@ -1930,6 +1936,20 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/readyz")
+    def readyz(session: Session = Depends(get_session)) -> dict[str, str]:
+        """Report database readiness without exposing infrastructure details."""
+
+        try:
+            check_database_ready(session)
+        except RuntimeReadinessError as exc:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="database_unavailable",
+            ) from exc
+        return {"status": "ready"}
+
     @app.get("/v1/auth/session", response_model=AuthSession)
     async def get_auth_session(
         request: Request,
@@ -2401,6 +2421,16 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> PlatformDashboardResponse:
         return get_platform_dashboard(session)
+
+    @app.get(
+        "/v1/platform/runtime/overview",
+        response_model=PlatformRuntimeOverviewResponse,
+    )
+    def get_platform_runtime_overview_endpoint(
+        _: AuthPrincipal = Depends(require_platform_admin),
+        session: Session = Depends(get_session),
+    ) -> PlatformRuntimeOverviewResponse:
+        return get_platform_runtime_overview(session)
 
     @app.get(
         "/v1/platform/workspace-feedback",

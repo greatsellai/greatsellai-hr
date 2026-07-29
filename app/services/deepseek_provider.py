@@ -729,9 +729,9 @@ def extract_resume_candidate_name(
 ) -> CandidateNameDraft:
     """Return only a source-cited resume owner name for safe backfills.
 
-    This small call exists because the compact facts fallback intentionally
-    omits identity to keep long-resume extraction reliable. It never changes
-    a candidate's existing user-owned display name.
+    This small call repairs historical extractions and rare compact responses
+    where identity remains null. It never changes a candidate's existing
+    user-owned display name.
     """
 
     source = render_evidence_blocks(
@@ -1044,6 +1044,12 @@ def resume_core_facts_tool_schema() -> dict[str, Any]:
             {"type": "null"},
         ]
     }
+    candidate_name = {
+        "anyOf": [
+            {"type": "string", "minLength": 1, "maxLength": 80},
+            {"type": "null"},
+        ]
+    }
     education = {
         "type": "object",
         "properties": {
@@ -1114,6 +1120,15 @@ def resume_core_facts_tool_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "schema_version": {"type": "string", "enum": ["resume_facts.v1"]},
+            # Candidate identity is compact enough to keep in the fallback
+            # contract. It is still independently source-grounded before the
+            # shared Candidate.display_name is ever written.
+            "candidate_name_raw": candidate_name,
+            "candidate_name_evidence_block_ids": {
+                "type": "array",
+                "items": evidence,
+                "maxItems": 2,
+            },
             # This is an availability fallback, not a full archive. Keeping
             # the response bounded avoids another malformed/truncated tool
             # argument on unusually dense resumes.
@@ -1121,7 +1136,14 @@ def resume_core_facts_tool_schema() -> dict[str, Any]:
             "experiences": {"type": "array", "items": experience, "maxItems": 8},
             "skills": {"type": "array", "items": skill, "maxItems": 16},
         },
-        "required": ["schema_version", "education", "experiences", "skills"],
+        "required": [
+            "schema_version",
+            "candidate_name_raw",
+            "candidate_name_evidence_block_ids",
+            "education",
+            "experiences",
+            "skills",
+        ],
         "additionalProperties": False,
     }
 
@@ -1877,12 +1899,14 @@ def extract_resume_core_facts(
 ) -> ResumeFactsSubmission:
     """Extract the minimum source-grounded profile needed for screening.
 
-    This is used only after the richer contract failed.  It must remain small:
-    no candidate identity, 985/211 AI reasoning, or per-responsibility list.
-    Local registry matching and normal source-grounding still run on save.
+    This is used only after the richer contract failed. It must remain small:
+    no 985/211 AI reasoning or per-responsibility list. An explicitly written
+    resume-owner name is retained with page evidence so a successful compact
+    fallback does not create an avoidable unnamed candidate. Local registry
+    matching and normal source-grounding still run on save.
     """
 
-    source = render_evidence_blocks(blocks, retain_candidate_name=False)
+    source = render_evidence_blocks(blocks, retain_candidate_name=True)
     parsed = call_strict_function(
         api_key=api_key,
         model=model,
@@ -1892,16 +1916,22 @@ def extract_resume_core_facts(
         parameters_schema=resume_core_facts_tool_schema(),
         system_prompt=(
             "Extract only explicit, source-grounded resume facts through the provided "
-            "function. This is a compact fallback: do not output a candidate name, "
-            "985/211 judgment, roster identifier, or detailed responsibility list. "
-            "Never infer missing values. Do not output phones, emails, addresses, "
-            "photos, or other personal data."
+            "function. This is a compact fallback: return candidate_name_raw only when "
+            "the resume owner's name is explicitly written as a clear page header or "
+            "labeled name, together with the page evidence that contains it. Never use "
+            "a filename, email, employer, referee, team member, author, or inferred "
+            "identity. If ownership is unclear, return null with an empty evidence list. "
+            "Do not output 985/211 judgment, roster identifier, detailed responsibility "
+            "list, phones, emails, addresses, photos, or other personal data."
         ),
         user_prompt=(
-            "Extract only the education, experience, and skills needed to screen this "
-            "resume. Return at most 4 education items, 8 experience items, and 16 skills, "
-            "prioritizing the most recent or most substantive explicit entries. Every fact "
-            "must cite the page IDs containing it; return page IDs "
+            "Extract the candidate name, education, experience, and skills needed to "
+            "screen this resume. candidate_name_raw must be the exact written name only "
+            "without a label, title, or job-seeking intention; "
+            "candidate_name_evidence_block_ids must be empty exactly when "
+            "candidate_name_raw is null. Return at most 4 education items, 8 experience "
+            "items, and 16 skills, prioritizing the most recent or most substantive "
+            "explicit entries. Every fact must cite the page IDs containing it; return page IDs "
             "as plain strings such as `page-001`. Copy raw fields character-for-character "
             "without translating or normalizing. A project, competition, course design, "
             "research, paper, club, or award must not be classified as employment or "

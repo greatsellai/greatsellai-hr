@@ -175,12 +175,30 @@ def test_resume_fact_tool_schema_requires_binary_ai_school_judgment() -> None:
     assert detail["additionalProperties"] is False
 
 
-def test_core_fact_tool_schema_omits_enrichment_fields() -> None:
+def test_core_fact_tool_schema_keeps_identity_and_omits_enrichment_fields() -> None:
     schema = resume_core_facts_tool_schema()
 
     assert set(schema["properties"]) == {
-        "schema_version", "education", "experiences", "skills",
+        "schema_version",
+        "candidate_name_raw",
+        "candidate_name_evidence_block_ids",
+        "education",
+        "experiences",
+        "skills",
     }
+    assert schema["properties"]["candidate_name_raw"] == {
+        "anyOf": [
+            {"type": "string", "minLength": 1, "maxLength": 80},
+            {"type": "null"},
+        ]
+    }
+    assert schema["properties"]["candidate_name_evidence_block_ids"] == {
+        "type": "array",
+        "items": {"type": "string", "pattern": "^page-\\d{3}$"},
+        "maxItems": 2,
+    }
+    assert "candidate_name_raw" in schema["required"]
+    assert "candidate_name_evidence_block_ids" in schema["required"]
     education = schema["properties"]["education"]["items"]
     experience = schema["properties"]["experiences"]["items"]
     assert "ai_985_211_judgment" not in education["properties"]
@@ -211,6 +229,10 @@ def test_core_extraction_fills_existing_submission_defaults(monkeypatch) -> None
                                             "arguments": json.dumps(
                                                 {
                                                     "schema_version": "resume_facts.v1",
+                                                    "candidate_name_raw": "Test Candidate",
+                                                    "candidate_name_evidence_block_ids": [
+                                                        "page-001"
+                                                    ],
                                                     "education": [],
                                                     "experiences": [
                                                         {
@@ -257,19 +279,30 @@ def test_core_extraction_fills_existing_submission_defaults(monkeypatch) -> None
                 block_id="page-001",
                 page_no=1,
                 block_type="page",
-                text="Name: Test Candidate Project Data Platform Developer Skills Python",
+                text=(
+                    "Test Candidate\\n"
+                    "Phone: 13800138000\\n"
+                    "Email: person@example.com\\n"
+                    "Project Data Platform Developer Skills Python"
+                ),
             )
         ],
     )
 
-    assert result.candidate_name_raw is None
+    assert result.candidate_name_raw == "Test Candidate"
+    assert result.candidate_name_evidence_block_ids == ["page-001"]
     assert result.education == []
     assert result.experiences[0].detail_items == []
     assert result.experiences[0].experience_name_raw == "Data Platform"
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert payload["tools"][0]["function"]["name"] == "submit_resume_core_facts"
-    assert "985/211" not in payload["messages"][1]["content"]
+    prompt = payload["messages"][1]["content"]
+    assert "Test Candidate" in prompt
+    assert "13800138000" not in prompt
+    assert "person@example.com" not in prompt
+    assert "985/211" not in prompt
+    assert "clear page header" in payload["messages"][0]["content"]
 
 
 def test_extraction_prompt_contains_the_versioned_ai_rulebook(monkeypatch) -> None:

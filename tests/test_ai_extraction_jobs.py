@@ -13,9 +13,8 @@ from app.models import (
 )
 from app.schemas import ResumeFactsSubmission
 from app.services import ai_extraction_job_service as job_service
-from app.services import candidate_name_job_service
 from app.services import document_extraction_job_service
-from app.services.deepseek_provider import CandidateNameDraft, DeepSeekProviderError
+from app.services.deepseek_provider import DeepSeekProviderError
 from app.services.institution_service import load_registry
 from test_resume_flow import make_pdf_with_text
 
@@ -964,11 +963,11 @@ def test_structured_provider_failure_retries_with_core_facts_fallback(
     assert "ai_draft_details_pending" in completed.json()["quality_flags"]
 
 
-def test_core_fallback_queues_and_completes_source_grounded_name_job(
+def test_core_fallback_saves_source_grounded_name_in_primary_extraction(
     ai_client,
     monkeypatch,
 ) -> None:
-    """Core facts must not leave an explicit source name permanently blank."""
+    """Core facts write an explicit source-backed name without a second AI call."""
 
     uploaded = _upload_new_resume(ai_client)
     resume_id = str(uploaded["resume_id"])
@@ -981,7 +980,7 @@ def test_core_fallback_queues_and_completes_source_grounded_name_job(
             )
         )
         assert block is not None
-        block.text = "Name: Source Candidate Skills Python"
+        block.text = "Source Candidate\\nSkills: Python"
         session.commit()
 
     monkeypatch.setattr(
@@ -1011,6 +1010,8 @@ def test_core_fallback_queues_and_completes_source_grounded_name_job(
         "extract_resume_core_facts",
         lambda **_kwargs: ResumeFactsSubmission.model_validate(
             {
+                "candidate_name_raw": "Source Candidate",
+                "candidate_name_evidence_block_ids": ["page-001"],
                 "skills": [
                     {"skill_display": "Python", "evidence_block_ids": ["page-001"]}
                 ]
@@ -1026,36 +1027,15 @@ def test_core_fallback_queues_and_completes_source_grounded_name_job(
     after_core = ai_client.get(f"/v1/resumes/{resume_id}")
     assert after_core.status_code == 200, after_core.text
     assert after_core.json()["ai_extraction_status"] == "completed"
-    assert after_core.json()["candidate_display_name"] is None
-    assert after_core.json()["candidate_name_extraction_status"] == "queued"
+    assert after_core.json()["candidate_display_name"] == "Source Candidate"
+    assert after_core.json()["candidate_name_extraction_status"] == "succeeded"
     with database.session_factory() as session:
         name_job = session.scalar(
             select(CandidateNameExtractionJob).where(
                 CandidateNameExtractionJob.resume_id == resume_id
             )
         )
-        assert name_job is not None
-        assert name_job.status == "queued"
-
-    monkeypatch.setattr(
-        candidate_name_job_service,
-        "extract_resume_candidate_name",
-        lambda **_kwargs: CandidateNameDraft(
-            value="Source Candidate",
-            evidence_block_ids=["page-001"],
-        ),
-    )
-    assert candidate_name_job_service.run_candidate_name_extraction_worker_once(
-        database,
-        settings=ai_client.app.state.settings,
-        worker_id="name-fallback-name-worker",
-    )
-
-    completed = ai_client.get(f"/v1/resumes/{resume_id}")
-    assert completed.status_code == 200, completed.text
-    assert completed.json()["ai_extraction_status"] == "completed"
-    assert completed.json()["candidate_display_name"] == "Source Candidate"
-    assert completed.json()["candidate_name_extraction_status"] == "succeeded"
+        assert name_job is None
 
 
 def test_structured_provider_failure_stops_at_the_attempt_budget(ai_client, monkeypatch) -> None:

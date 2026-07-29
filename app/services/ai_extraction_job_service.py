@@ -308,10 +308,11 @@ def backfill_unnamed_candidate_names(
 ) -> tuple[int, int]:
     """Fill only empty candidate names without touching completed facts.
 
-    The compact extraction fallback deliberately omits identity. This bounded
-    repair calls a name-only contract and keeps the same page-evidence check
-    before writing, so it can never replace an existing name or alter scores,
-    summaries, or screening facts.
+    Historical compact extractions and rare null identity responses can leave
+    a source-backed resume unnamed. This bounded repair calls a name-only
+    contract and keeps the same page-evidence check before writing, so it can
+    never replace an existing name or alter scores, summaries, or screening
+    facts.
     """
 
     if limit < 1:
@@ -703,7 +704,7 @@ def _process_claimed_job(
                         business_ref_type="resume_ai_extraction_job",
                         business_ref_id=claimed.job_id,
                         contract_version=(
-                            "resume_facts.core.v1" if core_fallback else "resume_facts.rich.v2"
+                            "resume_facts.core.v2" if core_fallback else "resume_facts.rich.v2"
                         ),
                         pinned_route_policy_version_id=claimed.ai_route_policy_version_id,
                     ),
@@ -929,12 +930,12 @@ def _save_completed_ai_facts(
                         raise AiExtractionJobError("ai_extraction_must_auto_activate")
                 elif saved_resume.extraction_status != "needs_review" or saved_resume.is_active:
                     raise AiExtractionJobError("stale_reparse_must_remain_inactive")
-                # Facts are now durable and active.  Queue the independent
-                # name stage before the independent summary stage. The core
-                # fallback intentionally omits identity; a separate durable,
-                # source-grounded task must therefore repair only a still
-                # empty display name without ever delaying or rolling back
-                # searchable facts.
+                # Facts are now durable and active. Queue the independent
+                # name stage before the independent summary stage only when
+                # the primary rich/core extraction did not return a verified
+                # name. It is a historical/rare-response repair, never the
+                # normal compact-fallback identity path, and it cannot delay
+                # or roll back searchable facts.
                 enqueue_candidate_name_extraction_job(
                     session,
                     resume=saved_resume,

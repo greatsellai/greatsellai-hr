@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import AppSettings
 from app.database import Database
 from app.models import Candidate, Resume, ResumeAiExtractionJob, ResumeSourceBlock
+from app.observability import log_exception_event
 from app.schemas import ResumeFactsSaveRequest, ResumeFactsSubmission
 from app.tenant_scope import clear_organization_context, set_organization_context
 from app.services.deepseek_provider import (
@@ -42,8 +42,6 @@ from app.services.resume_service import (
 )
 from app.services.resume_summary_job_service import enqueue_resume_summary_job
 
-
-logger = logging.getLogger(__name__)
 
 AI_EXTRACTION_QUEUED = "queued"
 AI_EXTRACTION_RUNNING = "running"
@@ -732,8 +730,14 @@ def _process_claimed_job(
             retryable=_is_retryable_deepseek_error(error),
         )
         return
-    except Exception:  # pragma: no cover - defensive containment for the worker
-        logger.exception("Unexpected AI resume extraction worker failure")
+    except Exception as exc:  # pragma: no cover - defensive containment for the worker
+        log_exception_event(
+            "ai_extraction_worker_failed",
+            error_code="ai_extraction_worker_error",
+            exception=exc,
+            job_id=claimed.job_id,
+            workspace_id=claimed.organization_id,
+        )
         _finish_failure(
             database,
             worker_id=worker_id,
@@ -771,8 +775,14 @@ def _process_claimed_job(
             error=str(exc),
             retryable=False,
         )
-    except Exception:  # pragma: no cover - defensive containment for database faults
-        logger.exception("Unable to persist AI resume extraction result")
+    except Exception as exc:  # pragma: no cover - defensive containment for database faults
+        log_exception_event(
+            "ai_extraction_persist_failed",
+            error_code="ai_extraction_persist_failed",
+            exception=exc,
+            job_id=claimed.job_id,
+            workspace_id=claimed.organization_id,
+        )
         _finish_failure(
             database,
             worker_id=worker_id,

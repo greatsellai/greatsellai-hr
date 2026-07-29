@@ -64,6 +64,8 @@ _request_id_context: contextvars.ContextVar[str | None] = contextvars.ContextVar
 )
 _OBSERVABILITY_LOGGER_NAME = "resume_screening.observability"
 _OBSERVABILITY_HANDLER_MARKER = "_resume_v3_safe_json_handler"
+_LEGACY_APP_LOGGER_NAME = "app"
+_LEGACY_APP_HANDLER_MARKER = "_resume_v3_safe_legacy_app_handler"
 
 
 def validate_request_id(value: object) -> str | None:
@@ -219,9 +221,10 @@ def get_observability_logger() -> logging.Logger:
 def configure_observability_logging() -> logging.Logger:
     """Install one isolated stdout JSON handler for safe operational events.
 
-    Existing application loggers are intentionally left unchanged.  This avoids
-    reformatting legacy logs (which may contain unsafe message strings) while
-    ensuring the new correlation events have a stable structured schema.
+    The explicit observability logger carries new structured events.  The
+    legacy ``app`` namespace is isolated separately below so an overlooked
+    ``logger.exception(...)`` cannot leak a raw provider error, candidate
+    value, or traceback through a root server logger.
     """
 
     logger = get_observability_logger()
@@ -231,6 +234,41 @@ def configure_observability_logging() -> logging.Logger:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(SafeJsonFormatter())
         setattr(handler, _OBSERVABILITY_HANDLER_MARKER, True)
+        logger.addHandler(handler)
+    configure_legacy_app_logging()
+    return logger
+
+
+def configure_legacy_app_logging() -> logging.Logger:
+    """Contain legacy application logger records behind the safe formatter.
+
+    ``app.*`` records historically flowed to the process/root logger.  A
+    normal ``logger.exception`` formats both its message and traceback, either
+    of which can contain provider responses or candidate data.  This one
+    namespace-only boundary leaves Uvicorn, Caddy, and other server loggers
+    untouched while ensuring any residual application record is rendered from
+    the allowlisted :class:`SafeJsonFormatter` fields alone.
+    """
+
+    logger = logging.getLogger(_LEGACY_APP_LOGGER_NAME)
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+
+    # A handler directly attached to the ``app`` namespace would otherwise
+    # receive raw ``LogRecord`` text before it reaches this formatter.  Remove
+    # only handlers on this application namespace; root/Uvicorn/Caddy loggers
+    # are deliberately outside this privacy boundary.
+    for handler in tuple(logger.handlers):
+        if not getattr(handler, _LEGACY_APP_HANDLER_MARKER, False):
+            logger.removeHandler(handler)
+
+    if not any(
+        getattr(handler, _LEGACY_APP_HANDLER_MARKER, False)
+        for handler in logger.handlers
+    ):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(SafeJsonFormatter())
+        setattr(handler, _LEGACY_APP_HANDLER_MARKER, True)
         logger.addHandler(handler)
     return logger
 
@@ -257,6 +295,28 @@ def log_event(event: str, *, level: int = logging.INFO, **fields: object) -> Non
             safe_extra["request_id"] = context_request_id
 
     get_observability_logger().log(level, safe_extra["event"], extra=safe_extra)
+
+
+def log_exception_event(
+    event: str,
+    *,
+    error_code: str,
+    exception: BaseException,
+    level: int = logging.ERROR,
+    **fields: object,
+) -> None:
+    """Record a caught exception without serializing its message or traceback.
+
+    Application and worker callers should use a reviewed, fixed ``error_code``
+    and may retain only the exception class name for diagnosis.  The exception
+    object is never passed to :mod:`logging`, avoiding the implicit
+    ``str(exception)`` and traceback formatting performed by ``logger.exception``.
+    """
+
+    safe_fields = dict(fields)
+    safe_fields["error_code"] = error_code
+    safe_fields["error_type"] = type(exception).__name__
+    log_event(event, level=level, **safe_fields)
 
 
 def safe_internal_error_response(request_id: str) -> JSONResponse:

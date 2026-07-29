@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -14,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import AppSettings
 from app.database import Database
 from app.models import Resume, ResumeDocumentExtractionJob, ResumeSourceBlock
+from app.observability import log_exception_event
 from app.services.document_text_extraction import (
     DocumentExtractionError,
     extract_document_text,
@@ -26,8 +26,6 @@ from app.services.contact_extraction_service import (
 from app.services.tencent_ocr_provider import TencentOcrConfig
 from app.tenant_scope import clear_organization_context, set_organization_context
 
-
-logger = logging.getLogger(__name__)
 
 DOCUMENT_EXTRACTION_QUEUED = "queued"
 DOCUMENT_EXTRACTION_RUNNING = "running"
@@ -410,8 +408,14 @@ def _process_claimed_job(
             retryable=_is_retryable_document_error(error),
         )
         return
-    except Exception:  # pragma: no cover - defensive worker containment
-        logger.exception("Unexpected document extraction worker failure")
+    except Exception as exc:  # pragma: no cover - defensive worker containment
+        log_exception_event(
+            "document_extraction_worker_failed",
+            error_code="document_extraction_worker_error",
+            exception=exc,
+            job_id=claimed.job_id,
+            workspace_id=claimed.organization_id,
+        )
         _finish_failure(
             database,
             worker_id=worker_id,
@@ -437,8 +441,14 @@ def _process_claimed_job(
             error=str(exc),
             retryable=False,
         )
-    except Exception:  # pragma: no cover - defensive database containment
-        logger.exception("Unable to persist document extraction result")
+    except Exception as exc:  # pragma: no cover - defensive database containment
+        log_exception_event(
+            "document_extraction_persist_failed",
+            error_code="document_extraction_persist_failed",
+            exception=exc,
+            job_id=claimed.job_id,
+            workspace_id=claimed.organization_id,
+        )
         _finish_failure(
             database,
             worker_id=worker_id,

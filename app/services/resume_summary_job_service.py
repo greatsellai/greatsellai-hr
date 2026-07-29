@@ -6,7 +6,6 @@ slow or failed summary can retry without changing that candidate state.
 """
 from __future__ import annotations
 
-import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.config import AppSettings
 from app.database import Database
 from app.models import Resume, ResumeFactSnapshot, ResumeSummary, ResumeSummaryJob
+from app.observability import log_exception_event
 from app.services.ai_gateway_service import (
     AiGatewayError,
     ai_gateway_credentials_configured,
@@ -30,8 +30,6 @@ from app.services.resume_eligibility import has_unreliable_source_text
 from app.services.summary_service import SummaryServiceError, generate_resume_summary
 from app.tenant_scope import clear_organization_context, set_organization_context
 
-
-logger = logging.getLogger(__name__)
 
 SUMMARY_JOB_QUEUED = "queued"
 SUMMARY_JOB_RUNNING = "running"
@@ -653,8 +651,14 @@ def _process_claimed_job(
             error=str(exc),
             retryable=False,
         )
-    except Exception:  # pragma: no cover - defensive containment for workers
-        logger.exception("Unexpected automatic resume summary worker failure")
+    except Exception as exc:  # pragma: no cover - defensive containment for workers
+        log_exception_event(
+            "resume_summary_worker_failed",
+            error_code="resume_summary_worker_error",
+            exception=exc,
+            job_id=claimed.job_id,
+            workspace_id=claimed.organization_id,
+        )
         _finish_failure(
             database,
             job_id=claimed.job_id,

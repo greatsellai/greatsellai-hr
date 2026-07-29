@@ -7,7 +7,6 @@ routes never handle cloud-provider SDK details or log raw action links.
 from __future__ import annotations
 
 import json
-import logging
 import smtplib
 import ssl
 from dataclasses import dataclass, field
@@ -18,9 +17,8 @@ from typing import Protocol
 from urllib.parse import urlencode
 
 from app.config import AppSettings
+from app.observability import log_exception_event
 
-
-logger = logging.getLogger(__name__)
 
 
 class TransactionalEmailError(RuntimeError):
@@ -153,10 +151,18 @@ class TencentSesTransactionalEmailProvider:
             request.Template = template
             client.SendEmail(request)
         except TencentCloudSDKException as exc:
-            logger.warning("transactional_email_provider_failed provider=tencent_ses")
+            log_exception_event(
+                "transactional_email_provider_failed",
+                error_code="email_delivery_provider_failed",
+                exception=exc,
+            )
             raise TransactionalEmailError("email_delivery_provider_failed") from exc
         except (OSError, TypeError, ValueError) as exc:
-            logger.warning("transactional_email_transport_failed provider=tencent_ses")
+            log_exception_event(
+                "transactional_email_transport_failed",
+                error_code="email_delivery_provider_failed",
+                exception=exc,
+            )
             raise TransactionalEmailError("email_delivery_provider_failed") from exc
 
     @property
@@ -208,10 +214,18 @@ class TencentSesTransactionalEmailProvider:
             request.Template = template
             client.SendEmail(request)
         except TencentCloudSDKException as exc:
-            logger.warning("transactional_email_provider_failed provider=tencent_ses")
+            log_exception_event(
+                "transactional_email_provider_failed",
+                error_code="email_delivery_provider_failed",
+                exception=exc,
+            )
             raise TransactionalEmailError("email_delivery_provider_failed") from exc
         except (OSError, TypeError, ValueError) as exc:
-            logger.warning("transactional_email_transport_failed provider=tencent_ses")
+            log_exception_event(
+                "transactional_email_transport_failed",
+                error_code="email_delivery_provider_failed",
+                exception=exc,
+            )
             raise TransactionalEmailError("email_delivery_provider_failed") from exc
 
 
@@ -263,7 +277,11 @@ class FeishuSmtpTransactionalEmailProvider:
                         recipient=delivery.recipient,
                     )
         except (smtplib.SMTPException, OSError, TimeoutError, ValueError) as exc:
-            logger.warning("transactional_email_transport_failed provider=feishu_smtp")
+            log_exception_event(
+                "transactional_email_transport_failed",
+                error_code="email_delivery_provider_failed",
+                exception=exc,
+            )
             raise TransactionalEmailError("email_delivery_provider_failed") from exc
 
     @property
@@ -308,7 +326,11 @@ class FeishuSmtpTransactionalEmailProvider:
                         recipient=delivery.recipient,
                     )
         except (smtplib.SMTPException, OSError, TimeoutError, ValueError) as exc:
-            logger.warning("transactional_email_transport_failed provider=feishu_smtp")
+            log_exception_event(
+                "transactional_email_transport_failed",
+                error_code="email_delivery_provider_failed",
+                exception=exc,
+            )
             raise TransactionalEmailError("email_delivery_provider_failed") from exc
 
 

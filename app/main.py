@@ -50,6 +50,8 @@ from app.observability import (
     RequestCorrelationMiddleware,
     configure_observability_logging,
     current_request_id,
+    log_event,
+    log_exception_event,
 )
 from app.schemas import (
     AuthLogin,
@@ -473,9 +475,6 @@ from app.services.workspace_feedback_service import (
     list_workspace_feedback,
     submit_workspace_feedback,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 def _resume_detail(resume: object) -> ResumeDetail:
@@ -1480,8 +1479,16 @@ def _deliver_email_verification(
         try:
             _commit_or_raise(session)
         except HTTPException:
-            logger.warning("email_verification_delivery_state_not_recorded")
-        logger.warning("email_verification_delivery_failed")
+            log_event(
+                "email_verification_delivery_state_not_recorded",
+                level=logging.WARNING,
+                error_code="email_verification_delivery_state_not_recorded",
+            )
+        log_event(
+            "email_verification_delivery_failed",
+            level=logging.WARNING,
+            error_code="email_verification_delivery_failed",
+        )
         return False
     except Exception:
         # The public registration response must not expose a provider error or
@@ -1497,8 +1504,16 @@ def _deliver_email_verification(
         try:
             _commit_or_raise(session)
         except HTTPException:
-            logger.warning("email_verification_delivery_state_not_recorded")
-        logger.warning("email_verification_delivery_failed")
+            log_event(
+                "email_verification_delivery_state_not_recorded",
+                level=logging.WARNING,
+                error_code="email_verification_delivery_state_not_recorded",
+            )
+        log_event(
+            "email_verification_delivery_failed",
+            level=logging.WARNING,
+            error_code="email_verification_delivery_failed",
+        )
         return False
 
     record_email_verification_delivery(
@@ -1509,7 +1524,11 @@ def _deliver_email_verification(
     try:
         _commit_or_raise(session)
     except HTTPException:
-        logger.warning("email_verification_delivery_state_not_recorded")
+        log_event(
+            "email_verification_delivery_state_not_recorded",
+            level=logging.WARNING,
+            error_code="email_verification_delivery_state_not_recorded",
+        )
     return True
 
 
@@ -2303,7 +2322,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                     # Do not leave an undeliverable active link, and never turn a
                     # registered account into a public existence signal.
                     session.rollback()
-                    logger.warning("password_reset_outbox_enqueue_unavailable")
+                    log_event(
+                        "password_reset_outbox_enqueue_unavailable",
+                        level=logging.WARNING,
+                        error_code="password_reset_outbox_enqueue_unavailable",
+                    )
             return PasswordResetRequestResult(
                 accepted=True,
                 delivery_available=provider.password_reset_configured,
@@ -3869,7 +3892,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             raise
         except Exception as exc:
             session.rollback()
-            logger.exception("Recruiting-agent request failed")
+            log_exception_event(
+                "recruiting_agent_request_failed",
+                error_code="agent_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="agent_service_unavailable",
@@ -4065,16 +4092,25 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             _raise_talent_search_profile_error(exc)
         except TalentProfileDeepSeekProviderError as exc:
             session.rollback()
-            logger.warning("Talent-search profile provider failed: %s", exc)
             detail = (
                 "talent_search_profile_response_truncated"
                 if str(exc) == "deepseek_response_truncated"
                 else "talent_search_profile_provider_failed"
             )
+            log_exception_event(
+                "talent_search_profile_provider_failed",
+                level=logging.WARNING,
+                error_code=detail,
+                exception=exc,
+            )
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
         except Exception as exc:
             session.rollback()
-            logger.exception("Talent-search profile generation failed")
+            log_exception_event(
+                "talent_search_profile_generation_failed",
+                error_code="talent_search_profile_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",
@@ -4097,7 +4133,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         except TalentSearchProfileServiceError as exc:
             _raise_talent_search_profile_error(exc)
         except Exception as exc:
-            logger.exception("Talent-search profile read failed")
+            log_exception_event(
+                "talent_search_profile_list_read_failed",
+                error_code="talent_search_profile_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",
@@ -4119,7 +4159,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         except TalentSearchProfileServiceError as exc:
             _raise_talent_search_profile_error(exc)
         except Exception as exc:
-            logger.exception("Talent-search profile read failed")
+            log_exception_event(
+                "talent_search_profile_read_failed",
+                error_code="talent_search_profile_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",
@@ -4153,16 +4197,25 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             _raise_talent_search_profile_error(exc)
         except TalentProfileDeepSeekProviderError as exc:
             session.rollback()
-            logger.warning("Talent-search profile refinement provider failed: %s", exc)
             detail = (
                 "talent_search_profile_response_truncated"
                 if str(exc) == "deepseek_response_truncated"
                 else "talent_search_profile_provider_failed"
             )
+            log_exception_event(
+                "talent_search_profile_refinement_provider_failed",
+                level=logging.WARNING,
+                error_code=detail,
+                exception=exc,
+            )
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
         except Exception as exc:
             session.rollback()
-            logger.exception("Talent-search profile refinement failed")
+            log_exception_event(
+                "talent_search_profile_refinement_failed",
+                error_code="talent_search_profile_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",
@@ -4199,7 +4252,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             _raise_job_service_error(exc)
         except Exception as exc:
             session.rollback()
-            logger.exception("Talent-search profile confirmation failed")
+            log_exception_event(
+                "talent_search_profile_confirmation_failed",
+                error_code="talent_search_profile_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",
@@ -4235,7 +4292,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             _raise_job_service_error(exc)
         except Exception as exc:
             session.rollback()
-            logger.exception("Talent-search profile run failed")
+            log_exception_event(
+                "talent_search_profile_run_failed",
+                error_code="talent_search_profile_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",
@@ -4299,7 +4360,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             _raise_job_service_error(exc)
         except Exception as exc:
             session.rollback()
-            logger.exception("Recruiting-agent scoped talent-profile run failed")
+            log_exception_event(
+                "recruiting_agent_talent_search_profile_run_failed",
+                error_code="talent_search_profile_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",
@@ -4330,7 +4395,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         except TalentSearchProfileServiceError as exc:
             _raise_talent_search_profile_error(exc)
         except Exception as exc:
-            logger.exception("Talent-search profile run read failed")
+            log_exception_event(
+                "talent_search_profile_run_read_failed",
+                error_code="talent_search_profile_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="talent_search_profile_service_unavailable",
@@ -5838,18 +5907,27 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         except JobServiceError as exc:
             _raise_job_service_error(exc)
         except JobDeepSeekProviderError as exc:
-            logger.warning("JD generation provider failed: %s", exc)
             detail = (
                 "jd_generation_response_truncated"
                 if str(exc) == "deepseek_response_truncated"
                 else "jd_generation_provider_failed"
+            )
+            log_exception_event(
+                "jd_generation_provider_failed",
+                level=logging.WARNING,
+                error_code=detail,
+                exception=exc,
             )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=detail,
             ) from exc
         except Exception as exc:  # pragma: no cover - final availability guard
-            logger.exception("JD generation service failed")
+            log_exception_event(
+                "jd_generation_service_failed",
+                error_code="jd_generation_service_unavailable",
+                exception=exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="jd_generation_service_unavailable",

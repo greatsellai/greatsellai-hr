@@ -106,6 +106,85 @@ def test_log_event_discards_unknown_or_unsafe_fields(monkeypatch) -> None:
     assert "resume-text-must-not-log" not in stream.getvalue()
 
 
+def test_log_exception_event_omits_exception_message_from_safe_handler(monkeypatch) -> None:
+    stream = io.StringIO()
+    logger = logging.Logger("tests.safe_exception_observability")
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(observability.SafeJsonFormatter())
+    logger.addHandler(handler)
+    monkeypatch.setattr(observability, "get_observability_logger", lambda: logger)
+
+    observability.log_exception_event(
+        "ai_extraction_worker_failed",
+        error_code="ai_extraction_worker_error",
+        exception=RuntimeError("candidate-payload-must-not-log@example.test"),
+        job_id="job-safe-123",
+        workspace_id="workspace-safe-456",
+        prompt="resume-text-must-not-log",
+    )
+
+    rendered = stream.getvalue()
+    payload = json.loads(rendered)
+    assert payload["event"] == "ai_extraction_worker_failed"
+    assert payload["error_code"] == "ai_extraction_worker_error"
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["job_id"] == "job-safe-123"
+    assert payload["workspace_id"] == "workspace-safe-456"
+    assert "candidate-payload-must-not-log@example.test" not in rendered
+    assert "resume-text-must-not-log" not in rendered
+
+
+def test_legacy_app_logger_isolated_from_raw_message_and_traceback(monkeypatch) -> None:
+    stream = io.StringIO()
+    app_logger = logging.getLogger("app")
+    legacy_logger = logging.getLogger("app.tests.legacy_raw_log")
+    original_handlers = list(app_logger.handlers)
+    original_level = app_logger.level
+    original_propagate = app_logger.propagate
+    original_legacy_handlers = list(legacy_logger.handlers)
+    original_legacy_level = legacy_logger.level
+    original_legacy_propagate = legacy_logger.propagate
+    for handler in tuple(app_logger.handlers):
+        app_logger.removeHandler(handler)
+    for handler in tuple(legacy_logger.handlers):
+        legacy_logger.removeHandler(handler)
+    monkeypatch.setattr(observability.sys, "stdout", stream)
+
+    try:
+        observability.configure_legacy_app_logging()
+        legacy_logger.error(
+            "raw-provider-response candidate-payload-must-not-log@example.test",
+            exc_info=(
+                RuntimeError,
+                RuntimeError("traceback-secret-must-not-log"),
+                None,
+            ),
+        )
+        rendered = stream.getvalue()
+        payload = json.loads(rendered)
+
+        assert payload["event"] == "invalid_event"
+        assert payload["level"] == "ERROR"
+        assert app_logger.propagate is False
+        assert "raw-provider-response" not in rendered
+        assert "candidate-payload-must-not-log@example.test" not in rendered
+        assert "traceback-secret-must-not-log" not in rendered
+    finally:
+        for handler in tuple(app_logger.handlers):
+            app_logger.removeHandler(handler)
+        for handler in original_handlers:
+            app_logger.addHandler(handler)
+        app_logger.setLevel(original_level)
+        app_logger.propagate = original_propagate
+        for handler in tuple(legacy_logger.handlers):
+            legacy_logger.removeHandler(handler)
+        for handler in original_legacy_handlers:
+            legacy_logger.addHandler(handler)
+        legacy_logger.setLevel(original_legacy_level)
+        legacy_logger.propagate = original_legacy_propagate
+
+
 def test_unhandled_exception_returns_safe_diagnostic_response_and_event(monkeypatch) -> None:
     events: list[tuple[str, int, dict[str, object]]] = []
 

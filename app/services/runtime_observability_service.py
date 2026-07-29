@@ -528,6 +528,31 @@ def _aggregate_worker_liveness(
     return "missing"
 
 
+def _aggregate_worker_processes(
+    workers: list[PlatformRuntimeWorkerResponse],
+) -> list[PlatformRuntimeWorkerResponse]:
+    """Collapse recent process heartbeats into one row per safe worker type.
+
+    A clean restart deliberately creates a new opaque process ID.  Showing
+    every retained process record would make the platform console duplicate a
+    single "background worker" row and would make an orderly, recently-stopped
+    predecessor look like an incident while its successor is healthy.  The
+    overview is a health summary, not a process inventory, so retain the most
+    useful current state for each type: live takes precedence over stale, then
+    stopped; records of the same state are already ordered newest-first.
+    """
+
+    liveness_priority = {"live": 3, "stale": 2, "stopped": 1}
+    by_kind: dict[str, PlatformRuntimeWorkerResponse] = {}
+    for worker in workers:
+        current = by_kind.get(worker.worker_kind)
+        if current is None or liveness_priority[worker.liveness] > liveness_priority[
+            current.liveness
+        ]:
+            by_kind[worker.worker_kind] = worker
+    return list(by_kind.values())
+
+
 def build_platform_runtime_overview(
     session: Session,
     *,
@@ -554,10 +579,11 @@ def build_platform_runtime_overview(
         .order_by(RuntimeWorkerHeartbeat.last_seen_at.desc())
         .limit(50)
     ).all()
-    workers = [
+    worker_processes = [
         _worker_response(heartbeat, stale_before=stale_before)
         for heartbeat in heartbeat_rows
     ]
+    workers = _aggregate_worker_processes(worker_processes)
     queues = [
         _queue_overview(session, spec, global_statement=global_statement)
         for spec in _QUEUE_SPECS

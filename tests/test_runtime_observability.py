@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import AppSettings
+from app import ai_extraction_worker
 from app.ai_extraction_worker import _log_worker_lifecycle_event
 from app.main import create_app
 from app.models import RuntimeWorkerHeartbeat, WorkspaceFeedbackSubmission
@@ -148,6 +149,36 @@ def test_worker_lifecycle_logging_uses_only_fixed_safe_event_fields(
     ]
 
 
+def test_worker_task_boundary_uses_the_rate_limited_liveness_touch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long queue tasks refresh liveness without bypassing the rate limit."""
+
+    calls: list[dict[str, object]] = []
+
+    def record_boundary(*args: object, **kwargs: object) -> tuple[float, bool]:
+        calls.append({"args": args, **kwargs})
+        return 123.0, True
+
+    monkeypatch.setattr(ai_extraction_worker, "_touch_worker_heartbeat", record_boundary)
+    database = object()
+
+    updated = ai_extraction_worker._touch_worker_task_boundary(
+        database,  # type: ignore[arg-type]
+        worker_id="runtime-worker-test",
+        last_heartbeat_monotonic=42.0,
+    )
+
+    assert updated == 123.0
+    assert calls == [
+        {
+            "args": (database,),
+            "worker_id": "runtime-worker-test",
+            "last_heartbeat_monotonic": 42.0,
+        }
+    ]
+
+
 def test_worker_heartbeat_is_durable_and_marks_clean_or_failed_shutdown(
     runtime_client: TestClient,
 ) -> None:
@@ -273,6 +304,43 @@ def test_runtime_overview_reports_stale_worker_when_no_live_worker_exists(
         overview = get_platform_runtime_overview(session, now=current_time)
     assert overview.worker_liveness == "stale"
     assert overview.workers[0].liveness == "stale"
+
+
+def test_runtime_overview_collapses_restarted_processes_by_worker_kind(
+    runtime_client: TestClient,
+) -> None:
+    """A stopped predecessor must not duplicate a healthy worker row."""
+
+    database = runtime_client.app.state.database
+    current_time = datetime.now(timezone.utc)
+    with database.session_factory() as session:
+        session.add_all(
+            [
+                RuntimeWorkerHeartbeat(
+                    worker_id="runtime-predecessor-worker",
+                    worker_kind="background",
+                    status="stopped",
+                    started_at=current_time - timedelta(minutes=8),
+                    last_seen_at=current_time - timedelta(minutes=6),
+                ),
+                RuntimeWorkerHeartbeat(
+                    worker_id="runtime-current-worker",
+                    worker_kind="background",
+                    status="running",
+                    started_at=current_time - timedelta(minutes=2),
+                    last_seen_at=current_time - timedelta(seconds=5),
+                ),
+            ]
+        )
+        session.commit()
+
+    with database.session_factory() as session:
+        overview = get_platform_runtime_overview(session, now=current_time)
+
+    assert overview.worker_liveness == "live"
+    assert len(overview.workers) == 1
+    assert overview.workers[0].worker_kind == "background"
+    assert overview.workers[0].liveness == "live"
 
 
 def test_runtime_overview_drops_expired_process_heartbeats(

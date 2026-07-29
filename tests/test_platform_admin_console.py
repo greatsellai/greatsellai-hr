@@ -229,7 +229,9 @@ def test_dashboard_organization_management_and_audit_are_safe_and_atomic(
 
     patched = platform_client.patch(
         f"/v1/platform/organizations/{organization_id}",
-        headers={"X-Request-ID": "candidate-name-must-not-enter-audit"},
+        # Public caller input must never become a durable audit ID, including
+        # values that appear to be a safe opaque trace ID.
+        headers={"X-Request-ID": "6a6f686e406578616d706c652e636f6d"},
         json={
             "name": "Renamed Tenant",
             "plan_code": "basic",
@@ -244,7 +246,7 @@ def test_dashboard_organization_management_and_audit_are_safe_and_atomic(
     assert patched.json()["plan_status"] == "active"
     request_id = patched.headers["X-Request-ID"]
     assert validate_request_id(request_id) == request_id
-    assert request_id != "candidate-name-must-not-enter-audit"
+    assert request_id != "6a6f686e406578616d706c652e636f6d"
 
     audit = platform_client.get(
         "/v1/platform/audit-events",

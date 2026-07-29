@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -10,23 +11,44 @@ from fastapi.testclient import TestClient
 from app import observability
 
 
-def test_request_id_is_generated_reused_and_replaced_when_invalid(client) -> None:
+def test_runtime_log_configuration_removes_raw_http_metadata() -> None:
+    """Proxy/API logs must not retain query tokens or original filenames."""
+
+    repository_root = Path(__file__).resolve().parents[1]
+    caddyfile = (repository_root / "deploy" / "Caddyfile").read_text(encoding="utf-8")
+    dockerfile = (repository_root / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "request>headers delete" in caddyfile
+    assert "request>uri delete" in caddyfile
+    assert "resp_headers delete" in caddyfile
+    assert '"--no-access-log"' in dockerfile
+
+
+def test_request_id_is_server_generated_even_when_a_client_supplies_one(client) -> None:
     generated = client.get("/health")
     generated_id = generated.headers[observability.REQUEST_ID_HEADER]
     assert generated.status_code == 200
     assert observability.validate_request_id(generated_id) == generated_id
 
-    supplied_id = "abcdef0123456789abcdef0123456789"
-    reused = client.get("/health", headers={observability.REQUEST_ID_HEADER: supplied_id})
-    assert reused.headers[observability.REQUEST_ID_HEADER] == supplied_id
+    # `john@example.com` represented as 16 bytes of hex is syntactically
+    # indistinguishable from a UUID-style trace ID. Public input must never
+    # reach logs or durable audit records under any encoding.
+    supplied_hex_encoded_pii = "6a6f686e406578616d706c652e636f6d"
+    supplied = client.get(
+        "/health",
+        headers={observability.REQUEST_ID_HEADER: supplied_hex_encoded_pii},
+    )
+    supplied_id = supplied.headers[observability.REQUEST_ID_HEADER]
+    assert supplied_id != supplied_hex_encoded_pii
+    assert observability.validate_request_id(supplied_id) == supplied_id
 
-    invalid = client.get(
+    malformed = client.get(
         "/health",
         headers={observability.REQUEST_ID_HEADER: "candidate-name-must-not-be-logged"},
     )
-    invalid_id = invalid.headers[observability.REQUEST_ID_HEADER]
-    assert invalid_id != "candidate-name-must-not-be-logged"
-    assert observability.validate_request_id(invalid_id) == invalid_id
+    malformed_id = malformed.headers[observability.REQUEST_ID_HEADER]
+    assert malformed_id != "candidate-name-must-not-be-logged"
+    assert observability.validate_request_id(malformed_id) == malformed_id
     assert observability.current_request_id() is None
 
 
@@ -201,16 +223,19 @@ def test_unhandled_exception_returns_safe_diagnostic_response_and_event(monkeypa
         raise RuntimeError("provider response with secret should not reach a client or log event")
 
     with TestClient(app, raise_server_exceptions=False) as client:
+        supplied_request_id = "0123456789abcdef0123456789abcdef"
         response = client.get(
             "/test/explode",
-            headers={observability.REQUEST_ID_HEADER: "0123456789abcdef0123456789abcdef"},
+            headers={observability.REQUEST_ID_HEADER: supplied_request_id},
         )
 
     assert response.status_code == 500
-    assert response.headers[observability.REQUEST_ID_HEADER] == "0123456789abcdef0123456789abcdef"
+    request_id = response.headers[observability.REQUEST_ID_HEADER]
+    assert request_id != supplied_request_id
+    assert observability.validate_request_id(request_id) == request_id
     assert response.json() == {
         "detail": "internal_server_error",
-        "request_id": "0123456789abcdef0123456789abcdef",
+        "request_id": request_id,
     }
 
     error_events = [event for event in events if event[0] == "api_unhandled_exception"]
@@ -219,7 +244,7 @@ def test_unhandled_exception_returns_safe_diagnostic_response_and_event(monkeypa
             "api_unhandled_exception",
             logging.ERROR,
             {
-                "request_id": "0123456789abcdef0123456789abcdef",
+                "request_id": request_id,
                 "method": "GET",
                 "path": "/test/explode",
                 "error_code": "unhandled_exception",

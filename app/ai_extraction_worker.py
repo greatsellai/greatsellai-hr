@@ -150,6 +150,29 @@ def _touch_worker_heartbeat(
     return current_monotonic, True
 
 
+def _touch_worker_task_boundary(
+    database: Database,
+    *,
+    worker_id: str,
+    last_heartbeat_monotonic: float,
+) -> float:
+    """Refresh liveness after one durable task boundary when due.
+
+    A worker cycle deliberately visits several independent queues.  A document
+    conversion, IMAP sync, or model call can take long enough that waiting
+    until the *whole* cycle finishes would make a healthy process look stale.
+    The underlying touch remains rate-limited, so fast queue checks do not
+    turn the heartbeat into a database write per task.
+    """
+
+    updated_monotonic, _ = _touch_worker_heartbeat(
+        database,
+        worker_id=worker_id,
+        last_heartbeat_monotonic=last_heartbeat_monotonic,
+    )
+    return updated_monotonic
+
+
 def run_forever(settings: AppSettings) -> None:
     database = _create_worker_database(settings)
     worker_id = _worker_id()
@@ -172,48 +195,98 @@ def run_forever(settings: AppSettings) -> None:
                 database,
                 worker_id=worker_id,
             )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             ran_transactional_email = run_transactional_email_outbox_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
+            )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
             )
             ran_mailbox_job = run_mailbox_background_job_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
             )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             ran_document_extraction = run_document_extraction_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
+            )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
             )
             ran_extraction = run_ai_extraction_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
             )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             ran_summary = run_resume_summary_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
+            )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
             )
             ran_job_match = run_job_match_batch_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
             )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             ran_score_batch = run_resume_score_batch_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
             )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             queued_due_mailbox_sync = enqueue_due_mailbox_sync_jobs(
                 database=database,
                 settings=settings,
             )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             ran_mailbox_retention_cleanup = cleanup_due_mailbox_retention(
                 database=database,
                 settings=settings,
+            )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
             )
             ran_candidate_data_retention_cleanup = (
                 run_due_candidate_data_retention_cleanup(
@@ -221,19 +294,39 @@ def run_forever(settings: AppSettings) -> None:
                     settings=settings,
                 )
             )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             ran_candidate_data_purge = run_candidate_data_purge_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
+            )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
             )
             ran_candidate_data_export = run_candidate_data_export_worker_once(
                 database,
                 settings=settings,
                 worker_id=worker_id,
             )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
+            )
             cleaned_candidate_data_exports = cleanup_expired_candidate_data_exports(
                 database,
                 settings=settings,
+            )
+            last_heartbeat_monotonic = _touch_worker_task_boundary(
+                database,
+                worker_id=worker_id,
+                last_heartbeat_monotonic=last_heartbeat_monotonic,
             )
             purged_recruiting_agent_contexts = (
                 purge_expired_recruiting_agent_conversations(database)

@@ -12,6 +12,8 @@ usage() {
 Usage: scripts/transfer-production-images.sh <commit-sha> --host <ssh-host> [options]
 
 Options:
+  --expected-ci-run-id <id>
+                       Required successful CI workflow run ID recorded on both images
   --ssh-key <path>     Optional SSH private-key path; never committed
 
 The source runner must already contain the CI-verified API and Caddy images
@@ -33,6 +35,10 @@ image_revision() {
   docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$1"
 }
 
+image_ci_run_id() {
+  docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_id" }}' "$1"
+}
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
@@ -46,10 +52,12 @@ release_commit="${1:-}"
 shift || true
 
 remote_host=""
+expected_ci_run_id=""
 ssh_key=""
 while (($#)); do
   case "$1" in
     --host) remote_host="${2:?--host requires a value}"; shift 2 ;;
+    --expected-ci-run-id) expected_ci_run_id="${2:?--expected-ci-run-id requires a value}"; shift 2 ;;
     --ssh-key) ssh_key="${2:?--ssh-key requires a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
@@ -57,14 +65,18 @@ while (($#)); do
 done
 
 [[ -n "$remote_host" ]] || die "Missing deployment target; pass --host."
+[[ "$expected_ci_run_id" =~ ^[0-9]+$ ]] || die "Missing or invalid CI workflow run ID."
 [[ -z "$ssh_key" || -r "$ssh_key" ]] || die "SSH key is not readable."
 
 api_image="greatsellai-hr-api:$release_commit"
 caddy_image="greatsellai-hr-caddy:$release_commit"
 for image in "$api_image" "$caddy_image"; do
   revision="$(image_revision "$image")" || die "Required CI image is unavailable: $image"
+  image_run_id="$(image_ci_run_id "$image")" || die "Required CI provenance label is unavailable: $image"
   [[ "$revision" == "$release_commit" ]] || \
     die "CI image $image does not carry the expected immutable revision label."
+  [[ "$image_run_id" == "$expected_ci_run_id" ]] || \
+    die "CI image $image does not come from the expected successful workflow run."
 done
 
 ssh_options=(
@@ -81,8 +93,13 @@ fi
 remote_loader="$(cat <<'EOF'
 set -Eeuo pipefail
 release_commit="$1"
+expected_ci_run_id="$2"
 [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]] || {
   echo "Invalid release commit." >&2
+  exit 1
+}
+[[ "$expected_ci_run_id" =~ ^[0-9]+$ ]] || {
+  echo "Invalid CI workflow run ID." >&2
   exit 1
 }
 
@@ -99,10 +116,15 @@ for image in "$api_image" "$caddy_image"; do
     echo "Transferred image revision label does not match the release commit: $image" >&2
     exit 1
   }
+  image_run_id="$(sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_id" }}' "$image")"
+  [[ "$image_run_id" == "$expected_ci_run_id" ]] || {
+    echo "Transferred image CI workflow run ID does not match: $image" >&2
+    exit 1
+  }
 done
 EOF
 )"
-remote_command="bash -c $(shell_quote "$remote_loader") -- $(shell_quote "$release_commit")"
+remote_command="bash -c $(shell_quote "$remote_loader") -- $(shell_quote "$release_commit") $(shell_quote "$expected_ci_run_id")"
 
 echo "Streaming CI-verified production images for $release_commit to $remote_host."
 docker image save "$api_image" "$caddy_image" | gzip -1 | \

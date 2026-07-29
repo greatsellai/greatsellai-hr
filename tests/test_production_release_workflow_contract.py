@@ -12,22 +12,34 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_automatic_release_preflights_the_candidate_before_creating_a_tag() -> None:
+def test_production_is_a_manual_promotion_of_a_completed_staging_candidate() -> None:
     workflow = (ROOT / ".github" / "workflows" / "production-release.yml").read_text(
         encoding="utf-8"
     )
 
+    assert "workflow_run:" not in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "Confirmation must be PROMOTE." in workflow
+    assert "verify-staging:" in workflow
+    assert "needs: verify-staging" in workflow
+    assert "environment:\n      name: staging" in workflow
+    assert "environment:\n      name: production" in workflow
+    assert "scripts/verify-staging-release.sh" in workflow
+    assert "scripts/verify-release-images.sh" in workflow
+    assert "mapfile -t staging_tags" in workflow
+    assert "Current main has multiple production tags; use Production deploy for an existing release." in workflow
+    assert "Expected exactly one staging tag for current main" in workflow
+
+    image_identity = workflow.index("Verify production host holds the exact staged images")
     preflight = workflow.index("Preflight production configuration before tagging")
-    create_tag = workflow.index("Create immutable production tag")
-    transfer = workflow.index("Transfer CI-verified production images")
-    deploy = workflow.index("Deploy tagged release from prebuilt images")
-    assert preflight < create_tag < transfer < deploy
+    create_tag = workflow.index("Create immutable production tag for the staged candidate")
+    deploy = workflow.index("Deploy tagged release from the exact staged images")
+    assert image_identity < preflight < create_tag < deploy
     assert 'scripts/preflight-production-release.sh "$RELEASE_SHA"' in workflow
-    assert "Reconfirm release target after preflight" in workflow
-    assert "steps.ready.outputs.deploy == 'true'" in workflow
-    assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' in workflow
     assert "--prebuilt-images" in workflow
-    assert "Remove retained CI images from the release runner" in workflow
+    assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' not in workflow
+    assert "main advanced after staging verification" in workflow
+    assert "scripts/ensure-staging-gateway.sh" in workflow
 
 
 def test_retry_deploy_is_manual_and_uses_current_reviewed_tooling() -> None:
@@ -39,6 +51,9 @@ def test_retry_deploy_is_manual_and_uses_current_reviewed_tooling() -> None:
     assert "workflow_dispatch:" in workflow
     assert "ref: main" in workflow
     assert 'git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"' in workflow
+    assert "--prebuilt-images" in workflow
+    assert "scripts/transfer-production-images.sh" not in workflow
+    assert "scripts/ensure-staging-gateway.sh" in workflow
 
 
 def test_legacy_pending_reconciliation_is_manual_and_uses_the_production_lock() -> None:
@@ -48,7 +63,7 @@ def test_legacy_pending_reconciliation_is_manual_and_uses_the_production_lock() 
 
     assert "workflow_dispatch:" in workflow
     assert "RECONCILE_LEGACY_PENDING" in workflow
-    assert "group: greatsellai-hr-production" in workflow
+    assert "group: greatsellai-hr-release-lane" in workflow
     assert "environment:" in workflow and "name: production" in workflow
     assert "ref: main" in workflow
     assert 'scripts/reconcile-legacy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
@@ -64,7 +79,7 @@ def test_pending_target_finalization_is_manual_and_narrowly_confirmed() -> None:
 
     assert "workflow_dispatch:" in workflow
     assert "FINALIZE_PENDING_PROXY_STARTUP" in workflow
-    assert "group: greatsellai-hr-production" in workflow
+    assert "group: greatsellai-hr-release-lane" in workflow
     assert "environment:" in workflow and "name: production" in workflow
     assert "ref: main" in workflow
     assert 'scripts/finalize-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
@@ -83,7 +98,7 @@ def test_healthy_pending_finalization_is_manual_and_read_only_for_runtime_state(
 
     assert "workflow_dispatch:" in workflow
     assert "FINALIZE_HEALTHY_PENDING_RUNTIME" in workflow
-    assert "group: greatsellai-hr-production" in workflow
+    assert "group: greatsellai-hr-release-lane" in workflow
     assert "environment:" in workflow and "name: production" in workflow
     assert "ref: main" in workflow
     assert 'bash scripts/finalize-healthy-pending-release.sh "$PENDING_TAG" "$PENDING_COMMIT"' in workflow
@@ -156,13 +171,18 @@ def test_main_ci_retains_only_labeled_images_that_the_release_workflow_can_trans
     assert '--tag "greatsellai-hr-api:${{ github.sha }}"' in ci
     assert '--tag "greatsellai-hr-caddy:${{ github.sha }}"' in ci
     assert 'org.opencontainers.image.revision=${{ github.sha }}' in ci
+    assert 'org.opencontainers.image.workflow_run_id=${{ github.run_id }}' in ci
     assert 'org.opencontainers.image.source=https://github.com/${{ github.repository }}' in ci
     assert '--image "greatsellai-hr-api:${{ github.sha }}"' in ci
     assert '"$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main"' in ci
     assert 'docker image save "$api_image" "$caddy_image" | gzip -1' in transfer
     assert "StrictHostKeyChecking=yes" in transfer
     assert "org.opencontainers.image.revision" in transfer
+    assert "org.opencontainers.image.workflow_run_id" in transfer
+    assert "--expected-ci-run-id" in transfer
     assert "docker image build" not in transfer
+    assert "id: release_runtime_regression" in ci
+    assert 'RUNTIME_REGRESSION_OUTCOME: ${{ steps.release_runtime_regression.outcome }}' in ci
 
 
 def test_image_transfer_script_loads_and_rechecks_the_ci_images(tmp_path: Path) -> None:
@@ -175,13 +195,18 @@ def test_image_transfer_script_loads_and_rechecks_the_ci_images(tmp_path: Path) 
         pytest.skip("Bash is required for the image transfer contract")
 
     release_commit = "a" * 40
+    ci_run_id = "123456789"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "docker").write_text(
         """#!/usr/bin/env bash
 set -Eeuo pipefail
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
-  printf '%s\\n' "$EXPECTED_RELEASE_COMMIT"
+  if [[ "$*" == *org.opencontainers.image.workflow_run_id* ]]; then
+    printf '%s\\n' "$EXPECTED_CI_RUN_ID"
+  else
+    printf '%s\\n' "$EXPECTED_RELEASE_COMMIT"
+  fi
 elif [[ "$1" == "image" && "$2" == "save" ]]; then
   printf 'image archive stream\\n'
 elif [[ "$1" == "image" && "$2" == "load" ]]; then
@@ -220,6 +245,8 @@ exec bash -c "$command"
             release_commit,
             "--host",
             "ubuntu@example.test",
+            "--expected-ci-run-id",
+            ci_run_id,
         ],
         text=True,
         capture_output=True,
@@ -227,6 +254,7 @@ exec bash -c "$command"
         | {
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "EXPECTED_RELEASE_COMMIT": release_commit,
+            "EXPECTED_CI_RUN_ID": ci_run_id,
         },
         check=False,
     )

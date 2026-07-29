@@ -71,9 +71,11 @@ SES 配置由 Compose 的共享应用环境同时交给 API、迁移任务和 wo
 
 ### 创建生产版本
 
-启用 GitHub Actions CI/CD 后，日常发布不需要在本地执行以下命令：合并到 `main` 的
-提交会在四项 CI 成功后先执行服务器配置预检，预检通过才自动创建生产标签并部署。下列
-本地命令仅保留给已获授权的应急恢复或 CI 不可用时使用；常规发布流程见 `docs/CI_CD.md`。
+启用 GitHub Actions CI/CD 后，日常发布不需要在本地执行以下命令：合并到 `main` 的提交先由
+**Staging release** 自动部署到隔离预发布环境并完成公网 smoke，负责人验收后才手动运行
+**Production promotion** 并输入 `PROMOTE`。生产不会因 main 合并自动发布。完整链路、GitHub
+Environment 配置和同一镜像校验见 [预发布与生产晋级](STAGING_RELEASE.md)。下列本地命令仅保留给
+已获授权的应急恢复或 CI 不可用时使用。
 
 在本地干净的、与 `origin/main` 完全一致的 `main` 分支上运行：
 

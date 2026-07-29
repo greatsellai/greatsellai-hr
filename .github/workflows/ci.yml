@@ -22,7 +22,7 @@ jobs:
     name: Main release provenance
     # Private GitHub Free repositories cannot rely on branch protection.  This
     # fails closed for an accidental direct push before any image build or
-    # production-release workflow can proceed.
+    # staging-release workflow can transfer these exact images.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, greatsell-ci]
     timeout-minutes: 5
@@ -184,6 +184,7 @@ jobs:
             if docker build --build-arg DEBIAN_MIRROR=deb.debian.org \
               --build-arg PIP_INDEX_URL=https://pypi.org/simple \
               --label "org.opencontainers.image.revision=${{ github.sha }}" \
+              --label "org.opencontainers.image.workflow_run_id=${{ github.run_id }}" \
               --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
               --tag "greatsellai-hr-api:${{ github.sha }}" .; then
               exit 0
@@ -206,6 +207,7 @@ jobs:
             if docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org/ \
               --file deploy/Caddy.Dockerfile \
               --label "org.opencontainers.image.revision=${{ github.sha }}" \
+              --label "org.opencontainers.image.workflow_run_id=${{ github.run_id }}" \
               --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
               --tag "greatsellai-hr-caddy:${{ github.sha }}" .; then
               exit 0
@@ -223,6 +225,7 @@ jobs:
           docker compose --env-file .env.production.example config --quiet
           python scripts/verify_production_compose.py
       - name: Run Docker release runtime regression
+        id: release_runtime_regression
         # The main image is rebuilt after PR validation.  Exercise the full
         # release harness against this exact deployable artifact rather than
         # assuming a previous PR image had identical base layers.
@@ -231,14 +234,16 @@ jobs:
           --image "greatsellai-hr-api:${{ github.sha }}"
       - name: Remove temporary release regression resources
         if: always()
+        env:
+          RUNTIME_REGRESSION_OUTCOME: ${{ steps.release_runtime_regression.outcome }}
         run: |
           filter='label=com.greatsell.release-regression=true'
           docker ps -aq --filter "$filter" | xargs -r docker rm -f || true
           docker network ls -q --filter "$filter" | xargs -r docker network rm || true
           docker volume ls -q --filter "$filter" | xargs -r docker volume rm || true
           docker image ls -q --filter "$filter" | sort -u | xargs -r docker image rm || true
-          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
-            echo "Retaining CI-verified images for the production-release workflow."
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" && "$RUNTIME_REGRESSION_OUTCOME" == "success" ]]; then
+            echo "Retaining CI-verified images for the staging-release workflow."
           else
             docker image rm -f "greatsellai-hr-api:${{ github.sha }}" || true
             docker image rm -f "greatsellai-hr-caddy:${{ github.sha }}" || true

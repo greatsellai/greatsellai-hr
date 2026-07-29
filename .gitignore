@@ -10,6 +10,7 @@ dist/
 .env.*
 !.env.example
 !.env.production.example
+!.env.staging.example
 data/*
 !data/.gitkeep
 web/node_modules/

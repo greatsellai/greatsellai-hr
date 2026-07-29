@@ -248,6 +248,10 @@ function isRootMarketingHost(hostname: string) {
   return hostname === "greatsellai.net";
 }
 
+function isHrApplicationHost(hostname: string) {
+  return hostname === "hr.greatsellai.net" || hostname === "staging.hr.greatsellai.net";
+}
+
 const HR_WORKSPACE_BASE_PATH = "/workspace";
 
 function workspaceHref(path = "") {
@@ -264,7 +268,7 @@ function workspaceHref(path = "") {
   // The public root site is intentionally a separate marketing surface. Its
   // calls to action always cross to the dedicated HR application origin, so
   // the root domain never needs to expose the authenticated HR API.
-  if (window.location.hostname === "hr.greatsellai.net") {
+  if (isHrApplicationHost(hostname)) {
     if (["/login", "/register", "/forgot-password", "/reset-password"].includes(normalizedPath)) {
       return normalizedPath;
     }
@@ -308,7 +312,7 @@ function resolveAppSurface(): AppSurface {
     isCompatibilityPlatformPath ||
     (
       isPrimaryPlatformPath &&
-      (hostname === "hr.greatsellai.net" || isLocalDevelopmentHost(hostname))
+      (isHrApplicationHost(hostname) || isLocalDevelopmentHost(hostname))
     )
   ) {
     return { kind: "platform" };
@@ -322,7 +326,7 @@ function resolveAppSurface(): AppSurface {
     return { kind: "workspace", authRoute: authRouteFromPath(nestedPath) };
   }
 
-  if (hostname === "hr.greatsellai.net") {
+  if (isHrApplicationHost(hostname)) {
     if (pathname === "/" || pathname === "") return { kind: "landing" };
     const nestedPath = pathname.startsWith(HR_WORKSPACE_BASE_PATH)
       ? pathname.slice(HR_WORKSPACE_BASE_PATH.length)

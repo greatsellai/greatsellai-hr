@@ -1,0 +1,249 @@
+name: Staging release
+
+on:
+  workflow_run:
+    workflows: ["Continuous integration"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type STAGE to deploy the current main commit to the isolated staging environment.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  stage:
+    name: Deploy CI-verified main to staging
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    timeout-minutes: 45
+    # This lock starts only when the deployment job runs. An unapproved
+    # production Environment must not block newer main commits from staging.
+    concurrency:
+      group: greatsellai-hr-release-lane
+      cancel-in-progress: false
+    environment:
+      name: staging
+    env:
+      RELEASE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Validate staging request
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Manual staging releases must be run from main." >&2; exit 1; }
+            [[ "$CONFIRM" == "STAGE" ]] || { echo "Confirmation must be STAGE." >&2; exit 1; }
+          else
+            [[ "$WORKFLOW_CONCLUSION" == "success" ]] || { echo "Automatic staging requires successful CI." >&2; exit 1; }
+            [[ "$WORKFLOW_EVENT" == "push" ]] || { echo "Automatic staging only accepts CI from a main push." >&2; exit 1; }
+            [[ "$WORKFLOW_HEAD_BRANCH" == "main" ]] || { echo "Automatic staging only accepts CI from main." >&2; exit 1; }
+          fi
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid staging commit SHA." >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: ${{ env.RELEASE_SHA }}
+      - name: Verify manual candidate passed main CI
+        id: manual_ci
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          # A manual retry is only for an already CI-verified main commit. It
+          # must never turn a failed or unverified main commit into a staging
+          # candidate merely because its Docker images still exist on the
+          # release runner.
+          curl --fail --silent --show-error --location --retry 3 \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs?branch=main&event=push&status=completed&per_page=100" \
+            | python -c '
+          import json
+          import os
+          import sys
+
+          release_sha = os.environ["RELEASE_SHA"]
+          runs = json.load(sys.stdin).get("workflow_runs", [])
+          valid_runs = [
+              run
+              for run in runs
+              if (
+              run.get("name") == "Continuous integration"
+              and run.get("head_sha") == release_sha
+              and run.get("event") == "push"
+              and run.get("conclusion") == "success"
+              )
+          ]
+          if not valid_runs:
+              raise SystemExit(
+                  "Manual staging requires a successful Continuous integration push run for this exact main commit."
+              )
+          ci_run_id = str(max(valid_runs, key=lambda run: run.get("id", 0)).get("id", ""))
+          if not ci_run_id.isdecimal():
+              raise SystemExit("Successful Continuous integration run has no valid run ID.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"ci_run_id={ci_run_id}\\n")
+          '
+      - name: Resolve current staging target
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          git fetch origin main --tags --prune
+          git switch --force-create main origin/main
+          if [[ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+            if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+              echo "stage=false" >> "$GITHUB_OUTPUT"
+              echo "Skipping superseded CI commit; current main will be staged after its CI succeeds."
+              exit 0
+            fi
+            echo "main advanced after this manual staging request. Re-run it from current main." >&2
+            exit 1
+          fi
+          echo "stage=true" >> "$GITHUB_OUTPUT"
+      - name: Validate and configure staging SSH
+        if: steps.target.outputs.stage == 'true'
+        env:
+          STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
+          STAGING_HISTORY_DIR: ${{ vars.STAGING_HISTORY_DIR }}
+          STAGING_PROJECT_DIR: ${{ vars.STAGING_PROJECT_DIR }}
+          STAGING_SSH_KNOWN_HOSTS: ${{ secrets.STAGING_SSH_KNOWN_HOSTS }}
+          STAGING_SSH_PRIVATE_KEY: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          : "${STAGING_DEPLOY_HOST:?Missing staging variable STAGING_DEPLOY_HOST}"
+          : "${STAGING_PROJECT_DIR:?Missing staging variable STAGING_PROJECT_DIR}"
+          : "${STAGING_HISTORY_DIR:?Missing staging variable STAGING_HISTORY_DIR}"
+          : "${STAGING_SSH_PRIVATE_KEY:?Missing staging secret STAGING_SSH_PRIVATE_KEY}"
+          : "${STAGING_SSH_KNOWN_HOSTS:?Missing staging secret STAGING_SSH_KNOWN_HOSTS}"
+          [[ "$STAGING_PROJECT_DIR" == /home/ubuntu/* && "$STAGING_PROJECT_DIR" == *staging* && "$STAGING_PROJECT_DIR" != /home/ubuntu/ ]] || {
+            echo "STAGING_PROJECT_DIR must be a non-root /home/ubuntu staging path." >&2
+            exit 1
+          }
+          [[ "$STAGING_HISTORY_DIR" == /home/ubuntu/* && "$STAGING_HISTORY_DIR" == *staging* && "$STAGING_HISTORY_DIR" != /home/ubuntu/ ]] || {
+            echo "STAGING_HISTORY_DIR must be a non-root /home/ubuntu staging path." >&2
+            exit 1
+          }
+          [[ "$STAGING_PROJECT_DIR" != "$STAGING_HISTORY_DIR" ]] || {
+            echo "Staging project and history paths must be distinct." >&2
+            exit 1
+          }
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$STAGING_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-staging-deploy"
+          chmod 600 "$RUNNER_TEMP/greatsell-staging-deploy"
+          printf '%s\n' "$STAGING_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "${STAGING_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null || {
+            echo "Staging known_hosts does not contain the configured host." >&2
+            exit 1
+          }
+      - name: Preflight staging configuration before tagging
+        if: steps.target.outputs.stage == 'true'
+        env:
+          STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
+          STAGING_HISTORY_DIR: ${{ vars.STAGING_HISTORY_DIR }}
+          STAGING_PROJECT_DIR: ${{ vars.STAGING_PROJECT_DIR }}
+        run: |
+          set -Eeuo pipefail
+          scripts/preflight-staging-release.sh "$RELEASE_SHA" \
+            --host "$STAGING_DEPLOY_HOST" \
+            --project-dir "$STAGING_PROJECT_DIR" \
+            --history-dir "$STAGING_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
+      - name: Reconfirm staging target after preflight
+        id: ready
+        if: steps.target.outputs.stage == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -Eeuo pipefail
+          git fetch origin main --tags --prune
+          git switch --force-create main origin/main
+          if [[ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
+            if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+              echo "stage=false" >> "$GITHUB_OUTPUT"
+              echo "Skipping a superseded commit after staging preflight."
+              exit 0
+            fi
+            echo "main advanced during staging preflight. Re-run from current main." >&2
+            exit 1
+          fi
+          echo "stage=true" >> "$GITHUB_OUTPUT"
+      - name: Create immutable staging tag
+        if: steps.ready.outputs.stage == 'true'
+        id: release
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mapfile -t existing_tags < <(git tag --points-at HEAD --list 'stg-*' | sort)
+          [[ "${#existing_tags[@]}" -le 1 ]] || {
+            echo "Current main has multiple staging tags; refusing ambiguous promotion lineage." >&2
+            exit 1
+          }
+          if [[ "${#existing_tags[@]}" -eq 1 ]]; then
+            tag="${existing_tags[0]}"
+            [[ "$tag" =~ ^stg-[0-9]{8}-[0-9a-f]{7,40}$ ]] || {
+              echo "Existing staging tag has an invalid format." >&2
+              exit 1
+            }
+            echo "Reusing immutable staging tag $tag for a retry."
+          else
+            tag="stg-$(date -u +%Y%m%d)-$(git rev-parse --short=7 HEAD)"
+            scripts/create-staging-tag.sh "$tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Transfer CI-verified images to staging
+        if: steps.ready.outputs.stage == 'true'
+        env:
+          STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
+          CI_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || steps.manual_ci.outputs.ci_run_id }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Missing CI workflow run identity." >&2; exit 1; }
+          scripts/transfer-production-images.sh "$RELEASE_SHA" \
+            --host "$STAGING_DEPLOY_HOST" \
+            --expected-ci-run-id "$CI_RUN_ID" \
+            --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
+      - name: Deploy immutable candidate and run public smoke checks
+        if: steps.ready.outputs.stage == 'true'
+        env:
+          STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
+          STAGING_HISTORY_DIR: ${{ vars.STAGING_HISTORY_DIR }}
+          STAGING_PROJECT_DIR: ${{ vars.STAGING_PROJECT_DIR }}
+          STAGING_PUBLIC_URL: ${{ vars.STAGING_PUBLIC_URL }}
+          STAGING_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          : "${STAGING_PUBLIC_URL:?Missing staging variable STAGING_PUBLIC_URL}"
+          scripts/deploy-staging.sh "$STAGING_TAG" \
+            --host "$STAGING_DEPLOY_HOST" \
+            --project-dir "$STAGING_PROJECT_DIR" \
+            --history-dir "$STAGING_HISTORY_DIR" \
+            --public-url "$STAGING_PUBLIC_URL" \
+            --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
+      - name: Remove CI images after staging transfer
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true
+          docker image rm -f "greatsellai-hr-caddy:$RELEASE_SHA" || true

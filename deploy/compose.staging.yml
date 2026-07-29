@@ -1,0 +1,233 @@
+# Same-host, low-concurrency staging stack. This file is deliberately separate
+# from the production compose file: it must never share volumes, networks,
+# database credentials, or host public ports with production.
+name: resume-screening-v3-staging
+
+x-container-logging: &container-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app-environment: &app-environment
+  # Application bootstrapping is explicit in staging, just like production.
+  # The migrate service owns schema upgrades and registry seeds.
+  RESUME_V3_ENVIRONMENT: staging
+  RESUME_V3_AUTO_CREATE_SCHEMA: "0"
+  RESUME_V3_SEED_REGISTRY_ON_STARTUP: "0"
+  RESUME_V3_DATABASE_URL: postgresql+psycopg://resume_v3_staging:${RESUME_V3_STAGING_POSTGRES_PASSWORD:?set RESUME_V3_STAGING_POSTGRES_PASSWORD in .env.staging}@db:5432/resume_v3_staging
+  RESUME_V3_DATA_DIR: /var/lib/resume-v3
+  RESUME_V3_ADMIN_TOKEN: ${RESUME_V3_STAGING_ADMIN_TOKEN:?set RESUME_V3_STAGING_ADMIN_TOKEN in .env.staging}
+  RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED: "0"
+  RESUME_V3_SESSION_SECRET: ${RESUME_V3_STAGING_SESSION_SECRET:?set RESUME_V3_STAGING_SESSION_SECRET in .env.staging}
+  RESUME_V3_SESSION_COOKIE_SECURE: ${RESUME_V3_STAGING_SESSION_COOKIE_SECURE:-1}
+  # Caddy's fixed address on the isolated staging proxy network.
+  RESUME_V3_TRUSTED_PROXY_CIDRS: 172.31.0.2/32
+
+  # External AI/OCR providers are intentionally disabled in the default
+  # staging configuration. A dedicated non-production provider credential is
+  # required before either capability can be exercised there.
+  DEEPSEEK_API_KEY: ""
+  DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+  DEEPSEEK_TIMEOUT_SECONDS: ${DEEPSEEK_TIMEOUT_SECONDS:-90}
+  RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON: "{}"
+  RESUME_V3_LEGACY_OPENAI_COMPATIBLE_ENDPOINT: ""
+  TENCENT_SECRET_ID: ""
+  TENCENT_SECRET_KEY: ""
+  TENCENT_OCR_REGION: ${TENCENT_OCR_REGION:-ap-guangzhou}
+  TENCENT_OCR_TIMEOUT_SECONDS: ${TENCENT_OCR_TIMEOUT_SECONDS:-20}
+  OCR_SPARSE_TEXT_CHARS_PER_PAGE: ${OCR_SPARSE_TEXT_CHARS_PER_PAGE:-500}
+  RESUME_V3_AI_EXTRACTION_JOB_MAX_ATTEMPTS: ${RESUME_V3_AI_EXTRACTION_JOB_MAX_ATTEMPTS:-3}
+  RESUME_V3_AI_EXTRACTION_JOB_LEASE_SECONDS: ${RESUME_V3_AI_EXTRACTION_JOB_LEASE_SECONDS:-180}
+  RESUME_V3_AI_EXTRACTION_WORKER_POLL_SECONDS: ${RESUME_V3_AI_EXTRACTION_WORKER_POLL_SECONDS:-10}
+
+  # Staging has no imported mailbox credentials by default. Keep the worker
+  # timer deliberately infrequent and leave every OAuth/SMTP credential empty.
+  RESUME_V3_MAILBOX_SYNC_INTERVAL_SECONDS: ${RESUME_V3_MAILBOX_SYNC_INTERVAL_SECONDS:-86400}
+  RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS: ${RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS:-86400}
+  # The application requires a positive limit even when no mailbox is enabled.
+  RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT: ${RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT:-1}
+  # A syntactically valid but non-routable allowlist keeps startup validation
+  # strict while preventing the default staging deployment from accepting a
+  # real fixed-provider mailbox endpoint.
+  RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS: imap.staging.invalid
+  RESUME_V3_MAILBOX_IMAP_CONNECT_TIMEOUT_SECONDS: ${RESUME_V3_MAILBOX_IMAP_CONNECT_TIMEOUT_SECONDS:-10}
+  RESUME_V3_MAILBOX_IMAP_MAX_RESOLVED_ADDRESSES: ${RESUME_V3_MAILBOX_IMAP_MAX_RESOLVED_ADDRESSES:-8}
+  RESUME_V3_MAILBOX_OAUTH_STATE_TTL_SECONDS: ${RESUME_V3_MAILBOX_OAUTH_STATE_TTL_SECONDS:-600}
+  RESUME_V3_MAILBOX_OAUTH_HTTP_TIMEOUT_SECONDS: ${RESUME_V3_MAILBOX_OAUTH_HTTP_TIMEOUT_SECONDS:-20}
+  RESUME_V3_MAILBOX_MAX_RAW_MESSAGE_BYTES: ${RESUME_V3_MAILBOX_MAX_RAW_MESSAGE_BYTES:-25165824}
+  RESUME_V3_MAILBOX_MAX_HEADER_BYTES: ${RESUME_V3_MAILBOX_MAX_HEADER_BYTES:-131072}
+  RESUME_V3_MAILBOX_MAX_MIME_PARTS: ${RESUME_V3_MAILBOX_MAX_MIME_PARTS:-64}
+  RESUME_V3_MAILBOX_MAX_MIME_DEPTH: ${RESUME_V3_MAILBOX_MAX_MIME_DEPTH:-16}
+  RESUME_V3_MAILBOX_MAX_ATTACHMENTS_PER_MESSAGE: ${RESUME_V3_MAILBOX_MAX_ATTACHMENTS_PER_MESSAGE:-5}
+  RESUME_V3_MAILBOX_MAX_SEARCH_RESPONSE_BYTES: ${RESUME_V3_MAILBOX_MAX_SEARCH_RESPONSE_BYTES:-1048576}
+  RESUME_V3_MAILBOX_MAX_BODY_CACHE_BYTES: ${RESUME_V3_MAILBOX_MAX_BODY_CACHE_BYTES:-262144}
+  RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_ALERT_THRESHOLD: ${RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_ALERT_THRESHOLD:-3}
+  RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_WINDOW_SECONDS: ${RESUME_V3_MAILBOX_CONSECUTIVE_FAILURE_WINDOW_SECONDS:-3600}
+  RESUME_V3_EMAIL_CREDENTIALS_KEY: ""
+  RESUME_V3_MAILBOX_GOOGLE_OAUTH_CLIENT_ID: ""
+  RESUME_V3_MAILBOX_GOOGLE_OAUTH_CLIENT_SECRET: ""
+  RESUME_V3_MAILBOX_GOOGLE_OAUTH_REDIRECT_URI: ""
+  RESUME_V3_MAILBOX_MICROSOFT_OAUTH_CLIENT_ID: ""
+  RESUME_V3_MAILBOX_MICROSOFT_OAUTH_CLIENT_SECRET: ""
+  RESUME_V3_MAILBOX_MICROSOFT_OAUTH_REDIRECT_URI: ""
+
+  # Never send real account email from staging by default.
+  RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER: disabled
+  RESUME_V3_TRANSACTIONAL_EMAIL_FROM: ""
+  RESUME_V3_PUBLIC_APP_URL: ${RESUME_V3_STAGING_PUBLIC_APP_URL:-https://staging.hr.greatsellai.net}
+  TENCENT_SES_REGION: ${TENCENT_SES_REGION:-ap-guangzhou}
+  TENCENT_SES_VERIFICATION_TEMPLATE_ID: ""
+  TENCENT_SES_PASSWORD_RESET_TEMPLATE_ID: ""
+  RESUME_V3_FEISHU_SMTP_HOST: ""
+  RESUME_V3_FEISHU_SMTP_PORT: "465"
+  RESUME_V3_FEISHU_SMTP_TLS_MODE: ssl
+  RESUME_V3_FEISHU_SMTP_USERNAME: ""
+  RESUME_V3_FEISHU_SMTP_PASSWORD: ""
+  RESUME_V3_FEISHU_SMTP_TIMEOUT_SECONDS: "20"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: resume_v3_staging
+      POSTGRES_USER: resume_v3_staging
+      POSTGRES_PASSWORD: ${RESUME_V3_STAGING_POSTGRES_PASSWORD:?set RESUME_V3_STAGING_POSTGRES_PASSWORD in .env.staging}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    logging: *container-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resume_v3_staging -d resume_v3_staging"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  migrate:
+    # Release workflows must provide a full immutable git commit SHA here.
+    # Do not add build: to this stack: staging and production test the same
+    # already-built images.
+    image: greatsellai-hr-api:${RESUME_V3_RELEASE_IMAGE_TAG:?set RESUME_V3_RELEASE_IMAGE_TAG to the full immutable commit SHA}
+    restart: "no"
+    environment: *app-environment
+    command: ["/bin/sh", "-c", "alembic upgrade head && python -m app.seed_institutions"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+    logging: *container-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  api:
+    image: greatsellai-hr-api:${RESUME_V3_RELEASE_IMAGE_TAG:?set RESUME_V3_RELEASE_IMAGE_TAG to the full immutable commit SHA}
+    restart: unless-stopped
+    environment: *app-environment
+    volumes:
+      - uploads_data:/var/lib/resume-v3/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      proxy:
+        ipv4_address: 172.31.0.3
+      backend: {}
+    logging: *container-logging
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/health').status == 200",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  worker:
+    image: greatsellai-hr-api:${RESUME_V3_RELEASE_IMAGE_TAG:?set RESUME_V3_RELEASE_IMAGE_TAG to the full immutable commit SHA}
+    restart: unless-stopped
+    environment: *app-environment
+    command: ["python", "-m", "app.ai_extraction_worker"]
+    volumes:
+      - uploads_data:/var/lib/resume-v3/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - backend
+    logging: *container-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 768M
+
+  caddy:
+    image: greatsellai-hr-caddy:${RESUME_V3_RELEASE_IMAGE_TAG:?set RESUME_V3_RELEASE_IMAGE_TAG to the full immutable commit SHA}
+    restart: unless-stopped
+    command: ["run", "--config", "/etc/caddy/Caddyfile.staging", "--adapter", "caddyfile"]
+    environment:
+      # TLS belongs to the production Caddy gateway. The staging Caddy only
+      # listens on its private same-host bridge endpoint.
+      RESUME_V3_DOMAIN: ":80"
+    ports:
+      - "172.17.0.1:18080:80"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      proxy:
+        ipv4_address: 172.31.0.2
+    logging: *container-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+networks:
+  # Keep the staging proxy address distinct from production's 172.30 range.
+  # Only Caddy and API attach to it so API can trust Caddy's exact /32.
+  proxy:
+    name: resume-screening-v3-staging_proxy
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+  backend:
+    name: resume-screening-v3-staging_backend
+    ipam:
+      config:
+        - subnet: 172.31.1.0/24
+
+volumes:
+  # Explicit names prevent Compose project-name drift from ever reusing a
+  # production database, upload store, or Caddy state volume.
+  postgres_data:
+    name: resume-screening-v3-staging_postgres_data
+  uploads_data:
+    name: resume-screening-v3-staging_uploads_data
+  caddy_data:
+    name: resume-screening-v3-staging_caddy_data
+  caddy_config:
+    name: resume-screening-v3-staging_caddy_config

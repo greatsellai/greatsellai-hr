@@ -18,4 +18,5 @@ RUN npm run build
 FROM caddy:2.10-alpine
 
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY deploy/Caddyfile.staging /etc/caddy/Caddyfile.staging
 COPY --from=web-build /web/dist /srv

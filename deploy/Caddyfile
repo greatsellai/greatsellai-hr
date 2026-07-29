@@ -67,3 +67,13 @@
 		import frontend
 	}
 }
+
+# The isolated staging stack listens only on the Docker host's private bridge
+# endpoint. This exact host is deliberately separate from the marketing root
+# and production HR hostname; it is the durable, versioned edge route that
+# lets the release workflow perform public staging smoke checks after Caddy is
+# recreated by a production deployment.
+staging.hr.greatsellai.net {
+	encode zstd gzip
+	reverse_proxy 172.17.0.1:18080
+}

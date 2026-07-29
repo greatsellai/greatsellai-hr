@@ -1,87 +1,136 @@
-name: Production release
+name: Production promotion
 
 on:
-  workflow_run:
-    workflows: ["Continuous integration"]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       confirm:
-        description: Type RELEASE to manually create an immutable production tag and deploy it.
+        description: Type PROMOTE to release the current completed staging candidate to production.
         required: true
         type: string
 
 permissions:
   contents: write
 
-concurrency:
-  group: greatsellai-hr-production
-  cancel-in-progress: false
-
 jobs:
-  release:
-    name: Tag and deploy production release
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+  verify-staging:
+    name: Verify completed staging candidate
+    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    timeout-minutes: 20
+    environment:
+      name: staging
+    outputs:
+      staging_tag: ${{ steps.verified.outputs.staging_tag }}
+      release_sha: ${{ steps.verified.outputs.release_sha }}
+      archive_sha256: ${{ steps.verified.outputs.archive_sha256 }}
+      api_image_id: ${{ steps.verified.outputs.api_image_id }}
+      caddy_image_id: ${{ steps.verified.outputs.caddy_image_id }}
+    steps:
+      - name: Validate promotion request
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Production promotion must be started from main." >&2; exit 1; }
+          [[ "$CONFIRM" == "PROMOTE" ]] || { echo "Confirmation must be PROMOTE." >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+      - name: Resolve the current completed staging tag
+        id: target
+        run: |
+          set -Eeuo pipefail
+          git fetch origin main --tags --prune
+          git switch --force-create main origin/main
+          release_sha="$(git rev-parse HEAD)"
+          mapfile -t staging_tags < <(git tag --points-at "$release_sha" --list 'stg-*' | sort)
+          [[ "${#staging_tags[@]}" -eq 1 ]] || {
+            echo "Expected exactly one staging tag for current main; stage current main before promoting it." >&2
+            exit 1
+          }
+          staging_tag="${staging_tags[0]}"
+          [[ "$staging_tag" =~ ^stg-[0-9]{8}-[0-9a-f]{7,40}$ ]] || { echo "Invalid staging tag." >&2; exit 1; }
+          [[ "$release_sha" == "${staging_tag##*-}"* ]] || { echo "Staging tag suffix does not match current main." >&2; exit 1; }
+          archive_sha256="$(git archive --format=tar "$staging_tag" | sha256sum | awk '{print $1}')"
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Unable to checksum staged source." >&2; exit 1; }
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "staging_tag=$staging_tag" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$archive_sha256" >> "$GITHUB_OUTPUT"
+      - name: Configure staging SSH
+        env:
+          STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
+          STAGING_HISTORY_DIR: ${{ vars.STAGING_HISTORY_DIR }}
+          STAGING_PROJECT_DIR: ${{ vars.STAGING_PROJECT_DIR }}
+          STAGING_SSH_KNOWN_HOSTS: ${{ secrets.STAGING_SSH_KNOWN_HOSTS }}
+          STAGING_SSH_PRIVATE_KEY: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          : "${STAGING_DEPLOY_HOST:?Missing staging variable STAGING_DEPLOY_HOST}"
+          : "${STAGING_PROJECT_DIR:?Missing staging variable STAGING_PROJECT_DIR}"
+          : "${STAGING_HISTORY_DIR:?Missing staging variable STAGING_HISTORY_DIR}"
+          : "${STAGING_SSH_PRIVATE_KEY:?Missing staging secret STAGING_SSH_PRIVATE_KEY}"
+          : "${STAGING_SSH_KNOWN_HOSTS:?Missing staging secret STAGING_SSH_KNOWN_HOSTS}"
+          [[ "$STAGING_PROJECT_DIR" == /home/ubuntu/* && "$STAGING_PROJECT_DIR" == *staging* && "$STAGING_PROJECT_DIR" != /home/ubuntu/ ]] || exit 1
+          [[ "$STAGING_HISTORY_DIR" == /home/ubuntu/* && "$STAGING_HISTORY_DIR" == *staging* && "$STAGING_HISTORY_DIR" != /home/ubuntu/ ]] || exit 1
+          [[ "$STAGING_PROJECT_DIR" != "$STAGING_HISTORY_DIR" ]] || exit 1
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$STAGING_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-staging-promote"
+          chmod 600 "$RUNNER_TEMP/greatsell-staging-promote"
+          printf '%s\n' "$STAGING_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "${STAGING_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null
+      - name: Verify staging attestation and runtime image identities
+        id: verified
+        env:
+          STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
+          STAGING_HISTORY_DIR: ${{ vars.STAGING_HISTORY_DIR }}
+          STAGING_PROJECT_DIR: ${{ vars.STAGING_PROJECT_DIR }}
+          STAGING_TAG: ${{ steps.target.outputs.staging_tag }}
+          RELEASE_SHA: ${{ steps.target.outputs.release_sha }}
+          ARCHIVE_SHA256: ${{ steps.target.outputs.archive_sha256 }}
+        run: |
+          set -Eeuo pipefail
+          scripts/verify-staging-release.sh "$STAGING_TAG" "$RELEASE_SHA" "$ARCHIVE_SHA256" \
+            --host "$STAGING_DEPLOY_HOST" \
+            --project-dir "$STAGING_PROJECT_DIR" \
+            --history-dir "$STAGING_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-staging-promote" \
+            --github-output "$GITHUB_OUTPUT"
+
+  promote:
+    name: Promote the completed staging image to production
+    needs: verify-staging
     runs-on: [self-hosted, Linux, X64, greatsell-ci]
     timeout-minutes: 45
+    # Do not acquire the deployment lock while this job is waiting for an
+    # Environment reviewer; staging must remain available for newer main.
+    concurrency:
+      group: greatsellai-hr-release-lane
+      cancel-in-progress: false
     environment:
       name: production
     env:
-      RELEASE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      RELEASE_SHA: ${{ needs.verify-staging.outputs.release_sha }}
+      STAGING_TAG: ${{ needs.verify-staging.outputs.staging_tag }}
+      STAGING_API_IMAGE_ID: ${{ needs.verify-staging.outputs.api_image_id }}
+      STAGING_CADDY_IMAGE_ID: ${{ needs.verify-staging.outputs.caddy_image_id }}
     steps:
-      - name: Validate release request
-        env:
-          CONFIRM: ${{ inputs.confirm }}
-          EVENT_NAME: ${{ github.event_name }}
-          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
-          WORKFLOW_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-        run: |
-          set -Eeuo pipefail
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Manual production releases must be run from main." >&2; exit 1; }
-            [[ "$CONFIRM" == "RELEASE" ]] || { echo "Confirmation must be RELEASE." >&2; exit 1; }
-          else
-            [[ "$WORKFLOW_CONCLUSION" == "success" ]] || { echo "Automatic release requires successful CI." >&2; exit 1; }
-            [[ "$WORKFLOW_EVENT" == "push" ]] || { echo "Automatic release only accepts CI from a main push." >&2; exit 1; }
-            [[ "$WORKFLOW_HEAD_BRANCH" == "main" ]] || { echo "Automatic release only accepts CI from main." >&2; exit 1; }
-          fi
-          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid release commit SHA." >&2; exit 1; }
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
           ref: ${{ env.RELEASE_SHA }}
-      - name: Resolve current release target
-        id: target
-        env:
-          EVENT_NAME: ${{ github.event_name }}
+      - name: Reconfirm promotion target is still current main
         run: |
           set -Eeuo pipefail
           git fetch origin main --tags --prune
           git switch --force-create main origin/main
-          if [[ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
-            if [[ "$EVENT_NAME" == "workflow_run" ]]; then
-              echo "deploy=false" >> "$GITHUB_OUTPUT"
-              echo "Skipping a superseded CI commit; the current main commit must pass CI before release."
-              exit 0
-            fi
-            echo "main advanced after this manual release was requested. Re-run it from current main." >&2
-            exit 1
-          fi
-          [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || {
-            echo "Checked-out main is not origin/main." >&2
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]] || {
+            echo "main advanced after staging verification. Stage the new main before promoting it." >&2
             exit 1
           }
-          echo "deploy=true" >> "$GITHUB_OUTPUT"
-      - name: Validate and configure production SSH
-        if: steps.target.outputs.deploy == 'true'
+      - name: Configure production SSH
+        id: production_ssh
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
           PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
@@ -95,25 +144,25 @@ jobs:
           : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
           : "${PROD_SSH_PRIVATE_KEY:?Missing production secret PROD_SSH_PRIVATE_KEY}"
           : "${PROD_SSH_KNOWN_HOSTS:?Missing production secret PROD_SSH_KNOWN_HOSTS}"
-          [[ "$PROD_PROJECT_DIR" == /home/ubuntu/* && "$PROD_PROJECT_DIR" != /home/ubuntu/ ]] || {
-            echo "PROD_PROJECT_DIR must be a non-root /home/ubuntu path." >&2
-            exit 1
-          }
-          [[ "$PROD_HISTORY_DIR" == /home/ubuntu/* && "$PROD_HISTORY_DIR" != /home/ubuntu/ ]] || {
-            echo "PROD_HISTORY_DIR must be a non-root /home/ubuntu path." >&2
-            exit 1
-          }
+          [[ "$PROD_PROJECT_DIR" == /home/ubuntu/* && "$PROD_PROJECT_DIR" != /home/ubuntu/ ]] || exit 1
+          [[ "$PROD_HISTORY_DIR" == /home/ubuntu/* && "$PROD_HISTORY_DIR" != /home/ubuntu/ ]] || exit 1
           install -d -m 700 "$HOME/.ssh"
           umask 077
-          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-production-deploy"
-          chmod 600 "$RUNNER_TEMP/greatsell-production-deploy"
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-production-promote"
+          chmod 600 "$RUNNER_TEMP/greatsell-production-promote"
           printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          ssh-keygen -F "${PROD_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null || {
-            echo "Production known_hosts does not contain the configured host." >&2
-            exit 1
-          }
+          ssh-keygen -F "${PROD_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null
+      - name: Verify production host holds the exact staged images
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+        run: |
+          set -Eeuo pipefail
+          scripts/verify-release-images.sh "$RELEASE_SHA" \
+            --host "$PROD_DEPLOY_HOST" \
+            --api-image-id "$STAGING_API_IMAGE_ID" \
+            --caddy-image-id "$STAGING_CADDY_IMAGE_ID" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
       - name: Preflight production configuration before tagging
-        if: steps.target.outputs.deploy == 'true'
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
           PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
@@ -124,58 +173,40 @@ jobs:
             --host "$PROD_DEPLOY_HOST" \
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"
-      - name: Reconfirm release target after preflight
-        id: ready
-        if: steps.target.outputs.deploy == 'true'
-        env:
-          EVENT_NAME: ${{ github.event_name }}
+            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
+      - name: Reconfirm promotion target after production preflight
         run: |
           set -Eeuo pipefail
           git fetch origin main --tags --prune
           git switch --force-create main origin/main
-          if [[ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]]; then
-            if [[ "$EVENT_NAME" == "workflow_run" ]]; then
-              echo "deploy=false" >> "$GITHUB_OUTPUT"
-              echo "Skipping a superseded commit after server preflight."
-              exit 0
-            fi
-            echo "main advanced during preflight. Re-run the manual release from current main." >&2
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]] || {
+            echo "main advanced during production preflight. Stage the new main before promoting it." >&2
             exit 1
-          fi
-          echo "deploy=true" >> "$GITHUB_OUTPUT"
-      - name: Create immutable production tag
-        if: steps.ready.outputs.deploy == 'true'
+          }
+      - name: Create immutable production tag for the staged candidate
         id: release
         run: |
           set -Eeuo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          tag="prod-$(date -u +%Y%m%d)-$(git rev-parse --short=7 HEAD)"
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
-            existing_commit="$(git rev-parse "refs/tags/$tag^{commit}")"
-            [[ "$existing_commit" == "$(git rev-parse HEAD)" ]] || {
-              echo "Existing production tag '$tag' points to a different commit." >&2
+          mapfile -t existing_tags < <(git tag --points-at HEAD --list 'prod-*' | sort)
+          [[ "${#existing_tags[@]}" -le 1 ]] || {
+            echo "Current main has multiple production tags; use Production deploy for an existing release." >&2
+            exit 1
+          }
+          if [[ "${#existing_tags[@]}" -eq 1 ]]; then
+            tag="${existing_tags[0]}"
+            [[ "$tag" =~ ^prod-[0-9]{8}-[0-9a-f]{7,40}$ ]] || {
+              echo "Existing production tag has an invalid format." >&2
               exit 1
             }
-            echo "Reusing existing immutable production tag $tag."
+            echo "Reusing immutable production tag $tag."
           else
+            tag="prod-$(date -u +%Y%m%d)-$(git rev-parse --short=7 HEAD)"
             scripts/create-production-tag.sh "$tag"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Transfer CI-verified production images
-        if: steps.ready.outputs.deploy == 'true'
-        env:
-          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
-        run: |
-          set -Eeuo pipefail
-          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
-          scripts/transfer-production-images.sh "$RELEASE_SHA" \
-            --host "$PROD_DEPLOY_HOST" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"
-      - name: Deploy tagged release from prebuilt images
-        if: steps.ready.outputs.deploy == 'true'
+      - name: Deploy tagged release from the exact staged images
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
           PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
@@ -183,18 +214,18 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -Eeuo pipefail
-          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
-          : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
-          : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
           scripts/deploy-production.sh "$RELEASE_TAG" \
             --host "$PROD_DEPLOY_HOST" \
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-promote" \
             --prebuilt-images
-      - name: Remove retained CI images from the release runner
-        if: ${{ always() && (steps.ready.outputs.deploy != 'true' || success()) }}
+      - name: Preserve the staging gateway after Caddy recreation
+        if: ${{ always() && steps.production_ssh.outcome == 'success' }}
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
         run: |
           set -Eeuo pipefail
-          docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true
-          docker image rm -f "greatsellai-hr-caddy:$RELEASE_SHA" || true
+          scripts/ensure-staging-gateway.sh \
+            --host "$PROD_DEPLOY_HOST" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"

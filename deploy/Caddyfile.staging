@@ -1,0 +1,47 @@
+# Private, inner Caddy configuration for the isolated same-host staging stack.
+# TLS is intentionally terminated by the production edge Caddy. Do not add the
+# public staging hostname here: the outer proxy preserves Host and a matching
+# site block would reverse-proxy traffic back to this same private listener.
+:80 {
+	encode zstd gzip
+
+	@api path /v1 /v1/*
+	handle @api {
+		reverse_proxy api:8000
+	}
+
+	@health path /health
+	handle @health {
+		reverse_proxy api:8000
+	}
+
+	@readyz path /readyz
+	handle @readyz {
+		reverse_proxy api:8000
+	}
+
+	@compat_api path /greatsellhr/v1 /greatsellhr/v1/*
+	handle @compat_api {
+		uri strip_prefix /greatsellhr
+		reverse_proxy api:8000
+	}
+
+	@compat_health path /greatsellhr/health
+	handle @compat_health {
+		uri strip_prefix /greatsellhr
+		reverse_proxy api:8000
+	}
+
+	@compat_readyz path /greatsellhr/readyz
+	handle @compat_readyz {
+		uri strip_prefix /greatsellhr
+		reverse_proxy api:8000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		header Cache-Control "no-cache"
+		file_server
+	}
+}

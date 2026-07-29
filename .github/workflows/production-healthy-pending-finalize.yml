@@ -19,15 +19,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: greatsellai-hr-production
-  cancel-in-progress: false
-
 jobs:
   finalize:
     name: Finalize verified healthy pending target
     runs-on: [self-hosted, Linux, X64, greatsell-ci]
     timeout-minutes: 45
+    concurrency:
+      group: greatsellai-hr-release-lane
+      cancel-in-progress: false
     environment:
       name: production
     env:
@@ -60,6 +59,7 @@ jobs:
             exit 1
           }
       - name: Configure production SSH
+        id: production_ssh
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
           PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
@@ -94,3 +94,12 @@ jobs:
             --history-dir "$PROD_HISTORY_DIR" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-deploy" \
             --confirm
+      - name: Preserve the staging gateway after recovery
+        if: ${{ always() && steps.production_ssh.outcome == 'success' }}
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+        run: |
+          set -Eeuo pipefail
+          scripts/ensure-staging-gateway.sh \
+            --host "$PROD_DEPLOY_HOST" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"

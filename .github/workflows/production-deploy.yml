@@ -15,15 +15,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: greatsellai-hr-production
-  cancel-in-progress: false
-
 jobs:
   deploy:
     name: Deploy production tag
     runs-on: [self-hosted, Linux, X64, greatsell-ci]
     timeout-minutes: 45
+    concurrency:
+      group: greatsellai-hr-release-lane
+      cancel-in-progress: false
     environment:
       name: production
     env:
@@ -58,6 +57,7 @@ jobs:
             exit 1
           }
       - name: Configure production SSH
+        id: production_ssh
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
           PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
@@ -90,4 +90,14 @@ jobs:
             --host "$PROD_DEPLOY_HOST" \
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy" \
+            --prebuilt-images
+      - name: Preserve the staging gateway after Caddy recreation
+        if: ${{ always() && steps.production_ssh.outcome == 'success' }}
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+        run: |
+          set -Eeuo pipefail
+          scripts/ensure-staging-gateway.sh \
+            --host "$PROD_DEPLOY_HOST" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"

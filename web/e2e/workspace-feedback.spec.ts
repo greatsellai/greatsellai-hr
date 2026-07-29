@@ -9,17 +9,19 @@ const feedbackScreenshot = Buffer.from([
   0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
 ]);
 
-test.describe("使用体验问卷", () => {
-  test("从账户菜单提交完整问卷和截图后进入自动奖励队列", async ({ page }) => {
+test.describe("使用体验反馈", () => {
+  test("从账户菜单提交完整意见和截图后进入审核队列", async ({ page }) => {
     await registerAndVerify(page, "workspace-feedback");
     await openAccountMenu(page);
 
     const accountMenu = page.getByRole("dialog", { name: "账户菜单" });
-    await accountMenu.getByRole("button", { name: /填写问卷调查/ }).click();
+    await accountMenu.getByRole("button", { name: /提交宝贵意见/ }).click();
 
     await expect(page).toHaveURL(/#feedback$/);
     await expect(page.locator(".feedback-page")).toBeVisible();
-    await expect(page.locator(".feedback-page")).not.toContainText("审核");
+    await expect(page.locator(".feedback-page")).toContainText("系统审核通过后");
+
+    await page.getByLabel("联系电话").fill("138 0013 8000");
 
     const answers = page.locator(".feedback-question-list textarea");
     await expect(answers).toHaveCount(4);
@@ -36,8 +38,8 @@ test.describe("使用体验问卷", () => {
 
     await page.locator(".feedback-form .button-primary").click();
 
-    await expect(page.locator(".feedback-history-list")).toContainText("奖励处理中，预计 5–10 分钟到账");
-    await expect(page.locator(".feedback-form")).toContainText("下一次可领取奖励的问卷提交时间");
+    await expect(page.locator(".feedback-history-list")).toContainText("系统审核中，审核通过后发放 500 次 AI 调用额度");
+    await expect(page.locator(".feedback-form")).toContainText("下一次可提交意见的时间");
     await expect(page.locator(".feedback-form .button-primary")).toBeDisabled();
     await expect(page.locator(".feedback-history-list")).toContainText("查看填写内容");
   });

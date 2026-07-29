@@ -25,7 +25,7 @@ import {
 const PAGE_SIZE = 30;
 
 const rewardPresentation: Record<WorkspaceFeedbackRewardStatus, { label: string; status: string }> = {
-  queued: { label: "待发放", status: "queued" },
+  queued: { label: "系统审核中", status: "queued" },
   running: { label: "发放中", status: "running" },
   granted: { label: "已发放", status: "succeeded" },
 };
@@ -77,6 +77,7 @@ function FeedbackDetail({ item }: { item: PlatformWorkspaceFeedback | null }) {
         <dl className="admin-fact-list">
           <div><dt>工作区 ID</dt><dd title={item.organization_id}>{shortId(item.organization_id)}</dd></div>
           <div><dt>提交人 ID</dt><dd title={item.submitted_by_user_id}>{shortId(item.submitted_by_user_id)}</dd></div>
+          <div><dt>联系电话</dt><dd>{readableResponse(item.contact_phone)}</dd></div>
           <div><dt>反馈 ID</dt><dd title={item.feedback_id}>{shortId(item.feedback_id)}</dd></div>
         </dl>
       </section>

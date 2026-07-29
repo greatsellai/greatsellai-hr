@@ -1,7 +1,7 @@
 """Add durable source-grounded candidate-name extraction jobs.
 
-Revision ID: 20260729_0047
-Revises: 20260728_0046
+Revision ID: 20260729_0049
+Revises: 20260729_0048
 Create Date: 2026-07-29 09:00:00
 
 Candidate identity completion is intentionally isolated from structured-fact
@@ -19,8 +19,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260729_0047"
-down_revision: Union[str, Sequence[str], None] = "20260728_0046"
+revision: str = "20260729_0049"
+down_revision: Union[str, Sequence[str], None] = "20260729_0048"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

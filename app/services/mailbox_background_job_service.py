@@ -8,7 +8,6 @@ mailbox synchronization or exact attachment retry.
 """
 from __future__ import annotations
 
-import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import AppSettings
 from app.database import Database
+from app.observability import log_exception_event
 from app.models import (
     EmailAttachmentImport,
     MailboxBackgroundJob,
@@ -72,8 +72,6 @@ _MAILBOX_JOB_LEASE_SECONDS = 15 * 60
 _TERMINAL_JOB_RETENTION = timedelta(days=30)
 _TERMINAL_JOB_MAX_PER_ORGANIZATION = 5_000
 _TERMINAL_JOB_PRUNE_BATCH_SIZE = 500
-
-logger = logging.getLogger(__name__)
 
 _TERMINAL_ERROR_CODES = frozenset(
     {
@@ -541,9 +539,13 @@ def _prune_terminal_job_history_safely(
 
     try:
         _prune_terminal_job_history(session, now=now)
-    except Exception:
+    except Exception as exc:
         session.rollback()
-        logger.warning("mailbox_terminal_job_history_prune_failed", exc_info=True)
+        log_exception_event(
+            "mailbox_terminal_job_history_prune_failed",
+            error_code="mailbox_terminal_job_history_prune_failed",
+            exception=exc,
+        )
 
 
 def enqueue_due_mailbox_sync_jobs(*, database: Database, settings: AppSettings) -> bool:
@@ -557,9 +559,13 @@ def enqueue_due_mailbox_sync_jobs(*, database: Database, settings: AppSettings) 
         # fault to prevent unrelated mailbox scheduling.
         try:
             cleanup_expired_mailbox_oauth_intents(session, now=now)
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
             session.rollback()
-            logger.warning("mailbox_oauth_intent_cleanup_failed", exc_info=True)
+            log_exception_event(
+                "mailbox_oauth_intent_cleanup_failed",
+                error_code="mailbox_oauth_intent_cleanup_failed",
+                exception=exc,
+            )
         active_sync_job = exists(
             select(MailboxBackgroundJob.id).where(
                 MailboxBackgroundJob.organization_id == MailboxConfig.organization_id,

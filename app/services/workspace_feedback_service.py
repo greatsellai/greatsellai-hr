@@ -1,11 +1,11 @@
-"""Workspace feedback questionnaires with delayed, automatic quota rewards.
+"""Workspace feedback questionnaires with server-controlled quota rewards.
 
 The service deliberately separates two transactions:
 
 * submitting a complete questionnaire atomically reserves the workspace's
   eight-hour cooldown and persists one queued reward; and
 * a leased worker later grants the fixed allowance in a database-only
-  transaction.
+  transaction after the server-side review queue is due.
 
 No feedback text is logged, sent to an AI provider, or copied into generic
 platform audit snapshots.  Image bytes are outside this module: callers pass
@@ -57,6 +57,7 @@ WORKSPACE_FEEDBACK_REWARD_MAX_DELAY_SECONDS = 10 * 60
 WORKSPACE_FEEDBACK_REWARD_LEASE_SECONDS = 120
 WORKSPACE_FEEDBACK_RETRY_DELAY_SECONDS = 60
 WORKSPACE_FEEDBACK_MAX_ANSWER_LENGTH = 4_000
+WORKSPACE_FEEDBACK_MAX_CONTACT_PHONE_LENGTH = 32
 WORKSPACE_FEEDBACK_MAX_IMAGE_ATTACHMENTS = 5
 WORKSPACE_FEEDBACK_MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
 WORKSPACE_FEEDBACK_ALLOWED_IMAGE_CONTENT_TYPES = frozenset(
@@ -69,6 +70,7 @@ WORKSPACE_FEEDBACK_REWARD_GRANTED = "granted"
 
 _IDEMPOTENCY_KEY_MAX_LENGTH = 255
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_CONTACT_PHONE_CHARACTERS_PATTERN = re.compile(r"^[0-9+()\-\s]+$")
 
 
 class WorkspaceFeedbackServiceError(RuntimeError):
@@ -128,16 +130,18 @@ def submit_workspace_feedback(
     intended_outcome: str,
     friction: str,
     desired_change: str,
+    contact_phone: str,
     attachments: Sequence[WorkspaceFeedbackAttachmentInput] = (),
     now: datetime | None = None,
 ) -> WorkspaceFeedbackSubmitResponse:
     """Persist a complete questionnaire and atomically reserve its cooldown.
 
-    A successful first submission queues a fixed +500 call reward for a random
-    time 5--10 minutes later.  The cooldown update and durable feedback row
-    share one transaction, so a rollback cannot consume a user's window
+    A successful first submission queues a fixed +500 call reward for
+    server-side review processing.  The cooldown update and durable feedback
+    row share one transaction, so a rollback cannot consume a user's window
     without a queued reward.  Replaying the same idempotency key returns the
-    original submission; using it for different answers is rejected.
+    original submission; using it for different answers or a different contact
+    number is rejected.
     """
 
     expected_organization_id = _require_current_organization(session, organization_id)
@@ -153,6 +157,7 @@ def submit_workspace_feedback(
         desired_change,
         "workspace_feedback_desired_change_required",
     )
+    normalized_contact_phone = _normalize_contact_phone(contact_phone)
     normalized_attachments = _normalize_attachments(attachments)
     key_hash = _hash_text(normalized_key)
     request_fingerprint = _request_fingerprint(
@@ -160,6 +165,7 @@ def submit_workspace_feedback(
         intended_outcome=normalized_outcome,
         friction=normalized_friction,
         desired_change=normalized_change,
+        contact_phone=normalized_contact_phone,
         attachments=normalized_attachments,
     )
     current_time = _as_utc(now) or utcnow()
@@ -233,6 +239,7 @@ def submit_workspace_feedback(
                 intended_outcome=normalized_outcome,
                 friction=normalized_friction,
                 desired_change=normalized_change,
+                contact_phone=normalized_contact_phone,
                 reward_status=WORKSPACE_FEEDBACK_REWARD_QUEUED,
                 reward_call_count=WORKSPACE_FEEDBACK_REWARD_CALL_COUNT,
                 reward_due_at=reward_due_at,
@@ -485,6 +492,7 @@ def _platform_workspace_feedback_response(
         submitted_by_user_id=feedback.submitted_by_user_id,
         submitter_name=submitter_name,
         submitter_email=submitter_email,
+        contact_phone=feedback.contact_phone,
         use_case=feedback.use_case,
         intended_outcome=feedback.intended_outcome,
         friction=feedback.friction,
@@ -791,6 +799,31 @@ def _normalize_answer(value: str, code: str) -> str:
     return normalized
 
 
+def _normalize_contact_phone(value: str | None) -> str:
+    """Keep a compact, display-safe phone value for platform follow-up only."""
+
+    raw = value.replace("\x00", "").strip() if isinstance(value, str) else ""
+    if not raw:
+        raise WorkspaceFeedbackServiceError("workspace_feedback_contact_phone_required")
+    if (
+        len(raw) > WORKSPACE_FEEDBACK_MAX_CONTACT_PHONE_LENGTH
+        or not _CONTACT_PHONE_CHARACTERS_PATTERN.fullmatch(raw)
+    ):
+        raise WorkspaceFeedbackServiceError("workspace_feedback_contact_phone_invalid")
+
+    normalized = re.sub(r"[\s().-]", "", raw)
+    if normalized.startswith("00"):
+        normalized = "+" + normalized[2:]
+    digits = normalized[1:] if normalized.startswith("+") else normalized
+    if (
+        not digits.isdigit()
+        or not 7 <= len(digits) <= 15
+        or "+" in normalized[1:]
+    ):
+        raise WorkspaceFeedbackServiceError("workspace_feedback_contact_phone_invalid")
+    return f"+{digits}" if normalized.startswith("+") else digits
+
+
 def _normalize_attachments(
     values: Sequence[WorkspaceFeedbackAttachmentInput],
 ) -> tuple[WorkspaceFeedbackAttachmentInput, ...]:
@@ -881,6 +914,7 @@ def _request_fingerprint(
     intended_outcome: str,
     friction: str,
     desired_change: str,
+    contact_phone: str,
     attachments: Sequence[WorkspaceFeedbackAttachmentInput],
 ) -> str:
     payload = {
@@ -888,6 +922,7 @@ def _request_fingerprint(
         "intended_outcome": intended_outcome,
         "friction": friction,
         "desired_change": desired_change,
+        "contact_phone": contact_phone,
         "attachments": [
             # A trusted uploader may mint a fresh opaque storage key for an
             # HTTP retry of the same bytes.  It is transport state, not part

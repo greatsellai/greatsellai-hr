@@ -143,6 +143,7 @@ _IMAP_NZ_NUMBER_MAX = (1 << 32) - 1
 _IMAP_CANONICAL_NZ_NUMBER_PATTERN = re.compile(rb"[1-9][0-9]{0,9}\Z")
 _INITIAL_SYNC_LOOKBACK_DAYS_MIN = 0
 _INITIAL_SYNC_LOOKBACK_DAYS_MAX = 365
+_INBOX_MAILBOX = "INBOX"
 _IMAP_MONTH_ABBREVIATIONS = (
     "Jan",
     "Feb",
@@ -262,6 +263,29 @@ def _validate_imap_connection_arguments(
     _validated_imap_text(mailbox)
     if credential is not None and credential.authentication_mode == "app_password":
         _validated_imap_text(credential.secret)
+
+
+def _normalized_configured_mailbox(
+    mailbox: str,
+    *,
+    existing_mailbox: str | None = None,
+) -> str:
+    """Keep new channels on INBOX without corrupting a legacy source binding.
+
+    A mailbox name is part of the source fingerprint used by UID watermarks,
+    retries, and audit records. Existing pre-INBOX-only channels therefore keep
+    their exact bound source until an administrator archives them, while every
+    newly created channel is constrained to the product's single INBOX target.
+    """
+
+    normalized_mailbox = mailbox.strip()
+    if existing_mailbox is not None:
+        if normalized_mailbox != existing_mailbox:
+            raise MailboxImportError("mailbox_folder_fixed_to_inbox")
+        return normalized_mailbox
+    if normalized_mailbox != _INBOX_MAILBOX:
+        raise MailboxImportError("mailbox_folder_fixed_to_inbox")
+    return _INBOX_MAILBOX
 
 
 def _login_imap_client(
@@ -1455,7 +1479,10 @@ def _update_config_values(
     if credential is not None and credential.authentication_mode != authentication_mode:
         raise MailboxImportError("mailbox_provider_authentication_mismatch")
     normalized_email = email_address.strip()
-    normalized_mailbox = mailbox.strip()
+    normalized_mailbox = _normalized_configured_mailbox(
+        mailbox,
+        existing_mailbox=config.mailbox if config is not None else None,
+    )
     # Keep the normalized values safe too; this mirrors the raw-value check
     # above and protects service callers that construct values internally.
     _validate_imap_connection_arguments(
@@ -1721,6 +1748,7 @@ def _start_mailbox_oauth_intent(
     email_address: str,
     mailbox: str,
     target_mailbox_config_id: str | None,
+    existing_mailbox: str | None = None,
     initial_sync_lookback_days: int = 0,
     reauthorization_generation: int = 0,
 ) -> MailboxOAuthStartResponse:
@@ -1735,8 +1763,18 @@ def _start_mailbox_oauth_intent(
         display_name_key=display_name_key,
         excluding_config_id=target_mailbox_config_id,
     )
+    # Validate the raw request first; a leading or trailing control character
+    # must not become harmless through normalization before it reaches IMAP.
+    _validate_imap_connection_arguments(
+        email_address=email_address,
+        mailbox=mailbox,
+        credential=None,
+    )
     normalized_email = email_address.strip()
-    normalized_mailbox = mailbox.strip()
+    normalized_mailbox = _normalized_configured_mailbox(
+        mailbox,
+        existing_mailbox=existing_mailbox,
+    )
     lookback_days = _validated_initial_sync_lookback_days(initial_sync_lookback_days)
     if reauthorization_generation < 0:
         raise MailboxImportError("mailbox_oauth_callback_invalid")
@@ -1866,6 +1904,7 @@ def start_mailbox_oauth_reauthorization(
         email_address=config.email_address,
         mailbox=config.mailbox,
         target_mailbox_config_id=config.id,
+        existing_mailbox=config.mailbox,
         initial_sync_lookback_days=0,
         reauthorization_generation=generation,
     )
@@ -2209,6 +2248,15 @@ def save_mailbox_config(
     payload: MailboxConfigUpdate,
 ) -> MailboxConfigResponse:
     config = _legacy_single_config(session)
+    # The compatibility endpoint predates named mailbox channels. Its schema
+    # defaults mailbox to INBOX, so preserve a historical non-INBOX source when
+    # an old client omitted the deprecated field instead of silently repointing
+    # its UID watermark and attachment audit trail.
+    requested_mailbox = (
+        payload.mailbox
+        if "mailbox" in payload.model_fields_set
+        else (config.mailbox if config is not None else _INBOX_MAILBOX)
+    )
     if config is None:
         if not payload.password:
             raise MailboxImportError("mailbox_password_required")
@@ -2220,7 +2268,7 @@ def save_mailbox_config(
                 imap_host=payload.imap_host,
                 imap_port=payload.imap_port,
                 email_address=payload.email_address,
-                mailbox=payload.mailbox,
+                mailbox=requested_mailbox,
                 password=payload.password,
                 enabled=payload.enabled,
             ),
@@ -2233,7 +2281,7 @@ def save_mailbox_config(
             imap_host=payload.imap_host,
             imap_port=payload.imap_port,
             email_address=payload.email_address,
-            mailbox=payload.mailbox,
+            mailbox=requested_mailbox,
             password=payload.password,
             enabled=payload.enabled,
         ),

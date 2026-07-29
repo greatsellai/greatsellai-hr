@@ -94,6 +94,7 @@ def _feedback_payload() -> dict[str, str]:
         "intended_outcome": "快速找到适合当前岗位的候选人。",
         "friction": "筛选结果中的技能说明不够容易核对。",
         "desired_change": "希望结果能直接展示对应项目证据。",
+        "contact_phone": "138 0013 8000",
     }
 
 
@@ -140,6 +141,21 @@ def test_workspace_feedback_is_complete_private_and_attachment_is_scoped(
     )
     assert missing_required_answer.status_code == 422, missing_required_answer.text
 
+    missing_phone = client_a.post(
+        "/v1/workspace-feedback",
+        data={key: value for key, value in _feedback_payload().items() if key != "contact_phone"},
+        headers={"Idempotency-Key": "feedback-missing-phone"},
+    )
+    assert missing_phone.status_code == 422, missing_phone.text
+
+    invalid_phone = client_a.post(
+        "/v1/workspace-feedback",
+        data={**_feedback_payload(), "contact_phone": "not-a-phone"},
+        headers={"Idempotency-Key": "feedback-invalid-phone"},
+    )
+    assert invalid_phone.status_code == 422, invalid_phone.text
+    assert invalid_phone.json()["detail"] == "workspace_feedback_contact_phone_invalid"
+
     created = _submit(client_a, idempotency_key="feedback-private-001", with_image=True)
     assert created.status_code == 200, created.text
     created_payload = created.json()
@@ -149,6 +165,7 @@ def test_workspace_feedback_is_complete_private_and_attachment_is_scoped(
     assert feedback["reward_status"] == "queued"
     assert feedback["reward_call_count"] == 500
     assert len(feedback["attachments"]) == 1
+    assert "contact_phone" not in feedback
     assert "storage_key" not in feedback["attachments"][0]
     assert "content_sha256" not in feedback["attachments"][0]
 
@@ -158,6 +175,7 @@ def test_workspace_feedback_is_complete_private_and_attachment_is_scoped(
     other_history = client_b.get("/v1/workspace-feedback")
     assert other_history.status_code == 200, other_history.text
     assert other_history.json()["items"] == []
+    assert client_b.get("/v1/platform/workspace-feedback").status_code == 403
 
     attachment_id = feedback["attachments"][0]["attachment_id"]
     own_attachment = client_a.get(
@@ -170,13 +188,19 @@ def test_workspace_feedback_is_complete_private_and_attachment_is_scoped(
     assert client_b.get(
         f"/v1/workspace-feedback/{feedback['feedback_id']}/attachments/{attachment_id}"
     ).status_code == 404
+    assert client_b.get(
+        f"/v1/platform/workspace-feedback/{feedback['feedback_id']}/attachments/{attachment_id}"
+    ).status_code == 403
 
     # The test's raw database check verifies the attachment remains attached
     # to A's workspace rather than trusting only the serialized response.
     organization_id = session_a["organization"]["organization_id"]
     with client_a.app.state.database.session_factory() as database_session:
         set_organization_context(database_session, organization_id)
+        submission = database_session.scalar(select(WorkspaceFeedbackSubmission))
         attachment = database_session.scalar(select(WorkspaceFeedbackImageAttachment))
+        assert submission is not None
+        assert submission.contact_phone == "13800138000"
         assert attachment is not None
         assert attachment.organization_id == organization_id
 
@@ -197,6 +221,14 @@ def test_workspace_feedback_cooldown_and_idempotent_retry_leave_one_image(
     replayed = _submit(client_a, idempotency_key="feedback-retry-001", with_image=True)
     assert replayed.status_code == 200, replayed.text
     assert len(replayed.json()["items"]) == 1
+
+    changed_phone = client_a.post(
+        "/v1/workspace-feedback",
+        data={**_feedback_payload(), "contact_phone": "139 0013 8000"},
+        headers={"Idempotency-Key": "feedback-retry-001"},
+    )
+    assert changed_phone.status_code == 409, changed_phone.text
+    assert changed_phone.json()["detail"] == "workspace_feedback_idempotency_key_reused"
 
     cooldown = _submit(client_a, idempotency_key="feedback-retry-002", with_image=False)
     assert cooldown.status_code == 409, cooldown.text
@@ -288,6 +320,7 @@ def test_due_feedback_reward_grants_exactly_once_and_platform_can_read(
     )
     assert row["organization_id"] == organization_id
     assert row["submitter_email"] == "feedback-reward@example.test"
+    assert row["contact_phone"] == "13800138000"
     assert row["friction"] == _feedback_payload()["friction"]
     platform_attachment = platform_client.get(
         f"/v1/platform/workspace-feedback/{feedback['feedback_id']}/attachments/"

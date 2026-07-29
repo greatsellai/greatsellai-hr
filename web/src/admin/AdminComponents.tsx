@@ -26,13 +26,13 @@ export function AdminPageHeader({
 
 export function AdminStatus({ status, label }: { status: string; label?: string }) {
   const normalized = status.trim().toLowerCase();
-  const tone = ["active", "success", "succeeded", "verified", "completed", "enabled"].includes(normalized)
+  const tone = ["active", "success", "succeeded", "verified", "completed", "enabled", "ready", "live"].includes(normalized)
     ? "success"
     : ["trial", "running", "queued", "progress", "partial"].includes(normalized)
       ? "progress"
       : ["expired", "pending", "retrying", "warning", "expiring"].includes(normalized)
         ? "warning"
-        : ["suspended", "failed", "error", "disabled", "inactive", "denied"].includes(normalized)
+    : ["suspended", "failed", "error", "disabled", "inactive", "denied", "stale", "stopped", "missing"].includes(normalized)
           ? "error"
           : "neutral";
   const labels: Record<string, string> = {
@@ -50,6 +50,11 @@ export function AdminStatus({ status, label }: { status: string; label?: string 
     pending: "待处理",
     enabled: "已启用",
     disabled: "已禁用",
+    ready: "已就绪",
+    live: "在线",
+    stale: "心跳超时",
+    stopped: "已停止",
+    missing: "未上报",
     inactive: "已停用",
     denied: "已拒绝",
     legacy: "兼容模式",

@@ -35,7 +35,7 @@ function cooldownMessage(nextSubmissionAt: string | null): string | null {
   if (!nextSubmissionAt) return null;
   const next = new Date(nextSubmissionAt);
   if (Number.isNaN(next.getTime()) || next.getTime() <= Date.now()) return null;
-  return `下一次可领取奖励的问卷提交时间：${formatDateTime(nextSubmissionAt)}`;
+  return `下一次可提交意见的时间：${formatDateTime(nextSubmissionAt)}`;
 }
 
 function rewardStatusCopy(item: WorkspaceFeedback): { label: string; tone: string } {
@@ -46,9 +46,9 @@ function rewardStatusCopy(item: WorkspaceFeedback): { label: string; tone: strin
         tone: "is-granted",
       };
     case "running":
-      return { label: "正在增加当前工作区额度", tone: "is-pending" };
+      return { label: "系统审核通过，正在发放当前工作区额度", tone: "is-pending" };
     default:
-      return { label: "奖励处理中，预计 5–10 分钟到账", tone: "is-pending" };
+      return { label: `系统审核中，审核通过后发放 ${item.reward_call_count} 次 AI 调用额度`, tone: "is-pending" };
   }
 }
 
@@ -190,6 +190,7 @@ export function WorkspaceFeedbackPage({
   const [intendedOutcome, setIntendedOutcome] = useState("");
   const [friction, setFriction] = useState("");
   const [desiredChange, setDesiredChange] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
   const idempotencyKeyRef = useRef<string | null>(null);
   const seenGrantedIdsRef = useRef<Set<string>>(new Set());
@@ -252,6 +253,7 @@ export function WorkspaceFeedbackPage({
         intended_outcome: intendedOutcome.trim(),
         friction: friction.trim(),
         desired_change: desiredChange.trim(),
+        contact_phone: contactPhone.trim(),
         attachments,
         idempotency_key: idempotencyKey,
       });
@@ -260,9 +262,10 @@ export function WorkspaceFeedbackPage({
       setIntendedOutcome("");
       setFriction("");
       setDesiredChange("");
+      setContactPhone("");
       setAttachments([]);
       idempotencyKeyRef.current = null;
-      notify("success", "问卷已提交，500 次 AI 调用额度将在 5–10 分钟内发放到当前工作区。");
+      notify("success", "意见已提交，系统审核通过后将向当前工作区发放 500 次 AI 调用额度。");
     } catch (error) {
       notify("error", formatError(error));
       void load();
@@ -275,10 +278,10 @@ export function WorkspaceFeedbackPage({
     <section className="page-frame feedback-page" aria-labelledby="feedback-page-title">
       <header className="page-heading feedback-page-heading">
         <div>
-          <h1 id="feedback-page-title">填写问卷调查</h1>
-          <p>写下真实使用体验。提交后，当前工作区将在 5–10 分钟内增加 500 次 AI 调用额度。</p>
+          <h1 id="feedback-page-title">提交宝贵意见</h1>
+          <p>写下真实使用体验。系统审核通过后，当前工作区将获得 500 次 AI 调用额度。</p>
         </div>
-        <span className="feedback-reward-note">每 8 小时可领取一次</span>
+        <span className="feedback-reward-note">每 8 小时可提交一次</span>
       </header>
 
       <div className="feedback-page-layout">
@@ -291,6 +294,21 @@ export function WorkspaceFeedbackPage({
           </div>
           {cooldown && <p className="feedback-cooldown" role="status"><Icon name="history" size={16} />{cooldown}</p>}
           <div className="feedback-question-list">
+            <label>
+              <span className="field-label">联系电话</span>
+              <input
+                autoComplete="tel"
+                className="field"
+                inputMode="tel"
+                maxLength={32}
+                onChange={(event) => setContactPhone(event.target.value)}
+                placeholder="例如：138 0013 8000"
+                required
+                type="tel"
+                value={contactPhone}
+              />
+              <span className="field-hint">仅供平台管理员在必要时跟进意见使用，不会在当前工作区公开。</span>
+            </label>
             <label>
               <span className="field-label">你这次主要怎样使用 GreatSell AI？</span>
               <textarea className="textarea-field" maxLength={2000} onChange={(event) => setUseCase(event.target.value)} placeholder="例如：上传一批简历后，用筛选工作台找有 Agent 项目经验的候选人。" required rows={3} value={useCase} />
@@ -316,7 +334,7 @@ export function WorkspaceFeedbackPage({
           <footer className="feedback-form-footer">
             <p>额度属于当前工作区，所有成员共享使用。</p>
             <button className="button button-primary" disabled={submitting || Boolean(cooldown)} type="submit">
-              {submitting ? <><i className="spinner" />正在提交</> : <><Icon name="document" size={16} />提交问卷并领取额度</>}
+              {submitting ? <><i className="spinner" />正在提交</> : <><Icon name="document" size={16} />提交意见</>}
             </button>
           </footer>
         </form>

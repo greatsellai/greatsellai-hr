@@ -81,6 +81,91 @@ CANDIDATE_NAME_LABEL_PATTERN = re.compile(
 )
 CANDIDATE_NAME_UNSAFE_CHARACTER_PATTERN = re.compile(r"[\r\n@]")
 AI_CONFIG_SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
+_PROTECTED_CANDIDATE_KEYWORD_EXACT_KEYS = frozenset(
+    normalized_key(value)
+    for value in (
+        "年龄",
+        "年纪",
+        "性别",
+        "男",
+        "女",
+        "男性",
+        "女性",
+        "男女",
+        "出生年月",
+        "出生日期",
+        "生日",
+        "婚姻",
+        "婚育",
+        "已婚",
+        "未婚",
+        "生育",
+        "怀孕",
+        "民族",
+        "宗教",
+        "籍贯",
+        "户籍",
+        "国籍",
+        "残障",
+        "健康",
+        "age",
+        "gender",
+        "male",
+        "female",
+        "sex",
+        "date of birth",
+        "birthday",
+        "marital status",
+        "marriage",
+        "pregnancy",
+        "ethnicity",
+        "religion",
+        "hometown",
+        "household registration",
+        "nationality",
+        "disability",
+        "health",
+    )
+)
+_PROTECTED_CANDIDATE_KEYWORD_PREFIXES = tuple(
+    normalized_key(value)
+    for value in (
+        "年龄",
+        "年纪",
+        "性别",
+        "男性",
+        "女性",
+        "男生",
+        "女生",
+        "出生",
+        "婚姻",
+        "婚育",
+        "生育",
+        "孕",
+        "民族",
+        "宗教",
+        "籍贯",
+        "户籍",
+        "国籍",
+        "gender",
+        "male",
+        "female",
+        "sex",
+        "birthday",
+        "date of birth",
+        "marital",
+        "pregnan",
+        "ethnic",
+        "religion",
+        "hometown",
+        "household registration",
+        "nationality",
+        "disability",
+    )
+)
+_PROTECTED_CANDIDATE_AGE_KEY = re.compile(
+    r"^(?:\d{1,3}岁(?:以下|以上|及以下|及以上|左右)?|(?:age)?(?:under|over|below|above)\d{1,3}|age\d{1,3})$"
+)
 
 
 def clean_string_list(values: list[str]) -> list[str]:
@@ -96,6 +181,18 @@ def clean_string_list(values: list[str]) -> list[str]:
             seen.add(normalized)
             cleaned.append(normalized)
     return cleaned
+
+
+def _is_protected_candidate_keyword(value: str) -> bool:
+    key = normalized_key(value)
+    return bool(
+        key
+        and (
+            key in _PROTECTED_CANDIDATE_KEYWORD_EXACT_KEYS
+            or key.startswith(_PROTECTED_CANDIDATE_KEYWORD_PREFIXES)
+            or _PROTECTED_CANDIDATE_AGE_KEY.fullmatch(key)
+        )
+    )
 
 
 class ApiModel(BaseModel):
@@ -178,6 +275,7 @@ class PlatformWorkspaceFeedbackResponse(ApiModel):
     submitted_by_user_id: str
     submitter_name: str
     submitter_email: str
+    contact_phone: str | None = Field(default=None, max_length=32)
     use_case: str
     intended_outcome: str
     friction: str
@@ -348,6 +446,49 @@ class PlatformDashboardResponse(ApiModel):
     ai_runs_failed: int
     ai_cost_cny_micros: int
     ai_cost_unavailable_runs: int
+
+
+class PlatformRuntimeWorkerResponse(ApiModel):
+    """Content-free health of one recent worker process.
+
+    Worker and host identifiers deliberately stay server-side. The platform
+    console needs liveness, not a process-to-customer correlation handle.
+    """
+
+    worker_kind: Literal["background", "unknown"]
+    liveness: Literal["live", "stale", "stopped"]
+    started_at: datetime
+    last_seen_at: datetime
+    last_cycle_completed_at: datetime | None = None
+    last_error_code: str | None = None
+
+
+class PlatformRuntimeQueueResponse(ApiModel):
+    """Aggregate durable-queue state without task or workspace identifiers."""
+
+    queue_key: str
+    queued_count: int = 0
+    running_count: int = 0
+    failed_count: int = 0
+    oldest_pending_at: datetime | None = None
+
+
+class PlatformRuntimeFailureResponse(ApiModel):
+    """A normalized operational failure, never a raw exception or task row."""
+
+    queue_key: str
+    error_code: str
+    occurred_at: datetime
+    attempt_count: int | None = None
+
+
+class PlatformRuntimeOverviewResponse(ApiModel):
+    generated_at: datetime
+    worker_stale_after_seconds: int
+    worker_liveness: Literal["live", "stale", "stopped", "missing"]
+    workers: list[PlatformRuntimeWorkerResponse] = Field(default_factory=list)
+    queues: list[PlatformRuntimeQueueResponse] = Field(default_factory=list)
+    recent_failures: list[PlatformRuntimeFailureResponse] = Field(default_factory=list)
 
 
 class PlatformOrganizationListItem(ApiModel):
@@ -894,6 +1035,8 @@ class MailboxConfigCreate(ApiModel):
     imap_host: str | None = Field(default=None, min_length=1, max_length=255)
     imap_port: int | None = Field(default=None, ge=1, le=65535)
     email_address: str = Field(min_length=3, max_length=320)
+    # Deprecated compatibility input. New product clients omit this field; all
+    # newly created channels are constrained to INBOX by the service layer.
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=512)
     enabled: bool = True
@@ -911,6 +1054,8 @@ class MailboxConfigPatch(ApiModel):
     imap_host: str | None = Field(default=None, min_length=1, max_length=255)
     imap_port: int | None = Field(default=None, ge=1, le=65535)
     email_address: str | None = Field(default=None, min_length=3, max_length=320)
+    # Deprecated compatibility input. Existing historical channels may only
+    # retain their current source mailbox; no arbitrary folder switch is allowed.
     mailbox: str | None = Field(default=None, min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=512)
     enabled: bool | None = None
@@ -927,6 +1072,7 @@ class MailboxConfigUpdate(ApiModel):
     imap_host: str = Field(min_length=1, max_length=255)
     imap_port: int = Field(default=993, ge=1, le=65535)
     email_address: str = Field(min_length=3, max_length=320)
+    # Deprecated compatibility input for the former single-mailbox endpoint.
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
     password: str | None = Field(default=None, min_length=1, max_length=512)
     enabled: bool = True
@@ -997,6 +1143,7 @@ class MailboxOAuthStartRequest(ApiModel):
     provider_key: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=32)
     email_address: str = Field(min_length=3, max_length=320)
+    # Deprecated compatibility input. New OAuth starts are fixed to INBOX.
     mailbox: str = Field(default="INBOX", min_length=1, max_length=255)
     initial_sync_lookback_days: int = Field(default=0, ge=0, le=365)
 
@@ -1951,6 +2098,11 @@ class EducationFilter(ApiModel):
         max_length=6,
     )
     institution_tiers_any_of: list[InstitutionTier] = Field(default_factory=list, max_length=10)
+    # A recruiter-facing convenience threshold.  A record satisfies it when
+    # either its explicit percentage average or its normalized GPA percentage
+    # reaches the selected value.  The more specific fields below remain
+    # available for API and Agent callers that intentionally require both.
+    min_academic_score_percent: float | None = Field(default=None, gt=0, le=100)
     min_average_score: float | None = Field(default=None, ge=0, le=100)
     min_gpa_percent: float | None = Field(default=None, ge=0, le=100)
     max_rank_position: int | None = Field(default=None, ge=1, le=1_000_000)
@@ -2091,6 +2243,16 @@ class CandidateSearchRequest(ApiModel):
             self.scholarship_levels_any_of or self.scholarship_name_contains
         ):
             raise ValueError("unknown scholarship status cannot include detail filters")
+        if any(
+            _is_protected_candidate_keyword(keyword)
+            for keywords in (
+                self.keywords,
+                self.keywords_all_of,
+                self.keywords_any_of,
+            )
+            for keyword in keywords
+        ):
+            raise ValueError("sensitive_candidate_keyword_not_supported")
         return self
 
 

@@ -1927,6 +1927,7 @@ def test_agent_search_supports_full_recruiter_filter_contract(
                                             "school_name_contains": ["清华大学"],
                                             "major_contains": ["计算机"],
                                             "institution_classifications_any_of": ["211"],
+                                            "min_academic_score_percent": 90,
                                             "min_average_score": 85,
                                             "max_rank_position": 10,
                                         }
@@ -2001,6 +2002,7 @@ def test_agent_search_supports_full_recruiter_filter_contract(
     assert request.education_any_of[0].school_name_contains == ["清华大学"]
     assert request.education_any_of[0].major_contains == ["计算机"]
     assert request.education_any_of[0].institution_classifications_any_of == ["211"]
+    assert request.education_any_of[0].min_academic_score_percent == 90
     assert request.education_any_of[0].min_average_score == 85
     assert request.education_any_of[0].max_rank_position == 10
     assert request.experience_any_of[0].experience_types == ["employment", "internship"]

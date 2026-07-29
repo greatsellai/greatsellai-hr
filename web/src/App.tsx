@@ -148,6 +148,8 @@ function humanizeError(error: unknown): string {
         "请完整填写四个问卷问题后再提交。",
       workspace_feedback_desired_change_required:
         "请完整填写四个问卷问题后再提交。",
+      workspace_feedback_contact_phone_required: "请填写联系电话后再提交。",
+      workspace_feedback_contact_phone_invalid: "请填写有效的联系电话。",
       workspace_feedback_answer_too_long:
         "单项回答请控制在 4,000 个字符以内。",
       workspace_feedback_too_many_attachments:
@@ -191,8 +193,8 @@ function humanizeError(error: unknown): string {
       mailbox_credentials_key_not_configured: "邮箱凭据服务尚未配置，请联系部署管理员。",
       mailbox_credentials_unavailable: "邮箱授权码无法读取，请重新保存后再同步。",
       mailbox_connection_failed: "无法连接邮箱，请检查 IMAP 地址、端口和授权码。",
-      mailbox_select_failed: "无法打开指定的邮箱文件夹。",
-      mailbox_status_failed: "无法读取邮箱当前位置，请检查文件夹设置后重试。",
+      mailbox_select_failed: "无法打开收件箱，请检查邮箱服务商和授权状态。",
+      mailbox_status_failed: "无法读取收件箱状态，请检查邮箱服务商和授权状态后重试。",
       mailbox_search_failed: "无法检索邮箱中的附件。",
       mailbox_sync_failed: "邮箱入库暂时异常，请稍后重试。",
       mailbox_retention_policy_invalid: "内容保留策略无效，请重新选择后保存。",
@@ -213,6 +215,8 @@ function humanizeError(error: unknown): string {
       candidate_data_export_snapshot_unavailable: "导出所需的候选人快照已不可用，请重新创建导出。",
       candidate_data_export_original_unavailable: "部分原始文件不可用，无法创建包含原件的导出。",
       candidate_data_export_original_bytes_exceeded: "原始文件总量超过本次导出上限，请改为不含原件导出。",
+      sensitive_candidate_keyword_not_supported:
+        "匹配关键词不能包含年龄、性别或其他受保护个人属性。请改为岗位技能、经历或项目关键词。",
       ...mailboxImportErrorMessages,
       score_template_not_found: "评分模板不存在，请重新选择。",
       resume_score_batch_not_found: "评分任务不存在或已不可访问。",

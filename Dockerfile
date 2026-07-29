@@ -40,4 +40,7 @@ RUN useradd --create-home --uid 10001 appuser \
 USER appuser
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Caddy owns public access logging and removes raw request targets. The API
+# process must not emit Uvicorn's default access lines, which include query
+# strings such as OAuth or password-reset tokens.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

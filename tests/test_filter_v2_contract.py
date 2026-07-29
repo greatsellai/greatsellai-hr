@@ -102,6 +102,10 @@ def test_filter_options_use_confirmed_order_and_bilingual_english_names(client) 
     assert [item["value"] for item in payload["award_levels"]] == [
         "national", "provincial", "school", "department", "other"
     ]
+    assert [item["label"] for item in payload["keyword_modes"]] == [
+        "任一命中",
+        "全部命中",
+    ]
 
 
 def test_v2_filters_match_same_grounded_facts_and_school_alias(client) -> None:
@@ -185,6 +189,105 @@ def test_v2_filters_match_same_grounded_facts_and_school_alias(client) -> None:
     )
     assert exact_211.status_code == 200, exact_211.text
     assert exact_211.json()["items"] == []
+
+
+def test_academic_score_threshold_matches_average_or_normalized_gpa(client) -> None:
+    resume_id = _save_v2_resume(client)
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={
+            "education_any_of": [
+                {
+                    # The fixture's average is 92 while its normalized GPA is
+                    # 95. This confirms the recruiter-facing threshold is an
+                    # either/or condition instead of accidentally requiring
+                    # both values to clear the same bar.
+                    "min_academic_score_percent": 94,
+                    "max_rank_percent": 5,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert [item["resume_id"] for item in response.json()["items"]] == [resume_id]
+    display_fields = {
+        field["key"]: field["values"] for field in response.json()["items"][0]["display_fields"]
+    }
+    assert display_fields["academic_performance"] == [
+        "GPA 3.8/4 (95%)",
+        "排名前 5%",
+    ]
+
+    rejected = client.post(
+        "/v1/candidates/search",
+        json={"education_any_of": [{"min_academic_score_percent": 96}]},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["items"] == []
+
+    invalid_threshold = client.post(
+        "/v1/candidates/search",
+        json={"education_any_of": [{"min_academic_score_percent": 0}]},
+    )
+    assert invalid_threshold.status_code == 422, invalid_threshold.text
+
+
+def test_previous_graduate_filter_uses_the_window_start_as_its_boundary(client) -> None:
+    resume_id = _save_v2_resume(client)
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={
+            "graduation_status": "previous",
+            "fresh_graduate_start_month": "2027-01",
+            "fresh_graduate_end_month": "2027-12",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["resume_id"] == resume_id
+    graduation_field = next(
+        field for field in item["display_fields"] if field["key"] == "graduation"
+    )
+    assert graduation_field["values"] == ["2026-06"]
+
+
+def test_keyword_result_fields_only_show_terms_that_actually_matched(client) -> None:
+    resume_id = _save_v2_resume(client)
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={
+            "keywords": ["Python", "Rust"],
+            "keyword_match_mode": "broad",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["resume_id"] == resume_id
+    keyword_field = next(
+        field for field in item["display_fields"] if field["key"] == "keywords"
+    )
+    assert keyword_field["values"] == ["Python"]
+    keyword_match = next(
+        match for match in item["matched_evidence"] if match["filter_key"] == "keywords"
+    )
+    assert keyword_match["label"] == "Python"
+
+
+def test_protected_personal_attributes_cannot_be_used_as_keyword_filters(client) -> None:
+    for payload in (
+        {"keywords": ["年龄 30 岁以下"], "keyword_match_mode": "broad"},
+        {"keywords_all_of": ["性别"]},
+        {"keywords_any_of": ["female engineer"]},
+    ):
+        response = client.post("/v1/candidates/search", json=payload)
+        assert response.status_code == 422, response.text
+        assert "sensitive_candidate_keyword_not_supported" in response.text
 
 
 def test_exact_211_filter_matches_only_a_211_only_school(client) -> None:

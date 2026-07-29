@@ -12,7 +12,6 @@ export interface MailboxDraft {
   providerKey: string;
   imapHost: string;
   emailAddress: string;
-  mailbox: string;
   password: string;
   enabled: boolean;
   initialSyncLookbackDays: number;
@@ -42,7 +41,6 @@ export function newMailboxDraft(): MailboxDraft {
     providerKey: "",
     imapHost: "",
     emailAddress: "",
-    mailbox: "INBOX",
     password: "",
     enabled: true,
     initialSyncLookbackDays: 0,
@@ -55,7 +53,6 @@ export function mailboxDraftFromConfig(config: MailboxConfig): MailboxDraft {
     providerKey: config.provider_key || "",
     imapHost: config.imap_host || "",
     emailAddress: config.email_address || "",
-    mailbox: config.mailbox || "INBOX",
     password: "",
     enabled: config.enabled,
     initialSyncLookbackDays: config.initial_sync_lookback_days ?? 0,
@@ -76,7 +73,6 @@ export function mailboxDraftIsDirty(
     || draft.providerKey !== baseline.providerKey
     || draft.imapHost !== baseline.imapHost
     || draft.emailAddress !== baseline.emailAddress
-    || draft.mailbox !== baseline.mailbox
     || draft.enabled !== baseline.enabled
     || draft.initialSyncLookbackDays !== baseline.initialSyncLookbackDays
     || Boolean(draft.password.trim())
@@ -164,11 +160,12 @@ export const mailboxImportErrorMessages: Record<string, string> = {
   mailbox_imap_port_not_allowed: "只支持加密 IMAPS 的 993 端口。",
   mailbox_imap_address_not_allowed: "该 IMAP 地址解析到不安全网络，系统已拒绝连接。",
   mailbox_imap_dns_failed: "无法安全解析该 IMAP 地址，请检查服务商配置。",
-  mailbox_imap_argument_invalid: "邮箱账号、文件夹或授权码包含 IMAP 不支持的字符，请重新配置。",
+  mailbox_imap_argument_invalid: "邮箱账号或授权码包含 IMAP 不支持的字符，请重新配置。",
+  mailbox_folder_fixed_to_inbox: "系统仅同步收件箱（INBOX）。",
   mailbox_imap_response_line_too_large: "邮箱返回的数据行超过安全上限，系统已停止本次同步。",
   mailbox_connection_failed: "无法连接邮箱，请检查 IMAP 地址、端口和授权码。",
-  mailbox_select_failed: "无法打开指定的邮箱文件夹。",
-  mailbox_status_failed: "无法读取邮箱当前位置，请检查文件夹设置后重试。",
+  mailbox_select_failed: "无法打开收件箱，请检查邮箱服务商和授权状态。",
+  mailbox_status_failed: "无法读取收件箱状态，请检查邮箱服务商和授权状态后重试。",
   mailbox_source_epoch_changed: "邮箱来源标识已变化，通道已暂停，请归档后新建。",
   mailbox_source_watermark_invalid: "邮箱 UID 水位线异常，通道已暂停，请归档后新建。",
   mailbox_message_too_large: "邮件超过系统可处理大小，已跳过且不会重复下载。",

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -19,6 +18,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.config import AppSettings
 from app.database import Database
+from app.observability import log_exception_event
 from app.models import PasswordResetToken, TransactionalEmailOutbox, UserAccount
 from app.services.identity_service import IssuedPasswordReset, digest_token
 from app.services.transactional_email import (
@@ -29,8 +29,6 @@ from app.services.transactional_email import (
     password_reset_url,
 )
 
-
-logger = logging.getLogger(__name__)
 
 OUTBOX_KIND_PASSWORD_RESET = "password_reset"
 OUTBOX_QUEUED = "queued"
@@ -341,10 +339,15 @@ def _process_claimed_outbox_job(
             code=_safe_provider_error_code(exc),
         )
         return
-    except Exception:
+    except Exception as exc:
         # Do not retain provider exception text: it can contain remote
         # infrastructure details and must never include reset material.
-        logger.warning("transactional_email_outbox_delivery_failed")
+        log_exception_event(
+            "transactional_email_outbox_delivery_failed",
+            error_code="transactional_email_delivery_failed",
+            exception=exc,
+            job_id=claimed.job_id,
+        )
         _finish_delivery_failure(
             database,
             settings=settings,

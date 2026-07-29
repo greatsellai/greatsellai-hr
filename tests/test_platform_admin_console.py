@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app.config import AppSettings
 from app.main import create_app
 from app.models import Candidate, Organization, OrganizationMembership, Resume, UserAccount
+from app.observability import validate_request_id
 from app.services.identity_service import LEGACY_ORGANIZATION_ID, LEGACY_USER_ID
 from app.services.platform_admin_service import PlatformAdminServiceError
 from app.tenant_scope import set_organization_context
@@ -228,7 +229,9 @@ def test_dashboard_organization_management_and_audit_are_safe_and_atomic(
 
     patched = platform_client.patch(
         f"/v1/platform/organizations/{organization_id}",
-        headers={"X-Request-ID": "platform-request-001"},
+        # Public caller input must never become a durable audit ID, including
+        # values that appear to be a safe opaque trace ID.
+        headers={"X-Request-ID": "6a6f686e406578616d706c652e636f6d"},
         json={
             "name": "Renamed Tenant",
             "plan_code": "basic",
@@ -241,6 +244,9 @@ def test_dashboard_organization_management_and_audit_are_safe_and_atomic(
     assert patched.json()["name"] == "Renamed Tenant"
     assert patched.json()["plan_code"] == "basic"
     assert patched.json()["plan_status"] == "active"
+    request_id = patched.headers["X-Request-ID"]
+    assert validate_request_id(request_id) == request_id
+    assert request_id != "6a6f686e406578616d706c652e636f6d"
 
     audit = platform_client.get(
         "/v1/platform/audit-events",
@@ -252,7 +258,7 @@ def test_dashboard_organization_management_and_audit_are_safe_and_atomic(
     event = audit_payload["items"][0]
     assert event["actor_user_id"] == LEGACY_USER_ID
     assert event["reason"] == "Customer support adjustment"
-    assert event["request_id"] == "platform-request-001"
+    assert event["request_id"] == request_id
     assert event["before_state"]["name"] == "Searchable Tenant"
     assert event["after_state"]["name"] == "Renamed Tenant"
     assert "email" not in event["before_state"]

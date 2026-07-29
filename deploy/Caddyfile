@@ -8,6 +8,11 @@
 	handle @health {
 		reverse_proxy api:8000
 	}
+
+	@readyz path /readyz
+	handle @readyz {
+		reverse_proxy api:8000
+	}
 }
 
 (frontend) {
@@ -20,6 +25,22 @@
 {$RESUME_V3_DOMAIN} {
 	encode zstd gzip
 
+	# Emit only privacy-safe proxy diagnostics. The API emits the route and
+	# request correlation itself; do not leave raw request headers, URI query
+	# values, response headers (which can contain an original filename or a
+	# redirect URL), or full client IP addresses in proxy access logs.
+	log hr_access {
+		output stdout
+		format filter {
+			wrap json
+			request>headers delete
+			request>uri delete
+			resp_headers delete
+			request>remote_ip ip_mask 24 56
+			request>client_ip ip_mask 24 56
+		}
+	}
+
 	# Retain the compatibility surface on the primary host while older links
 	# migrate to the dedicated HR origin.
 	@compat_api path /greatsellhr/v1 /greatsellhr/v1/*
@@ -30,6 +51,12 @@
 
 	@compat_health path /greatsellhr/health
 	handle @compat_health {
+		uri strip_prefix /greatsellhr
+		reverse_proxy api:8000
+	}
+
+	@compat_readyz path /greatsellhr/readyz
+	handle @compat_readyz {
 		uri strip_prefix /greatsellhr
 		reverse_proxy api:8000
 	}

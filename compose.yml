@@ -1,5 +1,14 @@
 name: resume-screening-v3
 
+x-container-logging: &container-logging
+  # Keep local diagnostics bounded. Application events are emitted as JSON to
+  # stdout, so a collector such as Tencent CLS can consume them without a
+  # second application-specific transport.
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 x-app-environment: &app-environment
   RESUME_V3_ENVIRONMENT: production
   RESUME_V3_AUTO_CREATE_SCHEMA: "0"
@@ -90,6 +99,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - backend
+    logging: *container-logging
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U resume_v3 -d resume_v3"]
       interval: 5s
@@ -107,6 +117,7 @@ services:
         condition: service_healthy
     networks:
       - backend
+    logging: *container-logging
 
   api:
     build: .
@@ -125,6 +136,7 @@ services:
       proxy:
         ipv4_address: 172.30.0.3
       backend: {}
+    logging: *container-logging
     healthcheck:
       test:
         [
@@ -153,6 +165,7 @@ services:
         condition: service_completed_successfully
     networks:
       - backend
+    logging: *container-logging
 
   caddy:
     build:
@@ -174,6 +187,7 @@ services:
     networks:
       proxy:
         ipv4_address: 172.30.0.2
+    logging: *container-logging
 
 networks:
   # Only Caddy and the API are connected here. Caddy has a stable address so

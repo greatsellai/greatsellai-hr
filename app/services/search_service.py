@@ -250,6 +250,17 @@ def _matches_education(
             )
         )
         and (
+            filter_item.min_academic_score_percent is None
+            or (
+                education.average_score is not None
+                and education.average_score >= filter_item.min_academic_score_percent
+            )
+            or (
+                education.gpa_percent is not None
+                and education.gpa_percent >= filter_item.min_academic_score_percent
+            )
+        )
+        and (
             filter_item.min_average_score is None
             or (
                 education.average_score is not None
@@ -722,24 +733,41 @@ def _matches_keywords(resume: Resume, *, all_of: list[str], any_of: list[str]) -
     )
 
 
-def _matches_v2_keywords(resume: Resume, *, keywords: list[str], mode: str) -> bool:
+def _matched_v2_keywords(
+    resume: Resume,
+    *,
+    keywords: list[str],
+    mode: str,
+) -> list[str]:
     if not keywords:
-        return True
+        return []
     source = normalized_key(_screening_source_text(resume))
     if mode == "precise":
-        return all(normalized_key(keyword) in source for keyword in keywords)
+        return [
+            keyword for keyword in keywords if normalized_key(keyword) in source
+        ]
     credential_codes = {
         credential.credential_code for credential in resume.language_credentials
     }
+    matched: list[str] = []
     for keyword in keywords:
         credential_code = normalize_language_credential(keyword)
         if credential_code is not None:
             if credential_code in credential_codes:
-                return True
+                matched.append(keyword)
             continue
         if normalized_key(keyword) in source:
-            return True
-    return False
+            matched.append(keyword)
+    return matched
+
+
+def _matches_v2_keywords(resume: Resume, *, keywords: list[str], mode: str) -> bool:
+    if not keywords:
+        return True
+    matched = _matched_v2_keywords(resume, keywords=keywords, mode=mode)
+    if mode == "precise":
+        return len(matched) == len(keywords)
+    return bool(matched)
 
 
 def _matching_keyword_block_ids(resume: Resume, keywords: list[str]) -> list[str]:
@@ -1071,6 +1099,27 @@ def search_candidates(
                         evidence_block_ids=education_block_ids,
                     )
                 academic_values: list[str | None] = []
+                if (
+                    filter_item.min_academic_score_percent is not None
+                    and education.average_score is not None
+                    and education.average_score
+                    >= filter_item.min_academic_score_percent
+                ):
+                    academic_values.append(f"平均分 {education.average_score:g}")
+                if (
+                    filter_item.min_academic_score_percent is not None
+                    and education.gpa_percent is not None
+                    and education.gpa_percent
+                    >= filter_item.min_academic_score_percent
+                ):
+                    if education.gpa_value is not None and education.gpa_scale is not None:
+                        academic_values.append(
+                            "GPA "
+                            f"{education.gpa_value:g}/{education.gpa_scale:g} "
+                            f"({education.gpa_percent:g}%)"
+                        )
+                    else:
+                        academic_values.append(f"GPA {education.gpa_percent:g}%")
                 if (
                     filter_item.min_average_score is not None
                     and education.average_score is not None
@@ -1634,22 +1683,27 @@ def search_candidates(
                 )
             )
         if request.keywords:
+            matched_v2_keywords = _matched_v2_keywords(
+                resume,
+                keywords=request.keywords,
+                mode=request.keyword_match_mode,
+            )
             matched_filters.append(f"keywords_{request.keyword_match_mode}")
             keyword_block_ids = _matching_v2_keyword_block_ids(
                 resume,
-                keywords=request.keywords,
+                keywords=matched_v2_keywords,
                 mode=request.keyword_match_mode,
             )
             _add_display_field(
                 display_field_values,
                 key="keywords",
-                values=request.keywords,
+                values=matched_v2_keywords,
                 evidence_block_ids=keyword_block_ids,
             )
             matched_evidence.append(
                 CandidateSearchMatch(
                     filter_key="keywords",
-                    label=", ".join(request.keywords),
+                    label=", ".join(matched_v2_keywords),
                     fact_type="keyword",
                     evidence_block_ids=keyword_block_ids,
                 )

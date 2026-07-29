@@ -41,7 +41,7 @@
 收件通道（以下简称“通道”）是一个工作区拥有的预设服务商或通用 IMAP 收件配置，包含：
 
 - HR 填写的通道名称；
-- 服务商标识、IMAPS 主机与端口、接收邮箱和文件夹。预设服务商由系统固定主机；通用 IMAP 由管理员填写服务器域名，仍固定 TLS `993`；
+- 服务商标识、IMAPS 主机与端口和接收邮箱。所有新通道固定同步收件箱（`INBOX`）；预设服务商由系统固定主机，通用 IMAP 由管理员填写服务器域名，仍固定 TLS `993`；
 - 仅服务端可读的加密授权码，或 OAuth 授权状态与加密 refresh token；
 - 独立的首次回溯天数、固定的首次回溯起始日期和完成时间，以及收件起点、UIDVALIDITY、同步时间和错误状态；
 - 独立的邮件暂存留存策略、清理记录和失败附件重试副本；
@@ -63,7 +63,7 @@
 
 通道名称可以随时修改，不影响已入库简历、附件幂等或失败重试。
 
-正常产品流程中，管理员选择预设邮箱服务商，或选择“通用 IMAP 邮箱”填写服务商提供的服务器域名。预设服务商固定 IMAPS 主机，通用 IMAP 固定 TLS `993` 端口且只接受域名，不提供 IP 或任意端口输入。服务商、主机、接收邮箱和文件夹共同构成连接身份。连接身份一旦已经产生附件记录，前端不得直接覆盖；用户应归档旧通道并新建通道。这样可以保留旧附件的原始来源快照，避免重绑后误取另一邮箱中的邮件。
+正常产品流程中，管理员选择预设邮箱服务商，或选择“通用 IMAP 邮箱”填写服务商提供的服务器域名。预设服务商固定 IMAPS 主机，通用 IMAP 固定 TLS `993` 端口且只接受域名，不提供 IP 或任意端口输入；所有新通道固定同步收件箱（`INBOX`）。服务商、主机和接收邮箱共同构成连接身份。连接身份一旦已经产生附件记录，前端不得直接覆盖；用户应归档旧通道并新建通道。这样可以保留旧附件的原始来源快照，避免重绑后误取另一邮箱中的邮件。
 
 服务商本身不能在既有通道上原地切换；要使用另一服务商时，管理员必须新建目标通道。这避免把旧服务商的授权码错误发送给新的服务商。
 
@@ -81,8 +81,8 @@ OAuth 的生产回调统一为 `https://hr.greatsellai.net/v1/mailbox-oauth/call
 
 1. 工作区管理员进入“邮箱附件入库”。
 2. 点击“新增收件邮箱”。
-3. 填写通道名称、选择预设服务商或通用 IMAP、接收邮箱和文件夹，并选择首次范围：从现在开始，或最近有限天数；通用 IMAP 还需填写服务商提供的服务器域名；对于授权码服务商填写授权码，对于 OAuth 服务商跳转至 Google 或 Microsoft 完成授权。
-4. 服务端校验所选 IMAPS 端点连接、读取该文件夹的 UIDNEXT 与 UIDVALIDITY，并加密保存授权码或 OAuth refresh token。
+3. 填写通道名称、选择预设服务商或通用 IMAP、接收邮箱，并选择首次范围：从现在开始，或最近有限天数；系统固定同步收件箱（`INBOX`）。通用 IMAP 还需填写服务商提供的服务器域名；对于授权码服务商填写授权码，对于 OAuth 服务商跳转至 Google 或 Microsoft 完成授权。
+4. 服务端校验所选 IMAPS 端点连接、读取收件箱（`INBOX`）的 UIDNEXT 与 UIDVALIDITY，并加密保存授权码或 OAuth refresh token。
 5. 页面显示首次范围和导入状态。选择回溯时，后台只处理冻结日期范围内的邮件；完成后切换为仅接收新邮件。
 6. 新通道出现在通道列表中，默认启用。
 
@@ -150,7 +150,7 @@ OAuth 的生产回调统一为 `https://hr.greatsellai.net/v1/mailbox-oauth/call
 - `id`、`organization_id`；
 - `display_name`、`display_name_key`；
 - 保留 `enabled`（`false` 即暂停）和新增 `archived_at`；`syncing` 由同步租约推导，`error` 由 `last_sync_error` 推导，不新增含义重叠的状态字段；
-- `provider_key`、`authentication_mode`、`imap_host`、`imap_port`、`email_address`、`mailbox`；其中新通道的端点由 `provider_key` 固定；
+- `provider_key`、`authentication_mode`、`imap_host`、`imap_port`、`email_address`、`mailbox`；其中新通道的端点由 `provider_key` 固定，`mailbox` 固定为 `INBOX`。历史非 `INBOX` 连接仅保留原来源标识，不提供文件夹切换；
 - `encrypted_password`（仅授权码服务商，密文）与独立的 OAuth 凭据表（仅 OAuth 服务商，密文 refresh token）；两种凭据不得混存或向浏览器回显；
 - `initial_sync_lookback_days`、`initial_backfill_since_date`、`initial_backfill_completed_at`，以及 `import_start_uid`、`imap_uidvalidity`、`import_started_at`；
 - `last_synced_at`、`last_sync_error`；

@@ -398,15 +398,12 @@ def test_existing_mailbox_without_watermark_skips_its_history_once(
     assert LegacyMailboxImap.searched is False
 
 
-def test_mailbox_rebinding_resets_the_uid_watermark_but_settings_edits_do_not(
+def test_mailbox_settings_edits_do_not_reset_the_uid_watermark_and_folder_rebinding_is_rejected(
     client,
     monkeypatch,
 ) -> None:
     class RebindingImap:
-        status_replies = [
-            b'INBOX (UIDVALIDITY 9 UIDNEXT 42)',
-            b'Archive (UIDVALIDITY 12 UIDNEXT 90)',
-        ]
+        status_replies = [b'INBOX (UIDVALIDITY 9 UIDNEXT 42)']
         status_calls = 0
 
         def __init__(self, *args, **kwargs) -> None:
@@ -450,7 +447,7 @@ def test_mailbox_rebinding_resets_the_uid_watermark_but_settings_edits_do_not(
     assert settings_only.status_code == 200, settings_only.text
     assert RebindingImap.status_calls == 1
 
-    rebound = client.put(
+    rejected_rebinding = client.put(
         "/v1/mailbox/config",
         json={
             "imap_host": "imap.example.test",
@@ -460,14 +457,17 @@ def test_mailbox_rebinding_resets_the_uid_watermark_but_settings_edits_do_not(
             "enabled": True,
         },
     )
-    assert rebound.status_code == 200, rebound.text
-    assert RebindingImap.status_calls == 2
+    assert rejected_rebinding.status_code == 422, rejected_rebinding.text
+    assert rejected_rebinding.json()["detail"] == "mailbox_folder_fixed_to_inbox"
+    assert RebindingImap.status_calls == 1
 
     with client.app.state.database.session_factory() as session:
         config = session.scalar(select(MailboxConfig))
         assert config is not None
-        assert config.import_start_uid == 90
-        assert config.imap_uidvalidity == 12
+        assert config.mailbox == "INBOX"
+        assert config.import_start_uid == 42
+        assert config.imap_uidvalidity == 9
+        assert config.enabled is False
 
 
 def test_html_resume_upload_is_preserved_but_never_served_as_inline_html(client) -> None:

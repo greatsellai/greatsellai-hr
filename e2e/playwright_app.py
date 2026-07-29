@@ -232,7 +232,8 @@ def _seed_ready_resume(
     source_text = (
         f"{candidate_name}\n"
         f"{contact_header}"
-        "清华大学 计算机科学 本科\n"
+        "清华大学 计算机科学 本科 2022-09 至 2026-06\n"
+        "平均成绩 92 分，GPA 3.8/4.0，排名 5/100。\n"
         "Python 后端经验 分布式系统\n"
         "负责服务端开发与系统设计。"
     )
@@ -277,6 +278,13 @@ def _seed_ready_resume(
                             "school_name_raw": "清华大学",
                             "degree": "bachelor",
                             "major_raw": "计算机科学",
+                            "start_month": "2022-09",
+                            "end_month": "2026-06",
+                            "average_score": 92,
+                            "gpa_value": 3.8,
+                            "gpa_scale": 4.0,
+                            "rank_position": 5,
+                            "rank_total": 100,
                             "evidence_block_ids": ["page-001"],
                         }
                     ],

@@ -186,7 +186,7 @@ export function RegistrationPage({
 
   return (
     <AuthPageLayout
-      description="注册后即可使用大卖数智 AI 招聘工作台。上传简历，快速筛选、统一评分并查看 JD 匹配依据，把时间留给真正需要你判断的人。"
+      description="注册后即可使用大卖智聘。上传简历，快速筛选、统一评分并查看 JD 匹配依据，把时间留给真正需要你判断的人。"
       eyebrow={offerLoading
         ? "30 天免费体验，含 1,000 次大模型调用"
         : `${registrationOffer.trial_days} 天${registrationOffer.plan_name}免费体验，含 ${formatWholeNumber(registrationOffer.llm_call_limit)} 次大模型调用`}

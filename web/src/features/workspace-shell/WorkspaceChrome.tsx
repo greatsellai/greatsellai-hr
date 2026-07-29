@@ -444,8 +444,8 @@ function AccountMenu({
             >
               <Icon name="document" size={16} />
               <span>
-                <strong>填写问卷调查</strong>
-                <small>提交后 5–10 分钟赠送 500 次 AI 调用</small>
+                <strong>提交宝贵意见</strong>
+                <small>系统审核通过后赠送 500 次 AI 调用额度</small>
               </span>
             </button>
             {canManageSettings && (

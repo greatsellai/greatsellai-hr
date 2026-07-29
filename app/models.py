@@ -519,13 +519,69 @@ class RegistrationRateLimitBucket(Base):
     )
 
 
-class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
-    """One complete workspace-feedback questionnaire and its automatic reward.
+class RuntimeWorkerHeartbeat(Base):
+    """Durable, content-free liveness record for a background worker.
 
-    The four text answers are product feedback, not candidate data and never
-    belong in generic audit-event snapshots or application logs.  A durable
-    reward state lets the worker grant the fixed allowance after its delayed
-    due time without relying on a browser tab remaining open.
+    The row is deliberately platform-scoped rather than organization-scoped:
+    it records process health only and must never carry a candidate, mailbox,
+    user, request body, or provider payload.  ``worker_id`` is internal
+    process correlation; platform APIs expose only aggregate liveness fields.
+    """
+
+    __tablename__ = "runtime_worker_heartbeats"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'stopped')",
+            name="ck_runtime_worker_heartbeat_status",
+        ),
+        Index(
+            "ix_runtime_worker_heartbeat_kind_seen",
+            "worker_kind",
+            "last_seen_at",
+        ),
+        Index(
+            "ix_runtime_worker_heartbeat_status_seen",
+            "status",
+            "last_seen_at",
+        ),
+        Index("ix_runtime_worker_heartbeat_last_seen", "last_seen_at"),
+    )
+
+    worker_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    worker_kind: Mapped[str] = mapped_column(String(64), default="background")
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="running",
+        server_default=text("'running'"),
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )
+    last_cycle_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # This holds a normalized operational code only. Raw exception text and
+    # external provider responses must remain outside the runtime ledger.
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
+    """One complete workspace-feedback questionnaire and its quota reward.
+
+    The four text answers and contact number are product feedback, not
+    candidate data.  They never belong in generic audit-event snapshots or
+    application logs.  A durable reward state lets the worker grant the fixed
+    allowance after server-side review processing without relying on a browser
+    tab remaining open.
     """
 
     __tablename__ = "workspace_feedback_submissions"
@@ -579,6 +635,10 @@ class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
     intended_outcome: Mapped[str] = mapped_column(Text)
     friction: Mapped[str] = mapped_column(Text)
     desired_change: Mapped[str] = mapped_column(Text)
+    # Existing questionnaire rows predate contact collection.  New submissions
+    # are validated as required at the service boundary, while the column stays
+    # nullable so the migration never fabricates or invalidates historical PII.
+    contact_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     reward_status: Mapped[str] = mapped_column(
         String(32),
         default="queued",

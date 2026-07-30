@@ -35,4 +35,12 @@ test("招聘工作台深链接可刷新，默认入口不会吞掉浏览器返�
   await page.reload();
   await expect(page.getByLabel("岗位名称", { exact: true })).toBeVisible();
   await expect(page).toHaveURL(/#jobs\?new=1$/);
+
+  await page.goto("/#matching?jobVersion=missing-job-version");
+  await expect(page.getByRole("heading", { name: "智能匹配", exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#matching$/);
+
+  await page.goto("/#workflow?job=missing-job");
+  await expect(page.getByRole("heading", { level: 1, name: "招聘流程", exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#workflow$/);
 });

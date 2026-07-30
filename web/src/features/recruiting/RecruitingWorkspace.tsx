@@ -114,6 +114,7 @@ export interface RecruitingWorkspaceProps {
   initialJobId?: string;
   notify: (kind: ToastKind, message: string) => void;
   onCreateJob: () => void;
+  onInvalidJobSelection?: () => void;
   onOpenCandidate?: (application: JobApplication) => void;
   onJobSelectionChange?: (jobId: string | null) => void;
 }
@@ -128,6 +129,7 @@ export function RecruitingWorkspace({
   initialJobId,
   notify,
   onCreateJob,
+  onInvalidJobSelection,
   onOpenCandidate,
   onJobSelectionChange,
 }: RecruitingWorkspaceProps) {
@@ -197,6 +199,10 @@ export function RecruitingWorkspace({
       setJobs(nextJobs.items);
       setWorkflows(nextWorkflows);
       setMembers(nextMembers);
+      if (initialJobId && !nextJobs.items.some((item) => item.job_id === initialJobId)) {
+        notify("error", "该招聘岗位不存在或无权访问，已回到可访问的岗位。");
+        onInvalidJobSelection?.();
+      }
       setSelectedJobId((current) =>
         nextJobs.items.some((item) => item.job_id === current)
           ? current
@@ -208,7 +214,7 @@ export function RecruitingWorkspace({
     } finally {
       setWorkspaceLoading(false);
     }
-  }, [formatError]);
+  }, [formatError, initialJobId, notify, onInvalidJobSelection]);
 
   const loadSelectedJob = useCallback(async (jobId: string) => {
     if (!jobId) {

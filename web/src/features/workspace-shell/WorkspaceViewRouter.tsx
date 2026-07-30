@@ -136,6 +136,18 @@ export function WorkspaceViewRouter({
     },
     [navigation.navigateToView],
   );
+  const clearJobRoute = useCallback(
+    () => navigation.navigateToView("jobs"),
+    [navigation.navigateToView],
+  );
+  const clearMatchingRoute = useCallback(
+    () => navigation.navigateToView("match"),
+    [navigation.navigateToView],
+  );
+  const clearWorkflowRoute = useCallback(
+    () => navigation.navigateToView("workflow"),
+    [navigation.navigateToView],
+  );
 
   return (
     <>
@@ -213,6 +225,7 @@ export function WorkspaceViewRouter({
           notify={feedback.notify}
           initialJobVersionId={routeParams.jobVersionId}
           onCreateNewJob={() => navigation.navigateToView("jobs", { createJob: true })}
+          onInvalidJobVersion={clearJobRoute}
           onJobVersionChange={(jobVersionId) => navigation.navigateToView(
             "jobs",
             jobVersionId ? { jobVersionId } : {},
@@ -228,6 +241,7 @@ export function WorkspaceViewRouter({
           mode="matching"
           notify={feedback.notify}
           initialJobVersionId={routeParams.jobVersionId}
+          onInvalidJobVersion={clearMatchingRoute}
           onJobVersionChange={(jobVersionId) => navigation.navigateToView(
             "match",
             jobVersionId ? { jobVersionId } : {},
@@ -242,6 +256,7 @@ export function WorkspaceViewRouter({
           initialJobId={routeParams.jobId}
           notify={feedback.notify}
           onCreateJob={() => navigation.navigateToView("jobs")}
+          onInvalidJobSelection={clearWorkflowRoute}
           onJobSelectionChange={handleWorkflowJobSelection}
           onOpenCandidate={(application) => onOpenRecruitingCandidate(
             application.resume_id,

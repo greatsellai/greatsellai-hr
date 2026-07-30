@@ -28,6 +28,7 @@ export function MatchWorkspace({
   mode = "jobs",
   notify,
   onCreateNewJob,
+  onInvalidJobVersion,
   onJobVersionChange,
   onOpenJobManagement,
   onOpenMatching,
@@ -42,6 +43,7 @@ export function MatchWorkspace({
   mode?: MatchWorkspaceSurface;
   notify: (kind: ToastKind, message: string) => void;
   onCreateNewJob?: () => void;
+  onInvalidJobVersion?: () => void;
   onJobVersionChange?: (jobVersionId: string) => void;
   onOpenJobManagement?: () => void;
   onOpenMatching?: (jobVersionId: string) => void;
@@ -342,6 +344,11 @@ export function MatchWorkspace({
         const initial = initialJobVersionId
           ? versions.find((item) => item.job_version_id === initialJobVersionId)
           : versions[0];
+        if (initialJobVersionId && !initial) {
+          notify("error", "该岗位 JD 不存在或无权访问，已回到可访问的岗位。");
+          onInvalidJobVersion?.();
+          return;
+        }
         if (initial) selectJobVersion(initial, false);
       })
       .catch(() => {
@@ -350,7 +357,7 @@ export function MatchWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [createNewJob, initialJobVersionId, mode]);
+  }, [createNewJob, initialJobVersionId, mode, notify, onInvalidJobVersion]);
   useEffect(() => {
     if (
       mode !== "matching" ||

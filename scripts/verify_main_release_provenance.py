@@ -33,15 +33,12 @@ REQUIRED_CI_JOB_NAMES = frozenset(
         "Backend tests",
         "PostgreSQL mailbox race",
         "Web build",
-        "Production image builds",
     }
 )
-# Public pull requests deliberately do not build production images on the
-# trusted self-hosted runner.  Their exact main commit is built only after
-# this provenance guard succeeds on the trusted main push.  Keep that
-# distinction explicit here so a skipped public-PR image job cannot block an
-# otherwise fully verified release.
-PUBLIC_REQUIRED_CI_JOB_NAMES = REQUIRED_CI_JOB_NAMES - {"Production image builds"}
+# Release images are intentionally built only after PR provenance is verified
+# on the merged main push.  They are not PR evidence in either public or
+# private repository mode, because a PR/manual image with the same SHA could
+# otherwise overwrite the staging hand-off artifact.
 REQUIRED_TEXT_CHECK_NAME = "UTF-8 source and PR metadata"
 TEXT_ENCODING_WORKFLOW_FILE = "text-encoding.yml"
 
@@ -160,22 +157,10 @@ def _verified_pr_base_sha(
     return base_sha
 
 
-def _repository_is_private(*, repository: str, fetch_json: JsonFetcher) -> bool:
-    metadata = _require_mapping(
-        fetch_json(f"/repos/{repository}"),
-        context="repository metadata",
-    )
-    private = metadata.get("private")
-    if not isinstance(private, bool):
-        raise ProvenanceError("repository visibility is unavailable")
-    return private
-
-
 def _verify_full_ci(
     *,
     repository: str,
     head_sha: str,
-    repository_is_private: bool,
     fetch_json: JsonFetcher,
 ) -> int:
     workflow_runs = _require_mapping(
@@ -211,12 +196,9 @@ def _verify_full_ci(
         if isinstance(name, str):
             jobs_by_name.setdefault(name, []).append(job)
 
-    required_job_names = (
-        REQUIRED_CI_JOB_NAMES if repository_is_private else PUBLIC_REQUIRED_CI_JOB_NAMES
-    )
     missing_or_failed = [
         name
-        for name in sorted(required_job_names)
+        for name in sorted(REQUIRED_CI_JOB_NAMES)
         if name not in jobs_by_name or not _successful_completed(_latest_item(jobs_by_name[name]))
     ]
     if missing_or_failed:
@@ -322,14 +304,9 @@ def verify_main_release_provenance(
     ):
         raise ProvenanceError("main commit tree differs from the merged pull request tree")
 
-    repository_is_private = _repository_is_private(
-        repository=repository,
-        fetch_json=fetch_json,
-    )
     ci_run_id = _verify_full_ci(
         repository=repository,
         head_sha=head_sha,
-        repository_is_private=repository_is_private,
         fetch_json=fetch_json,
     )
     _verify_text_metadata_check(

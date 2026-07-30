@@ -67,6 +67,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
+          command -v python3 >/dev/null || {
+            echo "python3 is required to verify a manually staged commit." >&2
+            exit 1
+          }
           # A manual retry is only for an already CI-verified main commit. It
           # must never turn a failed or unverified main commit into a staging
           # candidate merely because its Docker images still exist on the
@@ -75,7 +79,7 @@ jobs:
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $GITHUB_TOKEN" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs?branch=main&event=push&status=completed&per_page=100" \
-            | python -c '
+            | python3 -c '
           import json
           import os
           import sys
@@ -213,6 +217,7 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Transfer CI-verified images to staging
+        id: transfer_ci_images
         if: steps.ready.outputs.stage == 'true'
         env:
           STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
@@ -225,6 +230,7 @@ jobs:
             --expected-ci-run-id "$CI_RUN_ID" \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
       - name: Deploy immutable candidate and run public smoke checks
+        id: deploy_staging
         if: steps.ready.outputs.stage == 'true'
         env:
           STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
@@ -241,8 +247,16 @@ jobs:
             --history-dir "$STAGING_HISTORY_DIR" \
             --public-url "$STAGING_PUBLIC_URL" \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
-      - name: Remove CI images after staging transfer
-        if: always()
+      - name: Remove CI images after successful staging deployment
+        # A failed preflight, transfer, deployment or public smoke check must
+        # retain the verified images so an operator can retry the same
+        # CI-approved main commit. Only a completed staging deployment owns
+        # the exact images. Superseded commits are safe to remove.
+        if: >-
+          always() &&
+          (steps.target.outputs.stage == 'false' ||
+           steps.ready.outputs.stage == 'false' ||
+           steps.deploy_staging.outcome == 'success')
         run: |
           set -Eeuo pipefail
           docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true

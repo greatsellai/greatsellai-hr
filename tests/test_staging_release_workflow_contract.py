@@ -32,6 +32,8 @@ def test_staging_workflow_only_accepts_a_successful_main_ci_or_confirmed_main_di
     assert "Verify manual candidate passed main CI" in workflow
     assert "Manual staging requires a successful Continuous integration push run for this exact main commit." in workflow
     assert "actions/runs?branch=main&event=push&status=completed" in workflow
+    assert "command -v python3 >/dev/null" in workflow
+    assert "| python3 -c '" in workflow
     assert "ci_run_id=" in workflow
     assert "environment:\n      name: staging" in workflow
     assert "group: greatsellai-hr-release-lane" in workflow
@@ -47,13 +49,18 @@ def test_staging_preflights_tags_transfers_deploys_and_smokes_in_order() -> None
     tag = workflow.index("Create immutable staging tag")
     transfer = workflow.index("Transfer CI-verified images to staging")
     deploy = workflow.index("Deploy immutable candidate and run public smoke checks")
-    cleanup = workflow.index("Remove CI images after staging transfer")
+    cleanup = workflow.index("Remove CI images after successful staging deployment")
     assert preflight < tag < transfer < deploy < cleanup
     assert 'scripts/preflight-staging-release.sh "$RELEASE_SHA"' in workflow
     assert 'scripts/create-staging-tag.sh "$tag"' in workflow
     assert "Current main has multiple staging tags; refusing ambiguous promotion lineage." in workflow
     assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' in workflow
     assert '--expected-ci-run-id "$CI_RUN_ID"' in workflow
+    assert 'id: transfer_ci_images' in workflow
+    assert 'id: deploy_staging' in workflow
+    assert "steps.deploy_staging.outcome == 'success'" in workflow
+    assert "steps.target.outputs.stage == 'false'" in workflow
+    assert "steps.ready.outputs.stage == 'false'" in workflow
     assert "scripts/ensure-staging-gateway.sh" not in workflow
     assert 'scripts/deploy-staging.sh "$STAGING_TAG"' in workflow
     assert 'docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true' in workflow

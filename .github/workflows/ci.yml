@@ -155,18 +155,16 @@ jobs:
 
   production-images:
     name: Production image builds
-    # Public pull requests may originate from arbitrary forks. Only a trusted
-    # main push may access the self-hosted Docker runner in that mode. Private
-    # repositories retain the full historical PR/manual image regression.
+    # Exact-SHA release images are a hand-off artifact for staging. Building
+    # them for a PR or a manual CI run can overwrite a main image tag with a
+    # different workflow provenance, then make a staging retry fail closed.
+    # Release images therefore originate only from a verified merged main push
+    # in both public and private repository modes.
     needs: [main-release-provenance]
     if: >-
       always() &&
-      (needs.main-release-provenance.result == 'success' ||
-       needs.main-release-provenance.result == 'skipped') &&
-      (
-        github.event.repository.private ||
-        (github.event_name == 'push' && github.ref == 'refs/heads/main')
-      )
+      needs.main-release-provenance.result == 'success' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Linux, X64, greatsell-ci]
     timeout-minutes: 55
     steps:

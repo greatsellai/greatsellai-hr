@@ -157,7 +157,8 @@ def test_public_repository_routes_default_pr_checks_to_hosted_runners() -> None:
     assert runner_selector in encoding
 
     production_images = ci.split("  production-images:", maxsplit=1)[1]
-    assert "github.event.repository.private ||" in production_images
+    assert "github.event.repository.private" not in production_images
+    assert "needs.main-release-provenance.result == 'success'" in production_images
     assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in production_images
     assert "runs-on: [self-hosted, Linux, X64, greatsell-ci]" in production_images
 

@@ -104,7 +104,7 @@ jobs:
           if not ci_run_id.isdecimal():
               raise SystemExit("Successful Continuous integration run has no valid run ID.")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"ci_run_id={ci_run_id}\\n")
+              output.write(f"ci_run_id={ci_run_id}\n")
           '
       - name: Resolve current staging target
         id: target

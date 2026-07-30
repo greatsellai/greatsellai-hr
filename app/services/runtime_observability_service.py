@@ -569,6 +569,7 @@ def build_platform_runtime_overview(
     session: Session,
     *,
     global_statement: Callable[[Any], Any],
+    configured_worker_concurrency: int = 1,
     now: datetime | None = None,
 ) -> PlatformRuntimeOverviewResponse:
     """Build aggregate diagnostics through an injected platform scope bypass.
@@ -622,6 +623,10 @@ def build_platform_runtime_overview(
         generated_at=generated_at,
         worker_stale_after_seconds=WORKER_HEARTBEAT_STALE_AFTER_SECONDS,
         worker_liveness=_aggregate_worker_liveness(workers),
+        live_worker_process_count=sum(
+            worker.liveness == "live" for worker in worker_processes
+        ),
+        configured_worker_concurrency=max(1, configured_worker_concurrency),
         workers=workers,
         queues=queues,
         recent_failures=failures[:RUNTIME_RECENT_FAILURE_LIMIT],

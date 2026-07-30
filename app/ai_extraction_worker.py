@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import multiprocessing
 import os
+import signal
 import socket
 import time
+from collections.abc import Callable
+from typing import Any
 from uuid import uuid4
 
 from app.config import AppSettings
@@ -54,6 +58,8 @@ from app.services.runtime_observability_service import (
 
 
 _WORKER_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_WORKER_SUPERVISOR_POLL_SECONDS = 0.25
+_WORKER_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS = 15.0
 _SAFE_WORKER_LIFECYCLE_EVENTS = frozenset(
     {
         "worker_started",
@@ -73,8 +79,8 @@ def _create_worker_database(settings: AppSettings) -> Database:
     settings.ensure_directories()
     database = Database(
         settings.database_url,
-        pool_size=settings.database_pool_size,
-        max_overflow=settings.database_max_overflow,
+        pool_size=settings.worker_database_pool_size,
+        max_overflow=settings.worker_database_max_overflow,
     )
     if settings.auto_create_schema:
         database.create_all()
@@ -85,6 +91,150 @@ def _create_worker_database(settings: AppSettings) -> Database:
         elif not is_institution_registry_seeded(session):
             raise RuntimeError("institution_registry_not_seeded")
     return database
+
+
+def _validate_worker_supervisor_settings(settings: AppSettings) -> None:
+    """Reject unsafe multi-process development modes before forking work.
+
+    Each child owns a separate SQLAlchemy engine, but SQLite cannot safely
+    coordinate a real multi-process task pool and bootstrap/registry seeding
+    must happen once before any children start. Production migrations already
+    run before the worker container, so this affects only misconfigured local
+    or staging launches.
+    """
+
+    settings.validate_runtime()
+    if settings.worker_concurrency == 1:
+        return
+    if settings.database_url.startswith("sqlite"):
+        raise ValueError("RESUME_V3_WORKER_CONCURRENCY_GT_1_REQUIRES_POSTGRESQL")
+    if settings.auto_create_schema:
+        raise ValueError(
+            "RESUME_V3_WORKER_CONCURRENCY_GT_1_REQUIRES_MIGRATIONS"
+        )
+    if settings.seed_registry_on_startup:
+        raise ValueError(
+            "RESUME_V3_WORKER_CONCURRENCY_GT_1_REQUIRES_SEEDING_DISABLED"
+        )
+
+
+def _install_worker_shutdown_handlers() -> Callable[[], None]:
+    """Turn container stop signals into normal worker cleanup.
+
+    ``KeyboardInterrupt`` is intentionally outside ``run_forever``'s generic
+    worker-failure handler, so its ``finally`` records a clean stopped
+    heartbeat and disposes the child-owned connection pool.
+    """
+
+    previous_handlers: list[tuple[int, Any]] = []
+
+    def request_shutdown(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    for signal_name in ("SIGINT", "SIGTERM"):
+        value = getattr(signal, signal_name, None)
+        if value is None:
+            continue
+        try:
+            previous_handlers.append((value, signal.signal(value, request_shutdown)))
+        except (ValueError, OSError):
+            # Signal registration is only valid in a process's main thread;
+            # tests and embedded invocations retain normal cleanup semantics.
+            continue
+
+    def restore() -> None:
+        for signal_value, previous in previous_handlers:
+            try:
+                signal.signal(signal_value, previous)
+            except (ValueError, OSError):
+                continue
+
+    return restore
+
+
+def _run_worker_process(settings: AppSettings) -> None:
+    """Run one child with its own DB engine, PID, heartbeat, and queues."""
+
+    restore_handlers = _install_worker_shutdown_handlers()
+    try:
+        run_forever(settings)
+    finally:
+        restore_handlers()
+
+
+def _spawn_worker_processes(
+    settings: AppSettings,
+    *,
+    process_context: Any | None = None,
+) -> list[Any]:
+    """Start the configured worker pool without sharing parent DB state."""
+
+    context = process_context or multiprocessing.get_context("spawn")
+    processes: list[Any] = []
+    try:
+        for index in range(settings.worker_concurrency):
+            process = context.Process(
+                target=_run_worker_process,
+                args=(settings,),
+                name=f"resume-v3-worker-{index + 1}",
+            )
+            process.daemon = False
+            process.start()
+            processes.append(process)
+    except Exception:
+        _stop_worker_processes(processes)
+        raise
+    return processes
+
+
+def _stop_worker_processes(processes: list[Any]) -> None:
+    """Ask all children to exit, then escalate only after a bounded wait."""
+
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    deadline = time.monotonic() + _WORKER_SUPERVISOR_SHUTDOWN_TIMEOUT_SECONDS
+    for process in processes:
+        remaining = max(0.0, deadline - time.monotonic())
+        process.join(timeout=remaining)
+    for process in processes:
+        if not process.is_alive():
+            continue
+        kill = getattr(process, "kill", None)
+        if callable(kill):
+            kill()
+            process.join(timeout=1.0)
+
+
+def run_worker_supervisor(settings: AppSettings) -> None:
+    """Run a configurable shared process pool for all workspace queues.
+
+    A process is never assigned permanently to a customer. The fair database
+    lane gives each workspace one logical heavy-work slot, while these child
+    processes provide actual parallel capacity for different workspaces.
+    """
+
+    _validate_worker_supervisor_settings(settings)
+    if settings.worker_concurrency == 1:
+        _run_worker_process(settings)
+        return
+
+    restore_handlers = _install_worker_shutdown_handlers()
+    processes: list[Any] = []
+    try:
+        processes = _spawn_worker_processes(settings)
+        while True:
+            for process in processes:
+                process.join(timeout=_WORKER_SUPERVISOR_POLL_SECONDS)
+                if process.exitcode is not None:
+                    raise RuntimeError("worker_child_exited")
+    except KeyboardInterrupt:
+        # Docker and an interactive terminal use this path for an intentional
+        # shutdown. Children receive SIGTERM and run their own cleanup handler.
+        return
+    finally:
+        _stop_worker_processes(processes)
+        restore_handlers()
 
 
 def _log_worker_lifecycle_event(
@@ -402,7 +552,7 @@ def main() -> None:
     args = parser.parse_args()
     settings = AppSettings.from_env()
     if not args.once:
-        run_forever(settings)
+        run_worker_supervisor(settings)
         return
 
     database = _create_worker_database(settings)

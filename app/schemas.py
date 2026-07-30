@@ -486,6 +486,11 @@ class PlatformRuntimeOverviewResponse(ApiModel):
     generated_at: datetime
     worker_stale_after_seconds: int
     worker_liveness: Literal["live", "stale", "stopped", "missing"]
+    # Process count is intentionally aggregate-only. The platform UI must be
+    # able to verify configured worker concurrency without exposing process,
+    # host, workspace, or task identifiers.
+    live_worker_process_count: int = 0
+    configured_worker_concurrency: int = 1
     workers: list[PlatformRuntimeWorkerResponse] = Field(default_factory=list)
     queues: list[PlatformRuntimeQueueResponse] = Field(default_factory=list)
     recent_failures: list[PlatformRuntimeFailureResponse] = Field(default_factory=list)

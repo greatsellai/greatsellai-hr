@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.config import AppSettings
 from app.models import (
     AiRun,
     Job,
@@ -233,6 +234,7 @@ def get_platform_dashboard(session: Session) -> PlatformDashboardResponse:
 def get_platform_runtime_overview(
     session: Session,
     *,
+    settings: AppSettings | None = None,
     now: datetime | None = None,
 ) -> PlatformRuntimeOverviewResponse:
     """Return content-free global diagnostics through the control plane.
@@ -245,6 +247,9 @@ def get_platform_runtime_overview(
     return build_platform_runtime_overview(
         session,
         global_statement=_platform_statement,
+        configured_worker_concurrency=(
+            settings.worker_concurrency if settings is not None else 1
+        ),
         now=now,
     )
 

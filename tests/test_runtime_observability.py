@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
@@ -250,6 +251,8 @@ def test_runtime_overview_is_platform_only_global_and_content_free(
     payload = overview.json()
     assert payload["worker_liveness"] == "live"
     assert payload["worker_stale_after_seconds"] == 300
+    assert payload["live_worker_process_count"] == 1
+    assert payload["configured_worker_concurrency"] == 1
     assert {worker["liveness"] for worker in payload["workers"]} >= {"live", "stale"}
     assert "unknown" in {worker["worker_kind"] for worker in payload["workers"]}
     feedback_queue = next(
@@ -341,6 +344,39 @@ def test_runtime_overview_collapses_restarted_processes_by_worker_kind(
     assert len(overview.workers) == 1
     assert overview.workers[0].worker_kind == "background"
     assert overview.workers[0].liveness == "live"
+    assert overview.live_worker_process_count == 1
+
+
+def test_runtime_overview_reports_live_process_count_without_exposing_ids(
+    runtime_client: TestClient,
+) -> None:
+    database = runtime_client.app.state.database
+    current_time = datetime.now(timezone.utc)
+    with database.session_factory() as session:
+        for index in range(3):
+            session.add(
+                RuntimeWorkerHeartbeat(
+                    worker_id=f"runtime-pool-worker-{index}",
+                    worker_kind="background",
+                    status="running",
+                    started_at=current_time - timedelta(minutes=1),
+                    last_seen_at=current_time - timedelta(seconds=index),
+                )
+            )
+        session.commit()
+
+    configured = replace(runtime_client.app.state.settings, worker_concurrency=3)
+    with database.session_factory() as session:
+        overview = get_platform_runtime_overview(
+            session,
+            settings=configured,
+            now=current_time,
+        )
+
+    assert overview.worker_liveness == "live"
+    assert overview.live_worker_process_count == 3
+    assert overview.configured_worker_concurrency == 3
+    assert len(overview.workers) == 1
 
 
 def test_runtime_overview_drops_expired_process_heartbeats(

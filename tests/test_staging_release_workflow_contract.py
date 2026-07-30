@@ -108,6 +108,7 @@ def test_staging_deployment_is_isolated_and_never_uses_production_env_or_builds(
     assert "TENCENT_SECRET_ID: ${TENCENT_SECRET_ID:-}" in compose
     assert "RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER: ${RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER:-disabled}" in compose
     assert "RESUME_V3_AI_EXTRACTION_WORKER_POLL_SECONDS: ${RESUME_V3_AI_EXTRACTION_WORKER_POLL_SECONDS:-2}" in compose
+    assert "RESUME_V3_WORKER_CONCURRENCY: ${RESUME_V3_WORKER_CONCURRENCY:-1}" in compose
     assert "RESUME_V3_PUBLIC_APP_URL: ${RESUME_V3_STAGING_PUBLIC_APP_URL:-https://staging.hr.greatsellai.net}" in compose
 
     for script in (deploy, preflight):
@@ -155,6 +156,10 @@ def test_staging_matches_production_for_shared_runtime_integrations() -> None:
         "RESUME_V3_AI_EXTRACTION_JOB_MAX_ATTEMPTS",
         "RESUME_V3_AI_EXTRACTION_JOB_LEASE_SECONDS",
         "RESUME_V3_AI_EXTRACTION_WORKER_POLL_SECONDS",
+        "RESUME_V3_WORKER_CONCURRENCY",
+        "RESUME_V3_WORKER_DATABASE_POOL_SIZE",
+        "RESUME_V3_WORKER_DATABASE_MAX_OVERFLOW",
+        "RESUME_V3_WORKER_WORKSPACE_LANE_LEASE_SECONDS",
         "RESUME_V3_MAILBOX_SYNC_INTERVAL_SECONDS",
         "RESUME_V3_MAILBOX_RETENTION_CLEANUP_INTERVAL_SECONDS",
         "RESUME_V3_MAILBOX_SYNC_ATTACHMENT_LIMIT",

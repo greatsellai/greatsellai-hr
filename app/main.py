@@ -2549,7 +2549,10 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         _: AuthPrincipal = Depends(require_platform_admin),
         session: Session = Depends(get_session),
     ) -> PlatformRuntimeOverviewResponse:
-        return get_platform_runtime_overview(session)
+        return get_platform_runtime_overview(
+            session,
+            settings=app.state.settings,
+        )
 
     @app.get(
         "/v1/platform/workspace-feedback",

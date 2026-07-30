@@ -66,6 +66,8 @@ export interface PlatformRuntimeOverview {
   generated_at: string;
   worker_stale_after_seconds: number;
   worker_liveness: RuntimeLiveness;
+  live_worker_process_count: number;
+  configured_worker_concurrency: number;
   workers: PlatformRuntimeWorker[];
   queues: PlatformRuntimeQueue[];
   recent_failures: PlatformRuntimeFailure[];

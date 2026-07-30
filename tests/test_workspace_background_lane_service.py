@@ -5,11 +5,13 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.database import Database
+from app.config import AppSettings
 from app.models import (
     Candidate,
     Organization,
     Resume,
     ResumeAiExtractionJob,
+    ResumeDocumentExtractionJob,
     WorkspaceBackgroundLane,
 )
 from app.services.workspace_background_lane_service import (
@@ -18,6 +20,7 @@ from app.services.workspace_background_lane_service import (
     release_workspace_background_lane,
     renew_workspace_background_lane,
 )
+from app.services import document_extraction_job_service
 from app.tenant_scope import bypass_organization_scope
 
 
@@ -203,5 +206,93 @@ def test_expired_workspace_lane_becomes_claimable_again() -> None:
         )
         assert second is not None
         assert second.lease_token != first.lease_token
+        session.commit()
+    database.dispose()
+
+
+def test_document_workers_do_not_claim_two_heavy_jobs_from_one_workspace(
+    tmp_path,
+) -> None:
+    """The real document queue skips A's second job and claims B's first."""
+
+    database = _database()
+    settings = AppSettings(
+        project_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        upload_dir=tmp_path / "data" / "uploads",
+        database_url="sqlite://",
+        document_extraction_job_lease_seconds=180,
+        worker_workspace_lane_lease_seconds=210,
+    )
+    now = datetime.now(timezone.utc)
+    with database.session_factory() as session:
+        first = Organization(name="Document A")
+        second = Organization(name="Document B")
+        session.add_all((first, second))
+        session.flush()
+        with bypass_organization_scope(session):
+            for position, organization_id in enumerate((first.id, first.id, second.id)):
+                candidate = Candidate(
+                    organization_id=organization_id,
+                    display_name=f"Document candidate {position}",
+                )
+                session.add(candidate)
+                session.flush()
+                resume = Resume(
+                    organization_id=organization_id,
+                    candidate_id=candidate.id,
+                    original_filename=f"document-{position}.pdf",
+                    storage_key=f"document-{position}.pdf",
+                    sha256=(f"{position:x}" * 64)[:64],
+                    source_page_count=1,
+                    parsed_page_count=0,
+                    extraction_status="queued",
+                    quality_flags=[],
+                    parser_version="lane-test",
+                    facts_version=0,
+                )
+                session.add(resume)
+                session.flush()
+                session.add(
+                    ResumeDocumentExtractionJob(
+                        organization_id=organization_id,
+                        resume_id=resume.id,
+                        status="queued",
+                        attempt_count=0,
+                        max_attempts=3,
+                        next_attempt_at=now,
+                        requested_at=now + timedelta(seconds=position),
+                    )
+                )
+            session.flush()
+        session.commit()
+
+    first_claim = document_extraction_job_service._claim_next_job(
+        database,
+        settings=settings,
+        worker_id="document-worker-a",
+    )
+    second_claim = document_extraction_job_service._claim_next_job(
+        database,
+        settings=settings,
+        worker_id="document-worker-b",
+    )
+
+    assert first_claim is not None
+    assert second_claim is not None
+    assert first_claim.organization_id == first.id
+    assert second_claim.organization_id == second.id
+
+    with database.session_factory() as session:
+        assert release_workspace_background_lane(
+            session,
+            organization_id=first_claim.organization_id,
+            lease_token=first_claim.workspace_lane_token,
+        )
+        assert release_workspace_background_lane(
+            session,
+            organization_id=second_claim.organization_id,
+            lease_token=second_claim.workspace_lane_token,
+        )
         session.commit()
     database.dispose()

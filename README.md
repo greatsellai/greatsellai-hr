@@ -28,6 +28,11 @@ uvicorn app.main:app --reload
 python -m app.ai_extraction_worker
 ```
 
+默认一个 worker 容器内只有一个进程。生产使用 PostgreSQL 时可通过
+`RESUME_V3_WORKER_CONCURRENCY` 增加共享进程池，例如先从 `2` 开始；系统
+不会为每个用户常驻起一个进程，而是以工作区逻辑槽位保证同一工作区同时最多
+占用一个重任务，空闲进程优先服务最近未被处理的其他工作区。
+
 前端本地开发（另开一个终端；Vite 会将 `/v1` 和 `/health` 代理到本机 API）：
 
 ```powershell

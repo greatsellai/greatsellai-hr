@@ -96,7 +96,7 @@ export function AdminRuntimePage() {
             <article>
               <span>Worker</span>
               <strong><AdminStatus label={livenessLabel[runtime.worker_liveness]} status={runtime.worker_liveness} /></strong>
-              <small>心跳阈值 {Math.max(1, Math.round(runtime.worker_stale_after_seconds / 60))} 分钟</small>
+              <small>在线 {runtime.live_worker_process_count} / 已配置 {runtime.configured_worker_concurrency}，心跳阈值 {Math.max(1, Math.round(runtime.worker_stale_after_seconds / 60))} 分钟</small>
             </article>
             <article>
               <span>处理中任务</span>

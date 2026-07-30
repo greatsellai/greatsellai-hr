@@ -49,6 +49,7 @@ from app.services.workspace_background_lane_service import (
     acquire_workspace_background_lane,
     fair_available_workspace_ids,
     release_workspace_background_lane,
+    release_workspace_lane_for_inactive_job,
 )
 from app.tenant_scope import clear_organization_context, set_organization_context
 
@@ -469,6 +470,15 @@ def _recover_expired_items(session: Session, *, now: datetime) -> None:
             item.last_error = "resume_score_worker_lease_expired"
             _refresh_batch_progress(session, batch=batch, now=now)
             session.flush()
+            release_workspace_lane_for_inactive_job(
+                session,
+                job_model=ResumeScoreBatchItem,
+                job_id=item.id,
+                organization_id=organization_id,
+                job_kind="resume_score",
+                running_status=ITEM_RUNNING,
+                now=now,
+            )
 
 
 def _claim_next_item(

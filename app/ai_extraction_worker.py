@@ -106,7 +106,7 @@ def _validate_worker_supervisor_settings(settings: AppSettings) -> None:
     settings.validate_runtime()
     if settings.worker_concurrency == 1:
         return
-    if settings.database_url.startswith("sqlite"):
+    if not settings.database_url.lower().startswith("postgresql"):
         raise ValueError("RESUME_V3_WORKER_CONCURRENCY_GT_1_REQUIRES_POSTGRESQL")
     if settings.auto_create_schema:
         raise ValueError(

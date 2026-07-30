@@ -51,6 +51,7 @@ from app.services.workspace_background_lane_service import (
     acquire_workspace_background_lane,
     fair_available_workspace_ids,
     release_workspace_background_lane,
+    release_workspace_lane_for_inactive_job,
     renew_workspace_background_lane,
 )
 from app.tenant_scope import (
@@ -753,6 +754,16 @@ def _recover_expired_jobs(
                 .values(**values)
                 .execution_options(synchronize_session=False)
             )
+            if recovered.rowcount == 1:
+                release_workspace_lane_for_inactive_job(
+                    session,
+                    job_model=MailboxBackgroundJob,
+                    job_id=job.id,
+                    organization_id=organization_id,
+                    job_kind="mailbox",
+                    running_status=MAILBOX_JOB_RUNNING,
+                    now=now,
+                )
             if (
                 recovered.rowcount == 1
                 and not retry

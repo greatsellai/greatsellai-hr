@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import time
 
 from sqlalchemy import select
 
@@ -17,11 +18,13 @@ from app.models import (
 from app.services.workspace_background_lane_service import (
     acquire_workspace_background_lane,
     fair_available_workspace_ids,
+    maintain_claimed_workspace_job_lease,
     release_workspace_background_lane,
     renew_workspace_background_lane,
 )
 from app.services import document_extraction_job_service
-from app.tenant_scope import bypass_organization_scope
+from app.services import workspace_background_lane_service
+from app.tenant_scope import bypass_organization_scope, set_organization_context
 
 
 def _database() -> Database:
@@ -293,6 +296,200 @@ def test_document_workers_do_not_claim_two_heavy_jobs_from_one_workspace(
             session,
             organization_id=second_claim.organization_id,
             lease_token=second_claim.workspace_lane_token,
+        )
+        session.commit()
+    database.dispose()
+
+
+def test_document_lease_heartbeat_renews_the_task_and_workspace_lane(
+    monkeypatch,
+) -> None:
+    """A long OCR pass cannot expose its workspace after the old task lease."""
+
+    database = _database()
+    now = datetime.now(timezone.utc)
+    with database.session_factory() as session:
+        organization = Organization(name="Renewed document lane")
+        session.add(organization)
+        session.flush()
+        set_organization_context(session, organization.id)
+        candidate = Candidate(
+            organization_id=organization.id,
+            display_name="Renewed document candidate",
+        )
+        session.add(candidate)
+        session.flush()
+        resume = Resume(
+            organization_id=organization.id,
+            candidate_id=candidate.id,
+            original_filename="renewed.pdf",
+            storage_key="renewed.pdf",
+            sha256="b" * 64,
+            source_page_count=1,
+            parsed_page_count=0,
+            extraction_status="extracting",
+            quality_flags=[],
+            parser_version="lane-test",
+            facts_version=0,
+        )
+        session.add(resume)
+        session.flush()
+        job = ResumeDocumentExtractionJob(
+            organization_id=organization.id,
+            resume_id=resume.id,
+            status="running",
+            attempt_count=1,
+            max_attempts=3,
+            lease_owner="worker-a",
+            lease_expires_at=now + timedelta(seconds=1),
+            requested_at=now,
+        )
+        session.add(job)
+        session.flush()
+        lane = acquire_workspace_background_lane(
+            session,
+            organization_id=organization.id,
+            worker_id="worker-a",
+            job_kind="document_extraction",
+            job_id=job.id,
+            lease_seconds=3600,
+            now=now,
+        )
+        assert lane is not None
+        session.commit()
+
+    monkeypatch.setattr(
+        workspace_background_lane_service,
+        "_HEARTBEAT_MIN_INTERVAL_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        workspace_background_lane_service,
+        "_HEARTBEAT_MAX_INTERVAL_SECONDS",
+        0.01,
+    )
+    with maintain_claimed_workspace_job_lease(
+        database,
+        job_model=ResumeDocumentExtractionJob,
+        job_id=job.id,
+        organization_id=organization.id,
+        worker_id="worker-a",
+        running_status="running",
+        job_lease_seconds=180,
+        workspace_lane_token=lane.lease_token,
+        workspace_lane_lease_seconds=3600,
+    ):
+        time.sleep(0.08)
+
+    with database.session_factory() as session:
+        set_organization_context(session, organization.id)
+        stored_job = session.get(ResumeDocumentExtractionJob, job.id)
+        stored_lane = session.scalar(
+            select(WorkspaceBackgroundLane).where(
+                WorkspaceBackgroundLane.organization_id == organization.id
+            )
+        )
+        assert stored_job is not None
+        assert stored_lane is not None
+        assert stored_job.lease_expires_at is not None
+        assert stored_job.lease_expires_at > now.replace(tzinfo=None) + timedelta(
+            seconds=30
+        )
+        assert stored_lane.lease_expires_at is not None
+        assert stored_lane.lease_expires_at > now.replace(tzinfo=None) + timedelta(
+            seconds=30
+        )
+    database.dispose()
+
+
+def test_document_recovery_releases_a_long_workspace_lane_immediately(
+    tmp_path,
+) -> None:
+    """A crashed job must not strand its workspace until a 3600s lane expires."""
+
+    database = _database()
+    settings = AppSettings(
+        project_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        upload_dir=tmp_path / "data" / "uploads",
+        database_url="sqlite://",
+        document_extraction_job_lease_seconds=180,
+        worker_workspace_lane_lease_seconds=3600,
+    )
+    now = datetime.now(timezone.utc)
+    with database.session_factory() as session:
+        organization = Organization(name="Recovered document lane")
+        session.add(organization)
+        session.flush()
+        set_organization_context(session, organization.id)
+        candidate = Candidate(
+            organization_id=organization.id,
+            display_name="Recovered document candidate",
+        )
+        session.add(candidate)
+        session.flush()
+        resume = Resume(
+            organization_id=organization.id,
+            candidate_id=candidate.id,
+            original_filename="recovered.pdf",
+            storage_key="recovered.pdf",
+            sha256="c" * 64,
+            source_page_count=1,
+            parsed_page_count=0,
+            extraction_status="extracting",
+            quality_flags=[],
+            parser_version="lane-test",
+            facts_version=0,
+        )
+        session.add(resume)
+        session.flush()
+        job = ResumeDocumentExtractionJob(
+            organization_id=organization.id,
+            resume_id=resume.id,
+            status="running",
+            attempt_count=1,
+            max_attempts=3,
+            lease_owner="crashed-worker",
+            lease_expires_at=now - timedelta(seconds=1),
+            requested_at=now - timedelta(minutes=1),
+        )
+        session.add(job)
+        session.flush()
+        lane = acquire_workspace_background_lane(
+            session,
+            organization_id=organization.id,
+            worker_id="crashed-worker",
+            job_kind="document_extraction",
+            job_id=job.id,
+            lease_seconds=3600,
+            now=now - timedelta(seconds=2),
+        )
+        assert lane is not None
+        session.commit()
+
+    with database.session_factory() as session:
+        document_extraction_job_service._recover_expired_leases(session, now=now)
+        session.commit()
+        stored_lane = session.scalar(
+            select(WorkspaceBackgroundLane).where(
+                WorkspaceBackgroundLane.organization_id == organization.id
+            )
+        )
+        assert stored_lane is not None
+        assert stored_lane.lease_token is None
+
+    reclaimed = document_extraction_job_service._claim_next_job(
+        database,
+        settings=settings,
+        worker_id="recovery-worker",
+    )
+    assert reclaimed is not None
+    assert reclaimed.job_id == job.id
+    with database.session_factory() as session:
+        assert release_workspace_background_lane(
+            session,
+            organization_id=organization.id,
+            lease_token=reclaimed.workspace_lane_token,
         )
         session.commit()
     database.dispose()

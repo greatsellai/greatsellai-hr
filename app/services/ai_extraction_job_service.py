@@ -46,6 +46,7 @@ from app.services.workspace_background_lane_service import (
     acquire_workspace_background_lane,
     fair_available_workspace_ids,
     release_workspace_background_lane,
+    release_workspace_lane_for_inactive_job,
 )
 
 
@@ -691,6 +692,14 @@ def _recover_expired_leases(session: Session, *, now: datetime) -> None:
         ResumeAiExtractionJob.lease_expires_at.is_not(None),
         ResumeAiExtractionJob.lease_expires_at <= now,
     )
+    expired_jobs = session.execute(
+        select(
+            ResumeAiExtractionJob.id,
+            ResumeAiExtractionJob.organization_id,
+        )
+        .where(expired)
+        .execution_options(skip_organization_scope=True)
+    ).all()
     session.execute(
         update(ResumeAiExtractionJob)
         .where(expired, ResumeAiExtractionJob.attempt_count >= ResumeAiExtractionJob.max_attempts)
@@ -716,6 +725,17 @@ def _recover_expired_leases(session: Session, *, now: datetime) -> None:
         )
         .execution_options(skip_organization_scope=True)
     )
+    for job_id, organization_id in expired_jobs:
+        if organization_id:
+            release_workspace_lane_for_inactive_job(
+                session,
+                job_model=ResumeAiExtractionJob,
+                job_id=job_id,
+                organization_id=organization_id,
+                job_kind="ai_extraction",
+                running_status=AI_EXTRACTION_RUNNING,
+                now=now,
+            )
 
 
 def _process_claimed_job(

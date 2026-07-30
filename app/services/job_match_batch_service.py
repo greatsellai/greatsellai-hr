@@ -30,6 +30,7 @@ from app.services.workspace_background_lane_service import (
     acquire_workspace_background_lane,
     fair_available_workspace_ids,
     release_workspace_background_lane,
+    release_workspace_lane_for_inactive_job,
 )
 
 
@@ -543,6 +544,15 @@ def _recover_expired_items(session: Session, *, now: datetime) -> None:
             # Flushing here guarantees the tenant write guard sees this item
             # while its workspace context is still installed.
             session.flush()
+            release_workspace_lane_for_inactive_job(
+                session,
+                job_model=JobMatchBatchItem,
+                job_id=item.id,
+                organization_id=organization_id,
+                job_kind="job_match",
+                running_status=ITEM_RUNNING,
+                now=now,
+            )
 
 
 def _claimable_job_match_item_statement(

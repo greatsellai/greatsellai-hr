@@ -27,7 +27,9 @@ from app.services.tencent_ocr_provider import TencentOcrConfig
 from app.services.workspace_background_lane_service import (
     acquire_workspace_background_lane,
     fair_available_workspace_ids,
+    maintain_claimed_workspace_job_lease,
     release_workspace_background_lane,
+    release_workspace_lane_for_inactive_job,
 )
 from app.tenant_scope import clear_organization_context, set_organization_context
 
@@ -179,12 +181,26 @@ def run_document_extraction_worker_once(
     if claimed is None:
         return False
     try:
-        _process_claimed_job(
+        with maintain_claimed_workspace_job_lease(
             database,
-            settings=settings,
+            job_model=ResumeDocumentExtractionJob,
+            job_id=claimed.job_id,
+            organization_id=claimed.organization_id,
             worker_id=worker_id,
-            claimed=claimed,
-        )
+            running_status=DOCUMENT_EXTRACTION_RUNNING,
+            job_lease_seconds=settings.document_extraction_job_lease_seconds,
+            workspace_lane_token=claimed.workspace_lane_token,
+            workspace_lane_lease_seconds=max(
+                settings.worker_workspace_lane_lease_seconds,
+                settings.document_extraction_job_lease_seconds,
+            ),
+        ):
+            _process_claimed_job(
+                database,
+                settings=settings,
+                worker_id=worker_id,
+                claimed=claimed,
+            )
     finally:
         with database.session_factory() as session:
             release_workspace_background_lane(
@@ -391,6 +407,16 @@ def _recover_expired_leases(session: Session, *, now: datetime) -> None:
             Resume.organization_id == organization_id,
             Resume.extraction_status == "extracting",
         )
+        if organization_id:
+            release_workspace_lane_for_inactive_job(
+                session,
+                job_model=ResumeDocumentExtractionJob,
+                job_id=job_id,
+                organization_id=organization_id,
+                job_kind="document_extraction",
+                running_status=DOCUMENT_EXTRACTION_RUNNING,
+                now=now,
+            )
         if retry:
             session.execute(
                 update(Resume)

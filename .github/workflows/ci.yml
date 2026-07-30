@@ -66,7 +66,7 @@ jobs:
         run: python -m pytest -q
 
   postgres-mailbox-race:
-    name: PostgreSQL mailbox race
+    name: PostgreSQL concurrency regressions
     if: github.event_name != 'push'
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
@@ -97,8 +97,8 @@ jobs:
             requirements-production.lock
       - name: Install backend dependencies
         run: python -m pip install -c requirements-production.lock -e ".[dev]"
-      - name: Run PostgreSQL mailbox concurrency regression
-        run: python -m pytest -q tests/test_mailbox_content_claim_postgres.py
+      - name: Run PostgreSQL concurrency regressions
+        run: python -m pytest -q tests/test_mailbox_content_claim_postgres.py tests/test_workspace_background_lane_postgres.py
 
   web:
     name: Web build

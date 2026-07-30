@@ -102,6 +102,11 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
             metadata,
             autoload_with=engine,
         )
+        workspace_lanes = Table(
+            "workspace_background_lanes",
+            metadata,
+            autoload_with=engine,
+        )
         alembic_version = Table("alembic_version", metadata, autoload_with=engine)
         inspector = inspect(engine)
         mailbox_columns = {
@@ -122,6 +127,7 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
         assert {
             "mailbox_oauth_credentials",
             "mailbox_oauth_connect_intents",
+            "workspace_background_lanes",
         } <= set(inspector.get_table_names())
         assert {
             "ix_mailbox_oauth_credentials_organization_mailbox",
@@ -129,6 +135,29 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
         } <= {
             index["name"]
             for index in inspector.get_indexes("mailbox_oauth_credentials")
+        }
+        assert {
+            "lane_key",
+            "organization_id",
+            "lease_token",
+            "lease_expires_at",
+            "current_job_kind",
+            "current_job_id",
+            "last_claimed_at",
+        } <= set(workspace_lanes.c.keys())
+        assert "uq_workspace_background_lane" in {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints(
+                "workspace_background_lanes"
+            )
+        }
+        assert {
+            "ix_workspace_background_lanes_organization_id",
+            "ix_workspace_background_lane_claim",
+            "ix_workspace_background_lane_fairness",
+        } <= {
+            index["name"]
+            for index in inspector.get_indexes("workspace_background_lanes")
         }
 
         with engine.begin() as connection:

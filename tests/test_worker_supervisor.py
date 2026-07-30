@@ -110,6 +110,24 @@ def test_worker_supervisor_rejects_sqlite_for_multiple_processes(tmp_path: Path)
         ai_extraction_worker._validate_worker_supervisor_settings(settings)
 
 
+def test_worker_supervisor_rejects_non_postgresql_for_multiple_processes(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(
+        tmp_path,
+        database_url="mysql+pymysql://resume:test@db/resume",
+        auto_create_schema=False,
+        seed_registry_on_startup=False,
+        worker_concurrency=2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="RESUME_V3_WORKER_CONCURRENCY_GT_1_REQUIRES_POSTGRESQL",
+    ):
+        ai_extraction_worker._validate_worker_supervisor_settings(settings)
+
+
 def test_worker_database_uses_the_dedicated_worker_connection_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

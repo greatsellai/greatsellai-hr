@@ -134,6 +134,26 @@ def test_compose_injects_generic_provider_credential_map_into_api_and_worker() -
         assert "    environment: *app-environment" in match.group("body")
 
 
+def test_compose_and_production_template_document_fair_worker_pool() -> None:
+    """Operators can configure the reviewed pool without editing Compose."""
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "compose.yml").read_text(encoding="utf-8")
+    production_example = (root / ".env.production.example").read_text(
+        encoding="utf-8"
+    )
+    defaults = {
+        "RESUME_V3_WORKER_CONCURRENCY": "1",
+        "RESUME_V3_WORKER_DATABASE_POOL_SIZE": "1",
+        "RESUME_V3_WORKER_DATABASE_MAX_OVERFLOW": "0",
+        "RESUME_V3_WORKER_WORKSPACE_LANE_LEASE_SECONDS": "210",
+    }
+
+    for variable, default in defaults.items():
+        assert f"{variable}: ${{{variable}:-{default}}}" in compose
+        assert f"{variable}={default}" in production_example
+
+
 def test_compose_injects_mailbox_oauth_clients_into_every_runtime() -> None:
     """OAuth code exchange and worker token refresh need the same config."""
 

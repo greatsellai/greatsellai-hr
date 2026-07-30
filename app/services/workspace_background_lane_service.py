@@ -8,9 +8,11 @@ of truth for task recovery; this separate fence controls only fair capacity.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from threading import Event, Thread
+from typing import TYPE_CHECKING, Any, Iterator
 from uuid import uuid4
 
 from sqlalchemy import and_, case, func, or_, select, update
@@ -20,8 +22,14 @@ from sqlalchemy.orm import Session, aliased
 from app.models import WorkspaceBackgroundLane
 
 
+if TYPE_CHECKING:
+    from app.database import Database
+
+
 HEAVY_WORKSPACE_LANE = "heavy_background"
 _MAX_WORKSPACE_CANDIDATES_PER_CLAIM = 32
+_HEARTBEAT_MAX_INTERVAL_SECONDS = 30.0
+_HEARTBEAT_MIN_INTERVAL_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -238,3 +246,204 @@ def renew_workspace_background_lane(
         .execution_options(skip_organization_scope=True, synchronize_session=False)
     )
     return renewed.rowcount == 1
+
+
+def renew_claimed_workspace_job_lease(
+    session: Session,
+    *,
+    job_model: Any,
+    job_id: str,
+    organization_id: str,
+    worker_id: str,
+    running_status: str,
+    job_lease_seconds: int,
+    workspace_lane_token: str,
+    workspace_lane_lease_seconds: int,
+    now: datetime | None = None,
+) -> bool:
+    """Atomically renew a running task and its fenced workspace lane.
+
+    The durable task lease and the fair-lane lease are two halves of one
+    ownership boundary.  Renewing only one lets a second process either
+    recover the task or enter the workspace while an external model/OCR call
+    is still running.  A failed renewal is deliberately not retried in this
+    transaction: callers must treat the claim as lost and never revive it.
+    """
+
+    if (
+        not job_id
+        or not organization_id
+        or not worker_id
+        or not workspace_lane_token
+        or job_lease_seconds < 1
+        or workspace_lane_lease_seconds < 1
+    ):
+        return False
+    renewed_at = now or utcnow()
+    task_renewed = session.execute(
+        update(job_model)
+        .where(
+            job_model.id == job_id,
+            job_model.organization_id == organization_id,
+            job_model.status == running_status,
+            job_model.lease_owner == worker_id,
+            job_model.lease_expires_at.is_not(None),
+            job_model.lease_expires_at > renewed_at,
+        )
+        .values(
+            lease_expires_at=renewed_at + timedelta(seconds=job_lease_seconds)
+        )
+        .execution_options(skip_organization_scope=True, synchronize_session=False)
+    )
+    if task_renewed.rowcount != 1:
+        session.rollback()
+        return False
+    lane_renewed = renew_workspace_background_lane(
+        session,
+        organization_id=organization_id,
+        lease_token=workspace_lane_token,
+        lease_seconds=workspace_lane_lease_seconds,
+        now=renewed_at,
+    )
+    if not lane_renewed:
+        session.rollback()
+        return False
+    session.commit()
+    return True
+
+
+def release_workspace_lane_for_inactive_job(
+    session: Session,
+    *,
+    job_model: Any,
+    job_id: str,
+    organization_id: str,
+    job_kind: str,
+    running_status: str,
+    now: datetime | None = None,
+    lane_key: str = HEAVY_WORKSPACE_LANE,
+) -> bool:
+    """Clear an orphaned lane only when its recorded task is no longer live.
+
+    Lease recovery may requeue a crashed task before a configured lane's
+    natural expiry.  This predicate protects a concurrently renewed/reclaimed
+    task: a lane is cleared only when this exact job is not still running with
+    an unexpired durable lease in the same transaction.
+    """
+
+    if not job_id or not organization_id or not job_kind:
+        return False
+    released_at = now or utcnow()
+    still_running = session.scalar(
+        select(job_model.id)
+        .where(
+            job_model.id == job_id,
+            job_model.organization_id == organization_id,
+            job_model.status == running_status,
+            job_model.lease_expires_at.is_not(None),
+            job_model.lease_expires_at > released_at,
+        )
+        .limit(1)
+        .execution_options(skip_organization_scope=True)
+    )
+    if still_running is not None:
+        return False
+    released = session.execute(
+        update(WorkspaceBackgroundLane)
+        .where(
+            WorkspaceBackgroundLane.lane_key == lane_key,
+            WorkspaceBackgroundLane.organization_id == organization_id,
+            WorkspaceBackgroundLane.current_job_kind == job_kind,
+            WorkspaceBackgroundLane.current_job_id == job_id,
+        )
+        .values(
+            lease_owner=None,
+            lease_token=None,
+            lease_expires_at=None,
+            current_job_kind=None,
+            current_job_id=None,
+            updated_at=released_at,
+        )
+        .execution_options(skip_organization_scope=True, synchronize_session=False)
+    )
+    return released.rowcount == 1
+
+
+def _lease_heartbeat_interval_seconds(
+    *,
+    job_lease_seconds: int,
+    workspace_lane_lease_seconds: int,
+) -> float:
+    """Renew well before the shorter lease can expire without DB churn."""
+
+    return max(
+        _HEARTBEAT_MIN_INTERVAL_SECONDS,
+        min(
+            _HEARTBEAT_MAX_INTERVAL_SECONDS,
+            min(job_lease_seconds, workspace_lane_lease_seconds) / 3,
+        ),
+    )
+
+
+@contextmanager
+def maintain_claimed_workspace_job_lease(
+    database: Database,
+    *,
+    job_model: Any,
+    job_id: str,
+    organization_id: str,
+    worker_id: str,
+    running_status: str,
+    job_lease_seconds: int,
+    workspace_lane_token: str,
+    workspace_lane_lease_seconds: int,
+) -> Iterator[None]:
+    """Keep a slow external operation fenced without holding a DB session.
+
+    A worker uses one small connection pool per child process.  The heartbeat
+    opens a short-lived separate session only while renewing, so model/OCR/
+    IMAP work never holds a database transaction.  If ownership has already
+    been lost, the heartbeat stops; existing completion writes are fenced by
+    their normal running-job checks and will safely refuse to persist results.
+    """
+
+    stop_event = Event()
+    interval_seconds = _lease_heartbeat_interval_seconds(
+        job_lease_seconds=job_lease_seconds,
+        workspace_lane_lease_seconds=workspace_lane_lease_seconds,
+    )
+
+    def heartbeat() -> None:
+        while not stop_event.wait(interval_seconds):
+            try:
+                with database.session_factory() as session:
+                    renewed = renew_claimed_workspace_job_lease(
+                        session,
+                        job_model=job_model,
+                        job_id=job_id,
+                        organization_id=organization_id,
+                        worker_id=worker_id,
+                        running_status=running_status,
+                        job_lease_seconds=job_lease_seconds,
+                        workspace_lane_token=workspace_lane_token,
+                        workspace_lane_lease_seconds=workspace_lane_lease_seconds,
+                    )
+            except Exception:
+                # A short database outage must not terminate the foreground
+                # operation.  The next bounded heartbeat can still renew it;
+                # completion remains conditionally fenced if the lease lapses.
+                continue
+            if not renewed:
+                return
+
+    thread = Thread(
+        target=heartbeat,
+        name="resume-v3-workspace-lease-heartbeat",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        thread.join(timeout=1.0)

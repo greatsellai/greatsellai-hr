@@ -45,6 +45,7 @@ from app.services.workspace_background_lane_service import (
     acquire_workspace_background_lane,
     fair_available_workspace_ids,
     release_workspace_background_lane,
+    release_workspace_lane_for_inactive_job,
 )
 from app.tenant_scope import clear_organization_context, set_organization_context
 
@@ -305,6 +306,14 @@ def _recover_expired_leases(session: Session, *, now: datetime) -> None:
         CandidateNameExtractionJob.lease_expires_at.is_not(None),
         CandidateNameExtractionJob.lease_expires_at <= now,
     )
+    expired_jobs = session.execute(
+        select(
+            CandidateNameExtractionJob.id,
+            CandidateNameExtractionJob.organization_id,
+        )
+        .where(expired)
+        .execution_options(skip_organization_scope=True)
+    ).all()
     session.execute(
         update(CandidateNameExtractionJob)
         .where(
@@ -339,6 +348,17 @@ def _recover_expired_leases(session: Session, *, now: datetime) -> None:
         )
         .execution_options(skip_organization_scope=True)
     )
+    for job_id, organization_id in expired_jobs:
+        if organization_id:
+            release_workspace_lane_for_inactive_job(
+                session,
+                job_model=CandidateNameExtractionJob,
+                job_id=job_id,
+                organization_id=organization_id,
+                job_kind="candidate_name_extraction",
+                running_status=CANDIDATE_NAME_JOB_RUNNING,
+                now=now,
+            )
 
 
 def _claim_next_job(

@@ -119,7 +119,7 @@ export function useWorkspaceAuth({
   );
 
   const login = useCallback(
-    async (input: AuthLoginInput | string) => {
+    async (input: AuthLoginInput) => {
       setAuthError(null);
       setAuthLoading(true);
       try {

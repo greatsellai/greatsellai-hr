@@ -304,12 +304,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return request<AuthSession>("/auth/session");
     },
 
-    login(input: AuthLoginInput | string): Promise<AuthSession> {
+    login(input: AuthLoginInput): Promise<AuthSession> {
       return request<AuthSession>("/auth/login", {
         method: "POST",
-        // Keep the legacy password-only call shape available until the
-        // server-side legacy workspace migration is complete.
-        body: typeof input === "string" ? { password: input } : input,
+        body: input,
       });
     },
 

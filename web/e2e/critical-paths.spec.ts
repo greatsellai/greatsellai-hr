@@ -26,6 +26,9 @@ test.describe("招聘工作台关键路径", () => {
     const email = await registerAndVerify(page, "registration-login");
     await logout(page);
     await expect(page.getByRole("button", { name: "登录工作台" })).toBeVisible();
+    await expect(page.locator("#login-email")).toBeVisible();
+    await expect(page.locator("#legacy-login-password")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "使用旧管理口令" })).toHaveCount(0);
     await page.locator("#login-email").fill(email);
     await page.locator("#login-password").fill("E2E-password-2026");
     await page.getByRole("button", { name: "登录工作台" }).click();

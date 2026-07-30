@@ -185,6 +185,10 @@ services:
   caddy:
     image: greatsellai-hr-caddy:${RESUME_V3_RELEASE_IMAGE_TAG:?set RESUME_V3_RELEASE_IMAGE_TAG to the full immutable commit SHA}
     restart: unless-stopped
+    # The official image's default command includes the `caddy` executable.
+    # A Compose command override replaces that full default, so make the
+    # executable explicit before selecting the staging-specific config.
+    entrypoint: ["caddy"]
     command: ["run", "--config", "/etc/caddy/Caddyfile.staging", "--adapter", "caddyfile"]
     environment:
       # TLS belongs to the production Caddy gateway. The staging Caddy only

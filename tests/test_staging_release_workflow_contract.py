@@ -88,6 +88,7 @@ def test_staging_deployment_is_isolated_and_never_uses_production_env_or_builds(
         r"#.*", "", compose
     )
     assert not re.search(r"(?m)^\s*build:\s*", compose)
+    assert 'entrypoint: ["caddy"]' in compose
     assert 'command: ["run", "--config", "/etc/caddy/Caddyfile.staging", "--adapter", "caddyfile"]' in compose
     assert "RESUME_V3_RELEASE_IMAGE_TAG=replace-with-full-40-character-git-commit-sha" in staging_env
     assert "DEEPSEEK_API_KEY=copy-the-production-value-here" in staging_env

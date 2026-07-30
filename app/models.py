@@ -578,6 +578,61 @@ class RuntimeWorkerHeartbeat(Base):
     )
 
 
+class WorkspaceBackgroundLane(Base):
+    """A fair, fenced execution lane for one workspace's heavy work.
+
+    This is deliberately platform-scoped operational metadata.  It contains
+    no candidate, resume, mailbox, or model payload; it only prevents a busy
+    workspace from consuming every shared worker process while another
+    workspace has waiting work.  The token fences release and renewal so an
+    old worker can never clear a newer worker's lease after a restart.
+    """
+
+    __tablename__ = "workspace_background_lanes"
+    __table_args__ = (
+        UniqueConstraint(
+            "lane_key",
+            "organization_id",
+            name="uq_workspace_background_lane",
+        ),
+        Index(
+            "ix_workspace_background_lane_claim",
+            "lane_key",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_workspace_background_lane_fairness",
+            "lane_key",
+            "last_claimed_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    lane_key: Mapped[str] = mapped_column(String(64))
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        index=True,
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    current_job_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    current_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class WorkspaceFeedbackSubmission(OrganizationScoped, Base):
     """One complete workspace-feedback questionnaire and its quota reward.
 

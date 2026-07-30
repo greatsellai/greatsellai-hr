@@ -27,6 +27,7 @@ from app.models import (
     ResumeSummaryJob,
     RuntimeWorkerHeartbeat,
     TalentSearchRun,
+    WorkspaceBackgroundLane,
     WorkspaceFeedbackImageAttachment,
     WorkspaceFeedbackSubmission,
 )
@@ -35,7 +36,7 @@ from app.models import (
 def test_alembic_history_has_one_canonical_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert script.get_heads() == ["20260730_0051"]
+    assert script.get_heads() == ["20260730_0052"]
 
 
 def test_migration_revision_identifiers_are_unique() -> None:
@@ -191,3 +192,12 @@ def test_recruiting_job_migration_uses_native_postgresql_alter_operations(monkey
     assert "create_foreign_key" in operations.calls
     assert "drop_constraint" in operations.calls
     assert "drop_column" in operations.calls
+
+
+def test_workspace_background_lane_ddl_identifiers_fit_postgresql() -> None:
+    """Fair-worker scheduler metadata must remain portable to PostgreSQL."""
+
+    dialect = postgresql.dialect()
+    CreateTable(WorkspaceBackgroundLane.__table__).compile(dialect=dialect)
+    for index in WorkspaceBackgroundLane.__table__.indexes:
+        CreateIndex(index).compile(dialect=dialect)

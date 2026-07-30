@@ -47,6 +47,12 @@ from app.services.mailbox_sync_alert_service import (
     record_terminal_sync_failure,
     resolve_mailbox_sync_alert,
 )
+from app.services.workspace_background_lane_service import (
+    acquire_workspace_background_lane,
+    fair_available_workspace_ids,
+    release_workspace_background_lane,
+    renew_workspace_background_lane,
+)
 from app.tenant_scope import (
     clear_organization_context,
     organization_context_id,
@@ -126,6 +132,7 @@ class ClaimedMailboxBackgroundJob:
     email_attachment_import_id: str | None
     job_kind: str
     source_fingerprint: str | None
+    workspace_lane_token: str
 
 
 class _MailboxBackgroundJobLeaseLost(RuntimeError):
@@ -668,7 +675,21 @@ def run_mailbox_background_job_worker_once(
     claimed = _claim_next_job(database, settings=settings, worker_id=worker_id)
     if claimed is None:
         return False
-    _process_claimed_job(database, settings=settings, worker_id=worker_id, claimed=claimed)
+    try:
+        _process_claimed_job(
+            database,
+            settings=settings,
+            worker_id=worker_id,
+            claimed=claimed,
+        )
+    finally:
+        with database.session_factory() as session:
+            release_workspace_background_lane(
+                session,
+                organization_id=claimed.organization_id,
+                lease_token=claimed.workspace_lane_token,
+            )
+            session.commit()
     return True
 
 
@@ -758,32 +779,30 @@ def _claim_next_job(
     now = _utcnow()
     with database.session_factory() as session:
         _recover_expired_jobs(session, settings=settings, now=now)
-        candidate = session.scalar(
-            select(MailboxBackgroundJob)
-            .where(
-                MailboxBackgroundJob.status == MAILBOX_JOB_QUEUED,
-                MailboxBackgroundJob.attempt_count < MailboxBackgroundJob.max_attempts,
-                or_(
-                    MailboxBackgroundJob.next_attempt_at.is_(None),
-                    MailboxBackgroundJob.next_attempt_at <= now,
-                ),
-            )
+        eligible = and_(
+            MailboxBackgroundJob.status == MAILBOX_JOB_QUEUED,
+            MailboxBackgroundJob.attempt_count < MailboxBackgroundJob.max_attempts,
+            or_(
+                MailboxBackgroundJob.next_attempt_at.is_(None),
+                MailboxBackgroundJob.next_attempt_at <= now,
+            ),
+        )
+        missing_workspace_job_id = session.scalar(
+            select(MailboxBackgroundJob.id)
+            .where(eligible, MailboxBackgroundJob.organization_id.is_(None))
             .order_by(
                 MailboxBackgroundJob.requested_at.asc(),
                 MailboxBackgroundJob.next_attempt_at.asc(),
                 MailboxBackgroundJob.id.asc(),
             )
+            .limit(1)
             .execution_options(skip_organization_scope=True)
         )
-        if candidate is None:
-            session.commit()
-            return None
-        organization_id = candidate.organization_id
-        if not organization_id:
+        if missing_workspace_job_id is not None:
             session.execute(
                 MailboxBackgroundJob.__table__.update()
                 .where(
-                    MailboxBackgroundJob.id == candidate.id,
+                    MailboxBackgroundJob.id == missing_workspace_job_id,
                     MailboxBackgroundJob.status == MAILBOX_JOB_QUEUED,
                 )
                 .values(
@@ -798,18 +817,57 @@ def _claim_next_job(
             session.commit()
             return None
 
-        with _organization_session(session, organization_id):
-            claimed = session.execute(
+        organization_ids = fair_available_workspace_ids(
+            session,
+            source=MailboxBackgroundJob,
+            organization_id_column=MailboxBackgroundJob.organization_id,
+            eligible=eligible,
+            next_attempt_at_column=MailboxBackgroundJob.next_attempt_at,
+            requested_at_column=MailboxBackgroundJob.requested_at,
+            now=now,
+        )
+        if not organization_ids:
+            session.commit()
+            return None
+
+        for organization_id in organization_ids:
+            candidate = session.scalar(
+                select(MailboxBackgroundJob)
+                .where(
+                    eligible,
+                    MailboxBackgroundJob.organization_id == organization_id,
+                )
+                .order_by(
+                    MailboxBackgroundJob.requested_at.asc(),
+                    MailboxBackgroundJob.next_attempt_at.asc(),
+                    MailboxBackgroundJob.id.asc(),
+                )
+                .limit(1)
+                .execution_options(skip_organization_scope=True)
+            )
+            if candidate is None:
+                continue
+            lane = acquire_workspace_background_lane(
+                session,
+                organization_id=organization_id,
+                worker_id=worker_id,
+                job_kind="mailbox",
+                job_id=candidate.id,
+                lease_seconds=max(
+                    settings.worker_workspace_lane_lease_seconds,
+                    _MAILBOX_JOB_LEASE_SECONDS,
+                ),
+                now=now,
+            )
+            if lane is None:
+                continue
+            with _organization_session(session, organization_id):
+                claimed = session.execute(
                 update(MailboxBackgroundJob)
                 .where(
                     MailboxBackgroundJob.id == candidate.id,
                     MailboxBackgroundJob.organization_id == organization_id,
-                    MailboxBackgroundJob.status == MAILBOX_JOB_QUEUED,
-                    MailboxBackgroundJob.attempt_count < MailboxBackgroundJob.max_attempts,
-                    or_(
-                        MailboxBackgroundJob.next_attempt_at.is_(None),
-                        MailboxBackgroundJob.next_attempt_at <= now,
-                    ),
+                    eligible,
                 )
                 .values(
                     status=MAILBOX_JOB_RUNNING,
@@ -823,28 +881,35 @@ def _claim_next_job(
                 )
                 .execution_options(synchronize_session=False)
             )
-            if claimed.rowcount != 1:
-                session.commit()
-                return None
-            session.expire_all()
-            job = session.scalar(
-                select(MailboxBackgroundJob).where(
-                    MailboxBackgroundJob.id == candidate.id,
-                    MailboxBackgroundJob.organization_id == organization_id,
+                if claimed.rowcount != 1:
+                    session.rollback()
+                    return None
+                session.expire_all()
+                job = session.scalar(
+                    select(MailboxBackgroundJob).where(
+                        MailboxBackgroundJob.id == candidate.id,
+                        MailboxBackgroundJob.organization_id == organization_id,
+                    )
                 )
-            )
-            if job is None or job.status != MAILBOX_JOB_RUNNING or job.lease_owner != worker_id:
-                session.rollback()
-                return None
-            session.commit()
-            return ClaimedMailboxBackgroundJob(
-                job_id=job.id,
-                organization_id=organization_id,
-                mailbox_config_id=job.mailbox_config_id,
-                email_attachment_import_id=job.email_attachment_import_id,
-                job_kind=job.job_kind,
-                source_fingerprint=job.source_fingerprint,
-            )
+                if (
+                    job is None
+                    or job.status != MAILBOX_JOB_RUNNING
+                    or job.lease_owner != worker_id
+                ):
+                    session.rollback()
+                    return None
+                session.commit()
+                return ClaimedMailboxBackgroundJob(
+                    job_id=job.id,
+                    organization_id=organization_id,
+                    mailbox_config_id=job.mailbox_config_id,
+                    email_attachment_import_id=job.email_attachment_import_id,
+                    job_kind=job.job_kind,
+                    source_fingerprint=job.source_fingerprint,
+                    workspace_lane_token=lane.lease_token,
+                )
+        session.commit()
+        return None
 
 
 def _owned_running_job(
@@ -868,6 +933,7 @@ def _renew_job_lease(
     *,
     claimed: ClaimedMailboxBackgroundJob,
     worker_id: str,
+    settings: AppSettings,
 ) -> bool:
     """Persist a fresh lease before the next potentially slow IMAP operation."""
 
@@ -886,8 +952,21 @@ def _renew_job_lease(
         )
         .execution_options(synchronize_session=False)
     )
+    lane_renewed = renew_workspace_background_lane(
+        session,
+        organization_id=claimed.organization_id,
+        lease_token=claimed.workspace_lane_token,
+        lease_seconds=max(
+            settings.worker_workspace_lane_lease_seconds,
+            _MAILBOX_JOB_LEASE_SECONDS,
+        ),
+        now=now,
+    )
+    if renewed.rowcount != 1 or not lane_renewed:
+        session.rollback()
+        return False
     session.commit()
-    return renewed.rowcount == 1
+    return True
 
 
 def _retry_delay_seconds(attempt_count: int) -> int:
@@ -1030,6 +1109,7 @@ def _process_claimed_job(
                         session,
                         claimed=claimed,
                         worker_id=worker_id,
+                        settings=settings,
                     ):
                         raise _MailboxBackgroundJobLeaseLost()
 

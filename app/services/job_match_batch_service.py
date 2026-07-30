@@ -26,6 +26,11 @@ from app.services.job_service import (
     run_job_match,
 )
 from app.services.resume_eligibility import has_unreliable_source_text
+from app.services.workspace_background_lane_service import (
+    acquire_workspace_background_lane,
+    fair_available_workspace_ids,
+    release_workspace_background_lane,
+)
 
 
 BATCH_QUEUED = "queued"
@@ -36,7 +41,6 @@ ITEM_QUEUED = "queued"
 ITEM_RUNNING = "running"
 ITEM_COMPLETED = "completed"
 ITEM_FAILED = "failed"
-_LEASE_SECONDS = 180
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,7 @@ class ClaimedJobMatchBatchItem:
     resume_id: str
     job_version_id: str
     ai_route_policy_version_id: str | None
+    workspace_lane_token: str
 
 
 def _utcnow() -> datetime:
@@ -468,7 +473,21 @@ def run_job_match_batch_worker_once(
     claimed = _claim_next_item(database, settings=settings, worker_id=worker_id)
     if claimed is None:
         return False
-    _process_claimed_item(database, settings=settings, worker_id=worker_id, claimed=claimed)
+    try:
+        _process_claimed_item(
+            database,
+            settings=settings,
+            worker_id=worker_id,
+            claimed=claimed,
+        )
+    finally:
+        with database.session_factory() as session:
+            release_workspace_background_lane(
+                session,
+                organization_id=claimed.organization_id,
+                lease_token=claimed.workspace_lane_token,
+            )
+            session.commit()
     return True
 
 
@@ -526,10 +545,14 @@ def _recover_expired_items(session: Session, *, now: datetime) -> None:
             session.flush()
 
 
-def _claimable_job_match_item_statement(*, now: datetime):
+def _claimable_job_match_item_statement(
+    *,
+    now: datetime,
+    organization_id: str | None = None,
+):
     """Build the lease-claim query with PostgreSQL-safe worker locking."""
 
-    return (
+    statement = (
         select(JobMatchBatchItem, JobMatchBatch)
         .join(JobMatchBatch)
         .where(
@@ -548,6 +571,9 @@ def _claimable_job_match_item_statement(*, now: datetime):
         .with_for_update(of=JobMatchBatchItem, skip_locked=True)
         .execution_options(skip_organization_scope=True)
     )
+    if organization_id is not None:
+        statement = statement.where(JobMatchBatchItem.organization_id == organization_id)
+    return statement
 
 
 def _claim_next_item(
@@ -562,19 +588,34 @@ def _claim_next_item(
         if not ai_gateway_credentials_configured(settings):
             session.commit()
             return None
-        # The lease transition is a distributed-work mutex. PostgreSQL skips
-        # an item another worker is already claiming, so only the winning
-        # worker may invoke the model for it. SQLite safely ignores this lock
-        # clause in local tests; production uses PostgreSQL row locks.
-        row = session.execute(
-            _claimable_job_match_item_statement(now=now)
+        eligible = and_(
+            JobMatchBatch.status.in_((BATCH_QUEUED, BATCH_RUNNING)),
+            JobMatchBatchItem.status == ITEM_QUEUED,
+            or_(
+                JobMatchBatchItem.next_attempt_at.is_(None),
+                JobMatchBatchItem.next_attempt_at <= now,
+            ),
+        )
+        mismatched = session.execute(
+            select(JobMatchBatchItem, JobMatchBatch)
+            .join(JobMatchBatch)
+            .where(
+                eligible,
+                or_(
+                    JobMatchBatchItem.organization_id.is_(None),
+                    JobMatchBatch.organization_id != JobMatchBatchItem.organization_id,
+                ),
+            )
+            .order_by(
+                JobMatchBatch.requested_at.asc(),
+                JobMatchBatchItem.next_attempt_at.asc(),
+                JobMatchBatchItem.id.asc(),
+            )
+            .with_for_update(of=JobMatchBatchItem, skip_locked=True)
+            .execution_options(skip_organization_scope=True)
         ).first()
-        if row is None:
-            session.commit()
-            return None
-        item, batch = row
-        organization_id = item.organization_id
-        if not organization_id or batch.organization_id != organization_id:
+        if mismatched is not None:
+            item, _batch = mismatched
             session.execute(
                 JobMatchBatchItem.__table__.update()
                 .where(JobMatchBatchItem.id == item.id)
@@ -590,31 +631,84 @@ def _claim_next_item(
             )
             session.commit()
             return None
-        with _organization_session(session, organization_id):
-            _persist_legacy_job_match_batch_route_pin(
-                session,
-                batch=batch,
-                settings=settings,
-            )
-            item.status = ITEM_RUNNING
-            item.attempt_count += 1
-            item.next_attempt_at = None
-            item.lease_owner = worker_id
-            item.lease_expires_at = now + timedelta(seconds=_LEASE_SECONDS)
-            item.last_error = None
-            batch.status = BATCH_RUNNING
-            batch.started_at = batch.started_at or now
-            batch.lease_owner = worker_id
-            batch.lease_expires_at = item.lease_expires_at
+
+        organization_ids = fair_available_workspace_ids(
+            session,
+            source=JobMatchBatchItem.__table__.join(
+                JobMatchBatch.__table__,
+                JobMatchBatchItem.batch_id == JobMatchBatch.id,
+            ),
+            organization_id_column=JobMatchBatchItem.organization_id,
+            eligible=eligible,
+            next_attempt_at_column=JobMatchBatchItem.next_attempt_at,
+            requested_at_column=JobMatchBatch.requested_at,
+            now=now,
+        )
+        if not organization_ids:
             session.commit()
-            return ClaimedJobMatchBatchItem(
-                item_id=item.id,
-                organization_id=organization_id,
-                batch_id=batch.id,
-                resume_id=item.resume_id,
-                job_version_id=batch.job_version_id,
-                ai_route_policy_version_id=batch.ai_route_policy_version_id,
-            )
+            return None
+
+        # The lease transition is a distributed-work mutex. PostgreSQL skips
+        # an item another worker is already claiming, so only the winning
+        # worker may invoke the model for it. SQLite safely ignores this lock
+        # clause in local tests; production uses PostgreSQL row locks.
+        for organization_id in organization_ids:
+            row = session.execute(
+                _claimable_job_match_item_statement(
+                    now=now,
+                    organization_id=organization_id,
+                )
+            ).first()
+            if row is None:
+                continue
+            item, batch = row
+            if batch.organization_id != organization_id:
+                session.rollback()
+                return None
+            with _organization_session(session, organization_id):
+                _persist_legacy_job_match_batch_route_pin(
+                    session,
+                    batch=batch,
+                    settings=settings,
+                )
+                lane = acquire_workspace_background_lane(
+                    session,
+                    organization_id=organization_id,
+                    worker_id=worker_id,
+                    job_kind="job_match",
+                    job_id=item.id,
+                    lease_seconds=max(
+                        settings.worker_workspace_lane_lease_seconds,
+                        settings.ai_extraction_job_lease_seconds,
+                    ),
+                    now=now,
+                )
+                if lane is None:
+                    continue
+                item.status = ITEM_RUNNING
+                item.attempt_count += 1
+                item.next_attempt_at = None
+                item.lease_owner = worker_id
+                item.lease_expires_at = now + timedelta(
+                    seconds=settings.ai_extraction_job_lease_seconds
+                )
+                item.last_error = None
+                batch.status = BATCH_RUNNING
+                batch.started_at = batch.started_at or now
+                batch.lease_owner = worker_id
+                batch.lease_expires_at = item.lease_expires_at
+                session.commit()
+                return ClaimedJobMatchBatchItem(
+                    item_id=item.id,
+                    organization_id=organization_id,
+                    batch_id=batch.id,
+                    resume_id=item.resume_id,
+                    job_version_id=batch.job_version_id,
+                    ai_route_policy_version_id=batch.ai_route_policy_version_id,
+                    workspace_lane_token=lane.lease_token,
+                )
+        session.commit()
+        return None
 
 
 def _process_claimed_item(

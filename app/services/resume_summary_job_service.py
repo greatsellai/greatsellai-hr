@@ -28,6 +28,11 @@ from app.services.ai_retry_policy import is_retryable_ai_transport_error
 from app.services.deepseek_provider import DeepSeekProviderError
 from app.services.resume_eligibility import has_unreliable_source_text
 from app.services.summary_service import SummaryServiceError, generate_resume_summary
+from app.services.workspace_background_lane_service import (
+    acquire_workspace_background_lane,
+    fair_available_workspace_ids,
+    release_workspace_background_lane,
+)
 from app.tenant_scope import clear_organization_context, set_organization_context
 
 
@@ -63,6 +68,7 @@ class ClaimedResumeSummaryJob:
     fact_snapshot_id: str
     facts_version: int
     ai_route_policy_version_id: str | None
+    workspace_lane_token: str
 
 
 def _utcnow() -> datetime:
@@ -220,12 +226,21 @@ def run_resume_summary_worker_once(
     claimed = _claim_next_job(database, settings=settings, worker_id=worker_id)
     if claimed is None:
         return False
-    _process_claimed_job(
-        database,
-        settings=settings,
-        worker_id=worker_id,
-        claimed=claimed,
-    )
+    try:
+        _process_claimed_job(
+            database,
+            settings=settings,
+            worker_id=worker_id,
+            claimed=claimed,
+        )
+    finally:
+        with database.session_factory() as session:
+            release_workspace_background_lane(
+                session,
+                organization_id=claimed.organization_id,
+                lease_token=claimed.workspace_lane_token,
+            )
+            session.commit()
     return True
 
 
@@ -324,16 +339,12 @@ def _claim_next_job(
                 ResumeSummaryJob.next_attempt_at <= now,
             ),
         )
-        candidate = session.execute(
-            select(
-                ResumeSummaryJob.id,
-                ResumeSummaryJob.organization_id,
-                ResumeSummaryJob.resume_id,
-                ResumeSummaryJob.fact_snapshot_id,
-                ResumeSummaryJob.facts_version,
-                ResumeSummaryJob.ai_route_policy_version_id,
+        missing_workspace_job_id = session.scalar(
+            select(ResumeSummaryJob.id)
+            .where(
+                eligible,
+                ResumeSummaryJob.organization_id.is_(None),
             )
-            .where(eligible)
             .order_by(
                 ResumeSummaryJob.next_attempt_at.asc(),
                 ResumeSummaryJob.requested_at.asc(),
@@ -341,22 +352,11 @@ def _claim_next_job(
             )
             .limit(1)
             .execution_options(skip_organization_scope=True)
-        ).one_or_none()
-        if candidate is None:
-            session.commit()
-            return None
-        (
-            job_id,
-            organization_id,
-            resume_id,
-            fact_snapshot_id,
-            facts_version,
-            route_policy_version_id,
-        ) = candidate
-        if not organization_id:
+        )
+        if missing_workspace_job_id is not None:
             session.execute(
                 update(ResumeSummaryJob)
-                .where(ResumeSummaryJob.id == job_id)
+                .where(ResumeSummaryJob.id == missing_workspace_job_id)
                 .values(
                     status=SUMMARY_JOB_FAILED,
                     next_attempt_at=None,
@@ -369,66 +369,129 @@ def _claim_next_job(
             )
             session.commit()
             return None
-        if route_policy_version_id is None:
-            try:
-                route_policy_version_id = resolve_active_route_policy_version_id(
-                    session,
-                    settings=settings,
-                    feature="resume_summary",
-                )
-            except AiGatewayError as exc:
-                session.execute(
-                    update(ResumeSummaryJob)
-                    .where(
-                        ResumeSummaryJob.id == job_id,
-                        ResumeSummaryJob.organization_id == organization_id,
-                        eligible,
-                    )
-                    .values(
-                        status=SUMMARY_JOB_UNAVAILABLE,
-                        next_attempt_at=None,
-                        lease_owner=None,
-                        lease_expires_at=None,
-                        last_error=str(exc),
-                        completed_at=now,
-                    )
-                    .execution_options(skip_organization_scope=True)
-                )
-                session.commit()
-                return None
 
-        lease_expires_at = now + timedelta(seconds=settings.ai_extraction_job_lease_seconds)
-        claimed_update = session.execute(
-            update(ResumeSummaryJob)
-            .where(
-                ResumeSummaryJob.id == job_id,
-                ResumeSummaryJob.organization_id == organization_id,
-                eligible,
-            )
-            .values(
-                status=SUMMARY_JOB_RUNNING,
-                attempt_count=ResumeSummaryJob.attempt_count + 1,
-                started_at=now,
-                next_attempt_at=None,
-                lease_owner=worker_id,
-                lease_expires_at=lease_expires_at,
-                last_error=None,
-                ai_route_policy_version_id=route_policy_version_id,
-            )
-            .execution_options(skip_organization_scope=True, synchronize_session=False)
+        organization_ids = fair_available_workspace_ids(
+            session,
+            source=ResumeSummaryJob,
+            organization_id_column=ResumeSummaryJob.organization_id,
+            eligible=eligible,
+            next_attempt_at_column=ResumeSummaryJob.next_attempt_at,
+            requested_at_column=ResumeSummaryJob.requested_at,
+            now=now,
         )
-        if claimed_update.rowcount != 1:
-            session.rollback()
+        if not organization_ids:
+            session.commit()
             return None
+
+        for organization_id in organization_ids:
+            candidate = session.execute(
+            select(
+                ResumeSummaryJob.id,
+                ResumeSummaryJob.resume_id,
+                ResumeSummaryJob.fact_snapshot_id,
+                ResumeSummaryJob.facts_version,
+                ResumeSummaryJob.ai_route_policy_version_id,
+            )
+            .where(
+                eligible,
+                ResumeSummaryJob.organization_id == organization_id,
+            )
+            .order_by(
+                ResumeSummaryJob.next_attempt_at.asc(),
+                ResumeSummaryJob.requested_at.asc(),
+                ResumeSummaryJob.id.asc(),
+            )
+            .limit(1)
+            .execution_options(skip_organization_scope=True)
+            ).one_or_none()
+            if candidate is None:
+                continue
+            (
+                job_id,
+                resume_id,
+                fact_snapshot_id,
+                facts_version,
+                route_policy_version_id,
+            ) = candidate
+            if route_policy_version_id is None:
+                try:
+                    route_policy_version_id = resolve_active_route_policy_version_id(
+                        session,
+                        settings=settings,
+                        feature="resume_summary",
+                    )
+                except AiGatewayError as exc:
+                    session.execute(
+                        update(ResumeSummaryJob)
+                        .where(
+                            ResumeSummaryJob.id == job_id,
+                            ResumeSummaryJob.organization_id == organization_id,
+                            eligible,
+                        )
+                        .values(
+                            status=SUMMARY_JOB_UNAVAILABLE,
+                            next_attempt_at=None,
+                            lease_owner=None,
+                            lease_expires_at=None,
+                            last_error=str(exc),
+                            completed_at=now,
+                        )
+                        .execution_options(skip_organization_scope=True)
+                    )
+                    session.commit()
+                    return None
+
+            lane = acquire_workspace_background_lane(
+                session,
+                organization_id=organization_id,
+                worker_id=worker_id,
+                job_kind="resume_summary",
+                job_id=job_id,
+                lease_seconds=max(
+                    settings.worker_workspace_lane_lease_seconds,
+                    settings.ai_extraction_job_lease_seconds,
+                ),
+                now=now,
+            )
+            if lane is None:
+                continue
+            lease_expires_at = now + timedelta(
+                seconds=settings.ai_extraction_job_lease_seconds
+            )
+            claimed_update = session.execute(
+                update(ResumeSummaryJob)
+                .where(
+                    ResumeSummaryJob.id == job_id,
+                    ResumeSummaryJob.organization_id == organization_id,
+                    eligible,
+                )
+                .values(
+                    status=SUMMARY_JOB_RUNNING,
+                    attempt_count=ResumeSummaryJob.attempt_count + 1,
+                    started_at=now,
+                    next_attempt_at=None,
+                    lease_owner=worker_id,
+                    lease_expires_at=lease_expires_at,
+                    last_error=None,
+                    ai_route_policy_version_id=route_policy_version_id,
+                )
+                .execution_options(skip_organization_scope=True, synchronize_session=False)
+            )
+            if claimed_update.rowcount != 1:
+                session.rollback()
+                return None
+            session.commit()
+            return ClaimedResumeSummaryJob(
+                job_id=job_id,
+                organization_id=organization_id,
+                resume_id=resume_id,
+                fact_snapshot_id=fact_snapshot_id,
+                facts_version=facts_version,
+                ai_route_policy_version_id=route_policy_version_id,
+                workspace_lane_token=lane.lease_token,
+            )
         session.commit()
-        return ClaimedResumeSummaryJob(
-            job_id=job_id,
-            organization_id=organization_id,
-            resume_id=resume_id,
-            fact_snapshot_id=fact_snapshot_id,
-            facts_version=facts_version,
-            ai_route_policy_version_id=route_policy_version_id,
-        )
+        return None
 
 
 def _owned_running_job(

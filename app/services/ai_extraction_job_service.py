@@ -42,6 +42,11 @@ from app.services.resume_service import (
 )
 from app.services.resume_summary_job_service import enqueue_resume_summary_job
 from app.services.candidate_name_job_service import enqueue_candidate_name_extraction_job
+from app.services.workspace_background_lane_service import (
+    acquire_workspace_background_lane,
+    fair_available_workspace_ids,
+    release_workspace_background_lane,
+)
 
 
 AI_EXTRACTION_QUEUED = "queued"
@@ -76,6 +81,7 @@ class ClaimedAiExtractionJob:
     job_kind: str
     previous_error: str | None
     ai_route_policy_version_id: str | None
+    workspace_lane_token: str
 
 
 def utcnow() -> datetime:
@@ -440,12 +446,21 @@ def run_ai_extraction_worker_once(
     claimed = _claim_next_job(database, settings=settings, worker_id=worker_id)
     if claimed is None:
         return False
-    _process_claimed_job(
-        database,
-        settings=settings,
-        worker_id=worker_id,
-        claimed=claimed,
-    )
+    try:
+        _process_claimed_job(
+            database,
+            settings=settings,
+            worker_id=worker_id,
+            claimed=claimed,
+        )
+    finally:
+        with database.session_factory() as session:
+            release_workspace_background_lane(
+                session,
+                organization_id=claimed.organization_id,
+                lease_token=claimed.workspace_lane_token,
+            )
+            session.commit()
     return True
 
 
@@ -488,17 +503,12 @@ def _claim_next_job(
                 ResumeAiExtractionJob.next_attempt_at <= now,
             ),
         )
-        candidate = session.execute(
-            select(
-                ResumeAiExtractionJob.id,
-                ResumeAiExtractionJob.organization_id,
-                ResumeAiExtractionJob.resume_id,
-                ResumeAiExtractionJob.input_facts_version,
-                ResumeAiExtractionJob.job_kind,
-                ResumeAiExtractionJob.last_error,
-                ResumeAiExtractionJob.ai_route_policy_version_id,
+        missing_workspace_job_id = session.scalar(
+            select(ResumeAiExtractionJob.id)
+            .where(
+                eligible,
+                ResumeAiExtractionJob.organization_id.is_(None),
             )
-            .where(eligible)
             .order_by(
                 ResumeAiExtractionJob.next_attempt_at.asc(),
                 ResumeAiExtractionJob.requested_at.asc(),
@@ -506,26 +516,14 @@ def _claim_next_job(
             )
             .limit(1)
             .execution_options(skip_organization_scope=True)
-        ).one_or_none()
-        if candidate is None:
-            session.commit()
-            return None
-        (
-            candidate_id,
-            organization_id,
-            resume_id,
-            input_facts_version,
-            job_kind,
-            previous_error,
-            route_policy_version_id,
-        ) = candidate
-        if not organization_id:
+        )
+        if missing_workspace_job_id is not None:
             # A row without a workspace must never be handed to a model call.
             # Mark it terminally from the global claim path and leave all
             # workspace-bound reads/writes untouched.
             session.execute(
                 update(ResumeAiExtractionJob)
-                .where(ResumeAiExtractionJob.id == candidate_id)
+                .where(ResumeAiExtractionJob.id == missing_workspace_job_id)
                 .values(
                     status=AI_EXTRACTION_NEEDS_ATTENTION,
                     next_attempt_at=None,
@@ -539,56 +537,119 @@ def _claim_next_job(
             session.commit()
             return None
 
-        if route_policy_version_id is None:
-            try:
-                route_policy_version_id = resolve_active_route_policy_version_id(
-                    session,
-                    settings=settings,
-                    feature="resume_extract_rich",
-                )
-            except AiGatewayError:
-                # Let the established execution/failure path record the
-                # actionable route error when no version is available. When a
-                # route exists, the conditional claim below persists it before
-                # any source text is sent to a provider.
-                route_policy_version_id = None
-
-        lease_expires_at = now + timedelta(
-            seconds=settings.ai_extraction_job_lease_seconds
+        organization_ids = fair_available_workspace_ids(
+            session,
+            source=ResumeAiExtractionJob,
+            organization_id_column=ResumeAiExtractionJob.organization_id,
+            eligible=eligible,
+            next_attempt_at_column=ResumeAiExtractionJob.next_attempt_at,
+            requested_at_column=ResumeAiExtractionJob.requested_at,
+            now=now,
         )
-        claim = session.execute(
-            update(ResumeAiExtractionJob)
-            .where(
-                ResumeAiExtractionJob.id == candidate_id,
-                ResumeAiExtractionJob.organization_id == organization_id,
-                eligible,
-            )
-            .values(
-                status=AI_EXTRACTION_RUNNING,
-                attempt_count=ResumeAiExtractionJob.attempt_count + 1,
-                started_at=now,
-                lease_owner=worker_id,
-                lease_expires_at=lease_expires_at,
-                next_attempt_at=None,
-                last_error=None,
-                ai_route_policy_version_id=route_policy_version_id,
-            )
-            .execution_options(skip_organization_scope=True)
-        )
-        if claim.rowcount != 1:
-            session.rollback()
+        if not organization_ids:
+            session.commit()
             return None
-        claimed = ClaimedAiExtractionJob(
-            job_id=candidate_id,
-            organization_id=organization_id,
-            resume_id=resume_id,
-            input_facts_version=input_facts_version,
-            job_kind=job_kind,
-            previous_error=previous_error,
-            ai_route_policy_version_id=route_policy_version_id,
-        )
+
+        for organization_id in organization_ids:
+            candidate = session.execute(
+            select(
+                ResumeAiExtractionJob.id,
+                ResumeAiExtractionJob.resume_id,
+                ResumeAiExtractionJob.input_facts_version,
+                ResumeAiExtractionJob.job_kind,
+                ResumeAiExtractionJob.last_error,
+                ResumeAiExtractionJob.ai_route_policy_version_id,
+            )
+            .where(
+                eligible,
+                ResumeAiExtractionJob.organization_id == organization_id,
+            )
+            .order_by(
+                ResumeAiExtractionJob.next_attempt_at.asc(),
+                ResumeAiExtractionJob.requested_at.asc(),
+                ResumeAiExtractionJob.id.asc(),
+            )
+            .limit(1)
+            .execution_options(skip_organization_scope=True)
+            ).one_or_none()
+            if candidate is None:
+                continue
+            (
+                candidate_id,
+                resume_id,
+                input_facts_version,
+                job_kind,
+                previous_error,
+                route_policy_version_id,
+            ) = candidate
+
+            if route_policy_version_id is None:
+                try:
+                    route_policy_version_id = resolve_active_route_policy_version_id(
+                        session,
+                        settings=settings,
+                        feature="resume_extract_rich",
+                    )
+                except AiGatewayError:
+                    # Let the established execution/failure path record the
+                    # actionable route error when no version is available. When a
+                    # route exists, the conditional claim below persists it before
+                    # any source text is sent to a provider.
+                    route_policy_version_id = None
+
+            lane = acquire_workspace_background_lane(
+                session,
+                organization_id=organization_id,
+                worker_id=worker_id,
+                job_kind="ai_extraction",
+                job_id=candidate_id,
+                lease_seconds=max(
+                    settings.worker_workspace_lane_lease_seconds,
+                    settings.ai_extraction_job_lease_seconds,
+                ),
+                now=now,
+            )
+            if lane is None:
+                continue
+            lease_expires_at = now + timedelta(
+                seconds=settings.ai_extraction_job_lease_seconds
+            )
+            claim = session.execute(
+                update(ResumeAiExtractionJob)
+                .where(
+                    ResumeAiExtractionJob.id == candidate_id,
+                    ResumeAiExtractionJob.organization_id == organization_id,
+                    eligible,
+                )
+                .values(
+                    status=AI_EXTRACTION_RUNNING,
+                    attempt_count=ResumeAiExtractionJob.attempt_count + 1,
+                    started_at=now,
+                    lease_owner=worker_id,
+                    lease_expires_at=lease_expires_at,
+                    next_attempt_at=None,
+                    last_error=None,
+                    ai_route_policy_version_id=route_policy_version_id,
+                )
+                .execution_options(skip_organization_scope=True)
+            )
+            if claim.rowcount != 1:
+                session.rollback()
+                return None
+            claimed = ClaimedAiExtractionJob(
+                job_id=candidate_id,
+                organization_id=organization_id,
+                resume_id=resume_id,
+                input_facts_version=input_facts_version,
+                job_kind=job_kind,
+                previous_error=previous_error,
+                ai_route_policy_version_id=route_policy_version_id,
+                workspace_lane_token=lane.lease_token,
+            )
+            session.commit()
+            return claimed
         session.commit()
-        return claimed
+        return None
 
 
 def _mark_jobs_unavailable_without_key(session: Session, *, now: datetime) -> None:

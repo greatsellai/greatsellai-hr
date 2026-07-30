@@ -38,6 +38,17 @@ class AppSettings:
     seed_registry_on_startup: bool = True
     database_pool_size: int = 5
     database_max_overflow: int = 10
+    # API and worker engines have separate connection budgets.  A worker
+    # supervisor may launch several child processes, so each child defaults to
+    # a deliberately small, non-bursting pool rather than multiplying the API
+    # pool across every process.
+    worker_concurrency: int = 1
+    worker_database_pool_size: int = 1
+    worker_database_max_overflow: int = 0
+    # Minimum duration for the fair workspace lane. Individual queue leases
+    # may be longer; workers take the maximum of the two. Mailbox heartbeats
+    # renew the lane before each slow IMAP operation.
+    worker_workspace_lane_lease_seconds: int = 210
     admin_token: str | None = field(default=None, repr=False)
     # Pre-tenant installations authenticated a shared legacy workspace with
     # one static token.  New deployments must keep this bridge disabled: it
@@ -266,6 +277,16 @@ class AppSettings:
             database_pool_size=int(os.getenv("RESUME_V3_DATABASE_POOL_SIZE", "5")),
             database_max_overflow=int(
                 os.getenv("RESUME_V3_DATABASE_MAX_OVERFLOW", "10")
+            ),
+            worker_concurrency=int(os.getenv("RESUME_V3_WORKER_CONCURRENCY", "1")),
+            worker_database_pool_size=int(
+                os.getenv("RESUME_V3_WORKER_DATABASE_POOL_SIZE", "1")
+            ),
+            worker_database_max_overflow=int(
+                os.getenv("RESUME_V3_WORKER_DATABASE_MAX_OVERFLOW", "0")
+            ),
+            worker_workspace_lane_lease_seconds=int(
+                os.getenv("RESUME_V3_WORKER_WORKSPACE_LANE_LEASE_SECONDS", "210")
             ),
             admin_token=os.getenv("RESUME_V3_ADMIN_TOKEN") or None,
             legacy_admin_token_enabled=_environment_flag(
@@ -588,6 +609,28 @@ class AppSettings:
             raise ValueError("RESUME_V3_DATABASE_POOL_SIZE must be at least 1")
         if self.database_max_overflow < 0:
             raise ValueError("RESUME_V3_DATABASE_MAX_OVERFLOW must not be negative")
+        if not 1 <= self.worker_concurrency <= 16:
+            raise ValueError("RESUME_V3_WORKER_CONCURRENCY must be between 1 and 16")
+        if self.worker_database_pool_size < 1:
+            raise ValueError(
+                "RESUME_V3_WORKER_DATABASE_POOL_SIZE must be at least 1"
+            )
+        if self.worker_database_max_overflow < 0:
+            raise ValueError(
+                "RESUME_V3_WORKER_DATABASE_MAX_OVERFLOW must not be negative"
+            )
+        worker_connection_budget = self.worker_concurrency * (
+            self.worker_database_pool_size + self.worker_database_max_overflow
+        )
+        if worker_connection_budget > 32:
+            raise ValueError(
+                "worker database connection budget must not exceed 32; "
+                "reduce RESUME_V3_WORKER_CONCURRENCY or worker pool settings"
+            )
+        if not 60 <= self.worker_workspace_lane_lease_seconds <= 3600:
+            raise ValueError(
+                "RESUME_V3_WORKER_WORKSPACE_LANE_LEASE_SECONDS must be between 60 and 3600"
+            )
         if self.deepseek_timeout_seconds < 1:
             raise ValueError("DEEPSEEK_TIMEOUT_SECONDS must be at least 1")
         if self.legacy_openai_compatible_endpoint and not self.legacy_openai_compatible_endpoint.startswith(

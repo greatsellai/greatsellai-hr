@@ -45,6 +45,11 @@ from app.services.score_service import (
     ScoreTemplateNotFoundError,
     run_resume_score,
 )
+from app.services.workspace_background_lane_service import (
+    acquire_workspace_background_lane,
+    fair_available_workspace_ids,
+    release_workspace_background_lane,
+)
 from app.tenant_scope import clear_organization_context, set_organization_context
 
 
@@ -56,7 +61,6 @@ ITEM_QUEUED = "queued"
 ITEM_RUNNING = "running"
 ITEM_COMPLETED = "completed"
 ITEM_FAILED = "failed"
-_LEASE_SECONDS = 180
 _REUSABLE_SCORE_STATUSES = ("succeeded", "needs_review", "overridden")
 
 
@@ -69,6 +73,7 @@ class ClaimedResumeScoreBatchItem:
     template_id: str
     template_version: int
     ai_route_policy_version_id: str | None
+    workspace_lane_token: str
 
 
 def _utcnow() -> datetime:
@@ -396,7 +401,21 @@ def run_resume_score_batch_worker_once(
     claimed = _claim_next_item(database, settings=settings, worker_id=worker_id)
     if claimed is None:
         return False
-    _process_claimed_item(database, settings=settings, worker_id=worker_id, claimed=claimed)
+    try:
+        _process_claimed_item(
+            database,
+            settings=settings,
+            worker_id=worker_id,
+            claimed=claimed,
+        )
+    finally:
+        with database.session_factory() as session:
+            release_workspace_background_lane(
+                session,
+                organization_id=claimed.organization_id,
+                lease_token=claimed.workspace_lane_token,
+            )
+            session.commit()
     return True
 
 
@@ -464,15 +483,24 @@ def _claim_next_item(
         if not ai_gateway_credentials_configured(settings):
             session.commit()
             return None
-        row = session.execute(
+        eligible = and_(
+            ResumeScoreBatch.status.in_((BATCH_QUEUED, BATCH_RUNNING)),
+            ResumeScoreBatchItem.status == ITEM_QUEUED,
+            ResumeScoreBatchItem.attempt_count < ResumeScoreBatch.max_attempts,
+            or_(
+                ResumeScoreBatchItem.next_attempt_at.is_(None),
+                ResumeScoreBatchItem.next_attempt_at <= now,
+            ),
+        )
+        mismatched = session.execute(
             select(ResumeScoreBatchItem, ResumeScoreBatch)
             .join(ResumeScoreBatch)
             .where(
-                ResumeScoreBatch.status.in_((BATCH_QUEUED, BATCH_RUNNING)),
-                ResumeScoreBatchItem.status == ITEM_QUEUED,
+                eligible,
                 or_(
-                    ResumeScoreBatchItem.next_attempt_at.is_(None),
-                    ResumeScoreBatchItem.next_attempt_at <= now,
+                    ResumeScoreBatchItem.organization_id.is_(None),
+                    ResumeScoreBatch.organization_id
+                    != ResumeScoreBatchItem.organization_id,
                 ),
             )
             .order_by(
@@ -482,12 +510,8 @@ def _claim_next_item(
             )
             .execution_options(skip_organization_scope=True)
         ).first()
-        if row is None:
-            session.commit()
-            return None
-        candidate_item, candidate_batch = row
-        organization_id = candidate_item.organization_id
-        if not organization_id or candidate_batch.organization_id != organization_id:
+        if mismatched is not None:
+            candidate_item, candidate_batch = mismatched
             session.execute(
                 ResumeScoreBatchItem.__table__.update()
                 .where(ResumeScoreBatchItem.id == candidate_item.id)
@@ -509,13 +533,64 @@ def _claim_next_item(
             session.commit()
             return None
 
-        with _organization_session(session, organization_id):
-            _persist_legacy_score_batch_route_pin(
-                session,
-                batch=candidate_batch,
-                settings=settings,
-            )
-            claimed = session.execute(
+        organization_ids = fair_available_workspace_ids(
+            session,
+            source=ResumeScoreBatchItem.__table__.join(
+                ResumeScoreBatch.__table__,
+                ResumeScoreBatchItem.batch_id == ResumeScoreBatch.id,
+            ),
+            organization_id_column=ResumeScoreBatchItem.organization_id,
+            eligible=eligible,
+            next_attempt_at_column=ResumeScoreBatchItem.next_attempt_at,
+            requested_at_column=ResumeScoreBatch.requested_at,
+            now=now,
+        )
+        if not organization_ids:
+            session.commit()
+            return None
+
+        for organization_id in organization_ids:
+            row = session.execute(
+                select(ResumeScoreBatchItem, ResumeScoreBatch)
+                .join(ResumeScoreBatch)
+                .where(
+                    eligible,
+                    ResumeScoreBatchItem.organization_id == organization_id,
+                )
+                .order_by(
+                    ResumeScoreBatch.requested_at.asc(),
+                    ResumeScoreBatchItem.next_attempt_at.asc(),
+                    ResumeScoreBatchItem.id.asc(),
+                )
+                .execution_options(skip_organization_scope=True)
+            ).first()
+            if row is None:
+                continue
+            candidate_item, candidate_batch = row
+            if candidate_batch.organization_id != organization_id:
+                session.rollback()
+                return None
+            with _organization_session(session, organization_id):
+                _persist_legacy_score_batch_route_pin(
+                    session,
+                    batch=candidate_batch,
+                    settings=settings,
+                )
+                lane = acquire_workspace_background_lane(
+                    session,
+                    organization_id=organization_id,
+                    worker_id=worker_id,
+                    job_kind="resume_score",
+                    job_id=candidate_item.id,
+                    lease_seconds=max(
+                        settings.worker_workspace_lane_lease_seconds,
+                        settings.ai_extraction_job_lease_seconds,
+                    ),
+                    now=now,
+                )
+                if lane is None:
+                    continue
+                claimed = session.execute(
                 update(ResumeScoreBatchItem)
                 .where(
                     ResumeScoreBatchItem.id == candidate_item.id,
@@ -532,7 +607,8 @@ def _claim_next_item(
                     attempt_count=ResumeScoreBatchItem.attempt_count + 1,
                     next_attempt_at=None,
                     lease_owner=worker_id,
-                    lease_expires_at=now + timedelta(seconds=_LEASE_SECONDS),
+                    lease_expires_at=now
+                    + timedelta(seconds=settings.ai_extraction_job_lease_seconds),
                     last_error=None,
                 )
                 # SQLite returns naive timestamps while the worker clock is
@@ -540,38 +616,41 @@ def _claim_next_item(
                 # synchronizer to evaluate this lease predicate.
                 .execution_options(synchronize_session=False)
             )
-            if claimed.rowcount != 1:
+                if claimed.rowcount != 1:
+                    session.rollback()
+                    return None
+                # The conditional UPDATE deliberately bypassed ORM state
+                # synchronization.  Reload the claimed row before serializing the
+                # lease so we never return stale queued state to the worker.
+                session.expire_all()
+                item = session.get(ResumeScoreBatchItem, candidate_item.id)
+                batch = session.get(ResumeScoreBatch, candidate_batch.id)
+                if (
+                    item is None
+                    or batch is None
+                    or item.organization_id != organization_id
+                    or batch.organization_id != organization_id
+                    or item.batch_id != batch.id
+                ):
+                    session.rollback()
+                    return None
+                batch.status = BATCH_RUNNING
+                batch.started_at = batch.started_at or now
+                batch.lease_owner = worker_id
+                batch.lease_expires_at = item.lease_expires_at
                 session.commit()
-                return None
-            # The conditional UPDATE deliberately bypassed ORM state
-            # synchronization.  Reload the claimed row before serializing the
-            # lease so we never return stale queued state to the worker.
-            session.expire_all()
-            item = session.get(ResumeScoreBatchItem, candidate_item.id)
-            batch = session.get(ResumeScoreBatch, candidate_batch.id)
-            if (
-                item is None
-                or batch is None
-                or item.organization_id != organization_id
-                or batch.organization_id != organization_id
-                or item.batch_id != batch.id
-            ):
-                session.rollback()
-                return None
-            batch.status = BATCH_RUNNING
-            batch.started_at = batch.started_at or now
-            batch.lease_owner = worker_id
-            batch.lease_expires_at = item.lease_expires_at
-            session.commit()
-            return ClaimedResumeScoreBatchItem(
-                item_id=item.id,
-                organization_id=organization_id,
-                batch_id=batch.id,
-                resume_id=item.resume_id,
-                template_id=batch.template_id,
-                template_version=batch.template_version,
-                ai_route_policy_version_id=batch.ai_route_policy_version_id,
-            )
+                return ClaimedResumeScoreBatchItem(
+                    item_id=item.id,
+                    organization_id=organization_id,
+                    batch_id=batch.id,
+                    resume_id=item.resume_id,
+                    template_id=batch.template_id,
+                    template_version=batch.template_version,
+                    ai_route_policy_version_id=batch.ai_route_policy_version_id,
+                    workspace_lane_token=lane.lease_token,
+                )
+        session.commit()
+        return None
 
 
 def _process_claimed_item(

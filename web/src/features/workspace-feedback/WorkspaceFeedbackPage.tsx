@@ -311,7 +311,7 @@ export function WorkspaceFeedbackPage({
             </label>
             <label>
               <span className="field-label">你这次主要怎样使用 GreatSell AI？</span>
-              <textarea className="textarea-field" maxLength={2000} onChange={(event) => setUseCase(event.target.value)} placeholder="例如：上传一批简历后，用筛选工作台找有 Agent 项目经验的候选人。" required rows={3} value={useCase} />
+              <textarea className="textarea-field" maxLength={2000} onChange={(event) => setUseCase(event.target.value)} placeholder="例如：上传一批简历后，用条件筛选找有 Agent 项目经验的候选人。" required rows={3} value={useCase} />
             </label>
             <label>
               <span className="field-label">你当时想完成什么？</span>

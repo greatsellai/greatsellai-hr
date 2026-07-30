@@ -519,6 +519,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     navigateToView,
     openFeedback,
     openSettings,
+    routeParams,
     settingsSection,
     view,
   } = useWorkspaceNavigation({
@@ -536,6 +537,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       document.getElementById("recruiting-agent-trigger")?.focus();
     });
   }, []);
+
+  const openRecruitingAgent = useCallback(() => {
+    closeDrawer();
+    setAgentOpen(true);
+  }, [closeDrawer]);
 
   const openAgentWithFilterScope = useCallback(
     (filter: CandidateSearchRequest, totalCount: number) => {
@@ -649,6 +655,17 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     [openResume],
   );
 
+  const openRecruitingCandidate = useCallback(
+    (resumeId: string, candidateId: string, candidateName: string | null) => {
+      openResume({
+        resumeId,
+        candidateId,
+        candidateName: candidateName?.trim() || "未命名候选人",
+      }, "applications");
+    },
+    [openResume],
+  );
+
   const openAgentResume = useCallback(
     (item: RecruitingAgentCandidate) => {
       openResume({
@@ -742,14 +759,12 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         canManageSettings={canManageSettings}
         inert={drawerOpen || agentOpen}
         onChangeView={navigateToView}
+        onOpenAgent={openRecruitingAgent}
         onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
       />
       <div className="app-area" inert={drawerOpen || agentOpen}>
       <Topbar
-        onOpenAgent={() => {
-            closeDrawer();
-            setAgentOpen(true);
-          }}
+        onOpenAgent={openRecruitingAgent}
           onOpenFeedback={() => {
             closeDrawer();
             setAgentOpen(false);
@@ -806,6 +821,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
               canManageSettings,
               role: authSession?.role ?? null,
             }}
+            routeParams={routeParams}
             settingsSection={settingsSection}
             view={view}
             onFavoriteChanged={refreshCandidateFavorites}
@@ -814,6 +830,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             onOpenFavoriteResume={openFavoriteResume}
             onOpenLibraryResume={openLibraryResume}
             onOpenMatchedResume={openMatchedResume}
+            onOpenRecruitingCandidate={openRecruitingCandidate}
+            onOpenRecruitingAgent={openRecruitingAgent}
             onRefineWithAgent={openAgentWithFilterScope}
             onScoreCreated={handleScoreCreated}
             onTemplateCreated={registerScoreTemplate}

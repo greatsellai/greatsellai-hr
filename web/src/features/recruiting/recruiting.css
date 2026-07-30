@@ -26,6 +26,179 @@
   min-height: 22rem;
 }
 
+.backoffice-ui-root .recruiting-overview {
+  width: min(100%, 100rem);
+}
+
+.backoffice-ui-root .recruiting-overview-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.backoffice-ui-root .recruiting-overview-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(16rem, 1.35fr);
+  margin-bottom: var(--space-lg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.backoffice-ui-root .recruiting-overview-strip > div,
+.backoffice-ui-root .recruiting-overview-strip > p {
+  min-width: 0;
+  padding: 0.875rem 1rem;
+}
+
+.backoffice-ui-root .recruiting-overview-strip > div + div,
+.backoffice-ui-root .recruiting-overview-strip > p {
+  border-left: 1px solid var(--line);
+}
+
+.backoffice-ui-root .recruiting-overview-strip span,
+.backoffice-ui-root .recruiting-overview-strip strong {
+  display: block;
+}
+
+.backoffice-ui-root .recruiting-overview-strip span {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+.backoffice-ui-root .recruiting-overview-strip strong {
+  margin-top: 0.1875rem;
+  color: var(--ink);
+  font-size: 1.25rem;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.025em;
+}
+
+.backoffice-ui-root .recruiting-overview-strip > p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.backoffice-ui-root .recruiting-overview-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(17.5rem, 20rem);
+  gap: var(--space-lg);
+  align-items: start;
+}
+
+.backoffice-ui-root .recruiting-overview-jobs {
+  min-width: 0;
+}
+
+.backoffice-ui-root .recruiting-overview-table td {
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+}
+
+.backoffice-ui-root .recruiting-overview-table td:first-child strong,
+.backoffice-ui-root .recruiting-overview-table td:first-child small {
+  display: block;
+}
+
+.backoffice-ui-root .recruiting-overview-table td:first-child strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 720;
+}
+
+.backoffice-ui-root .recruiting-overview-table td:first-child small {
+  margin-top: 0.125rem;
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.backoffice-ui-root .recruiting-overview-empty-row {
+  padding: 2rem 1rem;
+  color: var(--ink-muted);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.backoffice-ui-root .recruiting-overview-actions {
+  padding: 0.875rem;
+}
+
+.backoffice-ui-root .recruiting-overview-action {
+  display: grid;
+  width: 100%;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.625rem;
+  align-items: center;
+  padding: 0.6875rem 0.625rem;
+  color: var(--ink-soft);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), color 160ms var(--ease-out);
+}
+
+.backoffice-ui-root .recruiting-overview-action + .recruiting-overview-action {
+  margin-top: 0.25rem;
+}
+
+.backoffice-ui-root .recruiting-overview-action:hover {
+  color: var(--ink);
+  background: var(--surface-muted);
+  border-color: var(--line);
+}
+
+.backoffice-ui-root .recruiting-overview-action > span {
+  display: grid;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.backoffice-ui-root .recruiting-overview-action strong,
+.backoffice-ui-root .recruiting-overview-action small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backoffice-ui-root .recruiting-overview-action strong {
+  color: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.backoffice-ui-root .recruiting-overview-action small {
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+}
+
+.backoffice-ui-root .recruiting-overview-loading {
+  display: grid;
+  gap: 0.75rem;
+  min-height: 20rem;
+  padding: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.backoffice-ui-root .recruiting-overview-loading-title {
+  width: 14rem;
+  height: 1rem;
+}
+
+.backoffice-ui-root .recruiting-overview-loading-row {
+  width: 100%;
+  height: 3.5rem;
+}
+
 .backoffice-ui-root .recruiting-layout {
   display: grid;
   grid-template-columns: minmax(13.5rem, 16rem) minmax(0, 1fr) minmax(17.5rem, 20rem);
@@ -408,6 +581,13 @@
   font-size: 0.75rem;
 }
 
+.backoffice-ui-root .recruiting-candidate-open {
+  justify-self: start;
+  min-height: 1.75rem;
+  padding: 0.125rem 0.25rem;
+  font-size: 0.75rem;
+}
+
 .backoffice-ui-root .recruiting-transition-history {
   display: grid;
   gap: 0.5rem;
@@ -663,6 +843,24 @@
     grid-column: 1 / -1;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
+
+  .backoffice-ui-root .recruiting-overview-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .backoffice-ui-root .recruiting-overview-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.25rem;
+  }
+
+  .backoffice-ui-root .recruiting-overview-actions .panel-heading {
+    grid-column: 1 / -1;
+  }
+
+  .backoffice-ui-root .recruiting-overview-action + .recruiting-overview-action {
+    margin-top: 0;
+  }
 }
 
 @media (max-width: 54rem) {
@@ -686,6 +884,16 @@
     grid-column: auto;
     grid-template-columns: 1fr;
   }
+
+  .backoffice-ui-root .recruiting-overview-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .backoffice-ui-root .recruiting-overview-strip > p {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
 }
 
 @media (max-width: 40rem) {
@@ -696,6 +904,28 @@
 
   .backoffice-ui-root .recruiting-page-heading .button {
     width: 100%;
+  }
+
+  .backoffice-ui-root .recruiting-overview-heading-actions {
+    width: 100%;
+  }
+
+  .backoffice-ui-root .recruiting-overview-heading-actions .button {
+    flex: 1 1 10rem;
+  }
+
+  .backoffice-ui-root .recruiting-overview-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .backoffice-ui-root .recruiting-overview-strip > div + div,
+  .backoffice-ui-root .recruiting-overview-strip > p {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .backoffice-ui-root .recruiting-overview-actions {
+    grid-template-columns: 1fr;
   }
 
   .backoffice-ui-root .recruiting-stage-board {

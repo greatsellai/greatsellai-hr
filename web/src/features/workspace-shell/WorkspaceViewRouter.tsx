@@ -11,16 +11,19 @@ import { FilterWorkspace } from "../filter/FilterWorkspace";
 import { type useCandidateSearchController } from "../filter/useCandidateSearchController";
 import { ScoreWorkspace } from "../scoring/ScoreWorkspace";
 import { MatchWorkspace } from "../job-match/MatchWorkspace";
+import { RecruitingOverview } from "../recruiting/RecruitingOverview";
 import { RecruitingWorkspace } from "../recruiting/RecruitingWorkspace";
 import { UploadPage } from "../upload/UploadPage";
 import { WorkspaceSettingsPage } from "../workspace-settings/WorkspaceSettingsPage";
 import { WorkspaceFeedbackPage } from "../workspace-feedback/WorkspaceFeedbackPage";
 import type { CandidateDrawerTab } from "../candidate-drawer/candidate-drawer-types";
+import { useCallback } from "react";
 import type {
   WorkspaceNavigationView,
   WorkspaceSettingsSection,
   WorkspaceView,
 } from "./workspace-navigation-types";
+import type { WorkspaceRouteParams } from "./workspace-navigation";
 
 type CandidateSearchController = ReturnType<typeof useCandidateSearchController>;
 
@@ -53,7 +56,7 @@ export interface WorkspaceViewRouterProps {
     selectedResumeId: string | null;
   };
   navigation: {
-    navigateToView: (view: WorkspaceNavigationView) => void;
+    navigateToView: (view: WorkspaceNavigationView, route?: WorkspaceRouteParams) => void;
     openSettings: (section: WorkspaceSettingsSection) => void;
   };
   permissions: {
@@ -64,6 +67,7 @@ export interface WorkspaceViewRouterProps {
     role: "admin" | "recruiter" | null;
   };
   settingsSection: WorkspaceSettingsSection;
+  routeParams: WorkspaceRouteParams;
   view: WorkspaceView;
   onLibraryChanged: () => void;
   /** Refresh every current-user favorite projection after a bookmark change. */
@@ -84,6 +88,12 @@ export interface WorkspaceViewRouterProps {
   ) => void;
   onOpenLibraryResume: (item: ResumeLibraryItem) => void;
   onOpenMatchedResume: (match: JobMatch) => void;
+  onOpenRecruitingCandidate: (
+    resumeId: string,
+    candidateId: string,
+    candidateName: string | null,
+  ) => void;
+  onOpenRecruitingAgent: () => void;
   onRefineWithAgent: (filter: CandidateSearchRequest, totalCount: number) => void;
   onScoreCreated: () => void;
   onTemplateCreated: (template: ScoreTemplate) => void;
@@ -102,6 +112,7 @@ export function WorkspaceViewRouter({
   navigation,
   permissions,
   settingsSection,
+  routeParams,
   view,
   onLibraryChanged,
   onFavoriteChanged,
@@ -109,13 +120,36 @@ export function WorkspaceViewRouter({
   onOpenCandidate,
   onOpenLibraryResume,
   onOpenMatchedResume,
+  onOpenRecruitingCandidate,
+  onOpenRecruitingAgent,
   onRefineWithAgent,
   onScoreCreated,
   onTemplateCreated,
   onUploadedResume,
 }: WorkspaceViewRouterProps) {
+  const handleWorkflowJobSelection = useCallback(
+    (jobId: string | null) => {
+      navigation.navigateToView(
+        "workflow",
+        jobId ? { jobId } : {},
+      );
+    },
+    [navigation.navigateToView],
+  );
+
   return (
     <>
+      {view === "workbench" && (
+        <RecruitingOverview
+          formatError={feedback.formatError}
+          notify={feedback.notify}
+          onOpenAgent={onOpenRecruitingAgent}
+          onCreateJob={() => navigation.navigateToView("jobs", { createJob: true })}
+          onOpenJobs={() => navigation.navigateToView("jobs")}
+          onOpenMatching={() => navigation.navigateToView("match")}
+          onOpenWorkflow={(jobId) => navigation.navigateToView("workflow", jobId ? { jobId } : {})}
+        />
+      )}
       {view === "library" && (
         <ResumeLibraryPage
           formatError={feedback.formatError}
@@ -170,19 +204,50 @@ export function WorkspaceViewRouter({
           onTemplateCreated={onTemplateCreated}
         />
       )}
+      {view === "jobs" && (
+        <MatchWorkspace
+          canGenerateAiJd={permissions.canGenerateAiJd}
+          createNewJob={routeParams.createJob}
+          formatError={feedback.formatError}
+          mode="jobs"
+          notify={feedback.notify}
+          initialJobVersionId={routeParams.jobVersionId}
+          onCreateNewJob={() => navigation.navigateToView("jobs", { createJob: true })}
+          onJobVersionChange={(jobVersionId) => navigation.navigateToView(
+            "jobs",
+            jobVersionId ? { jobVersionId } : {},
+          )}
+          onOpenMatching={(jobVersionId) => navigation.navigateToView("match", { jobVersionId })}
+          onOpenMatchedResume={onOpenMatchedResume}
+        />
+      )}
       {view === "match" && (
         <MatchWorkspace
           canGenerateAiJd={permissions.canGenerateAiJd}
           formatError={feedback.formatError}
+          mode="matching"
           notify={feedback.notify}
+          initialJobVersionId={routeParams.jobVersionId}
+          onJobVersionChange={(jobVersionId) => navigation.navigateToView(
+            "match",
+            jobVersionId ? { jobVersionId } : {},
+          )}
+          onOpenJobManagement={() => navigation.navigateToView("jobs")}
           onOpenMatchedResume={onOpenMatchedResume}
         />
       )}
-      {view === "recruiting" && (
+      {view === "workflow" && (
         <RecruitingWorkspace
           formatError={feedback.formatError}
+          initialJobId={routeParams.jobId}
           notify={feedback.notify}
-          onCreateJob={() => navigation.navigateToView("match")}
+          onCreateJob={() => navigation.navigateToView("jobs")}
+          onJobSelectionChange={handleWorkflowJobSelection}
+          onOpenCandidate={(application) => onOpenRecruitingCandidate(
+            application.resume_id,
+            application.candidate_id,
+            application.candidate_display_name,
+          )}
         />
       )}
       {view === "settings" && permissions.canManageSettings && (

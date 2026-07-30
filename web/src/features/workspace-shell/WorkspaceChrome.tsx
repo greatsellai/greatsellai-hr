@@ -3,29 +3,16 @@ import {
   useRef,
   useState,
 } from "react";
-import { Icon, type IconName } from "../../icons";
+import { Icon } from "../../icons";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
 import type { TrialAccess } from "../../types";
 import type {
   WorkspaceNavigationView,
   WorkspaceView,
 } from "./workspace-navigation-types";
+import { workspaceNavigationGroups } from "./workspace-navigation";
 
 export type { WorkspaceNavigationView } from "./workspace-navigation-types";
-
-const navigation: Array<{
-  view: WorkspaceNavigationView;
-  label: string;
-  icon: IconName;
-}> = [
-  { view: "library", label: "简历库", icon: "folder" },
-  { view: "favorites", label: "我的收藏", icon: "bookmark" },
-  { view: "filter", label: "筛选工作台", icon: "filter" },
-  { view: "upload", label: "上传简历", icon: "upload" },
-  { view: "score", label: "评分模板", icon: "layers" },
-  { view: "match", label: "招聘详情", icon: "match" },
-  { view: "recruiting", label: "职位管理", icon: "briefcase" },
-];
 
 function formatWholeNumber(value: number): string {
   return new Intl.NumberFormat("zh-CN", {
@@ -81,12 +68,14 @@ export function SideRail({
   activeView,
   canManageSettings,
   onChangeView,
+  onOpenAgent,
   onOpenSettings,
   inert,
 }: {
   activeView: WorkspaceView;
   canManageSettings: boolean;
   onChangeView: (view: WorkspaceNavigationView) => void;
+  onOpenAgent: () => void;
   onOpenSettings: () => void;
   inert: boolean;
 }) {
@@ -105,21 +94,46 @@ export function SideRail({
           src="/brand/greatsell-logo-symbol-red.png"
         />
       </div>
-      <nav className="rail-nav">
-        {navigation.map((item) => (
-            <button
-              aria-current={activeView === item.view ? "page" : undefined}
-              aria-label={item.label}
-              className={`rail-item${activeView === item.view ? " is-active" : ""}`}
-              key={item.view}
-              onClick={() => onChangeView(item.view)}
-              type="button"
-            >
-              <Icon name={item.icon} size={19} />
-              <span className="rail-label">{item.label}</span>
-              <span className="rail-tooltip">{item.label}</span>
-            </button>
-          ))}
+      <nav aria-label="招聘工作台导航" className="rail-nav">
+        {workspaceNavigationGroups.map((group) => (
+          <section aria-label={group.label} className="rail-nav-group" key={group.id}>
+            <span aria-hidden="true" className="rail-nav-group-label">{group.label}</span>
+            <div className="rail-nav-group-items">
+              {group.items.map((item) => {
+                if (item.kind === "action") {
+                  return (
+                    <button
+                      aria-label={item.label}
+                      className="rail-item rail-item-action"
+                      key={item.action}
+                      onClick={onOpenAgent}
+                      type="button"
+                    >
+                      <Icon name={item.icon} size={19} />
+                      <span className="rail-label">{item.label}</span>
+                      <span className="rail-tooltip">{item.label}</span>
+                    </button>
+                  );
+                }
+
+                return (
+                  <button
+                    aria-current={activeView === item.view ? "page" : undefined}
+                    aria-label={item.label}
+                    className={`rail-item${activeView === item.view ? " is-active" : ""}`}
+                    key={item.view}
+                    onClick={() => onChangeView(item.view)}
+                    type="button"
+                  >
+                    <Icon name={item.icon} size={19} />
+                    <span className="rail-label">{item.label}</span>
+                    <span className="rail-tooltip">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        ))}
       </nav>
       <div className="rail-bottom">
         {canManageSettings && (

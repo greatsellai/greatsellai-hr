@@ -8,7 +8,7 @@ test("workspace select menus render on an opaque elevated surface", async ({ pag
 
   // Navigation can grow (for example, with the private favorites worklist).
   // Select the JD workspace by its accessible product label, not rail order.
-  await page.getByRole("button", { name: "招聘详情", exact: true }).click();
+  await page.getByRole("button", { name: "智能匹配", exact: true }).click();
 
   const select = page.locator(".jd-switcher-select .semi-select");
   await expect(select).toBeVisible();

@@ -18,16 +18,33 @@ import "./job-match.css";
 
 type ToastKind = "success" | "error";
 type JobWorkspaceMode = "create" | "view";
+export type MatchWorkspaceSurface = "jobs" | "matching";
 
 export function MatchWorkspace({
   canGenerateAiJd,
+  createNewJob = false,
   formatError,
+  initialJobVersionId,
+  mode = "jobs",
   notify,
+  onCreateNewJob,
+  onJobVersionChange,
+  onOpenJobManagement,
+  onOpenMatching,
   onOpenMatchedResume,
 }: {
   canGenerateAiJd: boolean;
+  /** A routed, explicit new-JD action must not fall back to the first saved JD. */
+  createNewJob?: boolean;
   formatError: (error: unknown) => string;
+  initialJobVersionId?: string;
+  /** Jobs owns JD authoring; matching only consumes a confirmed JD version. */
+  mode?: MatchWorkspaceSurface;
   notify: (kind: ToastKind, message: string) => void;
+  onCreateNewJob?: () => void;
+  onJobVersionChange?: (jobVersionId: string) => void;
+  onOpenJobManagement?: () => void;
+  onOpenMatching?: (jobVersionId: string) => void;
   onOpenMatchedResume: (match: JobMatch) => void;
 }) {
   const [title, setTitle] = useState("");
@@ -55,15 +72,16 @@ export function MatchWorkspace({
     setGeneratedRequirements(null);
     setGenerationError(null);
   };
-  const selectJobVersion = (next: JobVersion) => {
+  const selectJobVersion = (next: JobVersion, syncRoute = true) => {
     resetJobAuthoring();
     setJobWorkspaceMode("view");
     setJobVersion(next);
     setVersioningJobId(null);
     setMatchBatch(null);
     setBatchItems([]);
+    if (syncRoute) onJobVersionChange?.(next.job_version_id);
   };
-  const beginNewJob = () => {
+  const enterNewJobDraft = () => {
     resetJobAuthoring();
     setJobWorkspaceMode("create");
     setJobVersion(null);
@@ -71,6 +89,10 @@ export function MatchWorkspace({
     setMatchBatch(null);
     setBatchItems([]);
     setJobMatches([]);
+  };
+  const beginNewJob = () => {
+    enterNewJobDraft();
+    onCreateNewJob?.();
   };
   const beginNextJobVersion = () => {
     if (!jobVersion) return;
@@ -313,7 +335,14 @@ export function MatchWorkspace({
       .then((versions) => {
         if (cancelled) return;
         setConfirmedJobVersions(versions);
-        if (versions[0]) selectJobVersion(versions[0]);
+        if (mode === "jobs" && createNewJob) {
+          enterNewJobDraft();
+          return;
+        }
+        const initial = initialJobVersionId
+          ? versions.find((item) => item.job_version_id === initialJobVersionId)
+          : versions[0];
+        if (initial) selectJobVersion(initial, false);
       })
       .catch(() => {
         // A new workspace has no confirmed JD yet. The creation form remains usable.
@@ -321,9 +350,10 @@ export function MatchWorkspace({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [createNewJob, initialJobVersionId, mode]);
   useEffect(() => {
     if (
+      mode !== "matching" ||
       !jobVersion ||
       jobVersion.status !== "confirmed" ||
       !jobVersion.requirements.length
@@ -347,7 +377,9 @@ export function MatchWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [jobVersion?.job_version_id, jobVersion?.status, matchBatch?.completed_count, notify]);
+  }, [jobVersion?.job_version_id, jobVersion?.status, matchBatch?.completed_count, mode, notify]);
+  const isJobManagement = mode === "jobs";
+  const isMatching = mode === "matching";
   const jobIsEnabled =
     jobWorkspaceMode === "view" && jobVersion?.status === "confirmed";
   const jobIsOriginal = Boolean(
@@ -358,14 +390,16 @@ export function MatchWorkspace({
   );
   const generatedJobIsReady = requirementsAreReady(generatedRequirements);
   return (
-    <div className="page-frame job-match-workspace">
+    <div className={`page-frame job-match-workspace is-${mode}`}>
       <header className="page-heading">
         <div>
-          <h1>招聘详情</h1>
+          <h1>{isJobManagement ? "职位管理" : "智能匹配"}</h1>
           <p>
-            {canGenerateAiJd
-              ? "管理岗位 JD、匹配条件与候选人评估；启用后可直接对该岗位的全部可匹配简历运行评估。"
-              : "可直接发布原版 JD；AI 生成 JD 与候选人匹配需要开通相应套餐。"}
+            {isJobManagement
+              ? (canGenerateAiJd
+                ? "创建、发布和维护岗位 JD 版本。确认后的版本可用于候选人匹配和招聘流程。"
+                : "可直接发布原版 JD；AI 生成 JD 需要开通相应套餐。")
+              : "选择已确认的岗位 JD，查看匹配依据并由招聘人员决定是否加入招聘流程。"}
           </p>
         </div>
       </header>
@@ -380,10 +414,10 @@ export function MatchWorkspace({
                 </div>
                 <div className="jd-switcher-select">
                   <BackofficeSelect
-                    ariaLabel="切换已保存的岗位 JD"
+                    ariaLabel={isJobManagement ? "切换已保存的岗位 JD" : "选择用于智能匹配的岗位 JD"}
                     onChange={(value) => {
                       if (!value) {
-                        beginNewJob();
+                        if (isJobManagement) beginNewJob();
                         return;
                       }
                       const next = confirmedJobVersions.find(
@@ -392,7 +426,7 @@ export function MatchWorkspace({
                       if (next) selectJobVersion(next);
                     }}
                     options={[
-                      { label: "新建岗位 JD", value: "" },
+                      ...(isJobManagement ? [{ label: "新建岗位 JD", value: "" }] : []),
                       ...confirmedJobVersions.map((item) => ({
                         label: `${item.title} · v${item.version}${!item.requirements.length ? " · 原版" : ""}`,
                         value: item.job_version_id,
@@ -422,14 +456,25 @@ export function MatchWorkspace({
                     <span className="status-pill">
                       {jobIsOriginal ? "原版已发布" : "已启用"}
                     </span>
-                    <button
-                      className="button button-ghost"
-                      onClick={beginNextJobVersion}
-                      type="button"
-                    >
-                      <Icon name="plus" size={15} />
-                      基于此新建版本
-                    </button>
+                    {isJobManagement && (
+                      <button
+                        className="button button-ghost"
+                        onClick={beginNextJobVersion}
+                        type="button"
+                      >
+                        <Icon name="plus" size={15} />
+                        基于此新建版本
+                      </button>
+                    )}
+                    {isJobManagement && !jobIsOriginal && onOpenMatching && (
+                      <button
+                        className="button button-primary"
+                        onClick={() => onOpenMatching(jobVersion.job_version_id)}
+                        type="button"
+                      >
+                        <Icon name="match" size={15} />查看智能匹配
+                      </button>
+                    )}
                   </div>
                 </div>
                 <label className="field-label" htmlFor="active-job-text">
@@ -444,7 +489,7 @@ export function MatchWorkspace({
                   value={jobVersion.raw_text}
                 />
               </div>
-            ) : (
+            ) : isJobManagement ? (
               <>
                 {versioningJobId && (
                   <p className="version-context" role="status">
@@ -562,9 +607,22 @@ export function MatchWorkspace({
                   )}
                 </div>
               </>
+            ) : (
+              <div className="empty-state job-match-selection-empty">
+                <div className="empty-state-inner">
+                  <span className="empty-glyph"><Icon name="briefcase" size={23} /></span>
+                  <h2>先发布一个岗位 JD</h2>
+                  <p>智能匹配只使用已确认的岗位版本，不会在这里创建或修改 JD。</p>
+                  {onOpenJobManagement && (
+                    <button className="button button-primary" onClick={onOpenJobManagement} type="button">
+                      <Icon name="briefcase" size={16} />前往职位管理
+                    </button>
+                  )}
+                </div>
+              </div>
             )}
           </section>
-          {jobWorkspaceMode === "create" && generatedJobIsReady && (
+          {isJobManagement && jobWorkspaceMode === "create" && generatedJobIsReady && (
             <section className="panel">
               <div className="panel-heading">
                 <div>
@@ -659,10 +717,10 @@ export function MatchWorkspace({
               </div>
             </section>
           )}
-          {matchBatch && (
+          {isMatching && matchBatch && (
             <MatchBatchDetails batch={matchBatch} items={batchItems} />
           )}
-          {jobCanMatch && (
+          {isMatching && jobCanMatch && (
             <MatchLeaderboard
               loading={matchesLoading}
               matches={jobMatches}
@@ -670,57 +728,59 @@ export function MatchWorkspace({
             />
           )}
         </div>
-        <aside className="panel">
-          <div className="panel-heading">
-            <div>
-              <h2>岗位评估</h2>
-              <p>
-                {jobIsOriginal
-                  ? "原版发布未生成匹配条件，因此不会调用 AI 匹配。"
-                  : "根据当前 JD，对全部可匹配简历生成匹配度、可信度与待核实项。"}
-              </p>
+        {isMatching && (
+          <aside className="panel">
+            <div className="panel-heading">
+              <div>
+                <h2>岗位评估</h2>
+                <p>
+                  {jobIsOriginal
+                    ? "原版发布未生成匹配条件，因此不会调用 AI 匹配。"
+                    : "根据当前 JD，对全部可匹配简历生成匹配度、可信度与待核实项。"}
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="fact-list">
-            <div className="fact-row">
-              <strong>当前岗位</strong>
-              <span>
-                {jobIsEnabled && jobVersion
-                  ? `${jobVersion.title} · v${jobVersion.version} · ${jobIsOriginal ? "原版已发布" : "已启用"}`
-                  : "尚未启用"}
-              </span>
+            <div className="fact-list">
+              <div className="fact-row">
+                <strong>当前岗位</strong>
+                <span>
+                  {jobIsEnabled && jobVersion
+                    ? `${jobVersion.title} · v${jobVersion.version} · ${jobIsOriginal ? "原版已发布" : "已启用"}`
+                    : "尚未启用"}
+                </span>
+              </div>
             </div>
-          </div>
-          {matchBatch && (
-            <div className="fact-row">
-              <strong>AI 批量进度</strong>
-              <span>
-                {matchBatch.completed_count + matchBatch.failed_count} / {matchBatch.total_count}
-                {matchBatch.failed_count ? ` · 失败 ${matchBatch.failed_count}` : ""}
-              </span>
+            {matchBatch && (
+              <div className="fact-row">
+                <strong>AI 批量进度</strong>
+                <span>
+                  {matchBatch.completed_count + matchBatch.failed_count} / {matchBatch.total_count}
+                  {matchBatch.failed_count ? ` · 失败 ${matchBatch.failed_count}` : ""}
+                </span>
+              </div>
+            )}
+            <div className="review-actions">
+              <button
+                className="button button-primary"
+                disabled={!jobCanMatch || loading}
+                onClick={() => void runAllMatches()}
+                type="button"
+              >
+                {loading ? (
+                  <>
+                    <i className="spinner" />
+                    正在创建评估任务…
+                  </>
+                ) : (
+                  <>
+                    <Icon name="match" size={16} />
+                    开始岗位评分（全部可匹配简历）
+                  </>
+                )}
+              </button>
             </div>
-          )}
-          <div className="review-actions">
-            <button
-              className="button button-primary"
-              disabled={!jobCanMatch || loading}
-              onClick={() => void runAllMatches()}
-              type="button"
-            >
-              {loading ? (
-                <>
-                  <i className="spinner" />
-                  正在创建评估任务…
-                </>
-              ) : (
-                <>
-                  <Icon name="match" size={16} />
-                  开始岗位评分（全部可匹配简历）
-                </>
-              )}
-            </button>
-          </div>
-        </aside>
+          </aside>
+        )}
       </div>
     </div>
   );

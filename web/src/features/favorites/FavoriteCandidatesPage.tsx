@@ -284,14 +284,14 @@ export function FavoriteCandidatesPage({
               </span>
               <h2>还没有收藏候选人</h2>
               <p>
-                在筛选工作台或候选人详情中收藏后，会仅显示在当前账号的这个工作区。
+                在条件筛选或候选人详情中收藏后，会仅显示在当前账号的这个工作区。
               </p>
               <BackofficeButton
                 icon={<Icon name="filter" size={16} />}
                 onClick={onGoToFilter}
                 tone="primary"
               >
-                前往筛选工作台
+                前往条件筛选
               </BackofficeButton>
             </div>
           </div>

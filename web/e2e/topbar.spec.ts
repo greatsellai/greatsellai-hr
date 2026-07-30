@@ -10,7 +10,7 @@ test.describe("workspace topbar", () => {
       page.getByPlaceholder("输入技能或关键词，按 Enter 筛选"),
     ).toHaveCount(0);
     await expect(
-      page.getByRole("button", { name: "筛选工作台", exact: true }),
+      page.getByRole("button", { name: "条件筛选", exact: true }),
     ).toBeVisible();
   });
 });

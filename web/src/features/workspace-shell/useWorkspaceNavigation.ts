@@ -4,6 +4,11 @@ import type {
   WorkspaceSettingsSection,
   WorkspaceView,
 } from "./workspace-navigation-types";
+import {
+  workspaceHashForView,
+  workspaceRouteFromHash,
+  type WorkspaceRouteParams,
+} from "./workspace-navigation";
 
 export type {
   WorkspaceNavigationView,
@@ -33,14 +38,13 @@ function feedbackHash(): string {
   return "#feedback";
 }
 
-function navigationViewFromHash(hash: string): WorkspaceNavigationView | null {
-  const value = hash
-    .replace(/^#/, "")
-    .trim()
-    .replace(/^\/+|\/+$/g, "")
-    .toLowerCase();
-
-  return value === "favorites" ? "favorites" : null;
+function sameRouteParams(
+  left: WorkspaceRouteParams,
+  right: WorkspaceRouteParams,
+): boolean {
+  return left.createJob === right.createJob &&
+    left.jobId === right.jobId &&
+    left.jobVersionId === right.jobVersionId;
 }
 
 interface UseWorkspaceNavigationOptions {
@@ -60,17 +64,29 @@ export function useWorkspaceNavigation({
   hasSession,
 }: UseWorkspaceNavigationOptions) {
   const [view, setView] = useState<WorkspaceView>(() =>
-    navigationViewFromHash(window.location.hash) ??
+    workspaceRouteFromHash(window.location.hash)?.view ??
     (window.location.hash.replace(/^#/, "").trim().toLowerCase() === "feedback"
       ? "feedback"
       : settingsSectionFromHash(window.location.hash)
         ? "settings"
-        : "library"),
+        : "workbench"),
   );
   const [settingsSection, setSettingsSection] =
     useState<WorkspaceSettingsSection>(
       () => settingsSectionFromHash(window.location.hash) ?? "mailbox",
     );
+  const [routeParams, setRouteParams] = useState<WorkspaceRouteParams>(
+    () => {
+      const route = workspaceRouteFromHash(window.location.hash);
+      return route
+        ? {
+            createJob: route.createJob,
+            jobId: route.jobId,
+            jobVersionId: route.jobVersionId,
+          }
+        : {};
+    },
+  );
   const canManageSettings = canManageMailbox || canManageCandidateData;
 
   const updateHash = useCallback(
@@ -94,11 +110,10 @@ export function useWorkspaceNavigation({
   );
 
   const navigateToView = useCallback(
-    (nextView: WorkspaceNavigationView) => {
-      setView(nextView);
-      // Favorites is a personal worklist with a useful direct URL. Other
-      // primary workspace views keep the existing clean root URL.
-      updateHash(nextView === "favorites" ? "#favorites" : "");
+    (nextView: WorkspaceNavigationView, nextRoute: WorkspaceRouteParams = {}) => {
+      setView((current) => current === nextView ? current : nextView);
+      setRouteParams((current) => sameRouteParams(current, nextRoute) ? current : nextRoute);
+      updateHash(workspaceHashForView(nextView, nextRoute));
     },
     [updateHash],
   );
@@ -107,6 +122,7 @@ export function useWorkspaceNavigation({
     (section: WorkspaceSettingsSection) => {
       setSettingsSection(section);
       setView("settings");
+      setRouteParams({});
       updateSettingsHash(section);
     },
     [updateSettingsHash],
@@ -114,6 +130,7 @@ export function useWorkspaceNavigation({
 
   const openFeedback = useCallback(() => {
     setView("feedback");
+    setRouteParams({});
     const nextHash = feedbackHash();
     if (window.location.hash === nextHash) return;
     window.history.pushState(
@@ -125,9 +142,14 @@ export function useWorkspaceNavigation({
 
   useEffect(() => {
     const syncSettingsFromHash = () => {
-      const navigationView = navigationViewFromHash(window.location.hash);
-      if (navigationView) {
-        setView(navigationView);
+      const route = workspaceRouteFromHash(window.location.hash);
+      if (route) {
+        setView(route.view);
+        setRouteParams({
+          createJob: route.createJob,
+          jobId: route.jobId,
+          jobVersionId: route.jobVersionId,
+        });
         return;
       }
       if (window.location.hash.replace(/^#/, "").trim().toLowerCase() === "feedback") {
@@ -137,16 +159,14 @@ export function useWorkspaceNavigation({
       const section = settingsSectionFromHash(window.location.hash);
       if (!section) {
         // A browser Back action from a hash-routed view returns to the clean
-        // workspace URL, whose canonical screen is the resume library.
-        setView((current) =>
-          current === "settings" || current === "favorites" || current === "feedback"
-            ? "library"
-            : current,
-        );
+        // workspace URL, whose canonical screen is the recruitment workbench.
+        setView("workbench");
+        setRouteParams({});
         return;
       }
       setSettingsSection(section);
       setView("settings");
+      setRouteParams({});
       updateSettingsHash(section, true);
     };
 
@@ -193,6 +213,7 @@ export function useWorkspaceNavigation({
     openFeedback,
     openSettings,
     settingsSection,
+    routeParams,
     view,
   };
 }

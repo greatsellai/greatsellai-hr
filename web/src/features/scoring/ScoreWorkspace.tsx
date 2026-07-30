@@ -206,7 +206,7 @@ export function ScoreWorkspace({
             <div className="panel-heading">
               <div>
                 <h2>新建评分模板</h2>
-                <p>权重总和必须为 100。模板用于简历库的通用评分；按 JD 的岗位评估请在招聘详情中发起。</p>
+                <p>权重总和必须为 100。模板用于简历库的通用评分；按 JD 的岗位评估请在智能匹配中发起。</p>
               </div>
               <BackofficeButton
                 icon={<Icon name="refresh" size={15} />}
@@ -392,7 +392,7 @@ export function ScoreWorkspace({
             <div className="panel-heading">
               <div>
                 <h2>批量生成通用评分</h2>
-                <p>按所选模板对当前工作区所有符合条件的启用简历评分。岗位 JD 匹配度请在招聘详情中运行。</p>
+                <p>按所选模板对当前工作区所有符合条件的启用简历评分。岗位 JD 匹配度请在智能匹配中运行。</p>
               </div>
             </div>
             <div className="field-stack">

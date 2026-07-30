@@ -108,7 +108,7 @@ test("个人收藏按候选人聚合，抽屉可切换所有简历版本", async
     throw new Error("Expected two distinct candidate resume versions.");
   }
 
-  // The left rail opens the private library.  The list has one candidate with
+  // The left rail opens the private worklist. The list has one candidate with
   // two source files, not two copied talent records.
   await page.getByRole("button", { name: "我的收藏", exact: true }).click();
   await expect(page).toHaveURL(/#favorites$/);
@@ -118,7 +118,7 @@ test("个人收藏按候选人聚合，抽屉可切换所有简历版本", async
   await page.goBack();
   await expect(page).toHaveURL(/\/$/);
   await expect(
-    page.getByRole("heading", { name: "简历库", exact: true }),
+    page.getByRole("heading", { name: "招聘工作台", exact: true }),
   ).toBeVisible();
   await page.goForward();
   await expect(page).toHaveURL(/#favorites$/);

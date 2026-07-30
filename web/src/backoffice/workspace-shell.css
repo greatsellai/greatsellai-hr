@@ -558,6 +558,33 @@
   padding: 0.875rem 0.625rem;
 }
 
+.backoffice-ui-root .rail-nav {
+  display: grid;
+  gap: 0.875rem;
+  align-content: start;
+  overflow-y: auto;
+}
+
+.backoffice-ui-root .rail-nav-group {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.backoffice-ui-root .rail-nav-group-items {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.backoffice-ui-root .rail-nav-group-label {
+  display: block;
+  padding: 0 0.75rem;
+  color: rgb(255 255 255 / 0.38);
+  font-size: 0.625rem;
+  font-weight: 650;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+}
+
 .backoffice-ui-root .rail-item {
   display: flex;
   min-height: 2.75rem;
@@ -586,6 +613,14 @@
 .backoffice-ui-root .rail-item.is-active {
   color: #fff;
   background: var(--workspace-rail-raised);
+}
+
+.backoffice-ui-root .rail-item-action {
+  color: rgb(255 255 255 / 0.72);
+}
+
+.backoffice-ui-root .rail-item-action:hover {
+  color: #fff;
 }
 
 .backoffice-ui-root .rail-label {
@@ -825,7 +860,8 @@
 
   .backoffice-ui-root .rail-brand-logo,
   .backoffice-ui-root .rail-brand-tagline,
-  .backoffice-ui-root .rail-label {
+  .backoffice-ui-root .rail-label,
+  .backoffice-ui-root .rail-nav-group-label {
     display: none;
   }
 
@@ -885,6 +921,12 @@
 
   .backoffice-ui-root .rail-nav {
     flex: 1 0 auto;
+  }
+
+  .backoffice-ui-root .rail-nav-group,
+  .backoffice-ui-root .rail-nav-group-items {
+    display: flex;
+    gap: 0.25rem;
   }
 
   .backoffice-ui-root .rail-bottom {

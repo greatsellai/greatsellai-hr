@@ -210,7 +210,7 @@ test.describe("招聘工作台关键路径", () => {
     await seedWorkspaceFixture(page);
     await page.reload();
 
-    await page.getByRole("button", { name: "简历库", exact: true }).click();
+    await page.getByRole("button", { name: "人才库", exact: true }).click();
     await expect(page.getByRole("heading", { name: "简历库", exact: true })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "AI 总结", exact: true })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "AI 评分", exact: true })).toBeVisible();
@@ -284,7 +284,7 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "drawer-name-refresh");
     await seedWorkspaceFixture(page);
     await page.reload();
-    await page.getByRole("button", { name: "简历库", exact: true }).click();
+    await page.getByRole("button", { name: "人才库", exact: true }).click();
     await page.getByRole("button", {
       name: "查看 E2E 推荐候选人 的简历详情",
     }).click();
@@ -384,7 +384,7 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "automatic-summary");
     await seedWorkspaceFixture(page);
     await page.reload();
-    await page.getByRole("button", { name: "简历库", exact: true }).click();
+    await page.getByRole("button", { name: "人才库", exact: true }).click();
 
     const candidateRow = page.locator("tr", { hasText: "E2E 推荐候选人" });
     await expect(candidateRow.locator(".library-summary-status")).toHaveText(
@@ -429,7 +429,7 @@ test.describe("招聘工作台关键路径", () => {
     await seedWorkspaceFixture(page);
     await page.reload();
 
-    await page.getByRole("button", { name: "简历库", exact: true }).click();
+    await page.getByRole("button", { name: "人才库", exact: true }).click();
     const tableScroll = page.locator(".resume-library-page .table-scroll");
     await expect(tableScroll).toBeVisible();
     await expect.poll(() => page.evaluate(
@@ -445,8 +445,8 @@ test.describe("招聘工作台关键路径", () => {
 
   test("岗位原样发布只提交原始输入，不调用 AI", async ({ page }) => {
     await registerAndVerify(page, "publish-original-job");
-    await page.getByRole("button", { name: "招聘详情", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "招聘详情", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "职位管理", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "职位管理", exact: true })).toBeVisible();
 
     const title = "E2E 原样发布岗位";
     const originalJd = "负责招聘工作台内测。\n\n任职要求：能独立完成招聘流程。";
@@ -499,7 +499,7 @@ test.describe("招聘工作台关键路径", () => {
     const fixture = await seedWorkspaceFixture(page);
     await page.reload();
 
-    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    await page.getByRole("button", { name: "条件筛选", exact: true }).click();
     await expect(
       page.getByText("E2E 评分规则 · v1", { exact: true }),
     ).toBeVisible();
@@ -741,8 +741,8 @@ test.describe("招聘工作台关键路径", () => {
     await genericScoreRequest;
     await expect(page.getByRole("heading", { name: "批量评分任务" })).toBeVisible();
 
-    await page.getByRole("button", { name: "招聘详情", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "招聘详情", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "智能匹配", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "智能匹配", exact: true })).toBeVisible();
     await expect(page.locator("#main-content").getByText("当前候选人", { exact: true })).toHaveCount(0);
     await expect(page.locator("#main-content").getByRole("button", { name: "运行岗位匹配" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "候选人评估结果" })).toBeVisible();
@@ -785,7 +785,7 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "first-pass-agent-scope");
     await seedWorkspaceFixture(page);
     await page.reload();
-    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    await page.getByRole("button", { name: "条件筛选", exact: true }).click();
 
     const isCompleteFirstPass = (request: import("@playwright/test").Request) => {
       if (
@@ -1043,7 +1043,7 @@ test.describe("招聘工作台关键路径", () => {
     });
 
     await registerAndVerify(page, "score-confidence");
-    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    await page.getByRole("button", { name: "条件筛选", exact: true }).click();
 
     const grounded = page.locator("tr", { hasText: "E2E 高可信度候选人" });
     await expect(grounded.locator(".score-confidence")).toHaveText("可信度 80%");
@@ -1063,7 +1063,7 @@ test.describe("招聘工作台关键路径", () => {
     await seedWorkspaceFixture(page);
     await page.reload();
 
-    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    await page.getByRole("button", { name: "条件筛选", exact: true }).click();
     await expect(page.getByText("e2e-contact@example.test", { exact: true })).toHaveCount(0);
     await page
       .getByRole("complementary", { name: "初筛条件" })
@@ -1097,7 +1097,7 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "simple-resume-delete");
     await seedWorkspaceFixture(page);
 
-    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    await page.getByRole("button", { name: "条件筛选", exact: true }).click();
     await page
       .getByRole("complementary", { name: "初筛条件" })
       .getByRole("checkbox", { name: "985" })
@@ -1135,7 +1135,7 @@ test.describe("招聘工作台关键路径", () => {
     await registerAndVerify(page, "mobile-filter");
     await page.setViewportSize({ width: 390, height: 844 });
 
-    await page.getByRole("button", { name: "筛选工作台", exact: true }).click();
+    await page.getByRole("button", { name: "条件筛选", exact: true }).click();
     const filters = page.getByRole("complementary", { name: "初筛条件" });
     const toggle = page.getByRole("button", { name: "展开", exact: true });
     await expect(toggle).toBeVisible();

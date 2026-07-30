@@ -24,7 +24,7 @@ interface RecruitingWorkflowFixture {
  * application is created through the same human action API used by the
  * candidate drawer, then the browser advances it through the workbench.
  */
-test("职位管理展示应聘快照，并由人工推进阶段", async ({ page }) => {
+test("招聘流程展示应聘快照，可打开候选人并由人工推进阶段", async ({ page }) => {
   await registerAndVerify(page, "recruiting-core");
   const fixture = await seedWorkspaceFixture(page);
   const resumeId = fixture.resume_ids[0];
@@ -62,9 +62,9 @@ test("职位管理展示应聘快照，并由人工推进阶段", async ({ page 
   });
 
   await page.reload();
-  await page.getByRole("button", { name: "职位管理", exact: true }).click();
+  await page.getByRole("button", { name: "招聘流程", exact: true }).click();
 
-  await expect(page.getByRole("heading", { name: "职位管理", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "招聘流程", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "E2E 后端工程师", exact: true })).toBeVisible();
   const candidateCard = page.locator(".recruiting-application-card").filter({
     hasText: "E2E 推荐候选人",
@@ -72,6 +72,15 @@ test("职位管理展示应聘快照，并由人工推进阶段", async ({ page 
   await expect(candidateCard).toBeVisible();
   await expect(candidateCard.getByText("JD v1", { exact: true })).toBeVisible();
   await expect(candidateCard.getByText("简历事实 v1", { exact: true })).toBeVisible();
+
+  await candidateCard.getByRole("button", { name: "查看候选人", exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: /E2E 推荐候选人 的简历详情/ });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByRole("tab", { name: "应聘记录", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await drawer.getByRole("button", { name: "关闭简历详情", exact: true }).click();
 
   const transitionRequest = page.waitForResponse((response) => (
     response.request().method() === "POST" &&

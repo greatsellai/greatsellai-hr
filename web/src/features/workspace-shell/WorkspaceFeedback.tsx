@@ -34,7 +34,7 @@ export function CandidateRequired({
                 type="button"
               >
                 <Icon name="filter" size={16} />
-                {actionLabel ?? "前往筛选工作台"}
+                {actionLabel ?? "前往条件筛选"}
               </button>
             )}
           </div>

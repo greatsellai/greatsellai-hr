@@ -1,11 +1,13 @@
 export type WorkspaceNavigationView =
+  | "workbench"
+  | "jobs"
+  | "workflow"
   | "library"
   | "favorites"
   | "filter"
   | "upload"
   | "score"
-  | "match"
-  | "recruiting";
+  | "match";
 
 /**
  * Feedback is intentionally reached from the account menu rather than the

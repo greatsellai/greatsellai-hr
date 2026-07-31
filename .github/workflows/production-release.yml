@@ -14,7 +14,7 @@ permissions:
 jobs:
   verify-staging:
     name: Verify completed staging candidate
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 20
     environment:
       name: staging
@@ -100,7 +100,7 @@ jobs:
   promote:
     name: Promote the completed staging image to production
     needs: verify-staging
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     # Do not acquire the deployment lock while this job is waiting for an
     # Environment reviewer; staging must remain available for newer main.

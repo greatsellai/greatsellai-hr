@@ -25,7 +25,7 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     # This lock starts only when the deployment job runs. An unapproved
     # production Environment must not block newer main commits from staging.
@@ -100,11 +100,16 @@ jobs:
               raise SystemExit(
                   "Manual staging requires a successful Continuous integration push run for this exact main commit."
               )
-          ci_run_id = str(max(valid_runs, key=lambda run: run.get("id", 0)).get("id", ""))
+          ci_run = max(valid_runs, key=lambda run: run.get("id", 0))
+          ci_run_id = str(ci_run.get("id", ""))
           if not ci_run_id.isdecimal():
               raise SystemExit("Successful Continuous integration run has no valid run ID.")
+          ci_run_attempt = str(ci_run.get("run_attempt", ""))
+          if not ci_run_attempt.isdecimal() or int(ci_run_attempt) < 1:
+              raise SystemExit("Successful Continuous integration run has no valid run attempt.")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"ci_run_id={ci_run_id}\n")
+              output.write(f"ci_run_attempt={ci_run_attempt}\n")
           '
       - name: Resolve current staging target
         id: target
@@ -216,18 +221,120 @@ jobs:
             scripts/create-staging-tag.sh "$tag"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Resolve CI image artifact
+        id: ci_artifact
+        if: steps.ready.outputs.stage == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          MANUAL_CI_RUN_ID: ${{ steps.manual_ci.outputs.ci_run_id }}
+          MANUAL_CI_RUN_ATTEMPT: ${{ steps.manual_ci.outputs.ci_run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            ci_run_id="$WORKFLOW_RUN_ID"
+            ci_run_attempt="$WORKFLOW_RUN_ATTEMPT"
+          else
+            ci_run_id="$MANUAL_CI_RUN_ID"
+            ci_run_attempt="$MANUAL_CI_RUN_ATTEMPT"
+          fi
+          [[ "$ci_run_id" =~ ^[0-9]+$ ]] || {
+            echo "Missing CI workflow run identity." >&2
+            exit 1
+          }
+          [[ "$ci_run_attempt" =~ ^[1-9][0-9]*$ ]] || {
+            echo "Missing CI workflow run attempt." >&2
+            exit 1
+          }
+          echo "run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
+          echo "run_attempt=$ci_run_attempt" >> "$GITHUB_OUTPUT"
+          echo "name=release-images-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" >> "$GITHUB_OUTPUT"
+      - name: Download CI-verified images
+        if: steps.ready.outputs.stage == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.ci_artifact.outputs.name }}
+          path: ${{ runner.temp }}/greatsell-release-images
+          run-id: ${{ steps.ci_artifact.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify and load CI-verified images
+        if: steps.ready.outputs.stage == 'true'
+        env:
+          CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}
+          CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}
+        run: |
+          set -Eeuo pipefail
+          artifact_dir="$RUNNER_TEMP/greatsell-release-images"
+          archive_name="release-images-${RELEASE_SHA}-${CI_RUN_ID}-${CI_RUN_ATTEMPT}.tar.gz"
+          metadata_name="${archive_name%.tar.gz}.metadata"
+          archive="$artifact_dir/$archive_name"
+          checksum="$artifact_dir/$archive_name.sha256"
+          metadata="$artifact_dir/$metadata_name"
+          [[ -f "$archive" && -f "$checksum" && -f "$metadata" ]] || {
+            echo "Verified release image artifact is incomplete." >&2
+            exit 1
+          }
+          (
+            cd "$artifact_dir"
+            sha256sum --check "$archive_name.sha256"
+          )
+          metadata_value() {
+            sed -n "s/^$1=//p" "$metadata"
+          }
+          [[ "$(metadata_value repository)" == "$GITHUB_REPOSITORY" ]] || {
+            echo "Verified release image artifact repository does not match." >&2
+            exit 1
+          }
+          [[ "$(metadata_value release_sha)" == "$RELEASE_SHA" ]] || {
+            echo "Verified release image artifact release SHA does not match." >&2
+            exit 1
+          }
+          [[ "$(metadata_value ci_run_id)" == "$CI_RUN_ID" ]] || {
+            echo "Verified release image artifact CI run ID does not match." >&2
+            exit 1
+          }
+          [[ "$(metadata_value ci_run_attempt)" == "$CI_RUN_ATTEMPT" ]] || {
+            echo "Verified release image artifact CI run attempt does not match." >&2
+            exit 1
+          }
+          [[ "$(metadata_value archive)" == "$archive_name" ]] || {
+            echo "Verified release image artifact archive name does not match." >&2
+            exit 1
+          }
+          docker image load --input "$archive"
+          for image in "greatsellai-hr-api:$RELEASE_SHA" "greatsellai-hr-caddy:$RELEASE_SHA"; do
+            revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
+            run_id="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_id" }}' "$image")"
+            run_attempt="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_attempt" }}' "$image")"
+            [[ "$revision" == "$RELEASE_SHA" ]] || {
+              echo "Loaded image revision does not match the release commit: $image" >&2
+              exit 1
+            }
+            [[ "$run_id" == "$CI_RUN_ID" ]] || {
+              echo "Loaded image CI workflow run ID does not match: $image" >&2
+              exit 1
+            }
+            [[ "$run_attempt" == "$CI_RUN_ATTEMPT" ]] || {
+              echo "Loaded image CI workflow run attempt does not match: $image" >&2
+              exit 1
+            }
+          done
       - name: Transfer CI-verified images to staging
         id: transfer_ci_images
         if: steps.ready.outputs.stage == 'true'
         env:
           STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
-          CI_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || steps.manual_ci.outputs.ci_run_id }}
+          CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}
+          CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}
         run: |
           set -Eeuo pipefail
           [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Missing CI workflow run identity." >&2; exit 1; }
+          [[ "$CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "Missing CI workflow run attempt." >&2; exit 1; }
           scripts/transfer-production-images.sh "$RELEASE_SHA" \
             --host "$STAGING_DEPLOY_HOST" \
             --expected-ci-run-id "$CI_RUN_ID" \
+            --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
       - name: Deploy immutable candidate and run public smoke checks
         id: deploy_staging
@@ -248,10 +355,10 @@ jobs:
             --public-url "$STAGING_PUBLIC_URL" \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
       - name: Remove CI images after successful staging deployment
-        # A failed preflight, transfer, deployment or public smoke check must
-        # retain the verified images so an operator can retry the same
-        # CI-approved main commit. Only a completed staging deployment owns
-        # the exact images. Superseded commits are safe to remove.
+        # The CI artifact remains available for its short retention window when
+        # preflight, transfer, deployment or public smoke fails. Only the
+        # temporary images loaded into this runner are cleaned here after a
+        # completed staging deployment (or a superseded candidate).
         if: >-
           always() &&
           (steps.target.outputs.stage == 'false' ||

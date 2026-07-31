@@ -142,7 +142,7 @@ def test_main_release_uses_verified_pull_request_provenance_instead_of_repeating
     assert "  push:" not in text_encoding
 
 
-def test_public_repository_routes_default_pr_checks_to_hosted_runners() -> None:
+def test_public_repository_routes_ci_and_release_jobs_to_hosted_runners() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     encoding = (ROOT / ".github" / "workflows" / "text-encoding.yml").read_text(
         encoding="utf-8"
@@ -153,17 +153,40 @@ def test_public_repository_routes_default_pr_checks_to_hosted_runners() -> None:
         "fromJSON('[\"self-hosted\", \"Linux\", \"X64\", \"greatsell-ci\"]') "
         "|| 'ubuntu-latest'"
     )
-    assert ci.count(runner_selector) == 3
+    assert ci.count(runner_selector) == 5
     assert runner_selector in encoding
 
     production_images = ci.split("  production-images:", maxsplit=1)[1]
-    assert "github.event.repository.private" not in production_images
+    assert runner_selector in production_images
     assert "needs.main-release-provenance.result == 'success'" in production_images
     assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in production_images
-    assert "runs-on: [self-hosted, Linux, X64, greatsell-ci]" in production_images
+    assert "runs-on: [self-hosted, Linux, X64, greatsell-ci]" not in production_images
 
 
-def test_main_ci_retains_only_labeled_images_that_the_release_workflow_can_transfer() -> None:
+def test_public_repository_routes_all_release_orchestration_to_hosted_runners() -> None:
+    runner_selector = (
+        "github.event.repository.private && "
+        "fromJSON('[\"self-hosted\", \"Linux\", \"X64\", \"greatsell-ci\"]') "
+        "|| 'ubuntu-latest'"
+    )
+    workflow_paths = (
+        ".github/workflows/staging-release.yml",
+        ".github/workflows/staging-gateway-bootstrap.yml",
+        ".github/workflows/production-release.yml",
+        ".github/workflows/production-deploy.yml",
+        ".github/workflows/production-rollback.yml",
+        ".github/workflows/production-healthy-pending-finalize.yml",
+        ".github/workflows/production-pending-finalize.yml",
+        ".github/workflows/production-legacy-reconcile.yml",
+    )
+
+    for workflow_path in workflow_paths:
+        workflow = (ROOT / workflow_path).read_text(encoding="utf-8")
+        assert "runs-on: [self-hosted, Linux, X64, greatsell-ci]" not in workflow
+        assert runner_selector in workflow
+
+
+def test_main_ci_archives_only_labeled_images_that_the_release_workflow_can_transfer() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     transfer = (ROOT / "scripts" / "transfer-production-images.sh").read_text(
         encoding="utf-8"
@@ -173,17 +196,30 @@ def test_main_ci_retains_only_labeled_images_that_the_release_workflow_can_trans
     assert '--tag "greatsellai-hr-caddy:${{ github.sha }}"' in ci
     assert 'org.opencontainers.image.revision=${{ github.sha }}' in ci
     assert 'org.opencontainers.image.workflow_run_id=${{ github.run_id }}' in ci
+    assert 'org.opencontainers.image.workflow_run_attempt=${{ github.run_attempt }}' in ci
     assert 'org.opencontainers.image.source=https://github.com/${{ github.repository }}' in ci
     assert '--image "greatsellai-hr-api:${{ github.sha }}"' in ci
-    assert '"$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main"' in ci
+    assert "Archive CI-verified release images" in ci
+    assert "actions/upload-artifact@v4" in ci
+    assert "name: release-images-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in ci
+    assert 'archive_name="release-images-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"' in ci
+    assert 'metadata_name="${archive_name%.tar.gz}.metadata"' in ci
+    assert "ci_run_attempt=%s" in ci
+    assert 'docker image save \\' in ci
+    assert "sha256sum \"$archive_name\" > \"$archive_name.sha256\"" in ci
+    assert "retention-days: 7" in ci
+    assert "compression-level: 0" in ci
     assert 'docker image save "$api_image" "$caddy_image" | gzip -1' in transfer
     assert "StrictHostKeyChecking=yes" in transfer
     assert "org.opencontainers.image.revision" in transfer
     assert "org.opencontainers.image.workflow_run_id" in transfer
+    assert "org.opencontainers.image.workflow_run_attempt" in transfer
     assert "--expected-ci-run-id" in transfer
+    assert "--expected-ci-run-attempt" in transfer
     assert "docker image build" not in transfer
     assert "id: release_runtime_regression" in ci
-    assert 'RUNTIME_REGRESSION_OUTCOME: ${{ steps.release_runtime_regression.outcome }}' in ci
+    assert 'docker image rm -f "greatsellai-hr-api:${{ github.sha }}" || true' in ci
+    assert 'docker image rm -f "greatsellai-hr-caddy:${{ github.sha }}" || true' in ci
 
 
 def test_image_transfer_script_loads_and_rechecks_the_ci_images(tmp_path: Path) -> None:
@@ -197,13 +233,16 @@ def test_image_transfer_script_loads_and_rechecks_the_ci_images(tmp_path: Path) 
 
     release_commit = "a" * 40
     ci_run_id = "123456789"
+    ci_run_attempt = "2"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "docker").write_text(
         """#!/usr/bin/env bash
 set -Eeuo pipefail
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
-  if [[ "$*" == *org.opencontainers.image.workflow_run_id* ]]; then
+  if [[ "$*" == *org.opencontainers.image.workflow_run_attempt* ]]; then
+    printf '%s\\n' "$EXPECTED_CI_RUN_ATTEMPT"
+  elif [[ "$*" == *org.opencontainers.image.workflow_run_id* ]]; then
     printf '%s\\n' "$EXPECTED_CI_RUN_ID"
   else
     printf '%s\\n' "$EXPECTED_RELEASE_COMMIT"
@@ -248,6 +287,8 @@ exec bash -c "$command"
             "ubuntu@example.test",
             "--expected-ci-run-id",
             ci_run_id,
+            "--expected-ci-run-attempt",
+            ci_run_attempt,
         ],
         text=True,
         capture_output=True,
@@ -256,6 +297,7 @@ exec bash -c "$command"
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "EXPECTED_RELEASE_COMMIT": release_commit,
             "EXPECTED_CI_RUN_ID": ci_run_id,
+            "EXPECTED_CI_RUN_ATTEMPT": ci_run_attempt,
         },
         check=False,
     )

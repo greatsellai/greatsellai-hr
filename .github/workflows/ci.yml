@@ -24,7 +24,7 @@ jobs:
     # fails closed for an accidental direct push before any image build or
     # staging-release workflow can transfer these exact images.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -157,17 +157,17 @@ jobs:
 
   production-images:
     name: Production image builds
-    # Exact-SHA release images are a hand-off artifact for staging. Building
-    # them for a PR or a manual CI run can overwrite a main image tag with a
-    # different workflow provenance, then make a staging retry fail closed.
-    # Release images therefore originate only from a verified merged main push
-    # in both public and private repository modes.
+    # Exact-SHA release images are published as a short-lived CI artifact for
+    # staging. Building them for a PR or a manual CI run can create an artifact
+    # with a different workflow provenance, then make a staging retry fail
+    # closed. Release images therefore originate only from a verified merged
+    # main push in both public and private repository modes.
     needs: [main-release-provenance]
     if: >-
       always() &&
       needs.main-release-provenance.result == 'success' &&
       github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
@@ -185,6 +185,7 @@ jobs:
               --build-arg PIP_INDEX_URL=https://pypi.org/simple \
               --label "org.opencontainers.image.revision=${{ github.sha }}" \
               --label "org.opencontainers.image.workflow_run_id=${{ github.run_id }}" \
+              --label "org.opencontainers.image.workflow_run_attempt=${{ github.run_attempt }}" \
               --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
               --tag "greatsellai-hr-api:${{ github.sha }}" .; then
               exit 0
@@ -208,6 +209,7 @@ jobs:
               --file deploy/Caddy.Dockerfile \
               --label "org.opencontainers.image.revision=${{ github.sha }}" \
               --label "org.opencontainers.image.workflow_run_id=${{ github.run_id }}" \
+              --label "org.opencontainers.image.workflow_run_attempt=${{ github.run_attempt }}" \
               --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
               --tag "greatsellai-hr-caddy:${{ github.sha }}" .; then
               exit 0
@@ -232,19 +234,39 @@ jobs:
         run: >-
           python scripts/run_release_regression.py --all
           --image "greatsellai-hr-api:${{ github.sha }}"
+      - name: Archive CI-verified release images
+        run: |
+          set -Eeuo pipefail
+          artifact_dir="$RUNNER_TEMP/greatsell-release-images"
+          archive_name="release-images-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          metadata_name="${archive_name%.tar.gz}.metadata"
+          install -d "$artifact_dir"
+          docker image save \
+            "greatsellai-hr-api:${GITHUB_SHA}" \
+            "greatsellai-hr-caddy:${GITHUB_SHA}" \
+            | gzip -1 > "$artifact_dir/$archive_name"
+          (
+            cd "$artifact_dir"
+            sha256sum "$archive_name" > "$archive_name.sha256"
+            printf 'repository=%s\nrelease_sha=%s\nci_run_id=%s\nci_run_attempt=%s\narchive=%s\n' \
+              "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$archive_name" \
+              > "$metadata_name"
+          )
+      - name: Upload CI-verified release images
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-images-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/greatsell-release-images/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       - name: Remove temporary release regression resources
         if: always()
-        env:
-          RUNTIME_REGRESSION_OUTCOME: ${{ steps.release_runtime_regression.outcome }}
         run: |
           filter='label=com.greatsell.release-regression=true'
           docker ps -aq --filter "$filter" | xargs -r docker rm -f || true
           docker network ls -q --filter "$filter" | xargs -r docker network rm || true
           docker volume ls -q --filter "$filter" | xargs -r docker volume rm || true
           docker image ls -q --filter "$filter" | sort -u | xargs -r docker image rm || true
-          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" && "$RUNTIME_REGRESSION_OUTCOME" == "success" ]]; then
-            echo "Retaining CI-verified images for the staging-release workflow."
-          else
-            docker image rm -f "greatsellai-hr-api:${{ github.sha }}" || true
-            docker image rm -f "greatsellai-hr-caddy:${{ github.sha }}" || true
-          fi
+          docker image rm -f "greatsellai-hr-api:${{ github.sha }}" || true
+          docker image rm -f "greatsellai-hr-caddy:${{ github.sha }}" || true

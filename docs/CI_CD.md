@@ -1,15 +1,19 @@
 # GitHub Actions CI/CD
 
-## 自托管 Runner
+## Runner 路由与镜像交接
 
 仓库为私有时，测试工作流通过标签 `self-hosted`、`Linux`、`X64` 和 `greatsell-ci` 路由到
 受信任 Linux 自托管 Runner。该 Runner 必须保持在线，并具备 Docker、Docker Compose、Python
 3.12、Node 22、Chromium 运行依赖和对 GitHub Actions 的网络访问；`postgres-mailbox-race`、
 生产镜像构建和运行时回归会直接使用其 Docker daemon。
 
-仓库为公开时，来自 PR 的后端、PostgreSQL、Web/Playwright 与 UTF-8 检查自动改用标准
-GitHub-hosted Ubuntu Runner。主分支的生产镜像构建、发布预检、镜像传输与生产部署仍只使用
-`greatsell-ci`。切回私有仓库时，测试工作流会自动恢复自托管 Runner，无需改回 YAML。
+仓库为公开时，PR 检查、`main` 溯源与镜像构建、staging 及生产发布编排均自动改用标准
+GitHub-hosted Ubuntu Runner。成功的 `main` CI 会把两份带 commit SHA、CI run ID 与 run attempt
+标签的镜像，以及 checksum 和 metadata 打包为短期 Actions artifact；**Staging release** 只从触发
+它的那次成功 CI 下载该 artifact，校验 checksum、commit、run ID 与 run attempt 后才加载并传输到
+staging。镜像不再依赖某台本机 Runner 的
+Docker 缓存跨工作流保留。切回私有仓库时，所有这些工作流会自动恢复自托管 Runner，无需改回
+YAML；artifact 交接仍保持相同的完整性校验。
 
 这只是工作流的默认路由，不是公开仓库的自托管 Runner 安全边界。公开前必须将该仓库的
 repo-level 自托管 Runner 解绑，或将其迁入只允许受保护 `main` 发布工作流的私有部署中继/
@@ -26,10 +30,11 @@ repo-level 自托管 Runner 解绑，或将其迁入只允许受保护 `main` �
 该次 `main` 提交完成精确 SHA 镜像构建、预发布配置预检、隔离环境部署和公网 smoke 后，才可以
 由负责人输入 `PROMOTE` 晋级生产。
 
-成功的 `main` CI 会保留已经完成运行时回归的 API 与 Caddy 镜像，并以完整 commit SHA 与 OCI
-revision label 标记。**Staging release** 使用这些镜像部署隔离的 staging；它通过后记录 source
-archive SHA-256、API/Caddy image ID 与健康检查。**Production promotion** 只接受当前 `main` 的
-已完成 `stg-*` 候选，并在生产部署前核对同一台 Docker 主机上的 image ID，随后以
+成功的 `main` CI 会将已完成运行时回归的 API 与 Caddy 镜像以完整 commit SHA、OCI revision
+label、CI run ID 和 run attempt 标记后归档。**Staging release** 只下载并校验该 CI 的精确 artifact，再使用这些
+镜像部署隔离的 staging；它通过后记录 source archive SHA-256、API/Caddy image ID 与健康检查。
+**Production promotion** 只接受当前 `main` 的已完成 `stg-*` 候选，并在生产部署前核对同一台
+Docker 主机上的 image ID，随后以
 `--prebuilt-images` 部署，不会在生产机重新构建镜像。详细操作见
 [预发布与生产晋级](STAGING_RELEASE.md)。
 
@@ -151,8 +156,8 @@ staging 或 production。
 
 ## 安全与边界
 
-- 公开仓库中，默认 `pull_request` 测试 job 必须保持 GitHub-hosted；生产镜像 job 在公开
-  仓库只接受 `main` 的 `push`。在公开前还必须解绑 repo-level 自托管 Runner 或使用受限私有
+- 公开仓库中，默认 PR、`main` 发布预检和发布编排均必须保持 GitHub-hosted；生产镜像 job 在公开
+  仓库只接受 `main` 的 `push`，staging 只能下载同一成功 CI run 的精确 artifact。在公开前还必须解绑 repo-level 自托管 Runner 或使用受限私有
   部署中继，因为外部 fork 可以在自己的分支改写 workflow，YAML 条件本身不是 Runner 隔离。
 - CI 不读取生产 Environment 的 SSH 密钥或变量。
 - 自动 staging 只接受本仓库的成功 `main` 推送 CI；PR CI、手动 CI、取消或失败的 CI 都不能

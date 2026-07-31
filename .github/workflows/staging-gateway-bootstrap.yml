@@ -14,7 +14,7 @@ permissions:
 jobs:
   bootstrap:
     name: Enable the reviewed staging edge route
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     # This is an explicit production infrastructure change, never an implicit
     # side effect of a staging deployment. Production Environment reviewers

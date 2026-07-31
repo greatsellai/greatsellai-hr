@@ -35,11 +35,15 @@ def test_staging_workflow_only_accepts_a_successful_main_ci_or_confirmed_main_di
     assert "command -v python3 >/dev/null" in workflow
     assert "| python3 -c '" in workflow
     assert "ci_run_id=" in workflow
+    assert "ci_run_attempt=" in workflow
     assert 'output.write(f"ci_run_id={ci_run_id}\\n")' in workflow
+    assert 'output.write(f"ci_run_attempt={ci_run_attempt}\\n")' in workflow
     assert 'output.write(f"ci_run_id={ci_run_id}\\\\n")' not in workflow
     assert "environment:\n      name: staging" in workflow
     assert "group: greatsellai-hr-release-lane" in workflow
     assert "cancel-in-progress: false" in workflow
+    assert "github.event.repository.private && " in workflow
+    assert "|| 'ubuntu-latest'" in workflow
 
 
 def test_staging_preflights_tags_transfers_deploys_and_smokes_in_order() -> None:
@@ -49,15 +53,34 @@ def test_staging_preflights_tags_transfers_deploys_and_smokes_in_order() -> None
 
     preflight = workflow.index("Preflight staging configuration before tagging")
     tag = workflow.index("Create immutable staging tag")
+    artifact = workflow.index("Resolve CI image artifact")
+    download = workflow.index("Download CI-verified images")
+    verify_and_load = workflow.index("Verify and load CI-verified images")
     transfer = workflow.index("Transfer CI-verified images to staging")
     deploy = workflow.index("Deploy immutable candidate and run public smoke checks")
     cleanup = workflow.index("Remove CI images after successful staging deployment")
-    assert preflight < tag < transfer < deploy < cleanup
+    assert preflight < tag < artifact < download < verify_and_load < transfer < deploy < cleanup
     assert 'scripts/preflight-staging-release.sh "$RELEASE_SHA"' in workflow
     assert 'scripts/create-staging-tag.sh "$tag"' in workflow
     assert "Current main has multiple staging tags; refusing ambiguous promotion lineage." in workflow
     assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' in workflow
     assert '--expected-ci-run-id "$CI_RUN_ID"' in workflow
+    assert '--expected-ci-run-attempt "$CI_RUN_ATTEMPT"' in workflow
+    assert "actions/download-artifact@v4" in workflow
+    assert "name: ${{ steps.ci_artifact.outputs.name }}" in workflow
+    assert "run-id: ${{ steps.ci_artifact.outputs.run_id }}" in workflow
+    assert "github-token: ${{ github.token }}" in workflow
+    assert 'echo "run_attempt=$ci_run_attempt" >> "$GITHUB_OUTPUT"' in workflow
+    assert 'echo "name=release-images-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" >> "$GITHUB_OUTPUT"' in workflow
+    assert 'archive_name="release-images-${RELEASE_SHA}-${CI_RUN_ID}-${CI_RUN_ATTEMPT}.tar.gz"' in workflow
+    assert 'metadata_name="${archive_name%.tar.gz}.metadata"' in workflow
+    assert 'sha256sum --check "$archive_name.sha256"' in workflow
+    assert "docker image load --input \"$archive\"" in workflow
+    assert "Loaded image revision does not match the release commit" in workflow
+    assert "Loaded image CI workflow run ID does not match" in workflow
+    assert "Loaded image CI workflow run attempt does not match" in workflow
+    assert "CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}" in workflow
+    assert "CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}" in workflow
     assert 'id: transfer_ci_images' in workflow
     assert 'id: deploy_staging' in workflow
     assert "steps.deploy_staging.outcome == 'success'" in workflow

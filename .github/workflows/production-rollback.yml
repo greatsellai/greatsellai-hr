@@ -23,7 +23,7 @@ permissions:
 jobs:
   rollback:
     name: Roll back production tag
-    runs-on: [self-hosted, Linux, X64, greatsell-ci]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     concurrency:
       group: greatsellai-hr-release-lane

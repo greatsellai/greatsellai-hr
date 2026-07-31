@@ -564,13 +564,13 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   useEffect(() => {
     const titles: Record<AuthRoute, string> = {
-      login: "登录｜GreatSell AI 招聘工具",
-      register: "免费试用｜GreatSell AI 招聘工具",
-      "forgot-password": "找回密码｜GreatSell AI 招聘工具",
-      "reset-password": "设置新密码｜GreatSell AI 招聘工具",
-      "verify-email": "验证邮箱｜GreatSell AI 招聘工具",
+      login: "登录大卖智聘｜大卖数智",
+      register: "免费试用大卖智聘｜大卖数智",
+      "forgot-password": "找回密码｜大卖智聘",
+      "reset-password": "设置新密码｜大卖智聘",
+      "verify-email": "验证邮箱｜大卖智聘",
     };
-    document.title = authRoute ? titles[authRoute] : "招聘工作台｜GreatSell AI";
+    document.title = authRoute ? titles[authRoute] : "大卖智聘｜AI 招聘决策工作台";
   }, [authRoute]);
 
   useEffect(() => {

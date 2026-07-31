@@ -47,8 +47,8 @@ export function LoginPage({
   return (
     <AuthPageLayout
       description="进入只属于你所在团队的招聘工作区。候选人、岗位、评分和原始文件按工作区分别管理。"
-      eyebrow="GREATSELL AI · 招聘工具"
-      title="登录招聘工作台"
+      eyebrow="大卖智聘｜AI 招聘决策工作台"
+      title="登录大卖智聘"
       workspaceHref={workspaceHref}
     >
       <form
@@ -590,7 +590,7 @@ function AuthPageLayout({
             ) : (
               <>
                 <li><Icon name="layers" size={17} /><span>团队资料集中管理，仅限已授权成员访问</span></li>
-                <li><Icon name="briefcase" size={17} /><span>从筛选、评分到 JD 匹配，在同一个工作台完成</span></li>
+                <li><Icon name="briefcase" size={17} /><span>从简历筛选、AI 评分到 JD 匹配，在大卖智聘统一完成</span></li>
                 <li><Icon name="user" size={17} /><span>AI 提供判断依据，最终决定始终属于招聘团队</span></li>
               </>
             )}

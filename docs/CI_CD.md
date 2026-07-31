@@ -127,6 +127,23 @@ git push --force-with-lease
 这保证发布候选的代码树正是经过验证的代码树；若跳过这一步，`Main release provenance`
 会在镜像构建、标签和服务器连接之前失败关闭。
 
+### `Main release provenance` 失败后的纠正流程
+
+这不是可以通过“重跑 main CI”或手动触发 staging 绕过的失败。失败意味着该次合并结果
+没有一组与当前 `main` 基线对应的完整 PR 验证证据；在此之前不会构建发布镜像，也不会连接
+staging 或 production。
+
+1. 保留失败提交作为审计记录，不重写或直接推送 `main`。
+2. 从当前 `origin/main` 新建或更新一个只包含待发布改动的 PR；若原 PR 已被合并，可用一个
+   明确、可审查的后续修复 PR 承接，不复制候选人数据、环境文件或部署产物。
+3. 等待该 PR 当前 head 的完整 CI 与文本完整性检查全部成功；在准备合并前再次 fetch，确认
+   `origin/main` 没有前进。若前进，重新 rebase/update 并重新跑完整 PR CI。
+4. 只在上述基线仍一致时合并。新的 `main` CI 会再次验证来源证明，成功后才由
+   **Staging release** 自动接力。
+
+该流程故意比“直接重试”多一步：它验证的是新的组合代码树，而不是把上一条 PR 的绿灯错误地
+借给已经变化的主分支。
+
 如果历史环境存在无法自动清除的 legacy pending 记录，不能把 `backup=none` 当成无数据，
 也不能手工删除该文件。先运行 **Production legacy pending reconciliation**：它会确认 current
 记录恰好等于 pending 所记录的前序版本，且数据库和两个持久化卷仍存在，完成新的一组受校验

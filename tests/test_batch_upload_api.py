@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Resume
+from app.tenant_scope import set_organization_context
 from test_resume_flow import make_pdf_with_text
 
 
@@ -21,6 +23,29 @@ def _upload_new_resume(
         files={"file": (filename, content, "application/pdf")},
         headers=headers,
     )
+
+
+def _register_and_login_named_owner(client) -> str:
+    email = "review-queue-owner@example.test"
+    password = "review-queue-owner-password"
+    registered = client.post(
+        "/v1/auth/register",
+        json={
+            "organization_name": "Review queue workspace",
+            "full_name": "Review queue owner",
+            "email": email,
+            "password": password,
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    delivery = client.app.state.transactional_email_provider.deliveries[-1]
+    token = parse_qs(urlsplit(delivery.verification_url).query)["token"][0]
+    verified = client.post("/v1/auth/email-verification/complete", json={"token": token})
+    assert verified.status_code == 200, verified.text
+    assert client.post("/v1/auth/logout").status_code == 204
+    logged_in = client.post("/v1/auth/login", json={"email": email, "password": password})
+    assert logged_in.status_code == 200, logged_in.text
+    return logged_in.json()["organization"]["organization_id"]
 
 
 def test_combined_upload_idempotency_replays_the_original_upload(client) -> None:
@@ -121,14 +146,13 @@ def test_review_queue_requires_auth_and_paginates_non_active_uploads(
     unauthenticated = protected_client.get("/v1/resumes/review-queue")
     assert unauthenticated.status_code == 401
 
-    headers = {"X-Admin-Token": "test-admin-token"}
+    organization_id = _register_and_login_named_owner(protected_client)
     uploaded: list[str] = []
     for index, name in enumerate(("First", "Second", "Third"), start=1):
         response = _upload_new_resume(
             protected_client,
             content=make_pdf_with_text(f"resume {index} " * 30),
             filename=f"resume-{index}.pdf",
-            headers=headers,
         )
         assert response.status_code == 200, response.text
         uploaded.append(response.json()["resume_id"])
@@ -136,6 +160,7 @@ def test_review_queue_requires_auth_and_paginates_non_active_uploads(
     database = protected_client.app.state.database
     base_time = datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc)
     with database.session_factory() as session:
+        set_organization_context(session, organization_id)
         for index, resume_id in enumerate(uploaded):
             resume = session.get(Resume, resume_id)
             assert resume is not None
@@ -147,11 +172,9 @@ def test_review_queue_requires_auth_and_paginates_non_active_uploads(
 
     first_page = protected_client.get(
         "/v1/resumes/review-queue?page=1&page_size=1",
-        headers=headers,
     )
     second_page = protected_client.get(
         "/v1/resumes/review-queue?page=2&page_size=1",
-        headers=headers,
     )
 
     assert first_page.status_code == 200, first_page.text

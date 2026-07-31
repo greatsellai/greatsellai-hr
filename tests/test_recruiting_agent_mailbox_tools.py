@@ -14,7 +14,7 @@ from app.models import (
     OrganizationMembership,
 )
 from app.services import mailbox_import_service, recruiting_agent_service
-from app.services.identity_service import LEGACY_MEMBERSHIP_ID
+from app.services.identity_service import DEVELOPMENT_MEMBERSHIP_ID
 from app.tenant_scope import bypass_organization_scope, set_organization_context
 
 
@@ -1185,7 +1185,7 @@ def test_agent_hides_and_hard_rejects_mailbox_tools_for_recruiter_role(
         email_address="recruiter-role@example.test",
     )
     with ai_client.app.state.database.session_factory() as session:
-        membership = session.get(OrganizationMembership, LEGACY_MEMBERSHIP_ID)
+        membership = session.get(OrganizationMembership, DEVELOPMENT_MEMBERSHIP_ID)
         assert membership is not None
         membership.role = "recruiter"
         session.commit()

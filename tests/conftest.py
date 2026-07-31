@@ -144,16 +144,25 @@ def ai_client(tmp_path: Path) -> TestClient:
 
 @pytest.fixture
 def protected_client(tmp_path: Path) -> TestClient:
+    """A production-like client with no compatibility-password backdoor.
+
+    Tests that need this fixture must create a named account through the
+    public registration flow and establish a regular browser session.  Keeping
+    the fixture anonymous makes the authentication boundary explicit.
+    """
+
     data_dir = tmp_path / "data"
     settings = AppSettings(
         project_dir=tmp_path,
         data_dir=data_dir,
         upload_dir=data_dir / "uploads",
         database_url="sqlite://",
-        admin_token="test-admin-token",
-        legacy_admin_token_enabled=True,
+        session_secret="protected-client-test-session-secret",
+        allow_unauthenticated=False,
         min_text_chars_per_page=20,
         mailbox_imap_allowed_hosts=TEST_MAILBOX_IMAP_HOSTS,
+        transactional_email_provider="test",
+        public_app_url="http://testserver",
     )
     app = create_app(settings)
     with TestClient(app) as test_client:

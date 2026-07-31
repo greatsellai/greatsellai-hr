@@ -580,7 +580,6 @@ def _tombstone_secret(settings: AppSettings) -> bytes:
         raise CandidateDataLifecycleError("candidate_data_tombstone_secret_not_configured")
     return (
         settings.session_secret
-        or settings.admin_token
         or "resume-v3-development-candidate-data-tombstone"
     ).encode("utf-8")
 
@@ -1265,7 +1264,6 @@ def _retention_preview_token(
 ) -> str:
     secret = (
         settings.session_secret
-        or settings.admin_token
         or "resume-v3-development-retention-preview"
     ).encode("utf-8")
     payload = f"candidate-retention-preview:v1:{organization_id}:{policy_version}:{retention_days}".encode("utf-8")

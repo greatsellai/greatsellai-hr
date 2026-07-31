@@ -92,6 +92,17 @@ export interface AuthOrganization {
   name: string;
 }
 
+export interface AuthWorkspaceMembership {
+  membership_id: string;
+  organization_id: string;
+  name: string;
+  role: MembershipRole;
+}
+
+export interface AuthWorkspaceMembershipList {
+  items: AuthWorkspaceMembership[];
+}
+
 export type MembershipRole = "admin" | "recruiter";
 
 export type PlanStatus = "trial" | "active" | "expired" | "suspended";

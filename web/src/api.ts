@@ -2,6 +2,7 @@ import type {
   AuthLoginInput,
   AuthRegistrationInput,
   AuthSession,
+  AuthWorkspaceMembershipList,
   CandidateCreateInput,
   CandidateCreated,
   CandidateDataAuditEventList,
@@ -302,6 +303,17 @@ export function createApiClient(options: ApiClientOptions = {}) {
   return {
     getAuthSession(): Promise<AuthSession> {
       return request<AuthSession>("/auth/session");
+    },
+
+    listAuthWorkspaces(): Promise<AuthWorkspaceMembershipList> {
+      return request<AuthWorkspaceMembershipList>("/auth/workspaces");
+    },
+
+    switchAuthWorkspace(membershipId: string): Promise<AuthSession> {
+      return request<AuthSession>(
+        `/auth/workspaces/${resourcePath(membershipId)}/switch`,
+        { method: "POST" },
+      );
     },
 
     login(input: AuthLoginInput): Promise<AuthSession> {

@@ -54,25 +54,20 @@ def _register_and_verify(client: TestClient, *, email: str, password: str) -> No
     assert client.post("/v1/auth/logout").status_code == 204
 
 
-def test_legacy_static_token_is_disabled_without_explicit_compatibility_switch(
+def test_password_only_and_admin_header_authentication_are_rejected(
     tmp_path: Path,
 ) -> None:
-    settings = _settings(
-        tmp_path,
-        admin_token="legacy-static-token-fixture",
-        legacy_admin_token_enabled=False,
-    )
+    settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         static_login = client.post(
             "/v1/auth/login",
-            json={"password": "legacy-static-token-fixture"},
+            json={"password": "historical-static-token"},
         )
-        assert static_login.status_code == 401
-        assert static_login.json()["detail"] == "invalid_login_credentials"
+        assert static_login.status_code == 422
 
         header_attempt = client.get(
             "/v1/resume-library",
-            headers={"x-admin-token": "legacy-static-token-fixture"},
+            headers={"x-admin-token": "historical-static-token"},
         )
         assert header_attempt.status_code == 401
         assert header_attempt.json()["detail"] == "authentication_required"
@@ -249,11 +244,10 @@ def test_unknown_and_inactive_logins_perform_dummy_scrypt_before_shared_failure(
     ]
 
 
-def test_public_auth_limit_and_legacy_compatibility_settings_are_explicit_and_validated(
+def test_public_auth_limit_settings_are_explicit_and_validated(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED", "true")
     monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_LIMIT", "6")
     monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_CLIENT_WINDOW_SECONDS", "901")
     monkeypatch.setenv("RESUME_V3_LOGIN_RATE_LIMIT_EMAIL_LIMIT", "4")
@@ -262,7 +256,8 @@ def test_public_auth_limit_and_legacy_compatibility_settings_are_explicit_and_va
     monkeypatch.setenv("RESUME_V3_PASSWORD_RESET_RESPONSE_JITTER_SECONDS", "0.1")
 
     loaded = AppSettings.from_env()
-    assert loaded.legacy_admin_token_enabled is True
+    assert not hasattr(loaded, "admin_token")
+    assert not hasattr(loaded, "legacy_admin_token_enabled")
     assert loaded.login_rate_limit_client_limit == 6
     assert loaded.login_rate_limit_client_window_seconds == 901
     assert loaded.login_rate_limit_email_limit == 4

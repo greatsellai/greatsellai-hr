@@ -25,8 +25,6 @@ x-app-environment: &app-environment
   # production-equivalent. It is still a separate file: never mount or source
   # `.env.production` here, because the database URL and storage boundary must
   # remain staging-only.
-  RESUME_V3_ADMIN_TOKEN: ${RESUME_V3_ADMIN_TOKEN:?set RESUME_V3_ADMIN_TOKEN in .env.staging}
-  RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED: ${RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED:-0}
   RESUME_V3_SESSION_SECRET: ${RESUME_V3_SESSION_SECRET:?set RESUME_V3_SESSION_SECRET in .env.staging}
   RESUME_V3_SESSION_COOKIE_SECURE: ${RESUME_V3_SESSION_COOKIE_SECURE:-1}
   # Caddy's fixed address on the isolated staging proxy network.

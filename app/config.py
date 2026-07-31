@@ -49,11 +49,6 @@ class AppSettings:
     # may be longer; workers take the maximum of the two. Mailbox heartbeats
     # renew the lane before each slow IMAP operation.
     worker_workspace_lane_lease_seconds: int = 210
-    admin_token: str | None = field(default=None, repr=False)
-    # Pre-tenant installations authenticated a shared legacy workspace with
-    # one static token.  New deployments must keep this bridge disabled: it
-    # has no human identity and cannot provide account-level attribution.
-    legacy_admin_token_enabled: bool = False
     session_secret: str | None = field(default=None, repr=False)
     session_cookie_secure: bool = False
     allow_unauthenticated: bool = False
@@ -287,11 +282,6 @@ class AppSettings:
             ),
             worker_workspace_lane_lease_seconds=int(
                 os.getenv("RESUME_V3_WORKER_WORKSPACE_LANE_LEASE_SECONDS", "210")
-            ),
-            admin_token=os.getenv("RESUME_V3_ADMIN_TOKEN") or None,
-            legacy_admin_token_enabled=_environment_flag(
-                "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED",
-                default=False,
             ),
             session_secret=os.getenv("RESUME_V3_SESSION_SECRET") or None,
             session_cookie_secure=_environment_flag(
@@ -1047,10 +1037,6 @@ class AppSettings:
                     raise RuntimeError(
                         "production_session_and_email_credentials_keys_must_differ"
                     )
-            if self.legacy_admin_token_enabled and not self.admin_token:
-                raise RuntimeError("legacy_admin_token_enabled_requires_admin_token")
-            if self.admin_token and self.admin_token == self.session_secret:
-                raise RuntimeError("production_session_secret_must_differ_from_legacy_admin_token")
             if self.transactional_email_provider == "test":
                 raise RuntimeError("production_must_not_use_test_transactional_email_provider")
             if self.public_app_url and not self.public_app_url.startswith("https://"):

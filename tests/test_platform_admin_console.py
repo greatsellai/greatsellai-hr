@@ -13,9 +13,12 @@ from app.config import AppSettings
 from app.main import create_app
 from app.models import Candidate, Organization, OrganizationMembership, Resume, UserAccount
 from app.observability import validate_request_id
-from app.services.identity_service import LEGACY_ORGANIZATION_ID, LEGACY_USER_ID
 from app.services.platform_admin_service import PlatformAdminServiceError
 from app.tenant_scope import set_organization_context
+
+
+_PLATFORM_ADMIN_EMAIL = "platform-console-admin@example.test"
+_PLATFORM_ADMIN_PASSWORD = "platform-console-user-password"
 
 
 @pytest.fixture
@@ -25,14 +28,13 @@ def platform_client(tmp_path: Path) -> Iterator[TestClient]:
         data_dir=tmp_path / "data",
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
-        admin_token="platform-console-test-token",
-        legacy_admin_token_enabled=True,
         session_secret="platform-console-session-secret",
         allow_unauthenticated=False,
         transactional_email_provider="test",
         public_app_url="http://testserver",
     )
     with TestClient(create_app(settings)) as client:
+        _create_platform_admin_account(client)
         yield client
 
 
@@ -69,12 +71,43 @@ def _register_and_verify(
 def _login_platform_admin(client: TestClient) -> dict[str, object]:
     response = client.post(
         "/v1/auth/login",
-        json={"password": "platform-console-test-token"},
+        json={"email": _PLATFORM_ADMIN_EMAIL, "password": _PLATFORM_ADMIN_PASSWORD},
     )
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["is_platform_admin"] is True
     return payload
+
+
+def _create_platform_admin_account(client: TestClient) -> None:
+    payload = _register_and_verify(
+        client,
+        organization_name="Platform control workspace",
+        full_name="Platform control administrator",
+        email=_PLATFORM_ADMIN_EMAIL,
+    )
+    user_id = payload["user"]["user_id"]
+    with client.app.state.database.session_factory() as session:
+        user = session.scalar(select(UserAccount).where(UserAccount.id == user_id))
+        assert user is not None
+        user.is_platform_admin = True
+        session.commit()
+
+
+def _platform_admin_identity(client: TestClient) -> tuple[str, str]:
+    with client.app.state.database.session_factory() as session:
+        user = session.scalar(
+            select(UserAccount).where(UserAccount.email == _PLATFORM_ADMIN_EMAIL)
+        )
+        assert user is not None
+        membership = session.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.user_id == user.id,
+                OrganizationMembership.is_active.is_(True),
+            )
+        )
+        assert membership is not None
+        return user.id, membership.organization_id
 
 
 def test_platform_permission_is_independent_from_workspace_plan_access(
@@ -103,10 +136,11 @@ def test_platform_permission_is_independent_from_workspace_plan_access(
     assert platform_client.post("/v1/auth/logout").status_code == 204
 
     _login_platform_admin(platform_client)
+    _, platform_organization_id = _platform_admin_identity(platform_client)
     with platform_client.app.state.database.session_factory() as session:
-        legacy = session.get(Organization, LEGACY_ORGANIZATION_ID)
-        assert legacy is not None
-        legacy.plan_status = "suspended"
+        platform_organization = session.get(Organization, platform_organization_id)
+        assert platform_organization is not None
+        platform_organization.plan_status = "suspended"
         session.commit()
 
     dashboard = platform_client.get("/v1/platform/dashboard")
@@ -256,7 +290,8 @@ def test_dashboard_organization_management_and_audit_are_safe_and_atomic(
     audit_payload = audit.json()
     assert audit_payload["total"] == 1
     event = audit_payload["items"][0]
-    assert event["actor_user_id"] == LEGACY_USER_ID
+    platform_admin_user_id, _ = _platform_admin_identity(platform_client)
+    assert event["actor_user_id"] == platform_admin_user_id
     assert event["reason"] == "Customer support adjustment"
     assert event["request_id"] == request_id
     assert event["before_state"]["name"] == "Searchable Tenant"
@@ -352,8 +387,9 @@ def test_platform_user_management_protects_platform_administrators(
     assert organization.json()["member_count"] == 1
     assert organization.json()["active_member_count"] == 0
 
+    platform_admin_user_id, _ = _platform_admin_identity(platform_client)
     self_denied = platform_client.patch(
-        f"/v1/platform/users/{LEGACY_USER_ID}",
+        f"/v1/platform/users/{platform_admin_user_id}",
         json={"is_active": False, "reason": "Unsafe self disable"},
     )
     assert self_denied.status_code == 403

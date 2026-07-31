@@ -7,22 +7,26 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.config import AppSettings
 from app.main import create_app
+from app.models import UserAccount
+
+
+_PLATFORM_ADMIN_EMAIL = "plan-platform-admin@example.test"
+_PLATFORM_ADMIN_PASSWORD = "plan-platform-admin-password"
 
 
 @pytest.fixture
 def identity_client(tmp_path: Path) -> Iterator[TestClient]:
-    """A disposable identity/plan database with legacy-token compatibility."""
+    """A disposable identity/plan database with a named platform account."""
 
     settings = AppSettings(
         project_dir=tmp_path,
         data_dir=tmp_path / "data",
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
-        admin_token="legacy-platform-test-token",
-        legacy_admin_token_enabled=True,
         session_secret="identity-plan-test-session-secret",
         allow_unauthenticated=False,
         ai_provider_credentials={
@@ -32,6 +36,7 @@ def identity_client(tmp_path: Path) -> Iterator[TestClient]:
         public_app_url="http://testserver",
     )
     with TestClient(create_app(settings)) as client:
+        _create_platform_admin_account(client)
         yield client
 
 
@@ -52,6 +57,39 @@ def _register_workspace(client: TestClient) -> dict[str, object]:
     verified = client.post("/v1/auth/email-verification/complete", json={"token": token})
     assert verified.status_code == 200, verified.text
     return verified.json()
+
+
+def _create_platform_admin_account(client: TestClient) -> None:
+    response = client.post(
+        "/v1/auth/register",
+        json={
+            "organization_name": "Plan control workspace",
+            "full_name": "Plan control administrator",
+            "email": _PLATFORM_ADMIN_EMAIL,
+            "password": _PLATFORM_ADMIN_PASSWORD,
+        },
+    )
+    assert response.status_code == 201, response.text
+    delivery = client.app.state.transactional_email_provider.deliveries[-1]
+    token = parse_qs(urlsplit(delivery.verification_url).query)["token"][0]
+    verified = client.post("/v1/auth/email-verification/complete", json={"token": token})
+    assert verified.status_code == 200, verified.text
+    user_id = verified.json()["user"]["user_id"]
+    with client.app.state.database.session_factory() as session:
+        user = session.scalar(select(UserAccount).where(UserAccount.id == user_id))
+        assert user is not None
+        user.is_platform_admin = True
+        session.commit()
+    assert client.post("/v1/auth/logout").status_code == 204
+
+
+def _login_platform_admin(client: TestClient) -> None:
+    response = client.post(
+        "/v1/auth/login",
+        json={"email": _PLATFORM_ADMIN_EMAIL, "password": _PLATFORM_ADMIN_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["is_platform_admin"] is True
 
 
 def test_new_registration_uses_advanced_30_day_trial_and_cannot_manage_platform_plans(
@@ -85,7 +123,7 @@ def test_new_registration_uses_advanced_30_day_trial_and_cannot_manage_platform_
     assert denied.json()["detail"] == "platform_admin_required"
 
 
-def test_legacy_platform_admin_can_list_and_update_product_plans(
+def test_named_platform_admin_can_list_and_update_product_plans(
     identity_client: TestClient,
 ) -> None:
     initial_offer = identity_client.get("/v1/auth/registration-offer")
@@ -97,11 +135,7 @@ def test_legacy_platform_admin_can_list_and_update_product_plans(
         "llm_call_limit": 1000,
     }
 
-    legacy_login = identity_client.post(
-        "/v1/auth/login",
-        json={"password": "legacy-platform-test-token"},
-    )
-    assert legacy_login.status_code == 200, legacy_login.text
+    _login_platform_admin(identity_client)
 
     listed = identity_client.get("/v1/platform/plans")
     assert listed.status_code == 200, listed.text
@@ -152,11 +186,7 @@ def test_platform_admin_alone_can_publish_ai_model_route(
     assert usage_trend_denied.status_code == 403, usage_trend_denied.text
     assert usage_trend_denied.json()["detail"] == "platform_admin_required"
 
-    legacy_login = identity_client.post(
-        "/v1/auth/login",
-        json={"password": "legacy-platform-test-token"},
-    )
-    assert legacy_login.status_code == 200, legacy_login.text
+    _login_platform_admin(identity_client)
 
     usage_runs = identity_client.get("/v1/platform/ai/usage/runs")
     assert usage_runs.status_code == 200, usage_runs.text
@@ -291,11 +321,7 @@ def test_platform_admin_alone_can_publish_ai_model_route(
 def test_platform_ai_route_cannot_publish_with_unconfigured_provider_credential(
     identity_client: TestClient,
 ) -> None:
-    legacy_login = identity_client.post(
-        "/v1/auth/login",
-        json={"password": "legacy-platform-test-token"},
-    )
-    assert legacy_login.status_code == 200, legacy_login.text
+    _login_platform_admin(identity_client)
 
     provider = identity_client.post(
         "/v1/platform/ai/providers",

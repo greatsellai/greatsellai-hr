@@ -13,6 +13,7 @@ from app.config import AppSettings
 from app.main import create_app
 from app.models import (
     Organization,
+    UserAccount,
     WorkspaceFeedbackImageAttachment,
     WorkspaceFeedbackSubmission,
     utcnow,
@@ -21,6 +22,10 @@ from app.services.workspace_feedback_service import (
     run_workspace_feedback_reward_worker_once,
 )
 from app.tenant_scope import set_organization_context
+
+
+_PLATFORM_ADMIN_EMAIL = "feedback-platform-admin@example.test"
+_PLATFORM_ADMIN_PASSWORD = "workspace-feedback-platform-password"
 
 
 # A compact, valid PNG header is enough for the server's deliberately
@@ -41,8 +46,6 @@ def feedback_clients(tmp_path: Path) -> Iterator[tuple[TestClient, TestClient, T
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
         allow_unauthenticated=False,
-        admin_token="workspace-feedback-platform-token",
-        legacy_admin_token_enabled=True,
         session_secret="workspace-feedback-test-session-secret",
         transactional_email_provider="test",
         public_app_url="http://testserver",
@@ -53,6 +56,7 @@ def feedback_clients(tmp_path: Path) -> Iterator[tuple[TestClient, TestClient, T
         client_b = TestClient(app)
         platform_client = TestClient(app)
         try:
+            _create_platform_admin_account(platform_client)
             yield client_a, client_b, platform_client
         finally:
             client_a.close()
@@ -66,8 +70,8 @@ def _register_and_login(
     organization_name: str,
     full_name: str,
     email: str,
+    password: str = "workspace-feedback-password",
 ) -> dict[str, object]:
-    password = "workspace-feedback-password"
     registered = client.post(
         "/v1/auth/register",
         json={
@@ -96,6 +100,32 @@ def _feedback_payload() -> dict[str, str]:
         "desired_change": "希望结果能直接展示对应项目证据。",
         "contact_phone": "138 0013 8000",
     }
+
+
+def _create_platform_admin_account(client: TestClient) -> None:
+    payload = _register_and_login(
+        client,
+        organization_name="Feedback control workspace",
+        full_name="Feedback control administrator",
+        email=_PLATFORM_ADMIN_EMAIL,
+        password=_PLATFORM_ADMIN_PASSWORD,
+    )
+    user_id = payload["user"]["user_id"]
+    with client.app.state.database.session_factory() as session:
+        user = session.get(UserAccount, user_id)
+        assert user is not None
+        user.is_platform_admin = True
+        session.commit()
+    assert client.post("/v1/auth/logout").status_code == 204
+
+
+def _login_platform_admin(client: TestClient) -> None:
+    response = client.post(
+        "/v1/auth/login",
+        json={"email": _PLATFORM_ADMIN_EMAIL, "password": _PLATFORM_ADMIN_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["is_platform_admin"] is True
 
 
 def _submit(
@@ -307,10 +337,7 @@ def test_due_feedback_reward_grants_exactly_once_and_platform_can_read(
     assert history.status_code == 200, history.text
     assert history.json()["items"][0]["reward_status"] == "granted"
 
-    assert platform_client.post(
-        "/v1/auth/login",
-        json={"password": "workspace-feedback-platform-token"},
-    ).status_code == 200
+    _login_platform_admin(platform_client)
     platform_rows = platform_client.get("/v1/platform/workspace-feedback")
     assert platform_rows.status_code == 200, platform_rows.text
     row = next(

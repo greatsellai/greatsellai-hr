@@ -76,13 +76,9 @@ def test_production_requires_independent_session_and_email_encryption_keys(tmp_p
             session_secret="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
             email_credentials_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
         ).validate_runtime()
-    with pytest.raises(RuntimeError, match="production_session_secret_must_differ_from_legacy_admin_token"):
-        _settings(
-            tmp_path,
-            admin_token="production-test-session-secret-that-is-independent",
-        ).validate_runtime()
-    with pytest.raises(RuntimeError, match="legacy_admin_token_enabled_requires_admin_token"):
-        _settings(tmp_path, legacy_admin_token_enabled=True, admin_token=None).validate_runtime()
+    settings = _settings(tmp_path)
+    assert not hasattr(settings, "admin_token")
+    assert not hasattr(settings, "legacy_admin_token_enabled")
 
 
 def test_production_without_email_flows_can_start_without_an_unused_email_key(tmp_path: Path) -> None:
@@ -251,13 +247,8 @@ def test_compose_injects_tencent_ses_templates_into_api_and_worker() -> None:
         assert "    environment: *app-environment" in match.group("body")
 
 
-def test_compose_explicitly_wires_the_opt_in_legacy_admin_entry_flag() -> None:
-    """A configured compatibility login flag must reach the API process.
-
-    The identity service keeps this password-only entry disabled by default,
-    but an operator must be able to enable the documented compatibility path
-    without editing the Compose source on a production host.
-    """
+def test_compose_does_not_expose_retired_static_admin_authentication() -> None:
+    """Named-account sessions are the only authentication configuration."""
 
     root = Path(__file__).resolve().parents[1]
     compose = (root / "compose.yml").read_text(encoding="utf-8")
@@ -265,11 +256,10 @@ def test_compose_explicitly_wires_the_opt_in_legacy_admin_entry_flag() -> None:
         encoding="utf-8"
     )
 
-    assert (
-        "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED: "
-        "${RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED:-0}"
-    ) in compose
-    assert "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED=0" in production_example
+    assert "RESUME_V3_ADMIN_TOKEN" not in compose
+    assert "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED" not in compose
+    assert "RESUME_V3_ADMIN_TOKEN" not in production_example
+    assert "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED" not in production_example
 
 
 def test_compose_pins_the_only_trusted_proxy_to_caddy_private_address() -> None:

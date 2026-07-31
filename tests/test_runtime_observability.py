@@ -11,13 +11,18 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.config import AppSettings
 from app import ai_extraction_worker
 from app.ai_extraction_worker import _log_worker_lifecycle_event
 from app.main import create_app
-from app.models import RuntimeWorkerHeartbeat, WorkspaceFeedbackSubmission
-from app.services.identity_service import LEGACY_ORGANIZATION_ID, LEGACY_USER_ID
+from app.models import (
+    OrganizationMembership,
+    RuntimeWorkerHeartbeat,
+    UserAccount,
+    WorkspaceFeedbackSubmission,
+)
 from app.services.platform_admin_service import get_platform_runtime_overview
 from app.services.runtime_observability_service import (
     RuntimeReadinessError,
@@ -27,6 +32,10 @@ from app.services.runtime_observability_service import (
 from app.tenant_scope import set_organization_context
 
 
+_PLATFORM_ADMIN_EMAIL = "runtime-platform-admin@example.test"
+_PLATFORM_ADMIN_PASSWORD = "runtime-platform-admin-password"
+
+
 @pytest.fixture
 def runtime_client(tmp_path: Path) -> Iterator[TestClient]:
     settings = AppSettings(
@@ -34,18 +43,17 @@ def runtime_client(tmp_path: Path) -> Iterator[TestClient]:
         data_dir=tmp_path / "data",
         upload_dir=tmp_path / "data" / "uploads",
         database_url="sqlite://",
-        admin_token="runtime-observability-platform-token",
-        legacy_admin_token_enabled=True,
         session_secret="runtime-observability-session-secret",
         allow_unauthenticated=False,
         transactional_email_provider="test",
         public_app_url="http://testserver",
     )
     with TestClient(create_app(settings)) as client:
+        _create_platform_admin_account(client)
         yield client
 
 
-def _register_and_verify(client: TestClient) -> None:
+def _register_and_verify(client: TestClient) -> dict[str, object]:
     registered = client.post(
         "/v1/auth/register",
         json={
@@ -60,15 +68,56 @@ def _register_and_verify(client: TestClient) -> None:
     token = parse_qs(urlsplit(delivery.verification_url).query)["token"][0]
     verified = client.post("/v1/auth/email-verification/complete", json={"token": token})
     assert verified.status_code == 200, verified.text
+    return verified.json()
 
 
 def _login_platform_admin(client: TestClient) -> None:
     response = client.post(
         "/v1/auth/login",
-        json={"password": "runtime-observability-platform-token"},
+        json={"email": _PLATFORM_ADMIN_EMAIL, "password": _PLATFORM_ADMIN_PASSWORD},
     )
     assert response.status_code == 200, response.text
     assert response.json()["is_platform_admin"] is True
+
+
+def _create_platform_admin_account(client: TestClient) -> None:
+    registered = client.post(
+        "/v1/auth/register",
+        json={
+            "organization_name": "Runtime control workspace",
+            "full_name": "Runtime control administrator",
+            "email": _PLATFORM_ADMIN_EMAIL,
+            "password": _PLATFORM_ADMIN_PASSWORD,
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    delivery = client.app.state.transactional_email_provider.deliveries[-1]
+    token = parse_qs(urlsplit(delivery.verification_url).query)["token"][0]
+    verified = client.post("/v1/auth/email-verification/complete", json={"token": token})
+    assert verified.status_code == 200, verified.text
+    user_id = verified.json()["user"]["user_id"]
+    with client.app.state.database.session_factory() as session:
+        user = session.get(UserAccount, user_id)
+        assert user is not None
+        user.is_platform_admin = True
+        session.commit()
+    assert client.post("/v1/auth/logout").status_code == 204
+
+
+def _platform_admin_identity(client: TestClient) -> tuple[str, str]:
+    with client.app.state.database.session_factory() as session:
+        user = session.scalar(
+            select(UserAccount).where(UserAccount.email == _PLATFORM_ADMIN_EMAIL)
+        )
+        assert user is not None
+        membership = session.scalar(
+            select(OrganizationMembership).where(
+                OrganizationMembership.user_id == user.id,
+                OrganizationMembership.is_active.is_(True),
+            )
+        )
+        assert membership is not None
+        return user.id, membership.organization_id
 
 
 def _feedback_with_unsafe_error(
@@ -78,11 +127,12 @@ def _feedback_with_unsafe_error(
 ) -> None:
     """Create a retrying durable job whose raw error must never reach HTTP."""
 
+    platform_admin_user_id, platform_organization_id = _platform_admin_identity(client)
     with client.app.state.database.session_factory() as session:
-        set_organization_context(session, LEGACY_ORGANIZATION_ID)
+        set_organization_context(session, platform_organization_id)
         session.add(
             WorkspaceFeedbackSubmission(
-                submitted_by_user_id=LEGACY_USER_ID,
+                submitted_by_user_id=platform_admin_user_id,
                 idempotency_key_hash="a" * 64,
                 request_fingerprint="b" * 64,
                 use_case="synthetic observability test",

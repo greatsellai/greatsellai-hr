@@ -94,13 +94,15 @@ def test_staging_deployment_is_isolated_and_never_uses_production_env_or_builds(
     assert "DEEPSEEK_API_KEY=copy-the-production-value-here" in staging_env
     assert "TENCENT_SECRET_ID=copy-the-production-value-here" in staging_env
     assert "RESUME_V3_AI_PROVIDER_CREDENTIALS_JSON=copy-the-production-value-here" in staging_env
-    assert "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED=copy-the-production-value-here" in staging_env
+    assert "RESUME_V3_ADMIN_TOKEN" not in staging_env
+    assert "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED" not in staging_env
     assert "RESUME_V3_MAILBOX_IMAP_ALLOWED_HOSTS=copy-the-production-value-here" in staging_env
     assert "RESUME_V3_STAGING_POSTGRES_PASSWORD=" in staging_env
     assert "RESUME_V3_TRUSTED_PROXY_CIDRS=172.31.0.2/32" in staging_env
     assert "RESUME_V3_STAGING_PUBLIC_APP_URL=https://staging.hr.greatsellai.net" in staging_env
     assert "RESUME_V3_DATABASE_URL: postgresql+psycopg://resume_v3_staging:" in compose
-    assert "RESUME_V3_ADMIN_TOKEN: ${RESUME_V3_ADMIN_TOKEN:" in compose
+    assert "RESUME_V3_ADMIN_TOKEN" not in compose
+    assert "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED" not in compose
     assert "RESUME_V3_SESSION_SECRET: ${RESUME_V3_SESSION_SECRET:" in compose
     assert "RESUME_V3_STAGING_ADMIN_TOKEN" not in compose
     assert "RESUME_V3_STAGING_SESSION_SECRET" not in compose
@@ -142,7 +144,6 @@ def test_staging_matches_production_for_shared_runtime_integrations() -> None:
         "RESUME_V3_AUTO_CREATE_SCHEMA",
         "RESUME_V3_SEED_REGISTRY_ON_STARTUP",
         "RESUME_V3_DATA_DIR",
-        "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED",
         "RESUME_V3_SESSION_COOKIE_SECURE",
         "DEEPSEEK_MODEL",
         "DEEPSEEK_TIMEOUT_SECONDS",
@@ -208,7 +209,7 @@ def test_staging_matches_production_for_shared_runtime_integrations() -> None:
     }
     copied_runtime_keys = {
         key for key in shared_runtime_keys if key in template_values
-    } | {"RESUME_V3_ADMIN_TOKEN", "RESUME_V3_SESSION_SECRET"}
+    } | {"RESUME_V3_SESSION_SECRET"}
     assert copied_runtime_keys
     for key in copied_runtime_keys:
         assert template_values[key] == "copy-the-production-value-here"

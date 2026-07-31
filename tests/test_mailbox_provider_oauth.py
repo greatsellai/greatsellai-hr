@@ -14,7 +14,7 @@ from app.config import AppSettings
 from app.main import create_app
 from app.models import MailboxConfig, MailboxOAuthConnectIntent, MailboxOAuthCredential
 from app.services import mailbox_import_service
-from app.services.identity_service import legacy_principal
+from app.services.identity_service import development_principal
 from app.services.mailbox_import_service import MailboxImportError
 from app.services.mailbox_oauth_service import MailboxOAuthError, OAuthAccessTokenRefresh
 from app.tenant_scope import LEGACY_ORGANIZATION_ID, set_organization_context
@@ -1143,7 +1143,7 @@ def test_late_reauthorization_callback_cannot_replace_newer_generation(
 
     with database.session_factory() as session:
         set_organization_context(session, LEGACY_ORGANIZATION_ID)
-        principal = legacy_principal(session)
+        principal = development_principal(session)
         older_start = mailbox_import_service.start_mailbox_oauth_reauthorization(
             session,
             settings=settings,

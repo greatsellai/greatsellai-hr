@@ -6,11 +6,12 @@ by that value and every write is stamped or verified before it reaches the
 database.  This gives services a defence-in-depth boundary even when a future
 endpoint forgets to add a manual ``organization_id`` predicate.
 
-The legacy workspace is deliberately the safe fallback for unscoped internal
-sessions.  It preserves existing service-level tests and, more importantly,
-means an accidentally unscoped query can see only legacy records rather than
-all customers' data.  Public requests always receive an explicit scope from
-the authentication dependency.
+The historical workspace is deliberately the safe fallback for unscoped
+internal sessions. It preserves existing service-level tests and, more
+importantly, means an accidentally unscoped query can see only archived
+records rather than all customers' data. It is not an authenticated identity:
+public requests always receive an explicit scope from the authentication
+dependency.
 """
 from __future__ import annotations
 
@@ -59,7 +60,7 @@ def clear_organization_context(session: Session) -> None:
 
 
 def organization_context_id(session: Session) -> str:
-    """Return the current safe workspace, falling back only to legacy data."""
+    """Return the current safe workspace, falling back only to archived data."""
 
     return str(session.info.get(_ORGANIZATION_ID_KEY) or LEGACY_ORGANIZATION_ID)
 

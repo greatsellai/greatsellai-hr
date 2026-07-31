@@ -32,6 +32,7 @@ from app.schemas import (
     AuthRegistration,
     AuthSession,
     AuthUserResponse,
+    AuthWorkspaceMembershipResponse,
     OrganizationInvitationAccept,
     OrganizationInvitationCreate,
     OrganizationInvitationResponse,
@@ -50,8 +51,19 @@ from app.tenant_scope import (
 from app.services.trial_quota_service import TRIAL_LLM_CALL_LIMIT, trial_llm_call_snapshot
 
 
-LEGACY_USER_ID = "00000000-0000-4000-8000-000000000002"
-LEGACY_MEMBERSHIP_ID = "00000000-0000-4000-8000-000000000003"
+# These rows belong to the retired shared-password workspace.  Keep their
+# identifiers stable only so old signed sessions and OAuth correlation cookies
+# fail closed before a deployment has finished applying the retirement
+# migration.  They are never a valid application principal.
+RETIRED_LEGACY_USER_ID = "00000000-0000-4000-8000-000000000002"
+RETIRED_LEGACY_MEMBERSHIP_ID = "00000000-0000-4000-8000-000000000003"
+
+# The explicit local-development bypass intentionally has a different
+# identity from the retired shared-password account.  It is created only when
+# ``allow_unauthenticated`` is enabled, which production refuses to start
+# with.  It has no usable password and cannot be selected through login.
+DEVELOPMENT_USER_ID = "00000000-0000-4000-8000-000000000004"
+DEVELOPMENT_MEMBERSHIP_ID = "00000000-0000-4000-8000-000000000005"
 PLAN_BASIC_ID = "00000000-0000-4000-8000-000000000101"
 PLAN_ADVANCED_ID = "00000000-0000-4000-8000-000000000102"
 PLAN_PROFESSIONAL_ID = "00000000-0000-4000-8000-000000000103"
@@ -82,7 +94,6 @@ class AuthPrincipal:
     membership: OrganizationMembership
     organization: Organization
     plan: ProductPlan | None
-    legacy_compatibility: bool = False
 
     @property
     def role(self) -> str:
@@ -98,11 +109,7 @@ class AuthPrincipal:
 
     @property
     def email_verified(self) -> bool:
-        # The historical password-only entry point is deliberately confined
-        # to its pre-existing legacy workspace.  It cannot be used to enter a
-        # newly registered tenant, so it remains compatible without a real
-        # deliverable email address.
-        return self.legacy_compatibility or self.user.email_verified_at is not None
+        return self.user.email_verified_at is not None
 
 
 @dataclass(frozen=True)
@@ -256,66 +263,85 @@ def _seed_plan_rows(session: Session) -> None:
     session.flush()
 
 
-def ensure_identity_bootstrap(session: Session) -> None:
-    """Idempotently seed plans and a safe owner for pre-tenant records."""
+def ensure_identity_bootstrap(
+    session: Session,
+    *,
+    create_development_identity: bool = False,
+) -> None:
+    """Idempotently seed product plans and an explicit local-only test identity.
+
+    Production must never recreate the retired shared-password user or its
+    membership.  Historical data remains attached to its original workspace
+    through migrations, while local ``create_all`` databases can still opt
+    into a separate, passwordless development principal for focused tests.
+    """
 
     _seed_plan_rows(session)
+    if create_development_identity:
+        _ensure_development_identity(session)
+
+
+def _ensure_development_identity(session: Session) -> None:
+    """Create the local no-auth fixture without reviving retired credentials."""
+
     advanced = session.scalar(select(ProductPlan).where(ProductPlan.code == "advanced"))
     if advanced is None:
         raise RuntimeError("default_advanced_plan_missing")
 
-    legacy_organization = session.get(Organization, LEGACY_ORGANIZATION_ID)
-    if legacy_organization is None:
-        legacy_organization = Organization(
+    workspace = session.get(Organization, LEGACY_ORGANIZATION_ID)
+    if workspace is None:
+        # Local ``create_all`` databases have no Alembic data migration.  The
+        # stable workspace ID also lets storage tests cover historical flat
+        # file reads without granting a production login path.
+        workspace = Organization(
             id=LEGACY_ORGANIZATION_ID,
-            name="Legacy workspace",
+            name="Local development workspace",
             plan=advanced,
             plan_status="active",
         )
-        session.add(legacy_organization)
+        session.add(workspace)
 
-    legacy_user = session.get(UserAccount, LEGACY_USER_ID)
-    if legacy_user is None:
-        legacy_user = UserAccount(
-            id=LEGACY_USER_ID,
-            email="legacy-admin@system.invalid",
-            email_key="legacy-admin@system.invalid",
-            full_name="Legacy Administrator",
-            password_hash="!legacy-configuration-authentication!",
+    user = session.get(UserAccount, DEVELOPMENT_USER_ID)
+    if user is None:
+        user = UserAccount(
+            id=DEVELOPMENT_USER_ID,
+            email="local-development@system.invalid",
+            email_key="local-development@system.invalid",
+            full_name="Local Development",
+            password_hash="!local-development-no-password!",
             is_active=True,
             is_platform_admin=True,
+            email_verified_at=utcnow(),
         )
-        session.add(legacy_user)
-    elif not legacy_user.is_platform_admin:
-        legacy_user.is_platform_admin = True
-    if legacy_user.email_verified_at is None:
-        # This identity is a compatibility bridge, not a deliverable inbox.
-        # Marking it verified preserves its existing access after the email
-        # gate is introduced and mirrors the one-time production migration.
-        legacy_user.email_verified_at = utcnow()
+        session.add(user)
+    else:
+        user.is_active = True
+        user.is_platform_admin = True
+        if user.email_verified_at is None:
+            user.email_verified_at = utcnow()
 
     session.flush()
-    membership = session.get(OrganizationMembership, LEGACY_MEMBERSHIP_ID)
+    membership = session.get(OrganizationMembership, DEVELOPMENT_MEMBERSHIP_ID)
     if membership is None:
         membership = session.scalar(
             select(OrganizationMembership).where(
                 OrganizationMembership.organization_id == LEGACY_ORGANIZATION_ID,
-                OrganizationMembership.user_id == LEGACY_USER_ID,
+                OrganizationMembership.user_id == DEVELOPMENT_USER_ID,
             )
         )
     if membership is None:
         session.add(
             OrganizationMembership(
-                id=LEGACY_MEMBERSHIP_ID,
+                id=DEVELOPMENT_MEMBERSHIP_ID,
                 organization_id=LEGACY_ORGANIZATION_ID,
-                user_id=LEGACY_USER_ID,
+                user_id=DEVELOPMENT_USER_ID,
                 role="admin",
                 is_active=True,
             )
         )
-    # ``create_all`` development databases do not execute Alembic's data
-    # seed, so give the compatibility workspace the same explicit manual
-    # policy as migrated and newly registered workspaces.
+    elif not membership.is_active:
+        membership.is_active = True
+
     if session.scalar(
         select(CandidateDataRetentionPolicy.id).where(
             CandidateDataRetentionPolicy.organization_id == LEGACY_ORGANIZATION_ID
@@ -361,49 +387,145 @@ def _membership_with_context(
     )
 
 
-def legacy_principal(session: Session) -> AuthPrincipal:
+def _active_memberships_for_user(
+    session: Session,
+    *,
+    user_id: str,
+) -> list[OrganizationMembership]:
+    """Return only memberships the named active user may enter.
+
+    The list is deliberately scoped by ``user_id`` at the query boundary. It
+    is shared by login and workspace switching so a membership ID from another
+    tenant can never become an authority-bearing session selector.
+    """
+
+    return list(
+        session.scalars(
+            select(OrganizationMembership)
+            .options(
+                joinedload(OrganizationMembership.organization).joinedload(
+                    Organization.plan
+                )
+            )
+            .where(
+                OrganizationMembership.user_id == user_id,
+                OrganizationMembership.is_active.is_(True),
+            )
+            .order_by(OrganizationMembership.created_at, OrganizationMembership.id)
+        ).all()
+    )
+
+
+def _default_membership_for_authenticated_user(
+    user: UserAccount,
+    memberships: list[OrganizationMembership],
+) -> OrganizationMembership:
+    """Choose the one safe default when a legacy workspace was adopted.
+
+    Product accounts normally have exactly one workspace. The legacy-auth
+    retirement migration intentionally gives verified platform operators an
+    additional membership so they can still reach historical records. That
+    one narrow state defaults to the adopted historical workspace; every
+    other ambiguous account continues to fail closed until an explicit switch
+    is selected after authentication.
+    """
+
+    if len(memberships) == 1:
+        return memberships[0]
+    legacy_memberships = [
+        membership
+        for membership in memberships
+        if membership.organization_id == LEGACY_ORGANIZATION_ID
+    ]
+    if user.is_platform_admin and len(legacy_memberships) == 1:
+        return legacy_memberships[0]
+    raise IdentityServiceError("account_workspace_unavailable")
+
+
+def list_workspace_memberships(
+    session: Session,
+    *,
+    principal: AuthPrincipal,
+) -> list[AuthWorkspaceMembershipResponse]:
+    """List the caller's own active workspaces without exposing other users."""
+
+    responses: list[AuthWorkspaceMembershipResponse] = []
+    for membership in _active_memberships_for_user(session, user_id=principal.user.id):
+        role = membership.role if membership.role in {"admin", "recruiter"} else "recruiter"
+        responses.append(
+            AuthWorkspaceMembershipResponse(
+                membership_id=membership.id,
+                organization_id=membership.organization_id,
+                name=membership.organization.name,
+                role=role,
+            )
+        )
+    return responses
+
+
+def switch_workspace_membership(
+    session: Session,
+    *,
+    principal: AuthPrincipal,
+    membership_id: str,
+) -> AuthPrincipal:
+    """Reissue a session only for another active membership of this user."""
+
+    selected = session.scalar(
+        select(OrganizationMembership)
+        .options(
+            joinedload(OrganizationMembership.organization).joinedload(
+                Organization.plan
+            )
+        )
+        .where(
+            OrganizationMembership.id == membership_id,
+            OrganizationMembership.user_id == principal.user.id,
+            OrganizationMembership.is_active.is_(True),
+        )
+    )
+    if selected is None:
+        # A uniform not-found error avoids disclosing whether a guessed
+        # membership ID exists in another workspace.
+        raise IdentityServiceError("workspace_membership_not_found")
+    return AuthPrincipal(
+        user=principal.user,
+        membership=selected,
+        organization=selected.organization,
+        plan=selected.organization.plan,
+    )
+
+
+def development_principal(session: Session) -> AuthPrincipal:
+    """Return the explicit local-only no-auth principal.
+
+    This helper is called only when the deployment has deliberately enabled
+    ``allow_unauthenticated``.  Production configuration rejects that mode,
+    so it cannot become a shared-password or browser-session backdoor.
+    """
+
     principal = _membership_with_context(
         session,
-        membership_id=LEGACY_MEMBERSHIP_ID,
-        user_id=LEGACY_USER_ID,
+        membership_id=DEVELOPMENT_MEMBERSHIP_ID,
+        user_id=DEVELOPMENT_USER_ID,
         organization_id=LEGACY_ORGANIZATION_ID,
     )
     if principal is None:
-        raise RuntimeError("legacy_identity_not_initialized")
-    return AuthPrincipal(
-        user=principal.user,
-        membership=principal.membership,
-        organization=principal.organization,
-        plan=principal.plan,
-        legacy_compatibility=True,
-    )
-
-
-def legacy_principal_from_session(
-    session: Session,
-    values: dict[str, object],
-) -> AuthPrincipal | None:
-    """Resolve an old boolean-only legacy cookie with version revocation.
-
-    Before tenant identity existed, the legacy workspace wrote only an
-    authenticated flag.  Treat that historical shape as session version 1 so
-    it continues to work after rollout, but no longer bypasses account-wide
-    session revocation after a password reset.
-    """
-
-    if values.get("resume_v3_authenticated") is not True:
-        return None
-    raw_version = values.get("resume_v3_auth_session_version", 1)
-    if (
-        isinstance(raw_version, bool)
-        or not isinstance(raw_version, int)
-        or raw_version < 1
-    ):
-        return None
-    principal = legacy_principal(session)
-    if principal.user.auth_session_version != raw_version:
-        return None
+        raise RuntimeError("development_identity_not_initialized")
     return principal
+
+
+def _is_retired_legacy_identity(
+    *,
+    user_id: str,
+    membership_id: str,
+) -> bool:
+    """Reject every session shape belonging to the retired shared account."""
+
+    return (
+        user_id == RETIRED_LEGACY_USER_ID
+        or membership_id == RETIRED_LEGACY_MEMBERSHIP_ID
+    )
 
 
 def principal_from_session(session: Session, values: dict[str, object]) -> AuthPrincipal | None:
@@ -412,9 +534,11 @@ def principal_from_session(session: Session, values: dict[str, object]) -> AuthP
     membership_id = values.get("resume_v3_membership_id")
     if not all(isinstance(value, str) and value for value in (user_id, organization_id, membership_id)):
         return None
-    # Sessions issued before auth-session versioning intentionally map to the
-    # initial version.  That keeps the legacy migration bridge working, while
-    # a password reset increments the account version and invalidates them.
+    if _is_retired_legacy_identity(user_id=user_id, membership_id=membership_id):
+        return None
+    # Sessions issued before auth-session versioning map to the initial
+    # version; a password reset increments the account version and invalidates
+    # them.
     raw_version = values.get("resume_v3_auth_session_version", 1)
     if (
         isinstance(raw_version, bool)
@@ -440,7 +564,6 @@ def principal_from_mailbox_oauth_callback(
     organization_id: str,
     membership_id: str,
     auth_session_version: int,
-    legacy_compatibility: bool = False,
 ) -> AuthPrincipal | None:
     """Rebuild a revoked-session-safe principal for one mailbox OAuth callback.
 
@@ -452,9 +575,8 @@ def principal_from_mailbox_oauth_callback(
     version, active membership and active user before the callback may issue a
     fresh browser session.
 
-    ``legacy_compatibility`` is accepted only for the deterministic historical
-    workspace used by local/transition deployments.  Callers remain
-    responsible for allowing that bridge in their deployment settings.
+    Retired shared-account bindings are rejected before any membership lookup,
+    even during a rolling deployment before the data migration has executed.
     """
 
     if isinstance(auth_session_version, bool) or not isinstance(auth_session_version, int):
@@ -462,21 +584,14 @@ def principal_from_mailbox_oauth_callback(
     if auth_session_version < 1:
         return None
 
-    if legacy_compatibility:
-        if (
-            user_id != LEGACY_USER_ID
-            or organization_id != LEGACY_ORGANIZATION_ID
-            or membership_id != LEGACY_MEMBERSHIP_ID
-        ):
-            return None
-        principal = legacy_principal(session)
-    else:
-        principal = _membership_with_context(
-            session,
-            membership_id=membership_id,
-            user_id=user_id,
-            organization_id=organization_id,
-        )
+    if _is_retired_legacy_identity(user_id=user_id, membership_id=membership_id):
+        return None
+    principal = _membership_with_context(
+        session,
+        membership_id=membership_id,
+        user_id=user_id,
+        organization_id=organization_id,
+    )
     if principal is None or principal.user.auth_session_version != auth_session_version:
         return None
     return principal
@@ -628,20 +743,10 @@ def authenticate_email_password(
     if not verify_password(password, user.password_hash):
         raise IdentityServiceError("invalid_login_credentials")
 
-    memberships = session.scalars(
-        select(OrganizationMembership)
-        .options(joinedload(OrganizationMembership.organization).joinedload(Organization.plan))
-        .where(
-            OrganizationMembership.user_id == user.id,
-            OrganizationMembership.is_active.is_(True),
-        )
-        .order_by(OrganizationMembership.created_at)
-    ).all()
-    if len(memberships) != 1:
-        # Multi-workspace switching has intentionally not been introduced;
-        # do not make an ambiguous membership silently select a tenant.
-        raise IdentityServiceError("account_workspace_unavailable")
-    membership = memberships[0]
+    membership = _default_membership_for_authenticated_user(
+        user,
+        _active_memberships_for_user(session, user_id=user.id),
+    )
     user.last_login_at = utcnow()
     return AuthPrincipal(
         user=user,
@@ -1155,18 +1260,10 @@ def complete_email_verification(
     ).all():
         pending.invalidated_at = current_time
 
-    memberships = session.scalars(
-        select(OrganizationMembership)
-        .options(joinedload(OrganizationMembership.organization).joinedload(Organization.plan))
-        .where(
-            OrganizationMembership.user_id == verification.user_id,
-            OrganizationMembership.is_active.is_(True),
-        )
-        .order_by(OrganizationMembership.created_at)
-    ).all()
-    if len(memberships) != 1:
-        raise IdentityServiceError("account_workspace_unavailable")
-    membership = memberships[0]
+    membership = _default_membership_for_authenticated_user(
+        locked_user,
+        _active_memberships_for_user(session, user_id=verification.user_id),
+    )
     return AuthPrincipal(
         user=locked_user,
         membership=membership,

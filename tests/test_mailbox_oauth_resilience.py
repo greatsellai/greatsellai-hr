@@ -16,7 +16,7 @@ from app.models import (
     MailboxOAuthCredential,
 )
 from app.services import mailbox_import_service, mailbox_oauth_service
-from app.services.identity_service import LEGACY_MEMBERSHIP_ID, LEGACY_USER_ID
+from app.services.identity_service import DEVELOPMENT_MEMBERSHIP_ID, DEVELOPMENT_USER_ID
 from app.services.mailbox_background_job_service import (
     _retryable_error,
     enqueue_due_mailbox_sync_jobs,
@@ -438,8 +438,8 @@ def test_oauth_intent_cleanup_is_bounded_and_keeps_active_intents(client) -> Non
             session.add(
                 MailboxOAuthConnectIntent(
                     organization_id=LEGACY_ORGANIZATION_ID,
-                    user_id=LEGACY_USER_ID,
-                    membership_id=LEGACY_MEMBERSHIP_ID,
+                    user_id=DEVELOPMENT_USER_ID,
+                    membership_id=DEVELOPMENT_MEMBERSHIP_ID,
                     target_mailbox_config_id=None,
                     provider_key="gmail_oauth",
                     display_name=f"OAuth intent {index}",

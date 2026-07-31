@@ -65,9 +65,6 @@ def main() -> None:
     api_environment = _mapping(api.get("environment"), label="api_environment")
     if api_environment.get("RESUME_V3_TRUSTED_PROXY_CIDRS") != EXPECTED_PROXY_CIDR:
         _fail("trusted_proxy_cidr_not_exact_caddy_address")
-    if api_environment.get("RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED") != "0":
-        _fail("legacy_admin_token_flag_default_not_disabled")
-
     api_networks = _mapping(api.get("networks"), label="api_networks")
     caddy_networks = _mapping(caddy.get("networks"), label="caddy_networks")
     if set(caddy_networks) != {"proxy"}:

@@ -83,8 +83,6 @@ function humanizeError(error: unknown): string {
       trial_llm_call_quota_exhausted:
         "本工作区的 1,000 次试用大模型调用已用完。数据仍会保留，请联系 GreatSell AI 团队继续使用。",
       organization_access_suspended: "当前工作区暂不可用，请联系 GreatSell AI 团队。",
-      invalid_admin_token: "管理口令无效。请在右上角连接配置中更新后重试。",
-      server_missing_admin_token: "服务器尚未配置管理口令，暂时无法访问。",
       deepseek_api_key_not_configured:
         "AI 服务尚未配置。请先在服务器环境变量中配置后重试。",
       talent_search_profile_not_found: "这份人才画像已不存在或无法访问。",
@@ -469,6 +467,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     register,
     requestPasswordReset,
     resendEmailVerification,
+    switchWorkspace,
+    workspaceMemberships,
   } = useWorkspaceAuth({
     authRoute,
     formatError: humanizeError,
@@ -777,6 +777,8 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           onLogout={() => void logout()}
           onNewUpload={() => navigateToView("upload")}
           onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
+          onSwitchWorkspace={(membershipId) => void switchWorkspace(membershipId)}
+          organizationId={authSession?.organization?.organization_id ?? null}
           organizationName={authSession?.organization?.name ?? null}
           platformAdmin={authSession?.is_platform_admin ?? false}
           platformAdminHref={platformHref()}
@@ -785,6 +787,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
           trial={authSession?.trial ?? null}
           userDisplayName={authSession?.user?.display_name ?? null}
           userEmail={authSession?.user?.email ?? null}
+          workspaceMemberships={workspaceMemberships}
         />
         <TrialStatusBanner trial={authSession?.trial ?? null} />
         <main className="main-content" id="main-content">

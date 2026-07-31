@@ -4,6 +4,7 @@ import type {
   AuthLoginInput,
   AuthRegistrationInput,
   AuthSession,
+  AuthWorkspaceMembership,
 } from "../../types";
 
 export type WorkspaceAuthState =
@@ -30,6 +31,7 @@ export function useWorkspaceAuth({
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [workspaceMemberships, setWorkspaceMemberships] = useState<AuthWorkspaceMembership[]>([]);
 
   const applyAuthSession = useCallback((session: AuthSession) => {
     setAuthSession(session);
@@ -52,6 +54,18 @@ export function useWorkspaceAuth({
     }
   }, [applyAuthSession]);
 
+  const refreshWorkspaceMemberships = useCallback(async () => {
+    try {
+      const response = await api.listAuthWorkspaces();
+      setWorkspaceMemberships(response.items);
+      return response.items;
+    } catch {
+      // The server remains authoritative. A transient menu refresh failure
+      // never changes the current authenticated workspace.
+      return [];
+    }
+  }, []);
+
   useEffect(() => {
     void api
       .getAuthSession()
@@ -63,6 +77,14 @@ export function useWorkspaceAuth({
         setAuthState("unauthenticated");
       });
   }, [applyAuthSession]);
+
+  useEffect(() => {
+    if (authState !== "authenticated" || !authSession?.authenticated) {
+      setWorkspaceMemberships([]);
+      return;
+    }
+    void refreshWorkspaceMemberships();
+  }, [authSession?.authenticated, authSession?.organization?.organization_id, authState, refreshWorkspaceMemberships]);
 
   // Large-model usage can change in a background worker, an Agent turn, or a
   // second browser tab. Refresh the small server-owned trial snapshot while
@@ -217,10 +239,33 @@ export function useWorkspaceAuth({
     }
   }, [formatError]);
 
+  const switchWorkspace = useCallback(
+    async (membershipId: string) => {
+      setAuthError(null);
+      setAuthLoading(true);
+      try {
+        const session = await api.switchAuthWorkspace(membershipId);
+        // All view-local candidate, filter, and Agent state belongs to the
+        // previous tenant. Clear it before the full workspace reload.
+        onLogoutCleanup();
+        applyAuthSession(session);
+        window.location.assign(workspaceHref());
+        return true;
+      } catch (error) {
+        setAuthError(formatError(error));
+        return false;
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [applyAuthSession, formatError, onLogoutCleanup, workspaceHref],
+  );
+
   const logout = useCallback(async () => {
     await api.logout();
     onLogoutCleanup();
     setAuthSession(null);
+    setWorkspaceMemberships([]);
     setAuthState("unauthenticated");
     window.location.assign(workspaceHref("/login"));
   }, [onLogoutCleanup, workspaceHref]);
@@ -238,5 +283,7 @@ export function useWorkspaceAuth({
     register,
     requestPasswordReset,
     resendEmailVerification,
+    switchWorkspace,
+    workspaceMemberships,
   };
 }

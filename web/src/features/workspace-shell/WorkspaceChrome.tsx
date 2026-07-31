@@ -5,7 +5,7 @@ import {
 } from "react";
 import { Icon } from "../../icons";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
-import type { TrialAccess } from "../../types";
+import type { AuthWorkspaceMembership, TrialAccess } from "../../types";
 import type {
   WorkspaceNavigationView,
   WorkspaceView,
@@ -162,6 +162,8 @@ export function Topbar({
   onLogout,
   onNewUpload,
   onOpenSettings,
+  onSwitchWorkspace,
+  organizationId,
   organizationName,
   platformAdmin,
   platformAdminHref,
@@ -170,6 +172,7 @@ export function Topbar({
   trial,
   userDisplayName,
   userEmail,
+  workspaceMemberships,
 }: {
   onOpenAgent: () => void;
   onOpenFeedback: () => void;
@@ -178,6 +181,8 @@ export function Topbar({
   onLogout: () => void;
   onNewUpload: () => void;
   onOpenSettings: () => void;
+  onSwitchWorkspace: (membershipId: string) => void;
+  organizationId: string | null;
   organizationName: string | null;
   platformAdmin: boolean;
   platformAdminHref: string;
@@ -186,6 +191,7 @@ export function Topbar({
   trial: TrialAccess | null;
   userDisplayName: string | null;
   userEmail: string | null;
+  workspaceMemberships: AuthWorkspaceMembership[];
 }) {
   const trialDays = trial?.trial_days_remaining;
   const roleLabel = role === "admin" ? "管理员" : role === "recruiter" ? "招聘官" : null;
@@ -238,6 +244,8 @@ export function Topbar({
           onOpenFeedback={onOpenFeedback}
           onOpenSettings={onOpenSettings}
           onLogout={onLogout}
+          onSwitchWorkspace={onSwitchWorkspace}
+          organizationId={organizationId}
           organizationName={organizationName}
           platformAdmin={platformAdmin}
           platformAdminHref={platformAdminHref}
@@ -247,6 +255,7 @@ export function Topbar({
           trialLlmCallRemaining={trialLlmCallRemaining}
           userDisplayName={userDisplayName}
           userEmail={userEmail}
+          workspaceMemberships={workspaceMemberships}
         />
       </div>
     </header>
@@ -259,6 +268,8 @@ function AccountMenu({
   onOpenFeedback,
   onOpenSettings,
   onLogout,
+  onSwitchWorkspace,
+  organizationId,
   organizationName,
   platformAdmin,
   platformAdminHref,
@@ -268,12 +279,15 @@ function AccountMenu({
   trialLlmCallRemaining,
   userDisplayName,
   userEmail,
+  workspaceMemberships,
 }: {
   canManageSettings: boolean;
   onOpen: () => void;
   onOpenFeedback: () => void;
   onOpenSettings: () => void;
   onLogout: () => void;
+  onSwitchWorkspace: (membershipId: string) => void;
+  organizationId: string | null;
   organizationName: string | null;
   platformAdmin: boolean;
   platformAdminHref: string;
@@ -283,6 +297,7 @@ function AccountMenu({
   trialLlmCallRemaining: number | null;
   userDisplayName: string | null;
   userEmail: string | null;
+  workspaceMemberships: AuthWorkspaceMembership[];
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
@@ -447,6 +462,35 @@ function AccountMenu({
             <section className="account-menu-allowance is-expired" aria-label="试用状态">
               <span>试用状态</span>
               <strong>试用已到期</strong>
+            </section>
+          )}
+          {workspaceMemberships.length > 1 && (
+            <section aria-label="切换工作区" className="account-menu-workspace-switcher">
+              <span>切换工作区</span>
+              <div>
+                {workspaceMemberships.map((workspace) => {
+                  const isCurrent = workspace.organization_id === organizationId;
+                  return (
+                    <button
+                      aria-current={isCurrent ? "true" : undefined}
+                      className="account-menu-action"
+                      disabled={isCurrent}
+                      key={workspace.membership_id}
+                      onClick={() => {
+                        closeMenu();
+                        onSwitchWorkspace(workspace.membership_id);
+                      }}
+                      type="button"
+                    >
+                      <Icon name="layers" size={16} />
+                      <span>
+                        <strong>{workspace.name}</strong>
+                        <small>{workspace.role === "admin" ? "管理员" : "招聘官"}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </section>
           )}
           <div className="account-menu-actions">

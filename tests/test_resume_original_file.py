@@ -76,16 +76,18 @@ def test_original_pdf_does_not_follow_a_tampered_storage_path(client: TestClient
     assert response.content != content
 
 
-def test_original_pdf_keeps_the_existing_admin_authentication(tmp_path: Path) -> None:
+def test_original_file_requires_a_named_authenticated_session(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     settings = AppSettings(
         project_dir=tmp_path,
         data_dir=data_dir,
         upload_dir=data_dir / "uploads",
         database_url="sqlite://",
-        admin_token="test-admin-token",
-        legacy_admin_token_enabled=True,
+        session_secret="original-file-authentication-test-secret",
+        allow_unauthenticated=False,
         min_text_chars_per_page=20,
+        transactional_email_provider="test",
+        public_app_url="http://testserver",
     )
     app = create_app(settings)
     with TestClient(app) as protected_client:

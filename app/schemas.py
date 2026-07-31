@@ -200,9 +200,7 @@ class ApiModel(BaseModel):
 
 
 class AuthLogin(ApiModel):
-    # ``email`` is optional only for the temporary legacy-admin compatibility
-    # path. New accounts always authenticate with email + password.
-    email: str | None = Field(default=None, max_length=320)
+    email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=512)
 
 
@@ -215,6 +213,19 @@ class AuthUserResponse(ApiModel):
 class AuthOrganizationResponse(ApiModel):
     organization_id: str
     name: str
+
+
+class AuthWorkspaceMembershipResponse(ApiModel):
+    """One workspace the authenticated person may explicitly enter."""
+
+    membership_id: str
+    organization_id: str
+    name: str
+    role: Literal["admin", "recruiter"]
+
+
+class AuthWorkspaceMembershipListResponse(ApiModel):
+    items: list[AuthWorkspaceMembershipResponse] = Field(default_factory=list)
 
 
 class AuthPlanResponse(ApiModel):

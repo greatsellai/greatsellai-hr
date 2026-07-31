@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { isApiError } from "./api";
+import { IcpFilingLink } from "./IcpFilingLink";
 import {
   LandingPage,
   ROOT_WORKSPACE_BASE_PATH,
@@ -841,6 +842,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             onUploadedResume={openUploadedResume}
           />
         </main>
+        <footer className="workspace-compliance-footer">
+          <IcpFilingLink />
+        </footer>
       </div>
 
       <div

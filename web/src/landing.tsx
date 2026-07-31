@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Icon, type IconName } from "./icons";
+import { IcpFilingLink } from "./IcpFilingLink";
 import "./landing.css";
 
 export const ROOT_WORKSPACE_BASE_PATH = "/greatsellhr";
@@ -474,7 +475,11 @@ export function LandingPage({
           <p>让每一次招聘决策，都拥有AI驱动的判断能力。</p>
           <nav aria-label="页脚导航"><a href="#capabilities">产品能力</a><a href="#pricing">版本定价</a><a href={loginHref}>登录系统</a></nav>
         </div>
-        <div className="landing-shell landing-footer-bottom"><span>© 2026 大卖数智 GreatSell AI</span><span>AI 辅助判断，招聘团队最终决策</span></div>
+        <div className="landing-shell landing-footer-bottom">
+          <span>© 2026 大卖数智 GreatSell AI</span>
+          <span>AI 辅助判断，招聘团队最终决策</span>
+          <IcpFilingLink />
+        </div>
       </footer>
     </div>
   );

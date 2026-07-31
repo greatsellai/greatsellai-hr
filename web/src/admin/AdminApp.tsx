@@ -6,6 +6,7 @@ import {
   type FormEvent,
 } from "react";
 import { Icon, type IconName } from "../icons";
+import { IcpFilingLink } from "../IcpFilingLink";
 import type { AuthSession } from "../types";
 import { adminApi, adminErrorMessage } from "./admin-api";
 import type { AdminView } from "./admin-types";
@@ -68,48 +69,57 @@ function viewFromPath(pathname = window.location.pathname): AdminView {
 
 function AdminBootState({ message }: { message: string }) {
   return (
-    <main className="admin-gate" aria-live="polite">
-      <div className="admin-gate-mark" aria-hidden="true" />
-      <div>
-        <h1>GreatSell AI 平台管理</h1>
-        <p><i className="spinner" /> {message}</p>
-      </div>
-    </main>
+    <div className="admin-gate-page">
+      <main className="admin-gate" aria-live="polite">
+        <div className="admin-gate-mark" aria-hidden="true" />
+        <div>
+          <h1>GreatSell AI 平台管理</h1>
+          <p><i className="spinner" /> {message}</p>
+        </div>
+      </main>
+      <footer className="admin-compliance-footer"><IcpFilingLink /></footer>
+    </div>
   );
 }
 
 function AdminDenied({ session }: { session: AuthSession }) {
   const displayName = session.user?.display_name || session.user?.email || "当前账号";
   return (
-    <main className="admin-gate admin-gate-denied">
-      <div className="admin-gate-mark is-denied" aria-hidden="true">
-        <Icon name="close" size={22} />
-      </div>
-      <div>
-        <span className="admin-gate-label">平台权限</span>
-        <h1>此账号不能访问平台管理</h1>
-        <p>{displayName} 已登录，但没有平台管理员权限。你仍可返回自己的招聘工作区。</p>
-        <div className="admin-gate-actions">
-          <a className="button button-primary" href={workspacePath}>返回招聘工作台</a>
-          <a className="button" href={`${loginPath}?next=${encodeURIComponent(platformBasePath)}`}>更换账号</a>
+    <div className="admin-gate-page">
+      <main className="admin-gate admin-gate-denied">
+        <div className="admin-gate-mark is-denied" aria-hidden="true">
+          <Icon name="close" size={22} />
         </div>
-      </div>
-    </main>
+        <div>
+          <span className="admin-gate-label">平台权限</span>
+          <h1>此账号不能访问平台管理</h1>
+          <p>{displayName} 已登录，但没有平台管理员权限。你仍可返回自己的招聘工作区。</p>
+          <div className="admin-gate-actions">
+            <a className="button button-primary" href={workspacePath}>返回招聘工作台</a>
+            <a className="button" href={`${loginPath}?next=${encodeURIComponent(platformBasePath)}`}>更换账号</a>
+          </div>
+        </div>
+      </main>
+      <footer className="admin-compliance-footer"><IcpFilingLink /></footer>
+    </div>
   );
 }
 
 function AdminLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <main className="admin-gate" role="alert">
-      <div className="admin-gate-mark is-denied" aria-hidden="true">
-        <Icon name="refresh" size={22} />
-      </div>
-      <div>
-        <h1>暂时无法验证平台权限</h1>
-        <p>{message}</p>
-        <button className="button button-primary" onClick={onRetry} type="button">重新验证</button>
-      </div>
-    </main>
+    <div className="admin-gate-page">
+      <main className="admin-gate" role="alert">
+        <div className="admin-gate-mark is-denied" aria-hidden="true">
+          <Icon name="refresh" size={22} />
+        </div>
+        <div>
+          <h1>暂时无法验证平台权限</h1>
+          <p>{message}</p>
+          <button className="button button-primary" onClick={onRetry} type="button">重新验证</button>
+        </div>
+      </main>
+      <footer className="admin-compliance-footer"><IcpFilingLink /></footer>
+    </div>
   );
 }
 
@@ -317,6 +327,7 @@ export default function AdminApp() {
             <AdminAuditPage />
           )}
         </main>
+        <footer className="admin-compliance-footer"><IcpFilingLink /></footer>
       </div>
     </div>
   );

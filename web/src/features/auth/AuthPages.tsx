@@ -6,6 +6,7 @@ import {
 } from "react";
 import { api } from "../../api";
 import { Icon } from "../../icons";
+import { IcpFilingLink } from "../../IcpFilingLink";
 import type {
   AuthLoginInput,
   AuthRegistrationInput,
@@ -600,6 +601,9 @@ function AuthPageLayout({
           {children}
         </section>
       </div>
+      <footer className="auth-compliance-footer">
+        <IcpFilingLink />
+      </footer>
     </main>
   );
 }

@@ -979,6 +979,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
       });
     },
 
+    publishOriginalJobVersion(jobId: string, input: OriginalJobPublishInput): Promise<JobVersion> {
+      return request<JobVersion>(`/jobs/${resourcePath(jobId)}/publish-original-version`, {
+        method: "POST",
+        body: input,
+      });
+    },
+
     createJobVersion(jobId: string, input: JobCreate): Promise<JobVersion> {
       return request<JobVersion>(`/jobs/${resourcePath(jobId)}/versions`, { method: "POST", body: input });
     },

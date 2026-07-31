@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useState,
   type CSSProperties,
 } from "react";
@@ -19,6 +20,29 @@ import "./job-match.css";
 type ToastKind = "success" | "error";
 type JobWorkspaceMode = "create" | "view";
 export type MatchWorkspaceSurface = "jobs" | "matching";
+
+/**
+ * The matching surface intentionally selects a precise immutable JD version.
+ * Job management has a different task: one selector item must represent one
+ * recruiting Job, with its latest confirmed version shown by default.
+ */
+function latestConfirmedVersionPerJob(versions: JobVersion[]): JobVersion[] {
+  const latestByJobId = new Map<string, JobVersion>();
+  for (const version of versions) {
+    const current = latestByJobId.get(version.job_id);
+    if (!current || version.version > current.version) {
+      latestByJobId.set(version.job_id, version);
+    }
+  }
+  return [...latestByJobId.values()];
+}
+
+function jobManagementLabel(version: JobVersion, versionCount: number): string {
+  const labels = [version.title, `最新 v${version.version}`];
+  if (versionCount > 1) labels.push(`${versionCount} 个版本`);
+  if (!version.requirements.length) labels.push("原版");
+  return labels.join(" · ");
+}
 
 export function MatchWorkspace({
   canGenerateAiJd,
@@ -66,6 +90,25 @@ export function MatchWorkspace({
   const [batchItems, setBatchItems] = useState<JobMatchBatchItem[]>([]);
   const [jobMatches, setJobMatches] = useState<JobMatch[]>([]);
   const [matchesLoading, setMatchesLoading] = useState(false);
+  const latestConfirmedJobs = useMemo(
+    () => latestConfirmedVersionPerJob(confirmedJobVersions),
+    [confirmedJobVersions],
+  );
+  const confirmedVersionsForCurrentJob = useMemo(
+    () => jobVersion?.job_id
+      ? confirmedJobVersions
+        .filter((item) => item.job_id === jobVersion.job_id)
+        .sort((left, right) => right.version - left.version)
+      : [],
+    [confirmedJobVersions, jobVersion?.job_id],
+  );
+  const confirmedVersionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const version of confirmedJobVersions) {
+      counts.set(version.job_id, (counts.get(version.job_id) ?? 0) + 1);
+    }
+    return counts;
+  }, [confirmedJobVersions]);
   const resetJobAuthoring = () => {
     setTitle("");
     setJobBrief("");
@@ -253,12 +296,15 @@ export function MatchWorkspace({
     setGenerationError(null);
     setLoading(true);
     try {
-      const published = await api.publishOriginalJob({
+      const payload = {
         title: title.trim(),
         // This deliberately retains every valid character entered in the JD.
         // The endpoint performs validation without normalizing the source text.
         jd_text: jobBrief,
-      });
+      };
+      const published = versioningJobId
+        ? await api.publishOriginalJobVersion(versioningJobId, payload)
+        : await api.publishOriginalJob(payload);
       setConfirmedJobVersions((current) => [
         published,
         ...current.filter(
@@ -341,9 +387,12 @@ export function MatchWorkspace({
           enterNewJobDraft();
           return;
         }
+        const defaultVersions = mode === "jobs"
+          ? latestConfirmedVersionPerJob(versions)
+          : versions;
         const initial = initialJobVersionId
           ? versions.find((item) => item.job_version_id === initialJobVersionId)
-          : versions[0];
+          : defaultVersions[0];
         if (initialJobVersionId && !initial) {
           notify("error", "该岗位 JD 不存在或无权访问，已回到可访问的岗位。");
           onInvalidJobVersion?.();
@@ -416,32 +465,45 @@ export function MatchWorkspace({
             {confirmedJobVersions.length > 0 && (
               <div className="jd-switcher">
                 <div>
-                  <span className="field-label">已保存的岗位 JD</span>
-                  <p>切换后将显示该岗位自己的候选人匹配结果。</p>
+                  <span className="field-label">
+                    {isJobManagement ? "已保存的岗位" : "已保存的岗位 JD"}
+                  </span>
+                  <p>
+                    {isJobManagement
+                      ? "每个岗位只显示一条，进入后可查看和切换其 JD 版本。"
+                      : "切换后将显示该岗位 JD 自己的候选人匹配结果。"}
+                  </p>
                 </div>
                 <div className="jd-switcher-select">
                   <BackofficeSelect
-                    ariaLabel={isJobManagement ? "切换已保存的岗位 JD" : "选择用于智能匹配的岗位 JD"}
+                    ariaLabel={isJobManagement ? "切换已保存的岗位" : "选择用于智能匹配的岗位 JD"}
+                    id="saved-job-selector"
                     onChange={(value) => {
                       if (!value) {
                         if (isJobManagement) beginNewJob();
                         return;
                       }
-                      const next = confirmedJobVersions.find(
-                        (item) => item.job_version_id === value,
-                      );
+                      const next = isJobManagement
+                        ? latestConfirmedJobs.find((item) => item.job_id === value)
+                        : confirmedJobVersions.find((item) => item.job_version_id === value);
                       if (next) selectJobVersion(next);
                     }}
                     options={[
                       ...(isJobManagement ? [{ label: "新建岗位 JD", value: "" }] : []),
-                      ...confirmedJobVersions.map((item) => ({
-                        label: `${item.title} · v${item.version}${!item.requirements.length ? " · 原版" : ""}`,
-                        value: item.job_version_id,
+                      ...(isJobManagement ? latestConfirmedJobs : confirmedJobVersions).map((item) => ({
+                        label: isJobManagement
+                          ? jobManagementLabel(item, confirmedVersionCounts.get(item.job_id) ?? 1)
+                          : `${item.title} · v${item.version}${!item.requirements.length ? " · 原版" : ""}`,
+                        value: isJobManagement ? item.job_id : item.job_version_id,
                       })),
                     ]}
                     value={
-                      jobWorkspaceMode === "view"
-                        ? (jobVersion?.job_version_id ?? "")
+                      isJobManagement && versioningJobId
+                        ? versioningJobId
+                        : jobWorkspaceMode === "view"
+                        ? (isJobManagement
+                          ? (jobVersion?.job_id ?? "")
+                          : (jobVersion?.job_version_id ?? ""))
                         : ""
                     }
                   />
@@ -484,6 +546,29 @@ export function MatchWorkspace({
                     )}
                   </div>
                 </div>
+                {isJobManagement && confirmedVersionsForCurrentJob.length > 1 && (
+                  <div className="job-version-picker">
+                    <div>
+                      <span className="field-label">JD 版本</span>
+                      <p>当前岗位保留 {confirmedVersionsForCurrentJob.length} 个已发布版本。</p>
+                    </div>
+                    <BackofficeSelect
+                      ariaLabel="切换当前岗位的 JD 版本"
+                      id="saved-job-version-selector"
+                      onChange={(value) => {
+                        const next = confirmedVersionsForCurrentJob.find(
+                          (item) => item.job_version_id === value,
+                        );
+                        if (next) selectJobVersion(next);
+                      }}
+                      options={confirmedVersionsForCurrentJob.map((item) => ({
+                        label: `v${item.version}${!item.requirements.length ? " · 原版" : ""}`,
+                        value: item.job_version_id,
+                      }))}
+                      value={jobVersion.job_version_id}
+                    />
+                  </div>
+                )}
                 <label className="field-label" htmlFor="active-job-text">
                   岗位 JD 原文
                 </label>
@@ -590,7 +675,7 @@ export function MatchWorkspace({
                     onClick={() => void publishOriginalJob()}
                     tone={canGenerateAiJd ? "default" : "primary"}
                   >
-                    原样发布 JD
+                    {versioningJobId ? "发布原版新版本" : "原样发布 JD"}
                   </BackofficeButton>
                   {canGenerateAiJd && (
                     <BackofficeButton

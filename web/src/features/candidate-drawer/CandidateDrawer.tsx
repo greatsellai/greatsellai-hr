@@ -223,7 +223,6 @@ export function CandidateDrawer({
               className={`button drawer-favorite-button${review?.is_favorited ? " is-favorited" : ""}`}
               disabled={!review || favoriteLoading}
               onClick={onToggleFavorite}
-              title="收藏以候选人为单位，所有简历版本共用此状态"
               type="button"
             >
               {favoriteLoading ? (

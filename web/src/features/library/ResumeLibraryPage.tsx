@@ -378,7 +378,6 @@ export function ResumeLibraryPage({
                               event.stopPropagation();
                               void toggleFavorite(item);
                             }}
-                            title="收藏的是候选人，所有简历版本共用此状态"
                             type="button"
                           >
                             {favoriteUpdating ? (

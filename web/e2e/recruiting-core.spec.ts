@@ -66,6 +66,10 @@ test("招聘流程展示应聘快照，可打开候选人并由人工推进阶�
 
   await expect(page.getByRole("heading", { level: 1, name: "招聘流程", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "E2E 后端工程师", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "新增招聘流程", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "新版本", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "新增招聘流程", exact: true }).click();
+  await expect(page.getByText("流程名称", { exact: true })).toBeVisible();
   const candidateCard = page.locator(".recruiting-application-card").filter({
     hasText: "E2E 推荐候选人",
   });

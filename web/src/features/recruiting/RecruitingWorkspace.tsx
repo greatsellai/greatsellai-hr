@@ -373,6 +373,11 @@ export function RecruitingWorkspace({
     setWorkflowEditorOpen(true);
   };
 
+  const openNewWorkflowEditor = () => {
+    resetWorkflowEditor(null);
+    setWorkflowEditorOpen(true);
+  };
+
   const refreshCurrentJob = async () => {
     await Promise.all([
       loadWorkspace(),
@@ -829,10 +834,21 @@ export function RecruitingWorkspace({
                 <h2>招聘流程</h2>
                 {selectedWorkflowReference && <p>{workflowVersionLabel(selectedWorkflowReference)}</p>}
               </div>
-              <button className="text-button" onClick={openWorkflowEditor} type="button">
-                {selectedWorkflowReference ? "新版本" : "配置流程"}
-              </button>
+              {selectedWorkflowReference && (
+                <button className="text-button" onClick={openWorkflowEditor} type="button">
+                  新版本
+                </button>
+              )}
             </div>
+            <button
+              aria-expanded={workflowEditorOpen}
+              className="button button-primary recruiting-workflow-create-action"
+              onClick={openNewWorkflowEditor}
+              type="button"
+            >
+              <Icon name="plus" size={16} />
+              新增招聘流程
+            </button>
             {selectedWorkflowReference ? (
               <ol className="recruiting-workflow-list">
                 {[...selectedWorkflowReference.version.stages]

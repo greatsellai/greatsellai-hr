@@ -209,9 +209,6 @@ export function FavoriteCandidatesPage({
                       <td>
                         <div className="candidate-person">
                           <strong className="candidate-name">{name}</strong>
-                          <span className="candidate-meta">
-                            收藏的是候选人，所有简历版本保留在同一详情中。
-                          </span>
                         </div>
                       </td>
                       <td>

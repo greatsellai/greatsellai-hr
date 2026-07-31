@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
-from app.models import JobRequirement, JobVersion
+from app.models import Job, JobRequirement, JobVersion
 from app.schemas import JobCreate, JobMatchCreate, JobRequirements
 from app.services import job_service
 from app.services.deepseek_provider import FACT_SNAPSHOT_SCHEMA_VERSION
 from test_filter_mvp_contract import _save_ready_resume
+from test_tenant_isolation import _register_and_login, workspace_clients
 
 
 def _job_payload(*, requirements: JobRequirements | None = None) -> JobCreate:
@@ -168,12 +170,118 @@ def test_original_jd_publish_persists_verbatim_without_calling_any_provider(
         assert persisted.job.jd_text == raw_jd
         assert persisted.status == "confirmed"
         assert persisted.requirements == []
+        jobs = session.scalars(select(Job).where(Job.kind == "job")).all()
+        assert [job.id for job in jobs] == [payload["job_id"]]
+        assert jobs[0].version == 1
+        assert jobs[0].requirements == {"must_have": [], "preferred": []}
 
     matching = ai_client.post(
         f"/v1/job-versions/{payload['job_version_id']}/match-all"
     )
     assert matching.status_code == 409, matching.text
     assert matching.json()["detail"] == "job_version_has_no_requirements"
+
+
+def test_original_jd_publish_version_reuses_existing_job_and_preserves_source_text(
+    ai_client,
+) -> None:
+    first_raw_jd = "Must have Python experience."
+    second_raw_jd = "  Original v2.\r\n\r\n- Keep all source whitespace.\r\n  "
+
+    first = ai_client.post(
+        "/v1/jobs",
+        json={
+            "title": "Source JD",
+            "jd_text": first_raw_jd,
+            "requirements": {"must_have": ["Python experience"], "preferred": []},
+        },
+    )
+    assert first.status_code == 200, first.text
+    first_payload = first.json()
+
+    second = ai_client.post(
+        f"/v1/jobs/{first_payload['job_id']}/publish-original-version",
+        json={"title": "Source JD revision", "jd_text": second_raw_jd},
+    )
+    assert second.status_code == 200, second.text
+    second_payload = second.json()
+
+    assert second_payload["job_id"] == first_payload["job_id"]
+    assert first_payload["version"] == 1
+    assert second_payload["version"] == 2
+    assert second_payload["raw_text"] == second_raw_jd
+    assert second_payload["status"] == "confirmed"
+    assert second_payload["requirements"] == []
+    assert [clause["text"] for clause in second_payload["clauses"]] == [
+        "Original v2.",
+        "Keep all source whitespace.",
+    ]
+
+    versions = ai_client.get(f"/v1/jobs/{first_payload['job_id']}/versions")
+    assert versions.status_code == 200, versions.text
+    assert [(item["job_id"], item["version"]) for item in versions.json()] == [
+        (first_payload["job_id"], 2),
+        (first_payload["job_id"], 1),
+    ]
+
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        jobs = session.scalars(select(Job).where(Job.kind == "job")).all()
+        assert [job.id for job in jobs] == [first_payload["job_id"]]
+        assert jobs[0].version == 2
+        assert jobs[0].title == "Source JD revision"
+        assert jobs[0].jd_text == second_raw_jd
+        assert jobs[0].requirements == {"must_have": [], "preferred": []}
+        persisted_versions = session.scalars(
+            select(JobVersion)
+            .where(JobVersion.job_id == first_payload["job_id"])
+            .order_by(JobVersion.version)
+        ).all()
+        assert [(item.version, item.raw_text) for item in persisted_versions] == [
+            (1, first_raw_jd),
+            (2, second_raw_jd),
+        ]
+        assert len(persisted_versions[0].requirements) == 1
+        assert persisted_versions[1].requirements == []
+
+
+def test_original_jd_publish_version_rejects_missing_or_foreign_job(
+    workspace_clients,
+) -> None:
+    client_a, client_b = workspace_clients
+    _register_and_login(
+        client_a,
+        organization_name="Original JD alpha",
+        full_name="Original JD alpha admin",
+        email="original-jd-alpha@example.test",
+        password="tenant-test-password-a",
+    )
+    _register_and_login(
+        client_b,
+        organization_name="Original JD beta",
+        full_name="Original JD beta admin",
+        email="original-jd-beta@example.test",
+        password="tenant-test-password-b",
+    )
+    created = client_b.post(
+        "/v1/jobs/publish-original",
+        json={"title": "Private role", "jd_text": "Private source JD."},
+    )
+    assert created.status_code == 200, created.text
+    job_id = created.json()["job_id"]
+
+    missing = client_a.post(
+        "/v1/jobs/not-a-real-job/publish-original-version",
+        json={"title": "Revision", "jd_text": "Revision source JD."},
+    )
+    foreign = client_a.post(
+        f"/v1/jobs/{job_id}/publish-original-version",
+        json={"title": "Revision", "jd_text": "Revision source JD."},
+    )
+
+    for response in (missing, foreign):
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"] == "job_not_found"
 
 
 @pytest.mark.parametrize(

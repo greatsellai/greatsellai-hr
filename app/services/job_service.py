@@ -598,6 +598,55 @@ def publish_original_job(
     return _version_response(job_version)
 
 
+def publish_original_job_version(
+    session: Session,
+    *,
+    job_id: str,
+    payload: OriginalJobPublishRequest,
+) -> JobVersionResponse:
+    """Append a verbatim, confirmed source-JD version to an existing job.
+
+    This is deliberately separate from :func:`publish_original_job`, which
+    creates a new position for a first-time source JD.  Re-publishing an
+    edited source JD must retain the same ``Job`` identity and recruiting
+    workflow, while preserving the supplied source text without model-led
+    normalization or requirement extraction.
+    """
+
+    job = session.get(Job, job_id)
+    if job is None or job.kind != "job":
+        raise JobNotFoundError("job_not_found")
+
+    next_version = (
+        session.scalar(
+            select(JobVersion.version)
+            .where(JobVersion.job_id == job.id)
+            .order_by(JobVersion.version.desc())
+        )
+        or 0
+    ) + 1
+    # ``Job`` is only a cache of the latest immutable version.  Keep it in
+    # sync so recruiting views and any later version creation point at vN,
+    # while JobVersion remains the source of truth for historical matching.
+    job.title = payload.title
+    job.jd_text = payload.jd_text
+    job.requirements = JobRequirements().model_dump()
+    job.version = next_version
+    job_version = JobVersion(
+        job_id=job.id,
+        version=next_version,
+        title=payload.title,
+        raw_text=payload.jd_text,
+        status="confirmed",
+        confirmed_at=_utcnow(),
+    )
+    session.add(job_version)
+    session.flush()
+    _create_clauses(session, job_version=job_version)
+    session.flush()
+    return _version_response(job_version)
+
+
 def generate_job_description(
     *,
     session: Session,
@@ -1221,6 +1270,7 @@ __all__ = [
     "list_resume_job_matches",
     "list_job_versions",
     "publish_original_job",
+    "publish_original_job_version",
     "run_job_match",
     "update_job_version_requirements",
 ]

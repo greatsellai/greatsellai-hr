@@ -428,6 +428,7 @@ from app.services.job_service import (
     list_job_versions,
     list_resume_job_matches,
     publish_original_job,
+    publish_original_job_version,
     run_job_match,
     update_job_version_requirements,
 )
@@ -6525,6 +6526,33 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         except RecruitingServiceError as exc:
             session.rollback()
             _raise_recruiting_service_error(exc)
+        _commit_or_raise(session)
+        return response
+
+    @app.post(
+        "/v1/jobs/{job_id}/publish-original-version",
+        response_model=JobVersionResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    def post_publish_original_job_version(
+        job_id: str,
+        payload: OriginalJobPublishRequest,
+        session: Session = Depends(get_session),
+    ) -> JobVersionResponse:
+        """Append an original-source JD version without creating a new position."""
+
+        try:
+            response = publish_original_job_version(
+                session,
+                job_id=job_id,
+                payload=payload,
+            )
+        except JobNotFoundError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except JobServiceError as exc:
+            session.rollback()
+            _raise_job_service_error(exc)
         _commit_or_raise(session)
         return response
 

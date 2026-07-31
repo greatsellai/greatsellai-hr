@@ -972,6 +972,37 @@ def test_deploy_failure_cleanup_does_not_mask_the_original_error_under_nounset()
     assert '"${migration_changed:-1}"' in deploy
 
 
+def test_schema_migration_quiesces_old_writers_before_target_migrate() -> None:
+    """An old API must not write while the target migration is in flight."""
+
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    deploy = helper.split("deploy_target()", maxsplit=1)[1].split(
+        "release_unlocked()", maxsplit=1
+    )[0]
+
+    phase = 'release_phase "Quiesce current writers before schema migration"'
+    stop_writers = 'stop api worker </dev/null'
+    target_migrate = 'up -d --no-build api worker caddy </dev/null'
+    assert phase in deploy
+    assert stop_writers in deploy
+    assert target_migrate in deploy
+    assert deploy.index(phase) < deploy.index(stop_writers) < deploy.index(target_migrate)
+    quiesce = deploy.split(phase, maxsplit=1)[1].split(target_migrate, maxsplit=1)[0]
+    assert quiesce.index("writers_quiesced=1") < quiesce.index(stop_writers)
+    # The explicit branch protects normal no-schema-change releases from an
+    # unnecessary second interruption while making every schema change safe.
+    assert '[[ "$migration_changed" == "1" && -n "${current_commit:-}" ]]' in deploy
+    assert "previous_schema_revision" in deploy
+    assert "database_schema_revision" in helper
+    # A migration may reject its no-write preflight (for example, no eligible
+    # formal administrator). In that narrow state the recorded runtime can be
+    # restored, but a changed revision deliberately leaves old writers down.
+    assert 'if [[ "$observed_schema_revision" == "$previous_schema_revision" ]]; then' in deploy
+    assert "Target migration may have advanced the database" in deploy
+
+
 def test_release_transaction_passes_all_double_digit_arguments_to_the_source_stager(
     tmp_path: Path,
 ) -> None:

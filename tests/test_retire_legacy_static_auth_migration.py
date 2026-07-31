@@ -146,6 +146,121 @@ def _seed_legacy_invitations(connection, *, now: datetime) -> datetime:
     return pending_expiry
 
 
+def test_retirement_allows_an_untouched_bootstrap_database_to_reach_head(tmp_path) -> None:
+    """A new installation has no history that needs an adopted administrator."""
+
+    database_path = tmp_path / "retire-legacy-pristine-bootstrap.sqlite"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = _config(database_url)
+
+    # A full upgrade creates only the deterministic legacy bootstrap identity
+    # plus its automatic retention policy.  The retirement migration must not
+    # make fresh/staging initialization impossible just because no real person
+    # has registered yet.
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        metadata = MetaData()
+        users = Table("user_accounts", metadata, autoload_with=engine)
+        memberships = Table("organization_memberships", metadata, autoload_with=engine)
+        candidates = Table("candidates", metadata, autoload_with=engine)
+        with engine.connect() as connection:
+            legacy_user = connection.execute(
+                select(users.c.is_active, users.c.is_platform_admin).where(
+                    users.c.id == _LEGACY_USER_ID
+                )
+            ).one()
+            legacy_membership_active = connection.execute(
+                select(memberships.c.is_active).where(
+                    memberships.c.id == _LEGACY_MEMBERSHIP_ID
+                )
+            ).scalar_one()
+            candidate_count = connection.execute(select(candidates.c.id)).all()
+    finally:
+        engine.dispose()
+
+    assert legacy_user == (False, False)
+    assert legacy_membership_active is False
+    assert candidate_count == []
+
+
+def test_retirement_requires_adoption_when_bootstrap_retention_policy_changed(tmp_path) -> None:
+    """A settings-only legacy workspace must not lose its only access path."""
+
+    database_path = tmp_path / "retire-legacy-changed-retention-policy.sqlite"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = _config(database_url)
+    command.upgrade(config, "20260730_0052")
+
+    engine = create_engine(database_url)
+    try:
+        metadata = MetaData()
+        policies = Table(
+            "candidate_data_retention_policies", metadata, autoload_with=engine
+        )
+        users = Table("user_accounts", metadata, autoload_with=engine)
+        memberships = Table("organization_memberships", metadata, autoload_with=engine)
+        with engine.begin() as connection:
+            original_auth_version = connection.execute(
+                select(users.c.auth_session_version).where(users.c.id == _LEGACY_USER_ID)
+            ).scalar_one()
+            connection.execute(
+                policies.update()
+                .where(policies.c.organization_id == _LEGACY_ORGANIZATION_ID)
+                .values(
+                    mode="automatic",
+                    retention_days=90,
+                    version=2,
+                    updated_by_user_id=_LEGACY_USER_ID,
+                )
+            )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(
+        RuntimeError,
+        match="legacy_workspace_adoption_requires_verified_platform_admin",
+    ):
+        command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        metadata = MetaData()
+        policies = Table(
+            "candidate_data_retention_policies", metadata, autoload_with=engine
+        )
+        users = Table("user_accounts", metadata, autoload_with=engine)
+        memberships = Table("organization_memberships", metadata, autoload_with=engine)
+        with engine.connect() as connection:
+            legacy_user = connection.execute(
+                select(
+                    users.c.is_active,
+                    users.c.is_platform_admin,
+                    users.c.auth_session_version,
+                ).where(users.c.id == _LEGACY_USER_ID)
+            ).one()
+            legacy_membership_active = connection.execute(
+                select(memberships.c.is_active).where(
+                    memberships.c.id == _LEGACY_MEMBERSHIP_ID
+                )
+            ).scalar_one()
+            policy = connection.execute(
+                select(
+                    policies.c.mode,
+                    policies.c.retention_days,
+                    policies.c.version,
+                    policies.c.updated_by_user_id,
+                ).where(policies.c.organization_id == _LEGACY_ORGANIZATION_ID)
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert legacy_user == (True, True, original_auth_version)
+    assert legacy_membership_active is True
+    assert policy == ("automatic", 90, 2, _LEGACY_USER_ID)
+
+
 def test_retirement_adopts_every_eligible_platform_admin_and_preserves_history(tmp_path) -> None:
     database_path = tmp_path / "retire-legacy-static-auth.sqlite"
     database_url = f"sqlite:///{database_path.as_posix()}"

@@ -22,6 +22,7 @@ def test_trial_llm_quota_migration_backfills_all_traceable_in_window_provider_at
     try:
         metadata = MetaData()
         organizations = Table("organizations", metadata, autoload_with=engine)
+        users = Table("user_accounts", metadata, autoload_with=engine)
         providers = Table("ai_provider_profiles", metadata, autoload_with=engine)
         models = Table("ai_model_profiles", metadata, autoload_with=engine)
         runs = Table("ai_runs", metadata, autoload_with=engine)
@@ -32,6 +33,26 @@ def test_trial_llm_quota_migration_backfills_all_traceable_in_window_provider_at
         trial_end = now + timedelta(days=2)
 
         with engine.begin() as connection:
+            # These provider attempts are legacy-workspace history. Seed the
+            # explicit, verified platform administrator needed by static-auth
+            # retirement before this fixture upgrades through that migration.
+            connection.execute(
+                users.insert(),
+                {
+                    "id": "quota-migration-platform-admin",
+                    "email": "quota-migration-admin@example.test",
+                    "email_key": "quota-migration-admin@example.test",
+                    "full_name": "Trial quota migration admin",
+                    "password_hash": "migration-fixture-not-a-login-password",
+                    "is_active": True,
+                    "is_platform_admin": True,
+                    "email_verified_at": now,
+                    "last_login_at": None,
+                    "created_at": now,
+                    "updated_at": now,
+                    "auth_session_version": 1,
+                },
+            )
             connection.execute(
                 organizations.update()
                 .where(organizations.c.id == organization_id)

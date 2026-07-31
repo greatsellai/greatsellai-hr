@@ -26,6 +26,7 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
     try:
         metadata = MetaData()
         mailboxes = Table("mailbox_configs", metadata, autoload_with=engine)
+        users = Table("user_accounts", metadata, autoload_with=engine)
         now = datetime.now(timezone.utc)
         common_values = {
             "imap_port": 993,
@@ -82,6 +83,26 @@ def test_mailbox_provider_oauth_migration_upgrades_current_production_revision_w
             },
         ]
         with engine.begin() as connection:
+            # The mailbox rows below are real legacy-workspace history. The
+            # static-auth retirement migration therefore needs an explicit,
+            # verified platform administrator before this fixture upgrades on.
+            connection.execute(
+                users.insert(),
+                {
+                    "id": "mailbox-provider-migration-platform-admin",
+                    "email": "mailbox-provider-admin@example.test",
+                    "email_key": "mailbox-provider-admin@example.test",
+                    "full_name": "Mailbox provider migration admin",
+                    "password_hash": "migration-fixture-not-a-login-password",
+                    "is_active": True,
+                    "is_platform_admin": True,
+                    "email_verified_at": now,
+                    "last_login_at": None,
+                    "created_at": now,
+                    "updated_at": now,
+                    "auth_session_version": 1,
+                },
+            )
             connection.execute(mailboxes.insert(), rows)
     finally:
         engine.dispose()

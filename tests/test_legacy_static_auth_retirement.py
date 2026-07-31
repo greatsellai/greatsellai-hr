@@ -265,6 +265,18 @@ def _seed_adopted_workspace_switch_fixture(app) -> dict[str, str]:
         )
         session.commit()
 
+    # The workspace-switch regression exercises the real server-side file
+    # grant resolver, so provide opaque fixture bytes at the exact scoped
+    # storage paths. Nothing here contains a real candidate record.
+    for organization_id, label in (
+        (LEGACY_ORGANIZATION_ID, "legacy"),
+        ("adopted-home-workspace", "home"),
+        ("adopted-foreign-workspace", "foreign"),
+    ):
+        original_path = app.state.settings.upload_dir / organization_id / f"{label}.pdf"
+        original_path.parent.mkdir(parents=True, exist_ok=True)
+        original_path.write_bytes(b"%PDF-1.4\nSynthetic workspace-switch fixture\n")
+
     return {
         "password": password,
         "legacy_membership_id": "adopted-legacy-membership",
@@ -370,12 +382,24 @@ def test_adopted_platform_admin_switches_only_its_own_active_membership(
             fixture["home_membership_id"],
         }
 
+        old_grant = client.post(
+            f"/v1/resumes/{fixture['legacy_resume_id']}/file-access",
+            json={"purpose": "view"},
+        )
+        assert old_grant.status_code == 200, old_grant.text
+        assert client.get(old_grant.json()["access_url"]).status_code == 200
+
         switched = client.post(
             f"/v1/auth/workspaces/{fixture['home_membership_id']}/switch"
         )
         assert switched.status_code == 200, switched.text
         assert switched.json()["organization"]["organization_id"] == fixture["home_organization_id"]
         assert client.cookies.get("resume_v3_session") != cookie_before_switch
+        # A grant is tied both to the account and this browser-session nonce,
+        # so changing workspace must not leave a usable legacy-file URL.
+        revoked_after_switch = client.get(old_grant.json()["access_url"])
+        assert revoked_after_switch.status_code == 404
+        assert revoked_after_switch.json()["detail"] == "candidate_data_file_access_not_found"
 
         # A real membership ID belonging to another user remains indistinguish-
         # able from an unknown selector and cannot replace the current session.

@@ -79,6 +79,16 @@ compose_run() {
       --env-file "$environment_dir/.env.production" "$@"
 }
 
+database_schema_revision() {
+  local source_dir="$1" environment_dir="$2" image_tag="$3"
+  # The database container has the server-side client and receives its
+  # credentials from Compose.  Return only Alembic revision identifiers, never
+  # a connection string or environment value.
+  compose_run "$source_dir" "$environment_dir" "$image_tag" exec -T db \
+    psql -U resume_v3 -d resume_v3 -At -c \
+      "SELECT version_num FROM alembic_version ORDER BY version_num;" </dev/null
+}
+
 uploads_volume_exists() {
   sudo -n docker volume inspect "$uploads_volume_name" >/dev/null 2>&1
 }
@@ -463,15 +473,26 @@ EOF
 deploy_target() {
   local environment_dir="$1" history_dir="$2" tag="$3" target_commit="$4" target_source_dir="$5"
   local mode="$6" migration_changed="$7" skip_migrate="$8" stage_tool="$9" image_mode="${10}"
-  local backup_id backup_state deployment_succeeded=0
+  local backup_id backup_state deployment_succeeded=0 writers_quiesced=0 previous_schema_revision=""
   backup_id="$(record_value "$history_dir/pending-release.env" backup_id)"
   backup_state="$(record_value "$history_dir/pending-release.env" backup_state)"
 
   recover_previous_runtime() {
-    local status=$?
+    local status=$? observed_schema_revision=""
     if [[ "${deployment_succeeded:-0}" != "1" && -n "${current_commit:-}" && "${migration_changed:-1}" == "0" ]]; then
       compose_run "$current_source_dir" "$environment_dir" "$current_commit" \
         up -d --no-build --no-deps api worker caddy >/dev/null 2>&1 || true
+    elif [[ "${deployment_succeeded:-0}" != "1" && "${writers_quiesced:-0}" == "1" && -n "${current_commit:-}" && -n "${previous_schema_revision:-}" ]]; then
+      observed_schema_revision="$(database_schema_revision "$current_source_dir" "$environment_dir" "$current_commit" 2>/dev/null || true)"
+      if [[ "$observed_schema_revision" == "$previous_schema_revision" ]]; then
+        # A target migration rejected its preflight before changing the schema.
+        # Restoring the exact recorded runtime is safe and avoids turning a
+        # no-write safety failure into a prolonged availability incident.
+        compose_run "$current_source_dir" "$environment_dir" "$current_commit" \
+          up -d --no-build --no-deps api worker caddy >/dev/null 2>&1 || true
+      else
+        echo "Target migration may have advanced the database; leaving prior writers stopped." >&2
+      fi
     fi
     exit "$status"
   }
@@ -481,6 +502,24 @@ deploy_target() {
     compose_run "$target_source_dir" "$environment_dir" "$target_commit" \
       up -d --no-build --no-deps api worker caddy </dev/null
   else
+    # ``create_backup_bundle`` briefly restarts the previous API/worker after
+    # the backup is verified.  Stop them again immediately before a real
+    # schema migration so an old binary cannot write against a transition
+    # window while Alembic changes authentication or tenant boundaries.
+    # Caddy stays up and returns an ordinary upstream failure until the target
+    # API has passed its health check; it must never proxy to an old writer.
+    if [[ "$migration_changed" == "1" && -n "${current_commit:-}" ]]; then
+      release_phase "Quiesce current writers before schema migration"
+      previous_schema_revision="$(database_schema_revision "$current_source_dir" "$environment_dir" "$current_commit")"
+      [[ -n "$previous_schema_revision" ]] || die "Unable to read current database schema revision."
+      # Mark recovery before asking Docker to stop either container.  ``stop``
+      # can report a failure after it has already stopped the API, and the
+      # unchanged-schema trap branch can safely restore the recorded runtime.
+      writers_quiesced=1
+      compose_run "$current_source_dir" "$environment_dir" "$current_commit" \
+        stop api worker </dev/null
+      release_phase_end
+    fi
     compose_run "$target_source_dir" "$environment_dir" "$target_commit" \
       up -d --no-build api worker caddy </dev/null
   fi

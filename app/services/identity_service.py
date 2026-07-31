@@ -946,6 +946,37 @@ def create_invitation(
     principal: AuthPrincipal,
     payload: OrganizationInvitationCreate,
 ) -> OrganizationInvitationResponse:
+    # The dependency resolved this principal at request entry. Reload and lock
+    # its two authority rows immediately before creating a new access grant so
+    # a concurrent account/membership revocation cannot leave an invitation
+    # behind after the caller ceased to be an administrator. Keep the user →
+    # membership order aligned with the legacy-auth retirement migration.
+    current_user = session.scalar(
+        select(UserAccount)
+        .where(UserAccount.id == principal.user.id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    current_membership = session.scalar(
+        select(OrganizationMembership)
+        .where(
+            OrganizationMembership.id == principal.membership.id,
+            OrganizationMembership.user_id == principal.user.id,
+            OrganizationMembership.organization_id == principal.organization.id,
+        )
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if (
+        current_user is None
+        or not current_user.is_active
+        or current_user.email_verified_at is None
+        or current_membership is None
+        or not current_membership.is_active
+        or current_membership.role != "admin"
+    ):
+        raise IdentityServiceError("organization_admin_required")
+
     email_key: str | None = None
     if payload.email:
         _, email_key = normalize_email(payload.email)
@@ -974,12 +1005,25 @@ def accept_invitation(
     *,
     payload: OrganizationInvitationAccept,
 ) -> AuthPrincipal:
+    # Invitation acceptance creates a membership, so serialize all consumers
+    # of the one-time token.  ``populate_existing`` is essential after a
+    # blocked row lock: it makes the waiter re-read a concurrent expiry or
+    # acceptance rather than acting on an identity-map snapshot.
     invitation = session.scalar(
         select(OrganizationInvitation)
-        .options(joinedload(OrganizationInvitation.organization).joinedload(Organization.plan))
         .where(OrganizationInvitation.token_digest == digest_token(payload.invitation_token))
+        .execution_options(populate_existing=True)
+        .with_for_update()
     )
     if invitation is None or invitation.accepted_at is not None or _aware(invitation.expires_at) <= utcnow():
+        raise IdentityServiceError("invitation_invalid_or_expired")
+    organization = session.scalar(
+        select(Organization)
+        .options(joinedload(Organization.plan))
+        .where(Organization.id == invitation.organization_id)
+        .execution_options(populate_existing=True)
+    )
+    if organization is None:
         raise IdentityServiceError("invitation_invalid_or_expired")
     email, email_key = normalize_email(payload.email)
     if invitation.email_key is not None and invitation.email_key != email_key:
@@ -1008,8 +1052,8 @@ def accept_invitation(
     return AuthPrincipal(
         user=user,
         membership=membership,
-        organization=invitation.organization,
-        plan=invitation.organization.plan,
+        organization=organization,
+        plan=organization.plan,
     )
 
 

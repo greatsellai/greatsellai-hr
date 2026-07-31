@@ -9,7 +9,9 @@ for historical recruiting records.  Before disabling that identity, grant the
 same workspace to every verified, active, non-legacy platform administrator.
 If there is no such formal administrator, fail before changing a row: leaving
 the legacy sign-in active is safer than making historical candidates or their
-original files inaccessible.
+original files inaccessible.  The sole exception is an empty legacy bootstrap
+workspace: it has no historical workspace data or extra legacy members, so it
+may retire the unused static identity without blocking a fresh installation.
 
 The migration never moves business data.  Candidate, resume, original-file,
 and audit references retain their existing organization and storage IDs.
@@ -33,6 +35,16 @@ depends_on: Union[str, Sequence[str], None] = None
 LEGACY_ORGANIZATION_ID = "00000000-0000-4000-8000-000000000001"
 LEGACY_USER_ID = "00000000-0000-4000-8000-000000000002"
 LEGACY_MEMBERSHIP_ID = "00000000-0000-4000-8000-000000000003"
+
+
+# Memberships are checked separately because the deterministic legacy
+# membership is a bootstrap row.  The retention-policy table is skipped by
+# the generic row scanner only because it is checked below for one *exact*
+# default row; a changed policy is operator intent and blocks retirement.
+_BOOTSTRAP_ONLY_SCOPED_TABLES = {
+    "candidate_data_retention_policies",
+    "organization_memberships",
+}
 
 
 def _tables() -> tuple[sa.Table, sa.Table, sa.Table, sa.Table, sa.Table]:
@@ -83,30 +95,159 @@ def _tables() -> tuple[sa.Table, sa.Table, sa.Table, sa.Table, sa.Table]:
     return organizations, users, memberships, invitations, platform_audit_events
 
 
+def _legacy_workspace_has_business_records(bind: sa.Connection) -> bool:
+    """Return whether a legacy-scoped row proves this is not a fresh install.
+
+    The tenant model has grown over time, so hard-coding only today's resume
+    tables would make a later root table invisible to this safety gate.  At
+    this migration head every tenant-owned table carries ``organization_id``;
+    inspect that schema and conservatively treat any non-bootstrap legacy row
+    as historical data that requires a formal administrator before retirement.
+    """
+
+    inspector = sa.inspect(bind)
+    metadata = sa.MetaData()
+    for table_name in inspector.get_table_names():
+        if table_name in _BOOTSTRAP_ONLY_SCOPED_TABLES:
+            continue
+        column_names = {column["name"] for column in inspector.get_columns(table_name)}
+        if "organization_id" not in column_names:
+            continue
+        table = sa.Table(table_name, metadata, autoload_with=bind)
+        row_exists = bind.execute(
+            sa.select(sa.literal(True))
+            .select_from(table)
+            .where(table.c.organization_id == LEGACY_ORGANIZATION_ID)
+            .limit(1)
+        ).scalar_one_or_none()
+        if row_exists is not None:
+            return True
+    return False
+
+
+def _has_exact_default_legacy_retention_policy(bind: sa.Connection) -> bool:
+    """Allow only the one unchanged retention-policy row created by bootstrap.
+
+    This condition is intentionally exact.  A person may configure retention
+    before uploading a candidate, and that is enough evidence that the legacy
+    workspace is in use.  Treat any extra, missing, or changed policy row as
+    history that requires a verified platform administrator to adopt access.
+    """
+
+    policies = sa.table(
+        "candidate_data_retention_policies",
+        sa.column("id", sa.String()),
+        sa.column("organization_id", sa.String()),
+        sa.column("mode", sa.String()),
+        sa.column("retention_days", sa.Integer()),
+        sa.column("version", sa.Integer()),
+        sa.column("updated_by_user_id", sa.String()),
+    )
+    rows = bind.execute(
+        sa.select(
+            policies.c.id,
+            policies.c.mode,
+            policies.c.retention_days,
+            policies.c.version,
+            policies.c.updated_by_user_id,
+        )
+        .where(policies.c.organization_id == LEGACY_ORGANIZATION_ID)
+        .with_for_update()
+    ).mappings().all()
+    if len(rows) != 1:
+        return False
+
+    policy = rows[0]
+    return (
+        policy["mode"] == "manual"
+        and policy["retention_days"] is None
+        and policy["version"] == 1
+        and policy["updated_by_user_id"] is None
+    )
+
+
+def _is_pristine_legacy_bootstrap(
+    bind: sa.Connection,
+    *,
+    memberships: sa.Table,
+) -> bool:
+    """Recognize only the exact no-data state of the legacy workspace.
+
+    This is deliberately stricter than "no candidates".  An extra membership
+    in the legacy workspace, invitation, job, mailbox record, audit record,
+    changed retention configuration, or any other tenant row means an operator
+    may need legacy access.  In that case a verified platform administrator
+    must adopt it before static access can be retired.  Users and memberships
+    in other workspaces are irrelevant: a newly registered tenant must not
+    keep an empty, unrelated bootstrap workspace alive forever.
+    """
+
+    has_extra_legacy_membership = (
+        bind.execute(
+            sa.select(memberships.c.id)
+            .where(
+                memberships.c.organization_id == LEGACY_ORGANIZATION_ID,
+                memberships.c.id != LEGACY_MEMBERSHIP_ID,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    if has_extra_legacy_membership:
+        return False
+
+    if not _has_exact_default_legacy_retention_policy(bind):
+        return False
+
+    return not _legacy_workspace_has_business_records(bind)
+
+
 def upgrade() -> None:
     """Adopt historical data first, then revoke only the shared identity."""
 
     organizations, users, memberships, invitations, platform_audit_events = _tables()
     bind = op.get_bind()
 
-    # All preconditions are checked before any INSERT or UPDATE.  Alembic runs
-    # this DML in one transaction, but this ordering also makes the failure
-    # contract explicit for every supported database engine.
-    source_exists = all(
-        (
-            bind.execute(
-                sa.select(table.c.id).where(table.c.id == identifier)
-            ).scalar_one_or_none()
-            is not None
-        )
-        for table, identifier in (
-            (organizations, LEGACY_ORGANIZATION_ID),
-            (users, LEGACY_USER_ID),
-            (memberships, LEGACY_MEMBERSHIP_ID),
-        )
+    # All preconditions are checked before any INSERT or UPDATE.  Lock the
+    # static user and membership in the same order used by invitation writes.
+    # The release helper also quiesces old API/worker writers before this
+    # migration, which is the cross-version fence for an old binary that does
+    # not yet know these locks.
+    organization_exists = (
+        bind.execute(
+            sa.select(organizations.c.id).where(
+                organizations.c.id == LEGACY_ORGANIZATION_ID
+            )
+        ).scalar_one_or_none()
+        is not None
     )
-    if not source_exists:
+    legacy_user_exists = (
+        bind.execute(
+            sa.select(users.c.id)
+            .where(users.c.id == LEGACY_USER_ID)
+            .with_for_update()
+        ).scalar_one_or_none()
+        is not None
+    )
+    legacy_membership_exists = (
+        bind.execute(
+            sa.select(memberships.c.id)
+            .where(memberships.c.id == LEGACY_MEMBERSHIP_ID)
+            .with_for_update()
+        ).scalar_one_or_none()
+        is not None
+    )
+    if not (organization_exists and legacy_user_exists and legacy_membership_exists):
         raise RuntimeError("legacy_workspace_adoption_source_missing")
+
+    # Lock every existing invite before classifying or expiring it.  New code
+    # reloads the same rows with ``FOR UPDATE`` before it can create/accept an
+    # invitation.  The release quiesce above covers the previous API image.
+    bind.execute(
+        sa.select(invitations.c.id)
+        .where(invitations.c.organization_id == LEGACY_ORGANIZATION_ID)
+        .with_for_update()
+    ).all()
 
     administrator_ids = list(
         bind.execute(
@@ -121,7 +262,16 @@ def upgrade() -> None:
         ).scalars()
     )
     if not administrator_ids:
-        raise RuntimeError("legacy_workspace_adoption_requires_verified_platform_admin")
+        # A pristine install reaches this migration with only the deterministic
+        # bootstrap organization/user/membership and its unchanged manual retention
+        # policy.  No candidate or other tenant data can become inaccessible,
+        # so retiring the unused static identity is safe and lets fresh/staging
+        # databases reach ``head``.  Every other state fails before a write.
+        if not _is_pristine_legacy_bootstrap(
+            bind,
+            memberships=memberships,
+        ):
+            raise RuntimeError("legacy_workspace_adoption_requires_verified_platform_admin")
 
     existing_rows = bind.execute(
         sa.select(
@@ -129,10 +279,12 @@ def upgrade() -> None:
             memberships.c.user_id,
             memberships.c.role,
             memberships.c.is_active,
-        ).where(
+        )
+        .where(
             memberships.c.organization_id == LEGACY_ORGANIZATION_ID,
             memberships.c.user_id.in_(administrator_ids),
         )
+        .with_for_update()
     ).mappings()
     existing_by_user_id = {str(row["user_id"]): row for row in existing_rows}
     now = datetime.now(timezone.utc)
@@ -197,11 +349,13 @@ def upgrade() -> None:
     # deliberately untouched.
     pending_invitation_ids = list(
         bind.execute(
-            sa.select(invitations.c.id).where(
+            sa.select(invitations.c.id)
+            .where(
                 invitations.c.organization_id == LEGACY_ORGANIZATION_ID,
                 invitations.c.accepted_at.is_(None),
                 invitations.c.expires_at > now,
             )
+            .with_for_update()
         ).scalars()
     )
     if pending_invitation_ids:

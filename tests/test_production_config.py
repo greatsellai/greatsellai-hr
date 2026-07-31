@@ -127,7 +127,12 @@ def test_compose_injects_generic_provider_credential_map_into_api_and_worker() -
             compose,
         )
         assert match is not None
-        assert "    environment: *app-environment" in match.group("body")
+        expected_environment = (
+            "    environment:\n      <<: *app-environment"
+            if service == "migrate"
+            else "    environment: *app-environment"
+        )
+        assert expected_environment in match.group("body")
 
 
 def test_compose_and_production_template_document_fair_worker_pool() -> None:
@@ -174,7 +179,12 @@ def test_compose_injects_mailbox_oauth_clients_into_every_runtime() -> None:
             rf"(?ms)^  {service}:\n(?P<body>.*?)(?=^  [a-z][a-z_]*:|\Z)", compose
         )
         assert match is not None
-        assert "    environment: *app-environment" in match.group("body")
+        expected_environment = (
+            "    environment:\n      <<: *app-environment"
+            if service == "migrate"
+            else "    environment: *app-environment"
+        )
+        assert expected_environment in match.group("body")
 
 
 def test_compose_injects_one_complete_mailbox_policy_into_every_runtime() -> None:
@@ -214,7 +224,12 @@ def test_compose_injects_one_complete_mailbox_policy_into_every_runtime() -> Non
             rf"(?ms)^  {service}:\n(?P<body>.*?)(?=^  [a-z][a-z_]*:|\Z)", compose
         )
         assert match is not None
-        assert "    environment: *app-environment" in match.group("body")
+        expected_environment = (
+            "    environment:\n      <<: *app-environment"
+            if service == "migrate"
+            else "    environment: *app-environment"
+        )
+        assert expected_environment in match.group("body")
 
 
 def test_compose_injects_tencent_ses_templates_into_api_and_worker() -> None:
@@ -244,7 +259,37 @@ def test_compose_injects_tencent_ses_templates_into_api_and_worker() -> None:
             rf"(?ms)^  {service}:\n(?P<body>.*?)(?=^  [a-z][a-z_]*:|\Z)", compose
         )
         assert match is not None
-        assert "    environment: *app-environment" in match.group("body")
+        expected_environment = (
+            "    environment:\n      <<: *app-environment"
+            if service == "migrate"
+            else "    environment: *app-environment"
+        )
+        assert expected_environment in match.group("body")
+
+
+def test_compose_limits_legacy_workspace_adoption_target_to_migration() -> None:
+    """A one-time migration control must not become an application setting."""
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "compose.yml").read_text(encoding="utf-8")
+    production_example = (root / ".env.production.example").read_text(
+        encoding="utf-8"
+    )
+    variable = "RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID"
+    migrate = re.search(
+        r"(?ms)^  migrate:\n(?P<body>.*?)(?=^  [a-z][a-z_]*:|\Z)", compose
+    )
+    assert migrate is not None
+    assert f"{variable}: ${{{variable}:-}}" in migrate.group("body")
+    assert f"{variable}=" in production_example
+
+    for service in ("api", "worker"):
+        match = re.search(
+            rf"(?ms)^  {service}:\n(?P<body>.*?)(?=^  [a-z][a-z_]*:|\Z)",
+            compose,
+        )
+        assert match is not None
+        assert variable not in match.group("body")
 
 
 def test_compose_does_not_expose_retired_static_admin_authentication() -> None:

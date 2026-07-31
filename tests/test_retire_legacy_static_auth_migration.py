@@ -13,6 +13,9 @@ _LEGACY_ORGANIZATION_ID = "00000000-0000-4000-8000-000000000001"
 _LEGACY_USER_ID = "00000000-0000-4000-8000-000000000002"
 _LEGACY_MEMBERSHIP_ID = "00000000-0000-4000-8000-000000000003"
 _ADOPTING_ADMIN_IDS = ("formal-platform-admin-a", "formal-platform-admin-b")
+_CONFIGURED_ADOPTER_ID = "11111111-1111-4111-8111-111111111111"
+_INELIGIBLE_ADOPTER_ID = "22222222-2222-4222-8222-222222222222"
+_LEGACY_ADOPTION_USER_ID_ENV = "RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID"
 
 
 def _sqlite_utc(value: datetime) -> datetime:
@@ -146,12 +149,18 @@ def _seed_legacy_invitations(connection, *, now: datetime) -> datetime:
     return pending_expiry
 
 
-def test_retirement_allows_an_untouched_bootstrap_database_to_reach_head(tmp_path) -> None:
+def test_retirement_allows_an_untouched_bootstrap_database_to_reach_head(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A new installation has no history that needs an adopted administrator."""
 
     database_path = tmp_path / "retire-legacy-pristine-bootstrap.sqlite"
     database_url = f"sqlite:///{database_path.as_posix()}"
     config = _config(database_url)
+    # A stale handoff value must not make a pristine database create or promote
+    # an arbitrary account. The migration never even resolves it on this path.
+    monkeypatch.setenv(_LEGACY_ADOPTION_USER_ID_ENV, _CONFIGURED_ADOPTER_ID)
 
     # A full upgrade creates only the deterministic legacy bootstrap identity
     # plus its automatic retention policy.  The retirement migration must not
@@ -177,12 +186,14 @@ def test_retirement_allows_an_untouched_bootstrap_database_to_reach_head(tmp_pat
                 )
             ).scalar_one()
             candidate_count = connection.execute(select(candidates.c.id)).all()
+            user_count = connection.execute(select(users.c.id)).all()
     finally:
         engine.dispose()
 
     assert legacy_user == (False, False)
     assert legacy_membership_active is False
     assert candidate_count == []
+    assert [row[0] for row in user_count] == [_LEGACY_USER_ID]
 
 
 def test_retirement_requires_adoption_when_bootstrap_retention_policy_changed(tmp_path) -> None:
@@ -261,10 +272,16 @@ def test_retirement_requires_adoption_when_bootstrap_retention_policy_changed(tm
     assert policy == ("automatic", 90, 2, _LEGACY_USER_ID)
 
 
-def test_retirement_adopts_every_eligible_platform_admin_and_preserves_history(tmp_path) -> None:
+def test_retirement_adopts_every_eligible_platform_admin_and_preserves_history(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database_path = tmp_path / "retire-legacy-static-auth.sqlite"
     database_url = f"sqlite:///{database_path.as_posix()}"
     config = _config(database_url)
+    # Existing formal administrators always win. An irrelevant stale value
+    # must not be parsed or consulted on that normal migration path.
+    monkeypatch.setenv(_LEGACY_ADOPTION_USER_ID_ENV, "not-a-user-id")
     command.upgrade(config, "20260730_0052")
 
     engine = create_engine(database_url)
@@ -389,8 +406,12 @@ def test_retirement_adopts_every_eligible_platform_admin_and_preserves_history(t
         (_ADOPTING_ADMIN_IDS[0], "admin", True),
         (_ADOPTING_ADMIN_IDS[1], "admin", True),
     ]
-    assert [row["actor_user_id"] for row in audit_rows] == list(_ADOPTING_ADMIN_IDS)
+    assert [row["actor_user_id"] for row in audit_rows] == [None, None]
+    assert all(row["actor_kind"] == "system_migration" for row in audit_rows)
     assert all(row["reason"] == "legacy_static_auth_retirement" for row in audit_rows)
+    assert all(
+        row["request_id"] == "system:migration:20260731_0053" for row in audit_rows
+    )
     assert all(row["after_json"]["is_active"] is True for row in audit_rows)
     assert pending_invitation["accepted_at"] is None
     assert _sqlite_utc(pending_invitation["expires_at"]) < _sqlite_utc(
@@ -401,6 +422,9 @@ def test_retirement_adopts_every_eligible_platform_admin_and_preserves_history(t
         pending_invitation_expiry
     )
     assert invitation_revocation_audit["reason"] == "legacy_static_auth_retirement"
+    assert invitation_revocation_audit["actor_user_id"] is None
+    assert invitation_revocation_audit["actor_kind"] == "system_migration"
+    assert invitation_revocation_audit["request_id"] == "system:migration:20260731_0053"
     assert invitation_revocation_audit["before_json"] == {"pending_invitation_count": 1}
     assert invitation_revocation_audit["after_json"] == {"pending_invitation_count": 0}
     assert candidate["organization_id"] == _LEGACY_ORGANIZATION_ID
@@ -437,7 +461,102 @@ def test_retirement_adopts_every_eligible_platform_admin_and_preserves_history(t
     assert len(adopted_count) == len(_ADOPTING_ADMIN_IDS)
 
 
-def test_retirement_fails_before_any_state_change_without_eligible_administrator(tmp_path) -> None:
+def test_retirement_bootstraps_only_the_explicit_verified_adopter(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployment owner may explicitly hand history to one verified user."""
+
+    database_path = tmp_path / "retire-legacy-explicit-adopter.sqlite"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = _config(database_url)
+    command.upgrade(config, "20260730_0052")
+
+    engine = create_engine(database_url)
+    try:
+        metadata = MetaData()
+        users = Table("user_accounts", metadata, autoload_with=engine)
+        now = datetime.now(timezone.utc)
+        with engine.begin() as connection:
+            original_auth_version = _seed_historical_resume(connection, now=now)
+            _seed_legacy_invitations(connection, now=now)
+            _insert_user(
+                connection,
+                users,
+                user_id=_CONFIGURED_ADOPTER_ID,
+                now=now,
+                platform_admin=False,
+                verified=True,
+            )
+    finally:
+        engine.dispose()
+
+    monkeypatch.setenv(_LEGACY_ADOPTION_USER_ID_ENV, _CONFIGURED_ADOPTER_ID)
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        metadata = MetaData()
+        users = Table("user_accounts", metadata, autoload_with=engine)
+        memberships = Table("organization_memberships", metadata, autoload_with=engine)
+        audits = Table("platform_audit_events", metadata, autoload_with=engine)
+        candidates = Table("candidates", metadata, autoload_with=engine)
+        resumes = Table("resumes", metadata, autoload_with=engine)
+        with engine.connect() as connection:
+            legacy_user = connection.execute(
+                select(
+                    users.c.is_active,
+                    users.c.is_platform_admin,
+                    users.c.auth_session_version,
+                ).where(users.c.id == _LEGACY_USER_ID)
+            ).one()
+            adopter = connection.execute(
+                select(users.c.is_active, users.c.is_platform_admin).where(
+                    users.c.id == _CONFIGURED_ADOPTER_ID
+                )
+            ).one()
+            membership = connection.execute(
+                select(memberships.c.role, memberships.c.is_active).where(
+                    memberships.c.organization_id == _LEGACY_ORGANIZATION_ID,
+                    memberships.c.user_id == _CONFIGURED_ADOPTER_ID,
+                )
+            ).one()
+            bootstrap_audit = connection.execute(
+                select(audits)
+                .where(audits.c.action == "legacy_workspace_adoption_bootstrap")
+                .where(audits.c.target_id == _CONFIGURED_ADOPTER_ID)
+            ).mappings().one()
+            candidate_organization_id = connection.execute(
+                select(candidates.c.organization_id).where(
+                    candidates.c.id == "retired-auth-candidate"
+                )
+            ).scalar_one()
+            resume_storage_key = connection.execute(
+                select(resumes.c.storage_key).where(
+                    resumes.c.id == "retired-auth-resume"
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert legacy_user == (False, False, original_auth_version + 1)
+    assert adopter == (True, True)
+    assert membership == ("admin", True)
+    assert bootstrap_audit["actor_user_id"] is None
+    assert bootstrap_audit["actor_kind"] == "system_migration"
+    assert bootstrap_audit["reason"] == (
+        "legacy_static_auth_retirement_explicit_deployment_adopter"
+    )
+    assert bootstrap_audit["before_json"] == {"is_platform_admin": False}
+    assert bootstrap_audit["after_json"] == {"is_platform_admin": True}
+    assert bootstrap_audit["request_id"] == "system:migration:20260731_0053"
+    assert candidate_organization_id == _LEGACY_ORGANIZATION_ID
+    assert resume_storage_key == "legacy/original/synthetic-retained.pdf"
+
+
+def test_retirement_fails_before_any_state_change_without_eligible_administrator(
+    tmp_path,
+) -> None:
     database_path = tmp_path / "retire-legacy-without-adopter.sqlite"
     database_url = f"sqlite:///{database_path.as_posix()}"
     config = _config(database_url)
@@ -456,9 +575,10 @@ def test_retirement_fails_before_any_state_change_without_eligible_administrator
             _insert_user(
                 connection,
                 users,
-                user_id="unverified-only-platform-admin",
+                user_id=_INELIGIBLE_ADOPTER_ID,
                 now=now,
-                verified=False,
+                platform_admin=False,
+                verified=True,
             )
             original_organization_status = connection.execute(
                 select(organizations.c.plan_status).where(
@@ -515,6 +635,11 @@ def test_retirement_fails_before_any_state_change_without_eligible_administrator
                     invitations.c.id == "retire-legacy-pending-invitation"
                 )
             ).scalar_one()
+            ordinary_user_platform_admin = connection.execute(
+                select(users.c.is_platform_admin).where(
+                    users.c.id == _INELIGIBLE_ADOPTER_ID
+                )
+            ).scalar_one()
     finally:
         engine.dispose()
 
@@ -526,3 +651,87 @@ def test_retirement_fails_before_any_state_change_without_eligible_administrator
     assert candidate == _LEGACY_ORGANIZATION_ID
     assert resume == "legacy/original/synthetic-retained.pdf"
     assert _sqlite_utc(pending_invitation) == _sqlite_utc(pending_invitation_expiry)
+    assert ordinary_user_platform_admin is False
+
+
+def test_retirement_rejects_an_ineligible_explicit_adopter_without_writes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configuration cannot revive, verify, or promote an unsafe target."""
+
+    database_path = tmp_path / "retire-legacy-ineligible-explicit-adopter.sqlite"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = _config(database_url)
+    command.upgrade(config, "20260730_0052")
+
+    engine = create_engine(database_url)
+    try:
+        metadata = MetaData()
+        users = Table("user_accounts", metadata, autoload_with=engine)
+        memberships = Table("organization_memberships", metadata, autoload_with=engine)
+        invitations = Table("organization_invitations", metadata, autoload_with=engine)
+        now = datetime.now(timezone.utc)
+        with engine.begin() as connection:
+            original_auth_version = _seed_historical_resume(connection, now=now)
+            pending_expiry = _seed_legacy_invitations(connection, now=now)
+            _insert_user(
+                connection,
+                users,
+                user_id=_INELIGIBLE_ADOPTER_ID,
+                now=now,
+                active=False,
+                platform_admin=False,
+                verified=True,
+            )
+            original_membership_active = connection.execute(
+                select(memberships.c.is_active).where(
+                    memberships.c.id == _LEGACY_MEMBERSHIP_ID
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    monkeypatch.setenv(_LEGACY_ADOPTION_USER_ID_ENV, _INELIGIBLE_ADOPTER_ID)
+    with pytest.raises(
+        RuntimeError,
+        match="legacy_workspace_adoption_configured_user_ineligible",
+    ):
+        command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        metadata = MetaData()
+        users = Table("user_accounts", metadata, autoload_with=engine)
+        memberships = Table("organization_memberships", metadata, autoload_with=engine)
+        invitations = Table("organization_invitations", metadata, autoload_with=engine)
+        with engine.connect() as connection:
+            legacy_user = connection.execute(
+                select(
+                    users.c.is_active,
+                    users.c.is_platform_admin,
+                    users.c.auth_session_version,
+                ).where(users.c.id == _LEGACY_USER_ID)
+            ).one()
+            configured_user = connection.execute(
+                select(users.c.is_active, users.c.is_platform_admin).where(
+                    users.c.id == _INELIGIBLE_ADOPTER_ID
+                )
+            ).one()
+            membership_active = connection.execute(
+                select(memberships.c.is_active).where(
+                    memberships.c.id == _LEGACY_MEMBERSHIP_ID
+                )
+            ).scalar_one()
+            pending_invitation_expiry = connection.execute(
+                select(invitations.c.expires_at).where(
+                    invitations.c.id == "retire-legacy-pending-invitation"
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert legacy_user == (True, True, original_auth_version)
+    assert configured_user == (False, False)
+    assert membership_active is original_membership_active is True
+    assert _sqlite_utc(pending_invitation_expiry) == _sqlite_utc(pending_expiry)

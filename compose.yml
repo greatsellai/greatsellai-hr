@@ -113,7 +113,12 @@ services:
     build: .
     image: greatsellai-hr-api:${RESUME_V3_RELEASE_IMAGE_TAG:-local}
     restart: "no"
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      # A one-time, explicit named-account handoff for historical static-auth
+      # data. This never reaches API or worker containers and is ignored when
+      # the database is pristine or already has a formal platform admin.
+      RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID: ${RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID:-}
     command: ["/bin/sh", "-c", "alembic upgrade head && python -m app.seed_institutions"]
     depends_on:
       db:

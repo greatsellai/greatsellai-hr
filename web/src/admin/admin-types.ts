@@ -175,6 +175,7 @@ export interface UserQuery {
 export interface PlatformAuditEvent {
   audit_id: string;
   actor_user_id: string | null;
+  actor_kind: string;
   action: string;
   target_type: string;
   target_id: string | null;

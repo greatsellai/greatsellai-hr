@@ -40,6 +40,7 @@ def test_ai_gateway_migration_upgrades_a_file_sqlite_database(tmp_path) -> None:
         }
         assert {
             "actor_user_id",
+            "actor_kind",
             "action",
             "target_type",
             "target_id",
@@ -50,6 +51,12 @@ def test_ai_gateway_migration_upgrades_a_file_sqlite_database(tmp_path) -> None:
             "request_id",
             "created_at",
         }.issubset(audit_columns)
+        actor_user_id = next(
+            column
+            for column in inspector.get_columns("platform_audit_events")
+            if column["name"] == "actor_user_id"
+        )
+        assert actor_user_id["nullable"] is True
         foreign_keys = inspector.get_foreign_keys("api_invocations")
         assert any(
             foreign_key["constrained_columns"] == ["ai_run_id", "organization_id"]

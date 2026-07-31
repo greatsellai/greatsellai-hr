@@ -623,7 +623,8 @@ class PlatformUserPatch(ApiModel):
 
 class PlatformAuditEventResponse(ApiModel):
     audit_id: str
-    actor_user_id: str
+    actor_user_id: str | None = None
+    actor_kind: str = "user"
     action: str
     target_type: str
     target_id: str

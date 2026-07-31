@@ -288,7 +288,19 @@ class PlatformAuditEvent(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    actor_user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    actor_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    # ``user`` is the normal control-plane path.  ``system_migration`` is
+    # reserved for deterministic database migrations with no human request
+    # actor, so audit history never fabricates a user action.
+    actor_kind: Mapped[str] = mapped_column(
+        String(32),
+        default="user",
+        server_default="user",
+    )
     action: Mapped[str] = mapped_column(String(100), index=True)
     target_type: Mapped[str] = mapped_column(String(64), index=True)
     target_id: Mapped[str] = mapped_column(String(128), index=True)

@@ -122,7 +122,11 @@ services:
     # already-built images.
     image: greatsellai-hr-api:${RESUME_V3_RELEASE_IMAGE_TAG:?set RESUME_V3_RELEASE_IMAGE_TAG to the full immutable commit SHA}
     restart: "no"
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      # Keep the one-time legacy adoption target inside the migration
+      # container. API and worker must never receive this deployment control.
+      RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID: ${RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID:-}
     command: ["/bin/sh", "-c", "alembic upgrade head && python -m app.seed_institutions"]
     depends_on:
       db:

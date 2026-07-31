@@ -123,6 +123,7 @@ def test_staging_deployment_is_isolated_and_never_uses_production_env_or_builds(
     assert "RESUME_V3_STAGING_POSTGRES_PASSWORD=" in staging_env
     assert "RESUME_V3_TRUSTED_PROXY_CIDRS=172.31.0.2/32" in staging_env
     assert "RESUME_V3_STAGING_PUBLIC_APP_URL=https://staging.hr.greatsellai.net" in staging_env
+    assert "RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID=" in staging_env
     assert "RESUME_V3_DATABASE_URL: postgresql+psycopg://resume_v3_staging:" in compose
     assert "RESUME_V3_ADMIN_TOKEN" not in compose
     assert "RESUME_V3_LEGACY_ADMIN_TOKEN_ENABLED" not in compose
@@ -135,6 +136,7 @@ def test_staging_deployment_is_isolated_and_never_uses_production_env_or_builds(
     assert "RESUME_V3_AI_EXTRACTION_WORKER_POLL_SECONDS: ${RESUME_V3_AI_EXTRACTION_WORKER_POLL_SECONDS:-2}" in compose
     assert "RESUME_V3_WORKER_CONCURRENCY: ${RESUME_V3_WORKER_CONCURRENCY:-1}" in compose
     assert "RESUME_V3_PUBLIC_APP_URL: ${RESUME_V3_STAGING_PUBLIC_APP_URL:-https://staging.hr.greatsellai.net}" in compose
+    assert "RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID: ${RESUME_V3_LEGACY_WORKSPACE_ADOPTION_USER_ID:-}" in compose
 
     for script in (deploy, preflight):
         assert ".env.staging" in script

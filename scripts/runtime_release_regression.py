@@ -672,7 +672,11 @@ def run_database_verify() -> None:
 
     from app.database import Database
     from app.models import MailboxBackgroundJob, Organization, Resume, ResumeAiExtractionJob
-    from app.services import ai_extraction_job_service, mailbox_background_job_service
+    from app.services import (
+        ai_extraction_job_service,
+        mailbox_background_job_service,
+        workspace_background_lane_service,
+    )
     from app.tenant_scope import clear_organization_context, set_organization_context
 
     database_url = _database_url()
@@ -775,6 +779,43 @@ def run_database_verify() -> None:
         _assert(claimed is not None, "recovered_mailbox_job_not_claimable")
         _assert(claimed.organization_id == primary.id, "recovered_mailbox_job_claimed_cross_workspace")
 
+        # The direct claim above intentionally stops before the mailbox worker
+        # performs an IMAP request.  It must nevertheless reserve the shared
+        # heavy-work lane, so an AI job in the same workspace cannot run at the
+        # same time.
+        blocked_ai_claim = ai_extraction_job_service._claim_next_job(
+            database,
+            settings=settings,
+            worker_id="recovery-regression-blocked-ai-worker",
+        )
+        _assert(
+            blocked_ai_claim is None,
+            "same_workspace_mailbox_lane_did_not_block_ai_claim",
+        )
+
+        # Simulate the normal mailbox worker completion/finally sequence
+        # without opening an IMAP connection: complete the claimed job, then
+        # release the exact fenced lane token.  The following AI claim proves
+        # that recovery does not leave capacity stranded after completion.
+        with database.session_factory() as session:
+            set_organization_context(session, claimed.organization_id)
+            try:
+                mailbox_completed = mailbox_background_job_service._complete_job(
+                    session,
+                    claimed=claimed,
+                    worker_id="recovery-regression-worker",
+                )
+            finally:
+                clear_organization_context(session)
+            _assert(mailbox_completed, "recovered_mailbox_job_not_completed")
+            lane_released = workspace_background_lane_service.release_workspace_background_lane(
+                session,
+                organization_id=claimed.organization_id,
+                lease_token=claimed.workspace_lane_token,
+            )
+            session.commit()
+        _assert(lane_released, "recovered_mailbox_lane_not_released")
+
         # AI extraction has a different lease/retry implementation from the
         # mailbox queue. Exercise its own recovery and global claim code with
         # an inert in-memory credential map; no provider execution follows.
@@ -814,7 +855,7 @@ def run_database_verify() -> None:
         with database.session_factory() as session:
             set_organization_context(session, primary.id)
             try:
-                reclaimed_mailbox_job = session.get(MailboxBackgroundJob, expired_mailbox_job.id)
+                completed_mailbox_job = session.get(MailboxBackgroundJob, expired_mailbox_job.id)
                 reclaimed_ai_job = session.get(ResumeAiExtractionJob, expired_ai_job.id)
             finally:
                 clear_organization_context(session)
@@ -832,11 +873,11 @@ def run_database_verify() -> None:
                 )
             finally:
                 clear_organization_context(session)
-            _assert(reclaimed_mailbox_job is not None, "reclaimed_mailbox_job_missing")
-            _assert(reclaimed_mailbox_job.status == "running", "recovered_mailbox_job_not_running_after_claim")
+            _assert(completed_mailbox_job is not None, "completed_mailbox_job_missing")
+            _assert(completed_mailbox_job.status == "completed", "recovered_mailbox_job_not_completed")
             _assert(
-                reclaimed_mailbox_job.lease_owner == "recovery-regression-worker",
-                "recovered_mailbox_job_owner_mismatch",
+                completed_mailbox_job.lease_owner is None,
+                "completed_mailbox_job_lease_owner_not_cleared",
             )
             _assert(reclaimed_ai_job is not None, "reclaimed_ai_job_missing")
             _assert(reclaimed_ai_job.status == "running", "recovered_ai_job_not_running_after_claim")

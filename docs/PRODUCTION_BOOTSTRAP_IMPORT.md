@@ -105,24 +105,54 @@ created_at=YYYY-MM-DDTHH:MM:SSZ
 新主机尚未接管域名时，公网 `https://<domain>` 仍可能解析到旧主机。因此首发阶段发布器验证的是
 **新主机本机**的 API 健康、匿名会话保护、原文件 401 保护、Caddy 配置以及私有 Caddy→API 反代链路，而不会把旧主机的
 公网响应当成新主机健康。首发记录会标记 `runtime_verification=bootstrap_target_local` 和
-`public_cutover_check=pending`。
+`public_cutover_check=pending`。前者表示新主机本地运行时已通过；后者**不是** DNS/TLS 已验收，也不是发布失败，
+而是把公网切流验收明确交给切流负责人完成。不要手工改写、删除或把这条首发记录中的 `pending` 改成 `pass`；
+后续正常生产晋级会在自己的新发布记录中写入 `public_cutover_check=pass`，不会倒改这次首发记录。
 
-只有本机验证成功后才可切换 HR 子域名 DNS。切换前记录旧 A/AAAA 值、TTL 和旧生产入口，作为回切依据；切换后必须人工验证：
+只有本机验证成功后才可切换 HR 子域名 DNS。切换前在变更单或受控运行记录中保存以下**非敏感**信息，作为验收和回切依据：
 
-```text
-https://<production-hr-domain>/health
-https://<production-hr-domain>/v1/auth/session
-```
+- 首发的 `prod-*` 标签与 commit、切流开始时间；
+- HR 子域名切换前的 A/AAAA 值与 TTL、切换后的目标地址；
+- 负责人的验收结论和回切结论。
 
-并确认匿名原文件访问被拒绝；同时独立确认原 staging 域名仍正常。不要把根域或泛域名映射到 HR。
+不要在该记录中保存部署私钥、环境变量、会话 Cookie、候选人姓名、简历文件名、原件 URL 或接口响应正文。
 
-DNS/TLS 验收清单：
+## DNS/TLS 切流后的验收与交接
 
-1. 新生产 `/health` 返回成功，并确认请求命中新主机而非旧 IP。
-2. 新生产 `/v1/auth/session` 在未登录状态返回受保护的匿名会话响应；原文件 API 未登录时返回 401。
-3. 通过浏览器完成一次真实登录、候选人列表读取和原文件受权访问抽检；不在公开日志中保存候选人内容。
-4. 独立检查 staging 域名、旧 staging 页面和 `/health`，确认没有被生产切流影响。
-5. 若以上任一项失败，先把 **仅 HR 子域名** A/AAAA 记录回切到切换前的旧生产值，等待 DNS 生效后复测旧生产；不要修改根域、泛域名、staging DNS 或数据卷。回切仅恢复流量，不应删除新主机导入数据，后续处理走显式失败恢复或新的受审查发布。
+`public_cutover_check=pending` 必须持续到下列**公网**验收全部完成。DNS 传播尚处于记录 TTL 内时，只能视为传播中，
+不能把本机缓存或旧主机响应当作通过；应从至少一个独立解析器和浏览器网络确认目标已经是新主机。
+
+1. 检查 HR 子域名的 A/AAAA 解析和 TLS 证书，确认它命中新生产地址、证书域名正确，且没有把根域、泛域名或 staging 域名映射到 HR。
+2. 通过公网 HTTPS 执行健康检查，而不是直接访问容器或新机回环地址：
+
+   ```bash
+   curl --fail --silent --show-error "https://<production-hr-domain>/health"
+   curl --fail --silent --show-error "https://<production-hr-domain>/v1/auth/session"
+   ```
+
+   `/v1/auth/session` 在未登录状态应返回 `200`，且响应表达 `authenticated=false` 和 `login_required=true`。
+3. 不带 Cookie 请求一个固定的、不会对应真实候选人的占位 ID，确认原文件访问仍先被鉴权层拒绝为 `401`：
+
+   ```bash
+   curl --silent --show-error --output /dev/null --write-out "%{http_code}\n" \
+     "https://<production-hr-domain>/v1/resumes/cutover-auth-check/original-file"
+   ```
+
+4. 使用浏览器完成一次真实登录、候选人列表读取和已授权原文件访问抽检；只记录通过/失败，不把候选人内容带入公开日志或变更单。
+5. 从独立入口检查 staging 的页面和 `/health`，确认生产切流没有改变 staging；同时确认旧生产仍可作为回切目标保留。
+6. 将以上检查时间、解析器/浏览器网络、通过结果和最终结论写入变更记录。至此才可宣布公网切流完成；
+   `pending` 保留在首发历史中，作为“首发在 DNS 之前完成本地验证、随后已按本清单人工验收”的可审计交接点。
+
+### 公网验收失败时的回切
+
+若 TTL 传播窗口结束后，任一项验收失败、HTTPS 仍命中旧地址、TLS 证书不正确、匿名保护不符合预期，或 staging 受到影响，
+立即执行以下回切，而不是先修改新机数据：
+
+1. 仅将 **HR 子域名** A/AAAA 回切到切换前记录的旧生产值；不修改根域、泛域名、staging DNS、Caddy 配置或 Docker 卷。
+2. 等待回切 DNS 生效后，从公网复测旧生产的 `/health`、匿名会话和未登录原文件 `401`，并记录回切完成时间。
+3. 保留新主机已导入的数据、发布记录和非敏感错误证据以便排查；DNS 回切只恢复流量，绝不删除数据。
+4. 不要仅因公网 DNS/TLS 验收失败运行 bootstrap restore。该恢复只适用于首发在本机验证前失败且没有
+   `current-release.env` 的情形；其余情况先按本节回切，再走受审查的故障处理或新的生产发布。
 
 ## 首发失败恢复
 

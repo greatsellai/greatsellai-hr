@@ -44,8 +44,9 @@
    staging 网关会安全拒绝，而不是在新主机错误部署。
 8. 仅在新机本地验证通过后，将 `hr.greatsell.cn` 的 A/AAAA 记录切到新主机。不要把
    `greatsellai.net` 根域或泛域名指向 HR 项目。
-9. DNS/TLS 生效后，分别验证 `https://hr.greatsell.cn/health` 和
-   `https://staging.hr.greatsellai.net/health`。两者必须独立可用；生产发布不应改变 staging。
+9. DNS/TLS 生效后，按[生产数据导入与首发](PRODUCTION_BOOTSTRAP_IMPORT.md)中的“DNS/TLS 切流后的验收与交接”
+   分别验证 `https://hr.greatsell.cn/health` 和 `https://staging.hr.greatsellai.net/health`，记录
+   `public_cutover_check=pending` 的人工交接结论。两者必须独立可用；生产发布不应改变 staging。
 
 ## ICP 备案检查
 

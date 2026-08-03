@@ -187,6 +187,26 @@ def test_compose_injects_mailbox_oauth_clients_into_every_runtime() -> None:
         assert expected_environment in match.group("body")
 
 
+def test_environment_templates_use_the_cn_canonical_production_origin() -> None:
+    root = Path(__file__).resolve().parents[1]
+    production_example = (root / ".env.production.example").read_text(
+        encoding="utf-8"
+    )
+    development_example = (root / ".env.example").read_text(encoding="utf-8")
+
+    assert "RESUME_V3_DOMAIN=hr.greatsell.cn" in production_example
+    assert "RESUME_V3_PUBLIC_APP_URL=https://hr.greatsell.cn" in production_example
+    for template in (production_example, development_example):
+        assert (
+            "RESUME_V3_MAILBOX_GOOGLE_OAUTH_REDIRECT_URI="
+            "https://hr.greatsell.cn/v1/mailbox-oauth/callback"
+        ) in template
+        assert (
+            "RESUME_V3_MAILBOX_MICROSOFT_OAUTH_REDIRECT_URI="
+            "https://hr.greatsell.cn/v1/mailbox-oauth/callback"
+        ) in template
+
+
 def test_compose_injects_one_complete_mailbox_policy_into_every_runtime() -> None:
     """API and worker must not disagree about a mailbox's safety envelope."""
 

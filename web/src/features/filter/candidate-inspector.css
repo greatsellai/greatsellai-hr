@@ -226,7 +226,10 @@
   line-height: 1.55;
 }
 
-@media (max-width: 78rem) {
+/* Account for the persistent navigation rail as well as the viewport. At a
+ * laptop-width work area, the comparison table must keep its action rail
+ * unobstructed; the complete candidate drawer remains available on demand. */
+@media (max-width: 86rem) {
   .candidate-inspector {
     display: none;
   }

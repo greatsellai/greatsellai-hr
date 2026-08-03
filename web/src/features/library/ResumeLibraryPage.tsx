@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Icon } from "../../icons";
+import {
+  RESUME_EXTRACTION_FAILED_LABEL,
+  resumeExtractionStatusMessage,
+} from "../../resume-extraction-user-messages";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
 import { BackofficeSelect } from "../../backoffice/ui/BackofficeSelect";
 import { TableSkeleton } from "../../backoffice/ui/TableSkeleton";
@@ -38,7 +42,7 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
   tone: "ready" | "progress" | "attention" | "waiting";
 } {
   if (hasSourceTextQualityIssue(item.quality_flags)) {
-    return { label: "文本待校正", tone: "attention" };
+    return { label: RESUME_EXTRACTION_FAILED_LABEL, tone: "attention" };
   }
   if (hasSupersededReparseVersion(item.quality_flags)) {
     return { label: "当前版本已更新", tone: "attention" };
@@ -53,7 +57,15 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
     item.ai_extraction_status === "needs_attention" ||
     item.extraction_status === "failed"
   ) {
-    return { label: "需要处理", tone: "attention" };
+    return {
+      label: item.ai_extraction_error?.startsWith("tencent_ocr_") ||
+        item.ai_extraction_error?.startsWith("document_extraction_") ||
+        item.ai_extraction_error?.startsWith("office_conversion_") ||
+        item.ai_extraction_error?.startsWith("spreadsheet_conversion_")
+        ? "服务暂时不可用"
+        : "需要处理",
+      tone: "attention",
+    };
   }
   if (item.ai_extraction_status === "unavailable") {
     return { label: "等待 AI 服务", tone: "attention" };
@@ -392,10 +404,12 @@ export function ResumeLibraryPage({
                               className={`library-status is-${status.tone}`}
                               title={
                                 sourceTextIssue
-                                  ? "提取文本疑似乱码，请先重新解析原件。"
+                                  ? `${RESUME_EXTRACTION_FAILED_LABEL}。请重新解析原件后重试。`
                                   : supersededReparse
                                     ? "候选人已有更新版本，此解析版本不会被启用。"
-                                    : item.ai_extraction_error ?? undefined
+                                    : resumeExtractionStatusMessage(
+                                      item.ai_extraction_error,
+                                    )
                               }
                             >
                               {status.label}
@@ -411,7 +425,7 @@ export function ResumeLibraryPage({
                       <td className="library-summary-cell">
                         {sourceTextIssue ? (
                           <span className="library-quality-copy">
-                            提取文本疑似乱码，暂不展示 AI 总结。
+                            {RESUME_EXTRACTION_FAILED_LABEL}
                           </span>
                         ) : supersededReparse ? (
                           <span className="library-quality-copy">

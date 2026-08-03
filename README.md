@@ -6,6 +6,7 @@
 - [产品命名与文案对齐规范](docs/PRODUCT_NAMING_GUIDE.md)
 - [全项目实施计划](docs/IMPLEMENTATION_PLAN.md)
 - [AI 提取后台任务](docs/AI_EXTRACTION_WORKER.md)
+- [简历文本提取与 OCR 质量策略](docs/OCR_EXTRACTION_POLICY.md)
 - [邮箱服务商接入说明](docs/MAILBOX_PROVIDER_SETUP.md)
 - [条件筛选 V2 规则与接口](docs/FILTER_V2.md)
 - [发布运行时回归执行手册](docs/RELEASE_REGRESSION_HARNESS.md)

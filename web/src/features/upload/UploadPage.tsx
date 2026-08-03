@@ -17,6 +17,11 @@ import {
   isSupportedResumeFile,
   resumeFileTypeLabel,
 } from "../../backoffice/utils/resume-file";
+import { hasSourceTextQualityIssue } from "../../backoffice/utils/resume-source-quality";
+import {
+  RESUME_EXTRACTION_FAILED_LABEL,
+  SERVICE_UNAVAILABLE_RETRY_MESSAGE,
+} from "../../resume-extraction-user-messages";
 import {
   BATCH_UPLOAD_CONCURRENCY,
   createUploadIdempotencyKey,
@@ -314,17 +319,20 @@ export function UploadPage({
     if (item.status === "attention") {
       if (
         item.response?.extraction_status === "failed" ||
+        hasSourceTextQualityIssue(item.response?.quality_flags) ||
         !item.response?.parsed_page_count
       ) {
-        return "原件已保存，但未读取到可用文字，暂不能 AI 提取";
+        return RESUME_EXTRACTION_FAILED_LABEL;
       }
       if (item.response?.ai_extraction_status === "unavailable") {
-        return "原件和文字已保存，等待服务器配置 AI 服务";
+        return SERVICE_UNAVAILABLE_RETRY_MESSAGE;
       }
-      return "原件和文字已保存，但 AI 提取需要处理；可查看原件并重新上传。";
+      return SERVICE_UNAVAILABLE_RETRY_MESSAGE;
     }
     if (item.status === "success") {
-      return item.response?.quality_flags.length
+      return hasSourceTextQualityIssue(item.response?.quality_flags)
+        ? RESUME_EXTRACTION_FAILED_LABEL
+        : item.response?.quality_flags.length
         ? "AI 已提取并启用，存在解析提示"
         : "AI 已提取并已进入筛选库";
     }

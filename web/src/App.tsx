@@ -9,6 +9,10 @@ import {
 import { isApiError } from "./api";
 import { IcpFilingLink } from "./IcpFilingLink";
 import {
+  resumeExtractionUserMessage,
+  SERVICE_UNAVAILABLE_RETRY_MESSAGE,
+} from "./resume-extraction-user-messages";
+import {
   LandingPage,
   ROOT_WORKSPACE_BASE_PATH,
 } from "./landing";
@@ -67,6 +71,11 @@ interface ToastMessage {
 
 function humanizeError(error: unknown): string {
   if (isApiError(error)) {
+    const resumeExtractionMessage = resumeExtractionUserMessage(
+      error.message,
+      error.status,
+    );
+    if (resumeExtractionMessage) return resumeExtractionMessage;
     const messages: Record<string, string> = {
       invalid_login_credentials: "邮箱或密码不正确，请重试。",
       email_already_registered: "该邮箱已注册，请直接登录或找回密码。",
@@ -104,12 +113,6 @@ function humanizeError(error: unknown): string {
         "本次需求较长，AI 未能完整生成画像。请精简后重试。",
       talent_search_profile_service_unavailable:
         "人才画像服务暂时不可用，请稍后重试。",
-      resume_has_no_native_text_for_ai_extraction:
-        "这份简历没有足够的可提取文字，暂时不能由 AI 提取。",
-      resume_source_text_unavailable:
-        "这份简历没有可用的提取文字，暂时不能由 AI 提取。",
-      resume_source_text_unreliable:
-        "这份简历的提取文本待校正，暂不能用于筛选、评分、总结或 JD 匹配。",
       completed_resume_cannot_be_reextracted:
         "这份简历已启用，不能被后台 AI 任务覆盖。",
       resume_must_be_active_and_ready_for_source_reparse:
@@ -235,7 +238,7 @@ function humanizeError(error: unknown): string {
     };
     const message = messages[error.message];
     if (message) return message;
-    if (error.status >= 500) return "服务暂时不可用，请稍后重试。";
+    if (error.status >= 500) return SERVICE_UNAVAILABLE_RETRY_MESSAGE;
     return `操作没有完成：${error.message}`;
   }
   return "操作没有完成。请检查网络后重试。";

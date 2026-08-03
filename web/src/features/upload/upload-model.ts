@@ -1,4 +1,5 @@
 import type { ResumeDetail, ResumeUploadResponse } from "../../types";
+import { hasSourceTextQualityIssue } from "../../backoffice/utils/resume-source-quality";
 
 export type UploadStatus =
   | "queued"
@@ -25,7 +26,12 @@ export const MAX_BATCH_FILES = 100;
 export function uploadStatusFromResponse(
   response: ResumeUploadResponse,
 ): UploadStatus {
-  if (response.extraction_status === "failed") return "attention";
+  if (
+    response.extraction_status === "failed" ||
+    hasSourceTextQualityIssue(response.quality_flags)
+  ) {
+    return "attention";
+  }
   if (response.ai_extraction_status === "completed") return "success";
   if (
     response.ai_extraction_status === "needs_attention" ||

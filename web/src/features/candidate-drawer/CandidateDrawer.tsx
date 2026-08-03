@@ -10,6 +10,7 @@ import type {
   ResumeSummary,
 } from "../../types";
 import { Icon } from "../../icons";
+import { RESUME_EXTRACTION_FAILED_LABEL } from "../../resume-extraction-user-messages";
 import { TableSkeleton } from "../../backoffice/ui/TableSkeleton";
 import { formatLibraryDate } from "../../backoffice/utils/formatters";
 import {
@@ -178,7 +179,7 @@ export function CandidateDrawer({
           <h2>
             {candidate?.candidateName ?? "候选人详情"}
             {sourceTextIssue ? (
-              <span className="tiny-badge is-attention">文本待校正</span>
+              <span className="tiny-badge is-attention">{RESUME_EXTRACTION_FAILED_LABEL}</span>
             ) : supersededReparse ? (
               <span className="tiny-badge is-attention">当前版本已更新</span>
             ) : review?.is_active ? (
@@ -345,7 +346,7 @@ export function CandidateDrawer({
                 busy={reparsingSource}
                 onOpenEvidence={() => onTabChange("evidence")}
                 onReparse={onReparseSource}
-                reason="这份简历的提取文本疑似乱码。为避免误导，本版本的评分结论不会在这里展示。"
+                reason={`${RESUME_EXTRACTION_FAILED_LABEL}。当前版本不会展示评分结论，请重新解析原件后重试。`}
               />
             ) : supersededReparse ? (
               <ScoreDetailsUnavailable
@@ -620,9 +621,9 @@ function SourceTextQualityNotice({
         <Icon name="document" size={18} />
       </span>
       <div className="source-quality-notice-copy">
-        <strong>提取文本疑似乱码</strong>
+        <strong>{RESUME_EXTRACTION_FAILED_LABEL}</strong>
         <p>
-          当前版本的 AI 总结、评分和 JD 匹配不应作为筛选依据。请从原件创建新的解析版本，旧版本会保留供追溯。
+          系统未能从当前原件中提取可用信息。请重新解析原件后重试，旧版本会保留供追溯。
         </p>
       </div>
       <button
@@ -660,9 +661,9 @@ function SourceTextQualityBlockedSummary({
         <span className="empty-glyph">
           <Icon name="document" size={23} />
         </span>
-        <h2>AI 总结已暂停展示</h2>
+        <h2>{RESUME_EXTRACTION_FAILED_LABEL}</h2>
         <p>
-          这份简历的提取文本疑似乱码。为避免误导，本版本的 AI 结论不会在这里展示。
+          当前版本不会展示 AI 结论。请重新解析原件后重试。
         </p>
         <div className="source-quality-summary-actions">
           <button

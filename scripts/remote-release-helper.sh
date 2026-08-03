@@ -71,6 +71,14 @@ validate_source_dir() {
   [[ -f "$source_dir/deploy/Caddy.Dockerfile" ]] || die "Release source Caddy Dockerfile is missing."
 }
 
+require_target_source_without_legacy_staging_gateway() {
+  local source_dir="$1"
+  local caddyfile="$source_dir/deploy/Caddyfile"
+  [[ -f "$caddyfile" ]] || die "Target release Caddyfile is missing."
+  ! grep -Fq 'staging.hr.greatsellai.net' "$caddyfile" || \
+    die "Target Caddy source retains the legacy staging gateway route; staging must remain on the old host."
+}
+
 compose_run() {
   local source_dir="$1" environment_dir="$2" image_tag="$3"
   shift 3
@@ -158,6 +166,7 @@ validate_pending_target_source() {
   [[ "$target_source_dir" == "$expected_source_dir" ]] || \
     die "Pending target source path does not match its recorded commit."
   validate_source_dir "$target_source_dir" "__not_used__" "$history_dir"
+  require_target_source_without_legacy_staging_gateway "$target_source_dir"
   manifest_path="$target_source_dir/.greatsell-release-source.json"
   [[ -f "$manifest_path" && ! -L "$manifest_path" ]] || \
     die "Pending target release source manifest is missing."
@@ -405,9 +414,22 @@ require_prebuilt_image() {
     die "CI-transferred image revision does not match the selected release: $image"
 }
 
+require_production_caddy_image_without_legacy_staging_gateway() {
+  local image="$1"
+  # A historical prod-* Caddy image can contain a route that only works when
+  # production and staging share one Docker host. Never let that image claim
+  # the new production edge: the old host keeps staging unchanged until a
+  # separately reviewed migration retires it.
+  sudo -n docker run --rm --network none --entrypoint sh "$image" -ceu '
+    test -f /etc/caddy/Caddyfile
+    ! grep -Fq "staging.hr.greatsellai.net" /etc/caddy/Caddyfile
+  ' || die "Target Caddy image retains the legacy staging gateway route; refusing cross-host production deployment."
+}
+
 prepare_target_images() {
   local target_source_dir="$1" environment_dir="$2" history_dir="$3" target_commit="$4" image_mode="$5"
   validate_source_dir "$target_source_dir" "$environment_dir" "$history_dir"
+  require_target_source_without_legacy_staging_gateway "$target_source_dir"
   compose_run "$target_source_dir" "$environment_dir" "$target_commit" config --quiet
   case "$image_mode" in
     build)
@@ -421,6 +443,7 @@ prepare_target_images() {
       die "Invalid production image mode."
       ;;
   esac
+  require_production_caddy_image_without_legacy_staging_gateway "greatsellai-hr-caddy:$target_commit"
   sudo -n docker image inspect "greatsellai-hr-api:$target_commit" >/dev/null
   sudo -n docker image inspect "greatsellai-hr-caddy:$target_commit" >/dev/null
 }
@@ -737,6 +760,7 @@ finalize_pending_target_unlocked() {
     die "Current release record is not in a complete state."
 
   validate_pending_target_source "$history_dir" "$pending_source_dir" "$pending_commit" "$expected_tree_sha256"
+  require_production_caddy_image_without_legacy_staging_gateway "greatsellai-hr-caddy:$pending_commit"
   validate_pending_target_backup "$history_dir" "$pending_backup_id" "$pending_tag" "$pending_commit" \
     "$pending_previous_tag" "$pending_previous_commit" "$pending_mode"
   sudo -n docker image inspect "greatsellai-hr-api:$pending_commit" >/dev/null
@@ -912,6 +936,7 @@ finalize_healthy_pending_target_unlocked() {
     die "Healthy pending predecessor does not match the recorded current release."
 
   validate_pending_target_source "$history_dir" "$pending_source_dir" "$pending_commit" "$expected_tree_sha256"
+  require_production_caddy_image_without_legacy_staging_gateway "greatsellai-hr-caddy:$pending_commit"
   validate_pending_target_backup "$history_dir" "$pending_backup_id" "$pending_tag" "$pending_commit" \
     "$pending_previous_tag" "$pending_previous_commit" "$pending_mode"
 

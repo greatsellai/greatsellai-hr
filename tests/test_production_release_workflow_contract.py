@@ -53,7 +53,7 @@ def test_production_is_a_manual_promotion_of_a_completed_staging_candidate() -> 
     assert "ci_run_id: ${{ steps.verified.outputs.ci_run_id }}" in workflow
     assert "ci_run_attempt: ${{ steps.verified.outputs.ci_run_attempt }}" in workflow
     assert "main advanced after staging verification" in workflow
-    assert "scripts/ensure-staging-gateway.sh" in workflow
+    assert "scripts/ensure-staging-gateway.sh" not in workflow
 
 
 def test_retry_deploy_is_manual_and_uses_current_reviewed_tooling() -> None:
@@ -67,7 +67,7 @@ def test_retry_deploy_is_manual_and_uses_current_reviewed_tooling() -> None:
     assert 'git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"' in workflow
     assert "--prebuilt-images" in workflow
     assert "scripts/transfer-production-images.sh" not in workflow
-    assert "scripts/ensure-staging-gateway.sh" in workflow
+    assert "scripts/ensure-staging-gateway.sh" not in workflow
 
 
 def test_legacy_pending_reconciliation_is_manual_and_uses_the_production_lock() -> None:
@@ -185,7 +185,6 @@ def test_public_repository_routes_all_release_orchestration_to_hosted_runners() 
     )
     workflow_paths = (
         ".github/workflows/staging-release.yml",
-        ".github/workflows/staging-gateway-bootstrap.yml",
         ".github/workflows/production-release.yml",
         ".github/workflows/production-deploy.yml",
         ".github/workflows/production-rollback.yml",
@@ -198,6 +197,37 @@ def test_public_repository_routes_all_release_orchestration_to_hosted_runners() 
         workflow = (ROOT / workflow_path).read_text(encoding="utf-8")
         assert "runs-on: [self-hosted, Linux, X64, greatsell-ci]" not in workflow
         assert runner_selector in workflow
+
+
+def test_cross_host_production_edge_never_claims_the_legacy_staging_gateway() -> None:
+    caddy = (ROOT / "deploy" / "Caddyfile").read_text(encoding="utf-8")
+    helper = (ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "staging.hr.greatsellai.net" not in caddy
+    assert not (ROOT / "scripts" / "ensure-staging-gateway.sh").exists()
+    assert not (ROOT / ".github" / "workflows" / "staging-gateway-bootstrap.yml").exists()
+    assert "require_target_source_without_legacy_staging_gateway" in helper
+    assert "require_production_caddy_image_without_legacy_staging_gateway" in helper
+    assert "Target Caddy image retains the legacy staging gateway route" in helper
+    assert helper.index("require_target_source_without_legacy_staging_gateway") < helper.index(
+        "create_backup_bundle"
+    )
+
+    for workflow_name in (
+        "production-release.yml",
+        "production-deploy.yml",
+        "production-rollback.yml",
+        "production-pending-finalize.yml",
+        "production-healthy-pending-finalize.yml",
+        "production-legacy-reconcile.yml",
+    ):
+        workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(
+            encoding="utf-8"
+        )
+        assert "ensure-staging-gateway" not in workflow
+        assert "Preserve the staging gateway" not in workflow
 
 
 def test_main_ci_archives_only_labeled_images_that_the_release_workflow_can_transfer() -> None:

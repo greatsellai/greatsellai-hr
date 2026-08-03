@@ -2191,6 +2191,11 @@ class LeadershipFilter(ApiModel):
 
 class CandidateSearchRequest(ApiModel):
     schema_version: Literal["candidate_filter.v2"] = "candidate_filter.v2"
+    # Controls how separately enabled top-level filter modules compose.  It
+    # deliberately does not alter the established within-module semantics
+    # (for example, institution multi-select remains OR and a precise keyword
+    # query still requires all of its own phrases).
+    condition_match_mode: Literal["all", "any"] = "all"
     is_985_211: bool | None = None
     # Matches any one education record.  This is deliberately different from
     # ``highest_degree_in``: a recruiter asking for someone who has completed
@@ -2352,6 +2357,14 @@ class CandidateSearchItem(ApiModel):
     display_fields: list[CandidateSearchDisplayField] = Field(default_factory=list)
     matched_filters: list[str]
     matched_evidence: list["CandidateSearchMatch"] = Field(default_factory=list)
+    # Exact-mode responses intentionally omit this projection to retain the
+    # existing response shape.  Fuzzy mode needs explicit server-owned
+    # outcomes so the browser never guesses whether a missing fact is a
+    # failed requirement or simply information that still needs checking.
+    filter_evaluations: list["CandidateSearchFilterEvaluation"] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
 
 
 class CandidateSearchMatch(ApiModel):
@@ -2368,6 +2381,22 @@ class CandidateSearchMatch(ApiModel):
         default="structured_fact",
         exclude=True,
     )
+
+
+class CandidateSearchFilterEvaluation(ApiModel):
+    """One requested top-level condition evaluated against one resume.
+
+    ``unknown`` is intentionally separate from ``unmet``.  The former means
+    that the extracted, source-grounded facts are insufficient to determine
+    whether the resume meets the condition; it must never be rendered as a
+    negative candidate conclusion.
+    """
+
+    filter_key: str
+    label: str
+    status: Literal["matched", "unmet", "unknown"]
+    detail: str
+    evidence_block_ids: list[str] = Field(default_factory=list)
 
 
 class CandidateSearchResponse(ApiModel):

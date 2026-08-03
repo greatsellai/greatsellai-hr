@@ -1054,6 +1054,8 @@ export interface FilterOptions {
 
 export interface CandidateSearchRequest {
   schema_version?: "candidate_filter.v2";
+  /** "all" keeps the strict default; "any" returns candidates matching at least one enabled condition. */
+  condition_match_mode?: "all" | "any";
   is_985_211?: boolean | null;
   /** Any education record has one of these degree levels. */
   education_degree_in?: DegreeLevel[];
@@ -1095,6 +1097,14 @@ export interface CandidateSearchMatch {
   fact_type:
     | "aggregate" | "education" | "experience" | "skill"
     | "language" | "scholarship" | "keyword";
+  evidence_block_ids: string[];
+}
+
+export interface CandidateSearchFilterEvaluation {
+  filter_key: string;
+  label: string;
+  status: "matched" | "unmet" | "unknown";
+  detail: string;
   evidence_block_ids: string[];
 }
 
@@ -1155,6 +1165,8 @@ export interface CandidateSearchItem {
   display_fields: CandidateSearchDisplayField[];
   matched_filters: string[];
   matched_evidence: CandidateSearchMatch[];
+  /** Server-owned fuzzy-mode explanation. Missing data is distinct from a failed condition. */
+  filter_evaluations?: CandidateSearchFilterEvaluation[];
 }
 
 export interface CandidateSearchResponse {

@@ -19,6 +19,8 @@ export type KeywordMode = "broad" | "precise";
  * the filter UI, saved-filter migration, and result-column presentation.
  */
 export interface FilterDraft {
+  /** Global composition of independently enabled filter modules. */
+  conditionMatchMode: MatchMode;
   minEmploymentOrInternshipMonths: number;
   degrees: DegreeLevel[];
   institutionClassifications: InstitutionClassification[];

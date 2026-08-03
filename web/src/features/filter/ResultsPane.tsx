@@ -17,6 +17,7 @@ import {
 import { hasActiveGraduationFilter } from "./filter-search-model";
 import type {
   CandidateSearchDisplayFieldKey,
+  CandidateSearchFilterEvaluation,
   CandidateSearchItem,
   CandidateSearchResponse,
   DegreeLevel,
@@ -258,6 +259,67 @@ function compactFilterValue(values: readonly string[], limit = 2): string {
   return `${uniqueValues.slice(0, limit).join("、")} 等 ${uniqueValues.length} 项`;
 }
 
+function uniqueEvaluations(
+  evaluations: readonly CandidateSearchFilterEvaluation[],
+): CandidateSearchFilterEvaluation[] {
+  const known = new Set<string>();
+  return evaluations.filter((evaluation) => {
+    const key = `${evaluation.filter_key}:${evaluation.status}:${evaluation.detail}`;
+    if (known.has(key)) return false;
+    known.add(key);
+    return true;
+  });
+}
+
+function FilterEvaluationSummary({
+  evaluations,
+}: {
+  evaluations: readonly CandidateSearchFilterEvaluation[];
+}) {
+  const items = uniqueEvaluations(evaluations);
+  const matched = items.filter((item) => item.status === "matched");
+  const unmet = items.filter((item) => item.status === "unmet");
+  const unknown = items.filter((item) => item.status === "unknown");
+  if (!items.length) {
+    return <span className="candidate-meta result-display-empty">筛选说明待生成</span>;
+  }
+
+  const renderItems = (values: CandidateSearchFilterEvaluation[]) =>
+    values.map((item) => (
+      <span className="filter-evaluation-item" key={`${item.filter_key}:${item.detail}`}>
+        <strong>{item.label}</strong>
+        <span>{item.detail}</span>
+      </span>
+    ));
+
+  return (
+    <div
+      aria-label={`命中 ${matched.length}/${items.length} 项条件`}
+      className="filter-evaluation-summary"
+    >
+      <strong className="filter-evaluation-count">命中 {matched.length}/{items.length} 项</strong>
+      {matched.length > 0 && (
+        <div className="filter-evaluation-group is-matched">
+          <span className="filter-evaluation-status">已满足</span>
+          {renderItems(matched)}
+        </div>
+      )}
+      {unmet.length > 0 && (
+        <div className="filter-evaluation-group is-unmet">
+          <span className="filter-evaluation-status">未满足</span>
+          {renderItems(unmet)}
+        </div>
+      )}
+      {unknown.length > 0 && (
+        <div className="filter-evaluation-group is-unknown">
+          <span className="filter-evaluation-status">待核实</span>
+          {renderItems(unknown)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function appliedFilterLabels(draft: FilterDraft): string[] {
   const labels: string[] = [];
   const add = (label: string, value: string) => {
@@ -355,6 +417,14 @@ export function ResultsPane({
   const displayColumns = activeResultDisplayColumns(appliedDraft);
   const hasAppliedDisplayColumns = displayColumns.length > 0;
   const appliedFilters = appliedFilterLabels(appliedDraft);
+  const hasAppliedFilterCriteria = appliedFilters.length > 0;
+  const matchModeLabel = hasAppliedFilterCriteria
+    ? appliedDraft.conditionMatchMode === "any"
+      ? "筛选方式：模糊匹配 · 任一条件"
+      : "筛选方式：精确匹配 · 全部条件"
+    : null;
+  const showFuzzyMatchExplanation =
+    appliedDraft.conditionMatchMode === "any" && hasAppliedFilterCriteria;
   const visibleAppliedFilters = appliedFilters.slice(0, 6);
   const hiddenAppliedFilterCount =
     appliedFilters.length - visibleAppliedFilters.length;
@@ -445,6 +515,11 @@ export function ResultsPane({
       {appliedFilters.length > 0 && (
         <div className="applied-filter-bar" aria-label="已应用的筛选条件">
           <div className="applied-filter-list">
+            {matchModeLabel && (
+              <span className="applied-filter-chip applied-filter-match-mode">
+                {matchModeLabel}
+              </span>
+            )}
             {visibleAppliedFilters.map((label) => (
               <span className="applied-filter-chip" key={label} title={label}>
                 {label}
@@ -481,11 +556,14 @@ export function ResultsPane({
           <table
             className={`candidate-table${
               hasAppliedDisplayColumns ? " has-active-filter-columns" : ""
-            }`}
+            }${showFuzzyMatchExplanation ? " has-fuzzy-match-explanation" : ""}`}
           >
             <thead>
               <tr>
                 <th scope="col">候选人</th>
+                {showFuzzyMatchExplanation && (
+                  <th className="filter-evaluation-column" scope="col">筛选说明</th>
+                )}
                 <th scope="col">学历 / 院校</th>
                 <th scope="col">经历</th>
                 <th scope="col">核心技能</th>
@@ -546,6 +624,13 @@ export function ResultsPane({
                         </button>
                       </div>
                     </td>
+                    {showFuzzyMatchExplanation && (
+                      <td className="filter-evaluation-cell">
+                        <FilterEvaluationSummary
+                          evaluations={item.filter_evaluations ?? []}
+                        />
+                      </td>
+                    )}
                     <td>
                       <CandidateEducationCell item={item} />
                     </td>

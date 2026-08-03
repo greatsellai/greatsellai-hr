@@ -784,6 +784,140 @@ test.describe("招聘工作台关键路径", () => {
     }
   });
 
+  test("模糊匹配展示命中、未满足与待核实条件，切回精确匹配后收起说明列", async ({ page }) => {
+    await registerAndVerify(page, "fuzzy-filter-explanations");
+    await seedWorkspaceFixture(page);
+    await page.reload();
+
+    await page.route("**/v1/candidates/search", async (route) => {
+      const request = route.request();
+      if (request.method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      const body = request.postDataJSON() as { condition_match_mode?: string };
+      if (body.condition_match_mode !== "any") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        json: {
+          items: [
+            {
+              candidate_id: "e2e-fuzzy-candidate",
+              display_name: "E2E 模糊匹配候选人",
+              resume_id: "e2e-fuzzy-resume",
+              original_filename: "e2e-fuzzy.pdf",
+              is_favorited: false,
+              is_985_211: true,
+              institution_classifications: ["985"],
+              highest_degree: "bachelor",
+              employment_months: 0,
+              employment_or_internship_months: 0,
+              education_school: "E2E 大学",
+              education_major: "软件工程",
+              latest_experience_title: null,
+              latest_experience_organization: null,
+              latest_experience_type: null,
+              skill_highlights: ["Python"],
+              summary_preview: null,
+              score_id: null,
+              score_template_id: null,
+              score_total: null,
+              score_status: null,
+              score_template_name: null,
+              score_confidence: null,
+              display_fields: [
+                { key: "institution_classifications", values: ["985"], evidence_block_ids: ["page-001"] },
+                { key: "employment_or_internship_months", values: ["0"], evidence_block_ids: [] },
+              ],
+              matched_filters: ["education"],
+              matched_evidence: [],
+              filter_evaluations: [
+                {
+                  filter_key: "education",
+                  label: "教育条件：院校 985",
+                  status: "matched",
+                  detail: "已识别同一段教育经历满足这组条件。",
+                  evidence_block_ids: ["page-001"],
+                },
+                {
+                  filter_key: "keywords",
+                  label: "关键词：任一命中 · Python",
+                  status: "unmet",
+                  detail: "简历原文中未检索到：Python。",
+                  evidence_block_ids: [],
+                },
+                {
+                  filter_key: "min_employment_or_internship_months",
+                  label: "工作与实习年限：至少 1 年",
+                  status: "unknown",
+                  detail: "未识别可核验的起止时间，无法确认累计年限。",
+                  evidence_block_ids: [],
+                },
+              ],
+            },
+          ],
+          next_cursor: null,
+          needs_review_count: 0,
+          total_count: 1,
+        },
+      });
+    });
+
+    await page.getByRole("button", { name: "条件筛选", exact: true }).click();
+    const basicFilters = page.getByRole("complementary", { name: "初筛条件" });
+    const modeGroup = basicFilters.getByRole("radiogroup", { name: "全局匹配方式" });
+    const institutionGroup = basicFilters.getByRole("group", { name: "院校等级条件" });
+    const keywordInput = basicFilters.getByLabel("添加匹配关键词");
+    const tenureRange = basicFilters.locator("#min-experience");
+
+    await expect(modeGroup.getByRole("radio", { name: /精确匹配/ })).toBeChecked();
+    await institutionGroup.getByRole("checkbox", { name: "985" }).check();
+    await keywordInput.fill("Python");
+    await keywordInput.press("Enter");
+    await tenureRange.focus();
+    await tenureRange.press("ArrowRight");
+
+    const fuzzyResponse = page.waitForResponse((response) => {
+      if (
+        response.request().method() !== "POST"
+        || new URL(response.url()).pathname !== "/v1/candidates/search"
+      ) {
+        return false;
+      }
+      return (response.request().postDataJSON() as { condition_match_mode?: string })
+        .condition_match_mode === "any";
+    });
+    await modeGroup.getByRole("radio", { name: /模糊匹配/ }).check();
+    await fuzzyResponse;
+
+    await expect(page.getByLabel("已应用的筛选条件")).toContainText(
+      "筛选方式：模糊匹配 · 任一条件",
+    );
+    await expect(page.getByRole("columnheader", { name: "筛选说明", exact: true })).toBeVisible();
+    const explanation = page.locator(".filter-evaluation-cell");
+    await expect(explanation).toContainText("命中 1/3 项");
+    await expect(explanation).toContainText("已满足");
+    await expect(explanation).toContainText("未满足");
+    await expect(explanation).toContainText("简历原文中未检索到：Python。");
+    await expect(explanation).toContainText("待核实");
+    await expect(explanation).toContainText("未识别可核验的起止时间");
+    const exactResponse = page.waitForResponse((response) => {
+      if (
+        response.request().method() !== "POST"
+        || new URL(response.url()).pathname !== "/v1/candidates/search"
+      ) {
+        return false;
+      }
+      return !(response.request().postDataJSON() as { condition_match_mode?: string })
+        .condition_match_mode;
+    });
+    await modeGroup.getByRole("radio", { name: /精确匹配/ }).check();
+    await exactResponse;
+    await expect(page.getByRole("columnheader", { name: "筛选说明", exact: true })).toHaveCount(0);
+  });
+
   test("初筛结果按总数交给 Agent，且浏览器不会提交候选人或覆盖冻结范围", async ({ page }) => {
     await registerAndVerify(page, "first-pass-agent-scope");
     await seedWorkspaceFixture(page);

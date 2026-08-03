@@ -807,6 +807,26 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert private["search_resume_id"] not in {
         item["resume_id"] for item in a_search.json()["items"]
     }
+
+    # Fuzzy matching takes a separate evaluation path. It must retain the
+    # same organization boundary before it evaluates or explains any result.
+    b_fuzzy_search = client_b.post(
+        "/v1/candidates/search",
+        json={"limit": 20, "condition_match_mode": "any"},
+    )
+    a_fuzzy_search = client_a.post(
+        "/v1/candidates/search",
+        json={"limit": 20, "condition_match_mode": "any"},
+    )
+    assert b_fuzzy_search.status_code == 200, b_fuzzy_search.text
+    assert a_fuzzy_search.status_code == 200, a_fuzzy_search.text
+    assert private["search_resume_id"] in {
+        item["resume_id"] for item in b_fuzzy_search.json()["items"]
+    }
+    assert private["search_resume_id"] not in {
+        item["resume_id"] for item in a_fuzzy_search.json()["items"]
+    }
+
     foreign_score_sort = client_a.post(
         "/v1/candidates/search",
         json={"limit": 20, "score_template_id": private["score_template_id"]},

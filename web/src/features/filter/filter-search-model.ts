@@ -24,6 +24,7 @@ export const emptyCandidateSearch: CandidateSearchResponse = {
 };
 
 const defaultFilterDraft: FilterDraft = {
+  conditionMatchMode: "all",
   minEmploymentOrInternshipMonths: 0,
   degrees: [],
   institutionClassifications: [],
@@ -234,6 +235,9 @@ export function draftToSearchRequest(
     limit: 50,
     cursor,
   };
+  if (draft.conditionMatchMode === "any") {
+    request.condition_match_mode = "any";
+  }
   const institutionClassifications = sortInstitutionClassifications(
     draft.institutionClassifications,
   );
@@ -382,6 +386,7 @@ export function searchRequestToDraft(
   return {
     draft: {
       ...defaults,
+      conditionMatchMode: request.condition_match_mode ?? "all",
       // Historical saved filters can have a formal-work threshold. The current
       // first-pass UI deliberately uses one combined tenure threshold instead.
       minEmploymentOrInternshipMonths: Math.max(

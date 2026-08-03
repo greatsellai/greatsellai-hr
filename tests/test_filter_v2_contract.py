@@ -80,6 +80,89 @@ def _save_v2_resume(client) -> str:
     return resume_id
 
 
+def _save_resume_with_incomplete_filter_facts(client) -> str:
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(
+        client,
+        resume_id,
+        "教育经历 北京大学 本科。另有清华大学学历尚未写明。"
+        "工作经历 已知公司 工程师 2024-01 至 2024-06。"
+        "工作经历 缺日期公司 开发工程师。"
+        "项目经历 项目组长。技能 Python。英语四级 420 分。校级奖学金。",
+    )
+    response = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "education": [
+                    {
+                        "school_name_raw": "北京大学",
+                        "degree": "bachelor",
+                        "evidence_block_ids": ["page-001"],
+                    },
+                    {
+                        "school_name_raw": "清华大学",
+                        "degree": "unknown",
+                        "evidence_block_ids": ["page-001"],
+                    },
+                ],
+                "experiences": [
+                    {
+                        "experience_type": "employment",
+                        "organization_name_raw": "已知公司",
+                        "title_raw": "工程师",
+                        "start_month": "2024-01",
+                        "end_month": "2024-06",
+                        "evidence_block_ids": ["page-001"],
+                        "classification_evidence_block_ids": ["page-001"],
+                    },
+                    {
+                        "experience_type": "employment",
+                        "organization_name_raw": "缺日期公司",
+                        "title_raw": "开发工程师",
+                        "evidence_block_ids": ["page-001"],
+                        "classification_evidence_block_ids": ["page-001"],
+                    },
+                    {
+                        "experience_type": "project",
+                        "experience_name_raw": "项目经历",
+                        "leadership_context": "project_team",
+                        "leadership_role": "项目组长",
+                        "evidence_block_ids": ["page-001"],
+                    },
+                ],
+                "skills": [
+                    {
+                        "skill_display": "Python",
+                        "skill_category": "software",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+                "language_credentials": [
+                    {
+                        "credential_code": "cet4",
+                        "credential_name_raw": "英语四级",
+                        "score": 420,
+                        "passed": True,
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+                "scholarships": [
+                    {
+                        "scholarship_name_raw": "校级奖学金",
+                        "scholarship_level": "school",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    return resume_id
+
+
 def test_filter_options_use_confirmed_order_and_bilingual_english_names(client) -> None:
     response = client.get("/v1/filter-options")
     assert response.status_code == 200, response.text
@@ -189,6 +272,111 @@ def test_v2_filters_match_same_grounded_facts_and_school_alias(client) -> None:
     )
     assert exact_211.status_code == 200, exact_211.text
     assert exact_211.json()["items"] == []
+
+
+def test_fuzzy_condition_mode_returns_explanations_without_relaxing_exact_mode(
+    client,
+) -> None:
+    resume_id = _save_v2_resume(client)
+    request_payload = {
+        "highest_degree_in": ["master"],
+        "min_employment_or_internship_months": 36,
+        "skills_all_of": ["Python"],
+    }
+
+    exact = client.post("/v1/candidates/search", json=request_payload)
+    assert exact.status_code == 200, exact.text
+    assert exact.json()["items"] == []
+
+    fuzzy = client.post(
+        "/v1/candidates/search",
+        json={**request_payload, "condition_match_mode": "any"},
+    )
+    assert fuzzy.status_code == 200, fuzzy.text
+    assert [item["resume_id"] for item in fuzzy.json()["items"]] == [resume_id]
+    item = fuzzy.json()["items"][0]
+    evaluation_by_key = {
+        evaluation["filter_key"]: evaluation
+        for evaluation in item["filter_evaluations"]
+    }
+    assert evaluation_by_key["skills_all_of"]["status"] == "matched"
+    assert evaluation_by_key["highest_degree_in"] == {
+        "filter_key": "highest_degree_in",
+        "label": "最高学历：硕士",
+        "status": "unmet",
+        "detail": "已识别最高学历：本科。",
+        "evidence_block_ids": ["page-001"],
+    }
+    assert evaluation_by_key["min_employment_or_internship_months"][
+        "status"
+    ] == "unknown"
+    assert "未识别可核验" in evaluation_by_key[
+        "min_employment_or_internship_months"
+    ]["detail"]
+
+    exact_match = client.post(
+        "/v1/candidates/search",
+        json={"skills_all_of": ["Python"]},
+    )
+    assert exact_match.status_code == 200, exact_match.text
+    assert [item["resume_id"] for item in exact_match.json()["items"]] == [resume_id]
+    assert "filter_evaluations" not in exact_match.json()["items"][0]
+
+
+def test_fuzzy_condition_mode_without_conditions_keeps_the_ready_pool(client) -> None:
+    resume_id = _save_v2_resume(client)
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={"condition_match_mode": "any"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert [item["resume_id"] for item in response.json()["items"]] == [resume_id]
+    assert "filter_evaluations" not in response.json()["items"][0]
+
+
+def test_fuzzy_mode_keeps_incomplete_or_alternative_facts_as_unknown(client) -> None:
+    resume_id = _save_resume_with_incomplete_filter_facts(client)
+
+    response = client.post(
+        "/v1/candidates/search",
+        json={
+            "condition_match_mode": "any",
+            # This grounded match makes the candidate visible, while every
+            # condition below exercises a partial or alternative fact that
+            # must stay "待核实" instead of being overstated as a failure.
+            "skills_all_of": ["Python"],
+            "education_degree_in": ["master"],
+            "highest_degree_in": ["master"],
+            "min_employment_months": 24,
+            "language_credentials_any_of": [
+                {"credential_code": "cet4", "min_score": 500},
+                {"credential_code": "ielts", "min_score": 6.5},
+            ],
+            "scholarship_status": "present",
+            "scholarship_levels_any_of": ["national"],
+            "leadership_any_of": [
+                {"contexts_any_of": ["class"], "roles_any_of": ["班长"]}
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert [item["resume_id"] for item in response.json()["items"]] == [resume_id]
+    evaluations = {
+        evaluation["filter_key"]: evaluation
+        for evaluation in response.json()["items"][0]["filter_evaluations"]
+    }
+    assert evaluations["skills_all_of"]["status"] == "matched"
+    assert evaluations["education_degree_in"]["status"] == "unknown"
+    assert "学历仍待核实" in evaluations["education_degree_in"]["detail"]
+    assert evaluations["highest_degree_in"]["status"] == "unknown"
+    assert evaluations["min_employment_months"]["status"] == "unknown"
+    assert "日期不完整" in evaluations["min_employment_months"]["detail"]
+    assert evaluations["language_credentials_any_of"]["status"] == "unknown"
+    assert evaluations["scholarship"]["status"] == "unknown"
+    assert evaluations["leadership"]["status"] == "unknown"
 
 
 def test_academic_score_threshold_matches_average_or_normalized_gpa(client) -> None:

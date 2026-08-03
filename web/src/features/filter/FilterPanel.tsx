@@ -127,6 +127,46 @@ export function FilterPanel({
       </div>
 
       <div className="filter-scroll filter-scroll-basic" id="filter-controls">
+        <section className="filter-section filter-condition-mode">
+          <div className="filter-section-heading">
+            <h3>全局匹配方式</h3>
+          </div>
+          <div
+            aria-describedby="condition-match-mode-note"
+            aria-label="全局匹配方式"
+            className="choice-grid"
+            role="radiogroup"
+          >
+            <label className="choice-row choice-row-detail">
+              <input
+                checked={draft.conditionMatchMode === "all"}
+                name="condition-match-mode"
+                onChange={() => update({ conditionMatchMode: "all" })}
+                type="radio"
+              />
+              <span className="choice-row-copy">
+                <strong>精确匹配</strong>
+                <small>全部已设条件均需满足</small>
+              </span>
+            </label>
+            <label className="choice-row choice-row-detail">
+              <input
+                checked={draft.conditionMatchMode === "any"}
+                name="condition-match-mode"
+                onChange={() => update({ conditionMatchMode: "any" })}
+                type="radio"
+              />
+              <span className="choice-row-copy">
+                <strong>模糊匹配</strong>
+                <small>满足任一条件即可显示</small>
+              </span>
+            </label>
+          </div>
+          <p className="filter-field-note" id="condition-match-mode-note">
+            不改变同一条件内的规则。模糊匹配会列出每位候选人未满足和待核实的条件。
+          </p>
+        </section>
+
         <section className="filter-section">
           <div className="filter-section-heading">
             <h3>院校等级</h3>

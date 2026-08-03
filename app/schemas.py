@@ -2656,6 +2656,17 @@ class TalentSearchProfileListResponse(ApiModel):
     items: list[TalentSearchProfileResponse] = Field(default_factory=list)
 
 
+class ResumeAnalysisWaitEstimate(ApiModel):
+    """A conservative interval for the next unnamed-candidate update."""
+
+    target: Literal["analysis", "candidate_name"]
+    estimated_min_seconds: int = Field(ge=0, le=1800)
+    estimated_max_seconds: int = Field(ge=0, le=1800)
+    # ``baseline`` means the workspace has not accumulated enough recent
+    # completed work to replace the safe initial estimate with observed timing.
+    confidence: Literal["observed", "baseline"]
+
+
 class ResumeLibraryItem(ApiModel):
     """A compact, recruiter-facing row for the persistent resume library."""
 
@@ -2672,6 +2683,10 @@ class ResumeLibraryItem(ApiModel):
     ai_extraction_error: str | None = None
     candidate_name_extraction_status: str | None = None
     candidate_name_extraction_error: str | None = None
+    # Present only while an unnamed candidate has a claimable/running pipeline
+    # stage. Terminal, unavailable and delayed-retry states intentionally do
+    # not receive a guessed ETA.
+    analysis_wait_estimate: ResumeAnalysisWaitEstimate | None = None
     ai_summary_status: str | None = None
     ai_summary_error: str | None = None
     is_active: bool

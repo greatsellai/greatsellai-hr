@@ -405,6 +405,46 @@ test.describe("招聘工作台关键路径", () => {
     await expect(evidencePanel.getByText("Python · 原文依据：page-001")).toBeVisible();
   });
 
+  test("未命名候选人展示会随队列刷新的分析预计时间", async ({ page }) => {
+    await registerAndVerify(page, "resume-analysis-wait-estimate");
+    await seedWorkspaceFixture(page);
+    await page.route("**/v1/resume-library**", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as {
+        items?: Array<Record<string, unknown>>;
+      };
+      await route.fulfill({
+        response,
+        json: {
+          ...payload,
+          items: (payload.items ?? []).map((item) =>
+            item.display_name === "E2E 推荐候选人"
+              ? {
+                  ...item,
+                  display_name: null,
+                  ai_extraction_status: "completed",
+                  candidate_name_extraction_status: "queued",
+                  candidate_name_extraction_error: null,
+                  analysis_wait_estimate: {
+                    target: "candidate_name",
+                    estimated_min_seconds: 70,
+                    estimated_max_seconds: 170,
+                    confidence: "observed",
+                  },
+                }
+              : item,
+          ),
+        },
+      });
+    });
+    await page.reload();
+    await page.getByRole("button", { name: "人才库", exact: true }).click();
+
+    await expect(page.getByText("未命名候选人", { exact: true })).toBeVisible();
+    await expect(page.getByText("等待识别姓名", { exact: true })).toBeVisible();
+    await expect(page.getByText("预计 1–3 分钟", { exact: true })).toBeVisible();
+  });
+
   test("原始文件页会跨 AI 提取和姓名补全刷新候选人姓名", async ({ page }) => {
     let reviewRequestCount = 0;
     await page.route("**/v1/resumes/*/review", async (route) => {

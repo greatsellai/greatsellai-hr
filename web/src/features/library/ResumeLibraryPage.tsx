@@ -20,6 +20,7 @@ import {
 } from "../../backoffice/utils/resume-source-quality";
 import type {
   MailboxConfig,
+  ResumeAnalysisWaitEstimate,
   ResumeLibraryItem,
   ResumeLibraryResponse,
 } from "../../types";
@@ -70,6 +71,18 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
   if (item.ai_extraction_status === "unavailable") {
     return { label: "等待 AI 服务", tone: "attention" };
   }
+  if (
+    !item.display_name?.trim() &&
+    item.candidate_name_extraction_status === "running"
+  ) {
+    return { label: "AI 正在识别姓名", tone: "progress" };
+  }
+  if (
+    !item.display_name?.trim() &&
+    item.candidate_name_extraction_status === "queued"
+  ) {
+    return { label: "等待识别姓名", tone: "waiting" };
+  }
   if (item.is_active && item.extraction_status === "ready") {
     if (aiSummaryIsInProgress(item.ai_summary_status)) {
       return { label: "AI 总结生成中", tone: "progress" };
@@ -83,6 +96,26 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
     return { label: "已启用", tone: "ready" };
   }
   return { label: "等待启用", tone: "waiting" };
+}
+
+function waitEstimateLabel(estimate: ResumeAnalysisWaitEstimate): string {
+  const minimum = Math.max(0, estimate.estimated_min_seconds);
+  const maximum = Math.max(minimum, estimate.estimated_max_seconds);
+  if (maximum < 60) return "预计少于 1 分钟";
+  const minimumMinutes = Math.max(1, Math.floor(minimum / 60));
+  const maximumMinutes = Math.max(minimumMinutes, Math.ceil(maximum / 60));
+  if (minimumMinutes === maximumMinutes) {
+    return `预计约 ${maximumMinutes} 分钟`;
+  }
+  return `预计 ${minimumMinutes}–${maximumMinutes} 分钟`;
+}
+
+function waitEstimateHint(estimate: ResumeAnalysisWaitEstimate): string {
+  const target = estimate.target === "candidate_name" ? "姓名识别" : "简历分析";
+  const basis = estimate.confidence === "observed"
+    ? "根据当前工作区队列和近期同类任务耗时估算。"
+    : "当前工作区历史样本较少，先按安全范围估算。";
+  return `${target}${basis}时间会随队列刷新。`;
 }
 
 function summaryStatusLabel(item: ResumeLibraryItem): string {
@@ -399,21 +432,33 @@ export function ResumeLibraryPage({
                             )}
                             {item.is_favorited ? "已收藏" : "收藏"}
                           </button>
-                          {status.tone !== "ready" && (
-                            <span
-                              className={`library-status is-${status.tone}`}
-                              title={
-                                sourceTextIssue
-                                  ? `${RESUME_EXTRACTION_FAILED_LABEL}。请重新解析原件后重试。`
-                                  : supersededReparse
-                                    ? "候选人已有更新版本，此解析版本不会被启用。"
-                                    : resumeExtractionStatusMessage(
-                                      item.ai_extraction_error,
-                                    )
-                              }
-                            >
-                              {status.label}
-                            </span>
+                          {(status.tone !== "ready" || item.analysis_wait_estimate) && (
+                            <div className="library-processing-meta">
+                              {status.tone !== "ready" && (
+                                <span
+                                  className={`library-status is-${status.tone}`}
+                                  title={
+                                    sourceTextIssue
+                                      ? `${RESUME_EXTRACTION_FAILED_LABEL}。请重新解析原件后重试。`
+                                      : supersededReparse
+                                        ? "候选人已有更新版本，此解析版本不会被启用。"
+                                        : resumeExtractionStatusMessage(
+                                          item.ai_extraction_error,
+                                        )
+                                  }
+                                >
+                                  {status.label}
+                                </span>
+                              )}
+                              {item.analysis_wait_estimate && (
+                                <span
+                                  className="library-wait-estimate"
+                                  title={waitEstimateHint(item.analysis_wait_estimate)}
+                                >
+                                  {waitEstimateLabel(item.analysis_wait_estimate)}
+                                </span>
+                              )}
+                            </div>
                           )}
                           {item.source_mailbox_label && (
                             <span className="candidate-meta library-source-label">

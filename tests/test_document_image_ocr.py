@@ -6,6 +6,7 @@ import pytest
 
 from app.services import document_text_extraction as document_text
 from app.services.document_text_extraction import DocumentExtractionError
+from app.services.text_extraction import PdfExtractionError
 from app.services.tencent_ocr_provider import TencentOcrConfig, TencentOcrError
 
 
@@ -78,3 +79,36 @@ def test_image_provider_error_is_preserved_as_stable_document_failure(
 
     with pytest.raises(DocumentExtractionError, match="tencent_ocr_request_failed"):
         _extract(image_path, config=_config())
+
+
+def test_pdf_error_preserves_count_only_ocr_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The document boundary preserves counters but never parser text."""
+
+    monkeypatch.setattr(
+        document_text,
+        "extract_pdf_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PdfExtractionError(
+                "document_text_limit_exceeded",
+                source_page_count=2,
+                ocr_attempted_page_count=2,
+                ocr_successful_page_count=1,
+                ocr_selected_page_count=1,
+                ocr_failed_page_count=1,
+            )
+        ),
+    )
+
+    with pytest.raises(DocumentExtractionError) as raised:
+        _extract(tmp_path / "resume.pdf", config=_config())
+
+    error = raised.value
+    assert str(error) == "document_text_limit_exceeded"
+    assert error.source_page_count == 2
+    assert error.ocr_attempted_page_count == 2
+    assert error.ocr_successful_page_count == 1
+    assert error.ocr_selected_page_count == 1
+    assert error.ocr_failed_page_count == 1

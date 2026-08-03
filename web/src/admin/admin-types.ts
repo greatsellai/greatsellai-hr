@@ -62,6 +62,21 @@ export interface PlatformRuntimeFailure {
   attempt_count: number | null;
 }
 
+export interface PlatformRuntimeOcrUsage {
+  recorded_from: string | null;
+  document_count: number;
+  completed_document_count: number;
+  failed_document_count: number;
+  total_source_pages: number;
+  ocr_attempted_document_count: number;
+  ocr_successful_document_count: number;
+  ocr_selected_document_count: number;
+  ocr_attempted_page_count: number;
+  ocr_successful_page_count: number;
+  ocr_selected_page_count: number;
+  ocr_failed_page_count: number;
+}
+
 export interface PlatformRuntimeOverview {
   generated_at: string;
   worker_stale_after_seconds: number;
@@ -71,6 +86,7 @@ export interface PlatformRuntimeOverview {
   workers: PlatformRuntimeWorker[];
   queues: PlatformRuntimeQueue[];
   recent_failures: PlatformRuntimeFailure[];
+  ocr_usage: PlatformRuntimeOcrUsage;
 }
 
 export interface PlatformOrganizationSummary {

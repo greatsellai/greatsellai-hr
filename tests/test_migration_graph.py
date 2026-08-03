@@ -13,6 +13,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from app.models import (
     CandidateFavorite,
     CandidateNameExtractionJob,
+    DocumentExtractionOcrDailyMetric,
     MailboxConfig,
     MailboxOAuthConnectIntent,
     JobApplication,
@@ -36,7 +37,7 @@ from app.models import (
 def test_alembic_history_has_one_canonical_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert script.get_heads() == ["20260731_0053"]
+    assert script.get_heads() == ["20260803_0054"]
 
 
 def test_migration_revision_identifiers_are_unique() -> None:
@@ -138,6 +139,15 @@ def test_runtime_observability_ddl_identifiers_fit_postgresql() -> None:
     dialect = postgresql.dialect()
     CreateTable(RuntimeWorkerHeartbeat.__table__).compile(dialect=dialect)
     for index in RuntimeWorkerHeartbeat.__table__.indexes:
+        CreateIndex(index).compile(dialect=dialect)
+
+
+def test_document_ocr_aggregate_ddl_identifiers_fit_postgresql() -> None:
+    """OCR totals must remain portable without tracking individual documents."""
+
+    dialect = postgresql.dialect()
+    CreateTable(DocumentExtractionOcrDailyMetric.__table__).compile(dialect=dialect)
+    for index in DocumentExtractionOcrDailyMetric.__table__.indexes:
         CreateIndex(index).compile(dialect=dialect)
 
 

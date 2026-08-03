@@ -25,6 +25,38 @@ from app.services.tencent_ocr_provider import (
 class DocumentExtractionError(RuntimeError):
     """A stable, UI-safe reason why a document could not be normalized."""
 
+    def __init__(
+        self,
+        error_code: str,
+        *,
+        source_page_count: int = 0,
+        ocr_attempted_page_count: int = 0,
+        ocr_successful_page_count: int = 0,
+        ocr_selected_page_count: int = 0,
+        ocr_failed_page_count: int = 0,
+    ) -> None:
+        super().__init__(error_code)
+        # Keep only count-level observability through an error path.  The
+        # worker can record this without retaining a document-level trace.
+        self.source_page_count = source_page_count
+        self.ocr_attempted_page_count = ocr_attempted_page_count
+        self.ocr_successful_page_count = ocr_successful_page_count
+        self.ocr_selected_page_count = ocr_selected_page_count
+        self.ocr_failed_page_count = ocr_failed_page_count
+
+
+def _document_error_from_pdf_error(exc: PdfExtractionError) -> DocumentExtractionError:
+    """Preserve count-only OCR telemetry when a PDF result is rejected late."""
+
+    return DocumentExtractionError(
+        str(exc),
+        source_page_count=exc.source_page_count,
+        ocr_attempted_page_count=exc.ocr_attempted_page_count,
+        ocr_successful_page_count=exc.ocr_successful_page_count,
+        ocr_selected_page_count=exc.ocr_selected_page_count,
+        ocr_failed_page_count=exc.ocr_failed_page_count,
+    )
+
 
 SUPPORTED_DOCUMENT_EXTENSIONS = frozenset(
     {
@@ -204,7 +236,7 @@ def extract_document_text(
                 max_text_chars=max_text_chars,
             )
         except PdfExtractionError as exc:
-            raise DocumentExtractionError(str(exc)) from exc
+            raise _document_error_from_pdf_error(exc) from exc
     if suffix in {".doc", ".docx"}:
         if suffix == ".docx":
             _assert_zip_budget(
@@ -349,7 +381,7 @@ def _extract_office_as_pdf(
                 max_text_chars=max_text_chars,
             )
         except PdfExtractionError as exc:
-            raise DocumentExtractionError(str(exc)) from exc
+            raise _document_error_from_pdf_error(exc) from exc
 
 
 def _assert_zip_budget(

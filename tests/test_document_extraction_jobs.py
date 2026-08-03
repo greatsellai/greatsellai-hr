@@ -4,6 +4,8 @@ import hashlib
 from io import BytesIO
 from dataclasses import replace
 from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -16,6 +18,7 @@ from app.database import Database
 from app.main import create_app
 from app.models import (
     Candidate,
+    DocumentExtractionOcrDailyMetric,
     Organization,
     Resume,
     ResumeAiExtractionJob,
@@ -297,6 +300,105 @@ def test_document_worker_persists_source_blocks_then_queues_ai_job(
     ]
 
 
+def test_document_worker_records_only_aggregate_ocr_usage(
+    ai_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parser result contributes counters, never an applicant reference."""
+
+    result = SimpleNamespace(
+        source_page_count=4,
+        parsed_page_count=4,
+        pages=[
+            ExtractedPage(
+                page_no=1,
+                text="Synthetic parser fixture with enough source text.",
+                non_whitespace_chars=44,
+            )
+        ],
+        raw_text="--- PAGE 1 ---\nSynthetic parser fixture with enough source text.",
+        quality_flags=[],
+        parser_version="document-worker-test",
+        status="text_ready",
+        ocr_attempted_page_count=3,
+        ocr_successful_page_count=2,
+        ocr_selected_page_count=1,
+        ocr_failed_page_count=1,
+    )
+    monkeypatch.setattr(job_service, "extract_document_text", lambda *_a, **_k: result)
+    response = ai_client.post(
+        "/v1/resumes/upload",
+        files={
+            "file": (
+                "ocr-aggregate-fixture.pdf",
+                make_pdf_with_text("Synthetic parser fixture"),
+                "application/pdf",
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    assert job_service.run_document_extraction_worker_once(
+        ai_client.app.state.database,
+        settings=ai_client.app.state.settings,
+        worker_id="document-ocr-aggregate-worker",
+    )
+
+    with ai_client.app.state.database.session_factory() as session:
+        metrics = session.scalars(select(DocumentExtractionOcrDailyMetric)).all()
+    assert len(metrics) == 1
+    metric = metrics[0]
+    assert metric.document_kind == "pdf"
+    assert metric.document_count == 1
+    assert metric.completed_document_count == 1
+    assert metric.failed_document_count == 0
+    assert metric.total_source_pages == 4
+    assert metric.ocr_attempted_document_count == 1
+    assert metric.ocr_successful_document_count == 1
+    assert metric.ocr_selected_document_count == 1
+    assert metric.ocr_attempted_page_count == 3
+    assert metric.ocr_successful_page_count == 2
+    assert metric.ocr_selected_page_count == 1
+    assert metric.ocr_failed_page_count == 1
+    assert {
+        "resume_id",
+        "job_id",
+        "organization_id",
+        "filename",
+        "source_text",
+    }.isdisjoint(DocumentExtractionOcrDailyMetric.__table__.columns.keys())
+
+
+def test_document_ocr_usage_upsert_accumulates_same_day_without_document_ids(
+    ai_client,
+) -> None:
+    result = SimpleNamespace(
+        source_page_count=2,
+        ocr_attempted_page_count=1,
+        ocr_successful_page_count=1,
+        ocr_selected_page_count=1,
+        ocr_failed_page_count=0,
+    )
+    for _ in range(2):
+        job_service._record_document_ocr_usage(
+            ai_client.app.state.database,
+            path=Path("aggregate-only.pdf"),
+            result=result,
+        )
+
+    with ai_client.app.state.database.session_factory() as session:
+        metrics = session.scalars(select(DocumentExtractionOcrDailyMetric)).all()
+    assert len(metrics) == 1
+    metric = metrics[0]
+    assert metric.document_count == 2
+    assert metric.completed_document_count == 2
+    assert metric.total_source_pages == 4
+    assert metric.ocr_attempted_document_count == 2
+    assert metric.ocr_attempted_page_count == 2
+    assert metric.ocr_successful_page_count == 2
+    assert metric.ocr_selected_page_count == 2
+
+
 @pytest.mark.parametrize(
     ("filename", "content"),
     [
@@ -457,6 +559,167 @@ def test_retryable_tencent_ocr_failure_retries_then_becomes_actionable(
     assert detail.status_code == 200, detail.text
     assert detail.json()["extraction_status"] == "failed"
     assert detail.json()["quality_flags"] == ["tencent_ocr_request_failed"]
+
+
+def test_failed_image_ocr_request_records_attempt_and_failed_page(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    settings = AppSettings(
+        project_dir=tmp_path,
+        data_dir=data_dir,
+        upload_dir=data_dir / "uploads",
+        database_url="sqlite://",
+        allow_unauthenticated=True,
+        min_text_chars_per_page=20,
+        tencent_secret_id="test-secret-id",
+        tencent_secret_key="test-secret-key",
+    )
+    with TestClient(create_app(settings)) as configured_client:
+        monkeypatch.setattr(
+            job_service,
+            "extract_document_text",
+            lambda *_a, **_k: (_ for _ in ()).throw(
+                DocumentExtractionError("tencent_ocr_request_failed")
+            ),
+        )
+        response = configured_client.post(
+            "/v1/resumes/upload",
+            files={
+                "file": (
+                    "ocr-request-failure.png",
+                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+                    "image/png",
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert job_service.run_document_extraction_worker_once(
+            configured_client.app.state.database,
+            settings=configured_client.app.state.settings,
+            worker_id="document-ocr-failure-worker",
+        )
+
+        with configured_client.app.state.database.session_factory() as session:
+            metric = session.scalar(select(DocumentExtractionOcrDailyMetric))
+        assert metric is not None
+        assert metric.document_kind == "image"
+        assert metric.document_count == 1
+        assert metric.completed_document_count == 0
+        assert metric.failed_document_count == 1
+        assert metric.total_source_pages == 1
+        assert metric.ocr_attempted_document_count == 1
+        assert metric.ocr_attempted_page_count == 1
+        assert metric.ocr_successful_page_count == 0
+        assert metric.ocr_selected_page_count == 0
+        assert metric.ocr_failed_page_count == 1
+
+
+def test_non_ocr_parser_failure_does_not_inflate_ocr_counters(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        job_service,
+        "extract_document_text",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            DocumentExtractionError("document_text_limit_exceeded")
+        ),
+    )
+    response = client.post(
+        "/v1/resumes/upload",
+        files={
+            "file": (
+                "non-ocr-parser-failure.pdf",
+                make_pdf_with_text("Synthetic parser failure fixture"),
+                "application/pdf",
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert job_service.run_document_extraction_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="document-non-ocr-failure-worker",
+    )
+
+    with client.app.state.database.session_factory() as session:
+        metric = session.scalar(select(DocumentExtractionOcrDailyMetric))
+    assert metric is not None
+    assert metric.document_kind == "pdf"
+    assert metric.document_count == 1
+    assert metric.completed_document_count == 0
+    assert metric.failed_document_count == 1
+    assert metric.total_source_pages == 0
+    assert metric.ocr_attempted_document_count == 0
+    assert metric.ocr_attempted_page_count == 0
+    assert metric.ocr_successful_page_count == 0
+    assert metric.ocr_selected_page_count == 0
+    assert metric.ocr_failed_page_count == 0
+
+
+def test_late_pdf_failure_keeps_its_count_only_ocr_usage(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-OCR size rejection still contributes its actual OCR calls."""
+
+    monkeypatch.setattr(
+        job_service,
+        "extract_document_text",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            DocumentExtractionError(
+                "document_text_limit_exceeded",
+                source_page_count=2,
+                ocr_attempted_page_count=2,
+                ocr_successful_page_count=1,
+                ocr_selected_page_count=1,
+                ocr_failed_page_count=1,
+            )
+        ),
+    )
+    response = client.post(
+        "/v1/resumes/upload",
+        files={
+            "file": (
+                "late-pdf-limit.pdf",
+                make_pdf_with_text("Synthetic OCR limit failure"),
+                "application/pdf",
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert job_service.run_document_extraction_worker_once(
+        client.app.state.database,
+        settings=client.app.state.settings,
+        worker_id="document-late-ocr-failure-worker",
+    )
+
+    with client.app.state.database.session_factory() as session:
+        metric = session.scalar(select(DocumentExtractionOcrDailyMetric))
+    assert metric is not None
+    assert metric.document_count == 1
+    assert metric.completed_document_count == 0
+    assert metric.failed_document_count == 1
+    assert metric.total_source_pages == 2
+    assert metric.ocr_attempted_page_count == 2
+    assert metric.ocr_successful_page_count == 1
+    assert metric.ocr_selected_page_count == 1
+    assert metric.ocr_failed_page_count == 1
+
+
+def test_unopened_original_is_not_counted_as_document_or_ocr_usage(ai_client) -> None:
+    """Lease/file lookup errors happen before parsing and have no OCR denominator."""
+
+    job_service._record_document_ocr_usage(
+        ai_client.app.state.database,
+        path=None,
+        error="document_original_not_found",
+    )
+
+    with ai_client.app.state.database.session_factory() as session:
+        assert session.scalars(select(DocumentExtractionOcrDailyMetric)).all() == []
 
 
 def test_tencent_ocr_rate_limit_uses_a_longer_retry_delay() -> None:

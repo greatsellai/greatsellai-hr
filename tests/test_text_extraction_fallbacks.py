@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.services import text_extraction
 from app.services.tencent_ocr_provider import TencentOcrConfig, TencentOcrError
 
@@ -64,6 +66,43 @@ def test_sparse_native_text_is_replaced_by_tencent_ocr(monkeypatch, tmp_path) ->
     assert result.ocr_failed_page_count == 0
     assert len(calls) == 1
     assert calls[0]["page_no"] == 1
+
+
+def test_late_text_limit_preserves_ocr_usage_counts(monkeypatch, tmp_path) -> None:
+    """A rejected PDF must not make a real OCR request disappear from metrics."""
+
+    monkeypatch.setattr(
+        text_extraction,
+        "PdfReader",
+        lambda path: _FakeReader("short"),
+    )
+    monkeypatch.setattr(
+        text_extraction,
+        "_extract_pymupdf_page_texts",
+        lambda path, pages: {},
+    )
+    monkeypatch.setattr(
+        text_extraction,
+        "extract_pdf_page_text",
+        lambda **kwargs: "Recovered text " * 20,
+    )
+
+    with pytest.raises(text_extraction.PdfExtractionError) as raised:
+        text_extraction.extract_pdf_text(
+            tmp_path / "resume.pdf",
+            min_text_chars_per_page=1,
+            ocr_sparse_text_chars_per_page=100,
+            tencent_ocr_config=_ocr_config(),
+            max_text_chars=20,
+        )
+
+    error = raised.value
+    assert str(error) == "document_text_limit_exceeded"
+    assert error.source_page_count == 1
+    assert error.ocr_attempted_page_count == 1
+    assert error.ocr_successful_page_count == 1
+    assert error.ocr_selected_page_count == 1
+    assert error.ocr_failed_page_count == 0
 
 
 def test_better_pymupdf_text_avoids_an_ocr_request(monkeypatch, tmp_path) -> None:

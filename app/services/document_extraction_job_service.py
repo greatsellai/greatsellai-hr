@@ -8,11 +8,18 @@ from pathlib import Path
 from typing import Iterator
 
 from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.config import AppSettings
 from app.database import Database
-from app.models import Resume, ResumeDocumentExtractionJob, ResumeSourceBlock
+from app.models import (
+    DocumentExtractionOcrDailyMetric,
+    Resume,
+    ResumeDocumentExtractionJob,
+    ResumeSourceBlock,
+)
 from app.observability import log_exception_event
 from app.services.document_text_extraction import (
     DocumentExtractionError,
@@ -39,6 +46,8 @@ DOCUMENT_EXTRACTION_RUNNING = "running"
 DOCUMENT_EXTRACTION_COMPLETED = "completed"
 DOCUMENT_EXTRACTION_NEEDS_ATTENTION = "needs_attention"
 
+_MAX_SAFE_OCR_COUNTER = 1_000_000
+
 
 class DocumentExtractionJobError(RuntimeError):
     pass
@@ -52,8 +61,263 @@ class ClaimedDocumentExtractionJob:
     workspace_lane_token: str
 
 
+@dataclass(frozen=True)
+class _DocumentOcrUsageDelta:
+    """One content-free contribution to the daily platform total."""
+
+    document_kind: str
+    document_count: int
+    completed_document_count: int
+    failed_document_count: int
+    total_source_pages: int
+    ocr_attempted_document_count: int
+    ocr_successful_document_count: int
+    ocr_selected_document_count: int
+    ocr_attempted_page_count: int
+    ocr_successful_page_count: int
+    ocr_selected_page_count: int
+    ocr_failed_page_count: int
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _document_ocr_kind(path: Path | None) -> str:
+    """Return a coarse, non-identifying original-file category."""
+
+    suffix = path.suffix.lower() if path is not None else ""
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix in {".doc", ".docx"}:
+        return "office"
+    if suffix in {".xls", ".xlsx"}:
+        return "spreadsheet"
+    if suffix in {".png", ".jpg", ".jpeg"}:
+        return "image"
+    if suffix in {".html", ".htm"}:
+        return "html"
+    return "other"
+
+
+def _safe_ocr_counter(value: object) -> int:
+    """Normalize worker-result counters before they reach an aggregate table."""
+
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return min(_MAX_SAFE_OCR_COUNTER, max(0, normalized))
+
+
+def _result_ocr_usage_delta(
+    *,
+    path: Path,
+    result: object,
+    completed: bool,
+) -> _DocumentOcrUsageDelta:
+    """Build one safe metric increment from a completed parser result.
+
+    The document result is intentionally duck-typed.  Parser versions before
+    the OCR telemetry fields remain compatible and contribute zero OCR pages
+    instead of breaking a queued document after an application rollout.
+    """
+
+    total_source_pages = _safe_ocr_counter(
+        getattr(result, "source_page_count", 0)
+    )
+    attempted_pages = _safe_ocr_counter(
+        getattr(result, "ocr_attempted_page_count", 0)
+    )
+    successful_pages = min(
+        attempted_pages,
+        _safe_ocr_counter(getattr(result, "ocr_successful_page_count", 0)),
+    )
+    # Each provider call is either a success or a failure.  Deriving the
+    # latter protects the aggregate during a staggered rollout where an older
+    # result object may not yet expose the explicit failed-page field.
+    failed_pages = max(0, attempted_pages - successful_pages)
+    selected_pages = min(
+        successful_pages,
+        _safe_ocr_counter(getattr(result, "ocr_selected_page_count", 0)),
+    )
+    return _DocumentOcrUsageDelta(
+        document_kind=_document_ocr_kind(path),
+        document_count=1,
+        completed_document_count=int(completed),
+        failed_document_count=int(not completed),
+        total_source_pages=total_source_pages,
+        ocr_attempted_document_count=int(attempted_pages > 0),
+        ocr_successful_document_count=int(successful_pages > 0),
+        ocr_selected_document_count=int(selected_pages > 0),
+        ocr_attempted_page_count=attempted_pages,
+        ocr_successful_page_count=successful_pages,
+        ocr_selected_page_count=selected_pages,
+        ocr_failed_page_count=failed_pages,
+    )
+
+
+def _failed_ocr_usage_delta(
+    *,
+    path: Path | None,
+    error: object,
+) -> _DocumentOcrUsageDelta:
+    """Count a failed parser attempt without serializing its error or source.
+
+    Page-level PDF OCR failures are returned in a completed parser result, so
+    the only direct provider failure we can safely classify here is an image
+    document.  Configuration failures do not make an external OCR request.
+    """
+
+    document_kind = _document_ocr_kind(path)
+    error_code = str(error)
+    source_page_count = _safe_ocr_counter(
+        getattr(error, "source_page_count", 0)
+    )
+    attempted_pages = _safe_ocr_counter(
+        getattr(error, "ocr_attempted_page_count", 0)
+    )
+    successful_pages = min(
+        attempted_pages,
+        _safe_ocr_counter(getattr(error, "ocr_successful_page_count", 0)),
+    )
+    selected_pages = min(
+        successful_pages,
+        _safe_ocr_counter(getattr(error, "ocr_selected_page_count", 0)),
+    )
+    inferred_image_attempt = (
+        document_kind == "image"
+        and error_code.startswith("tencent_ocr_")
+        and error_code != "tencent_ocr_not_configured"
+    )
+    if attempted_pages == 0 and inferred_image_attempt:
+        attempted_pages = 1
+    failed_pages = max(0, attempted_pages - successful_pages)
+    return _DocumentOcrUsageDelta(
+        document_kind=document_kind,
+        document_count=1,
+        completed_document_count=0,
+        failed_document_count=1,
+        total_source_pages=(
+            source_page_count or (1 if document_kind == "image" else 0)
+        ),
+        ocr_attempted_document_count=int(attempted_pages > 0),
+        ocr_successful_document_count=int(successful_pages > 0),
+        ocr_selected_document_count=int(selected_pages > 0),
+        ocr_attempted_page_count=attempted_pages,
+        ocr_successful_page_count=successful_pages,
+        ocr_selected_page_count=selected_pages,
+        ocr_failed_page_count=failed_pages,
+    )
+
+
+_DOCUMENT_OCR_USAGE_COUNTER_FIELDS = (
+    "document_count",
+    "completed_document_count",
+    "failed_document_count",
+    "total_source_pages",
+    "ocr_attempted_document_count",
+    "ocr_successful_document_count",
+    "ocr_selected_document_count",
+    "ocr_attempted_page_count",
+    "ocr_successful_page_count",
+    "ocr_selected_page_count",
+    "ocr_failed_page_count",
+)
+
+
+def _record_document_ocr_usage(
+    database: Database,
+    *,
+    path: Path | None,
+    result: object | None = None,
+    error: object | None = None,
+    completed: bool = True,
+) -> None:
+    """Best-effort atomic increment of content-free platform OCR totals.
+
+    Observability must never turn a completed resume parse into a failed
+    candidate operation.  The aggregate therefore writes in its own short
+    transaction and deliberately suppresses only its own storage failure.
+    """
+
+    # A failed lease/file lookup never opens a document and must not be
+    # counted as an extraction attempt under an invented "other" category.
+    if path is None:
+        return
+    if result is not None:
+        delta = _result_ocr_usage_delta(
+            path=path,
+            result=result,
+            completed=completed,
+        )
+    else:
+        delta = _failed_ocr_usage_delta(path=path, error=error or "")
+    observed_at = utcnow()
+    values = {
+        "metric_date": observed_at.date(),
+        "document_kind": delta.document_kind,
+        "created_at": observed_at,
+        "updated_at": observed_at,
+        **{
+            field: getattr(delta, field)
+            for field in _DOCUMENT_OCR_USAGE_COUNTER_FIELDS
+        },
+    }
+    try:
+        with database.session_factory() as session:
+            _upsert_document_ocr_usage(session, values=values)
+            session.commit()
+    except Exception as exc:  # pragma: no cover - diagnostic writes are best effort
+        log_exception_event(
+            "document_ocr_usage_record_failed",
+            error_code="document_ocr_usage_record_failed",
+            exception=exc,
+        )
+
+
+def _upsert_document_ocr_usage(
+    session: Session,
+    *,
+    values: dict[str, object],
+) -> None:
+    """Atomically add one parser attempt on supported production dialects."""
+
+    table = DocumentExtractionOcrDailyMetric.__table__
+    update_values = {
+        field: table.c[field] + int(values[field])
+        for field in _DOCUMENT_OCR_USAGE_COUNTER_FIELDS
+    }
+    update_values["updated_at"] = values["updated_at"]
+    dialect_name = session.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        statement = postgresql_insert(table).values(**values).on_conflict_do_update(
+            index_elements=[table.c.metric_date, table.c.document_kind],
+            set_=update_values,
+        )
+        session.execute(statement)
+        return
+    if dialect_name == "sqlite":
+        statement = sqlite_insert(table).values(**values).on_conflict_do_update(
+            index_elements=[table.c.metric_date, table.c.document_kind],
+            set_=update_values,
+        )
+        session.execute(statement)
+        return
+
+    # SQLite and PostgreSQL are the only supported application databases.  A
+    # conservative fallback still keeps local tooling usable without relying
+    # on an unportable upsert syntax.
+    existing = session.get(
+        DocumentExtractionOcrDailyMetric,
+        (values["metric_date"], values["document_kind"]),
+    )
+    if existing is None:
+        session.add(DocumentExtractionOcrDailyMetric(**values))
+        return
+    for field in _DOCUMENT_OCR_USAGE_COUNTER_FIELDS:
+        setattr(existing, field, int(getattr(existing, field)) + int(values[field]))
+    existing.updated_at = values["updated_at"]  # type: ignore[assignment]
 
 
 @contextmanager
@@ -454,6 +718,7 @@ def _process_claimed_job(
     worker_id: str,
     claimed: ClaimedDocumentExtractionJob,
 ) -> None:
+    path: Path | None = None
     try:
         path = _load_claimed_original(
             database,
@@ -475,6 +740,11 @@ def _process_claimed_job(
             office_timeout_seconds=settings.document_office_timeout_seconds,
         )
     except DocumentExtractionJobError as exc:
+        _record_document_ocr_usage(
+            database,
+            path=path,
+            error=str(exc),
+        )
         _finish_failure(
             database,
             worker_id=worker_id,
@@ -485,6 +755,11 @@ def _process_claimed_job(
         return
     except DocumentExtractionError as exc:
         error = str(exc)
+        _record_document_ocr_usage(
+            database,
+            path=path,
+            error=exc,
+        )
         _finish_failure(
             database,
             worker_id=worker_id,
@@ -500,6 +775,11 @@ def _process_claimed_job(
             exception=exc,
             job_id=claimed.job_id,
             workspace_id=claimed.organization_id,
+        )
+        _record_document_ocr_usage(
+            database,
+            path=path,
+            error="document_extraction_worker_error",
         )
         _finish_failure(
             database,
@@ -519,6 +799,12 @@ def _process_claimed_job(
             result=result,
         )
     except DocumentExtractionJobError as exc:
+        _record_document_ocr_usage(
+            database,
+            path=path,
+            result=result,
+            completed=False,
+        )
         _finish_failure(
             database,
             worker_id=worker_id,
@@ -534,12 +820,24 @@ def _process_claimed_job(
             job_id=claimed.job_id,
             workspace_id=claimed.organization_id,
         )
+        _record_document_ocr_usage(
+            database,
+            path=path,
+            result=result,
+            completed=False,
+        )
         _finish_failure(
             database,
             worker_id=worker_id,
             claimed=claimed,
             error="document_extraction_persist_failed",
             retryable=True,
+        )
+    else:
+        _record_document_ocr_usage(
+            database,
+            path=path,
+            result=result,
         )
 
 

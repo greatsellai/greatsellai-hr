@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.database import Database
 from app.models import (
     AiRun,
+    DocumentExtractionOcrDailyMetric,
     JobMatchBatchItem,
     MailboxBackgroundJob,
     ResumeAiExtractionJob,
@@ -32,6 +33,7 @@ from app.models import (
 )
 from app.schemas import (
     PlatformRuntimeFailureResponse,
+    PlatformRuntimeOcrUsageResponse,
     PlatformRuntimeOverviewResponse,
     PlatformRuntimeQueueResponse,
     PlatformRuntimeWorkerResponse,
@@ -565,6 +567,85 @@ def _aggregate_worker_processes(
     return list(by_kind.values())
 
 
+def _ocr_usage_overview(session: Session) -> PlatformRuntimeOcrUsageResponse:
+    """Return only all-workspace OCR counter totals for platform operators.
+
+    ``DocumentExtractionOcrDailyMetric`` is already a daily aggregate with no
+    tenant or document reference.  Do not join it to resume or job tables:
+    that would weaken its purpose as a content-free operational signal.
+    """
+
+    row = session.execute(
+        select(
+            func.min(DocumentExtractionOcrDailyMetric.metric_date).label(
+                "recorded_from"
+            ),
+            func.coalesce(
+                func.sum(DocumentExtractionOcrDailyMetric.document_count), 0
+            ).label("document_count"),
+            func.coalesce(
+                func.sum(DocumentExtractionOcrDailyMetric.completed_document_count),
+                0,
+            ).label("completed_document_count"),
+            func.coalesce(
+                func.sum(DocumentExtractionOcrDailyMetric.failed_document_count),
+                0,
+            ).label("failed_document_count"),
+            func.coalesce(
+                func.sum(DocumentExtractionOcrDailyMetric.total_source_pages), 0
+            ).label("total_source_pages"),
+            func.coalesce(
+                func.sum(
+                    DocumentExtractionOcrDailyMetric.ocr_attempted_document_count
+                ),
+                0,
+            ).label("ocr_attempted_document_count"),
+            func.coalesce(
+                func.sum(
+                    DocumentExtractionOcrDailyMetric.ocr_successful_document_count
+                ),
+                0,
+            ).label("ocr_successful_document_count"),
+            func.coalesce(
+                func.sum(
+                    DocumentExtractionOcrDailyMetric.ocr_selected_document_count
+                ),
+                0,
+            ).label("ocr_selected_document_count"),
+            func.coalesce(
+                func.sum(DocumentExtractionOcrDailyMetric.ocr_attempted_page_count),
+                0,
+            ).label("ocr_attempted_page_count"),
+            func.coalesce(
+                func.sum(DocumentExtractionOcrDailyMetric.ocr_successful_page_count),
+                0,
+            ).label("ocr_successful_page_count"),
+            func.coalesce(
+                func.sum(DocumentExtractionOcrDailyMetric.ocr_selected_page_count),
+                0,
+            ).label("ocr_selected_page_count"),
+            func.coalesce(
+                func.sum(DocumentExtractionOcrDailyMetric.ocr_failed_page_count),
+                0,
+            ).label("ocr_failed_page_count"),
+        )
+    ).one()
+    return PlatformRuntimeOcrUsageResponse(
+        recorded_from=row.recorded_from,
+        document_count=int(row.document_count or 0),
+        completed_document_count=int(row.completed_document_count or 0),
+        failed_document_count=int(row.failed_document_count or 0),
+        total_source_pages=int(row.total_source_pages or 0),
+        ocr_attempted_document_count=int(row.ocr_attempted_document_count or 0),
+        ocr_successful_document_count=int(row.ocr_successful_document_count or 0),
+        ocr_selected_document_count=int(row.ocr_selected_document_count or 0),
+        ocr_attempted_page_count=int(row.ocr_attempted_page_count or 0),
+        ocr_successful_page_count=int(row.ocr_successful_page_count or 0),
+        ocr_selected_page_count=int(row.ocr_selected_page_count or 0),
+        ocr_failed_page_count=int(row.ocr_failed_page_count or 0),
+    )
+
+
 def build_platform_runtime_overview(
     session: Session,
     *,
@@ -630,4 +711,5 @@ def build_platform_runtime_overview(
         workers=workers,
         queues=queues,
         recent_failures=failures[:RUNTIME_RECENT_FAILURE_LIMIT],
+        ocr_usage=_ocr_usage_overview(session),
     )

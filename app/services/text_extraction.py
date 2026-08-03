@@ -34,7 +34,31 @@ _HARD_SOURCE_TEXT_DAMAGE_RATIO = 0.10
 
 
 class PdfExtractionError(RuntimeError):
-    pass
+    """A stable parser error that can retain content-free OCR usage counts.
+
+    Most parser errors occur before an OCR request.  A text-size limit can be
+    reached only after one or more page recoveries, however, so dropping the
+    counts there would make the operational OCR rate under-report real calls.
+    These attributes intentionally contain counts only, never page text or
+    provider payloads.
+    """
+
+    def __init__(
+        self,
+        error_code: str,
+        *,
+        source_page_count: int = 0,
+        ocr_attempted_page_count: int = 0,
+        ocr_successful_page_count: int = 0,
+        ocr_selected_page_count: int = 0,
+        ocr_failed_page_count: int = 0,
+    ) -> None:
+        super().__init__(error_code)
+        self.source_page_count = source_page_count
+        self.ocr_attempted_page_count = ocr_attempted_page_count
+        self.ocr_successful_page_count = ocr_successful_page_count
+        self.ocr_selected_page_count = ocr_selected_page_count
+        self.ocr_failed_page_count = ocr_failed_page_count
 
 
 @dataclass(frozen=True)
@@ -311,7 +335,14 @@ def extract_pdf_text(
         f"--- PAGE {page.page_no} ---\n{page.text}" for page in pages if page.text
     )
     if max_text_chars is not None and len(raw_text) > max_text_chars:
-        raise PdfExtractionError("document_text_limit_exceeded")
+        raise PdfExtractionError(
+            "document_text_limit_exceeded",
+            source_page_count=source_page_count,
+            ocr_attempted_page_count=len(ocr_attempted_pages),
+            ocr_successful_page_count=len(ocr_successful_pages),
+            ocr_selected_page_count=len(ocr_selected_pages),
+            ocr_failed_page_count=len(ocr_failed_pages),
+        )
     if not raw_text:
         flags.append("no_extractable_text")
 

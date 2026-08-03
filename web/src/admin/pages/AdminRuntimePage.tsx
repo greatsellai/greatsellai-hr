@@ -49,6 +49,11 @@ function oldestPendingLabel(value: string | null) {
   return `等待约 ${Math.floor(age / 60)} 小时 ${age % 60} 分钟`;
 }
 
+function percentage(numerator: number, denominator: number) {
+  if (denominator <= 0) return "—";
+  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+}
+
 export function AdminRuntimePage() {
   const [state, setState] = useState<RequestState>("loading");
   const [error, setError] = useState("");
@@ -145,6 +150,51 @@ export function AdminRuntimePage() {
                       <td>{oldestPendingLabel(queue.oldest_pending_at)}</td>
                     </tr>
                   ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="admin-panel admin-runtime-panel" aria-labelledby="runtime-ocr-title">
+            <div className="admin-section-heading">
+              <div>
+                <h2 id="runtime-ocr-title">腾讯 OCR 使用统计</h2>
+                <p>按日期汇总解析次数和页数，不保存候选人、简历、文件名或原文。统计从功能上线后开始累计。</p>
+              </div>
+              <span className="admin-generated-at">
+                {runtime.ocr_usage.recorded_from ? `统计起始：${formatDate(runtime.ocr_usage.recorded_from)}` : "暂未记录 OCR 统计"}
+              </span>
+            </div>
+            <div className="admin-metric-strip" aria-label="OCR 关键指标">
+              <article>
+                <span>OCR 尝试率</span>
+                <strong>{percentage(runtime.ocr_usage.ocr_attempted_page_count, runtime.ocr_usage.total_source_pages)}</strong>
+                <small>尝试 {numberFormat(runtime.ocr_usage.ocr_attempted_page_count)} / 来源 {numberFormat(runtime.ocr_usage.total_source_pages)} 页</small>
+              </article>
+              <article>
+                <span>OCR 成功率</span>
+                <strong>{percentage(runtime.ocr_usage.ocr_successful_page_count, runtime.ocr_usage.ocr_attempted_page_count)}</strong>
+                <small>成功 {numberFormat(runtime.ocr_usage.ocr_successful_page_count)} / 尝试 {numberFormat(runtime.ocr_usage.ocr_attempted_page_count)} 页</small>
+              </article>
+              <article>
+                <span>结果采用率</span>
+                <strong>{percentage(runtime.ocr_usage.ocr_selected_page_count, runtime.ocr_usage.ocr_successful_page_count)}</strong>
+                <small>采用 {numberFormat(runtime.ocr_usage.ocr_selected_page_count)} / 成功 {numberFormat(runtime.ocr_usage.ocr_successful_page_count)} 页</small>
+              </article>
+            </div>
+            <div className="admin-runtime-table-wrap">
+              <table className="admin-runtime-table">
+                <thead><tr><th scope="col">纳入统计的解析</th><th scope="col">完成</th><th scope="col">失败</th><th scope="col">尝试 OCR 的文档</th><th scope="col">成功 OCR 的文档</th><th scope="col">采用 OCR 的文档</th><th scope="col">OCR 失败页</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <th scope="row">{numberFormat(runtime.ocr_usage.document_count)}</th>
+                    <td>{numberFormat(runtime.ocr_usage.completed_document_count)}</td>
+                    <td>{numberFormat(runtime.ocr_usage.failed_document_count)}</td>
+                    <td>{numberFormat(runtime.ocr_usage.ocr_attempted_document_count)}</td>
+                    <td>{numberFormat(runtime.ocr_usage.ocr_successful_document_count)}</td>
+                    <td>{numberFormat(runtime.ocr_usage.ocr_selected_document_count)}</td>
+                    <td>{numberFormat(runtime.ocr_usage.ocr_failed_page_count)}</td>
+                  </tr>
                 </tbody>
               </table>
             </div>

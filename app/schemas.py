@@ -493,6 +493,23 @@ class PlatformRuntimeFailureResponse(ApiModel):
     attempt_count: int | None = None
 
 
+class PlatformRuntimeOcrUsageResponse(ApiModel):
+    """Aggregate OCR activity with no document or workspace identifiers."""
+
+    recorded_from: date | None = None
+    document_count: int = 0
+    completed_document_count: int = 0
+    failed_document_count: int = 0
+    total_source_pages: int = 0
+    ocr_attempted_document_count: int = 0
+    ocr_successful_document_count: int = 0
+    ocr_selected_document_count: int = 0
+    ocr_attempted_page_count: int = 0
+    ocr_successful_page_count: int = 0
+    ocr_selected_page_count: int = 0
+    ocr_failed_page_count: int = 0
+
+
 class PlatformRuntimeOverviewResponse(ApiModel):
     generated_at: datetime
     worker_stale_after_seconds: int
@@ -505,6 +522,9 @@ class PlatformRuntimeOverviewResponse(ApiModel):
     workers: list[PlatformRuntimeWorkerResponse] = Field(default_factory=list)
     queues: list[PlatformRuntimeQueueResponse] = Field(default_factory=list)
     recent_failures: list[PlatformRuntimeFailureResponse] = Field(default_factory=list)
+    ocr_usage: PlatformRuntimeOcrUsageResponse = Field(
+        default_factory=PlatformRuntimeOcrUsageResponse
+    )
 
 
 class PlatformOrganizationListItem(ApiModel):

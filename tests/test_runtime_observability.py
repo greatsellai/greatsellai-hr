@@ -18,6 +18,7 @@ from app import ai_extraction_worker
 from app.ai_extraction_worker import _log_worker_lifecycle_event
 from app.main import create_app
 from app.models import (
+    DocumentExtractionOcrDailyMetric,
     OrganizationMembership,
     RuntimeWorkerHeartbeat,
     UserAccount,
@@ -333,6 +334,73 @@ def test_runtime_overview_is_platform_only_global_and_content_free(
         "worker_id",
         "job_id",
     ):
+        assert forbidden not in serialized
+
+
+def test_runtime_overview_aggregates_ocr_usage_without_document_references(
+    runtime_client: TestClient,
+) -> None:
+    """OCR counters remain useful without becoming a candidate activity log."""
+
+    database = runtime_client.app.state.database
+    current_time = datetime.now(timezone.utc)
+    with database.session_factory() as session:
+        session.add_all(
+            [
+                DocumentExtractionOcrDailyMetric(
+                    metric_date=(current_time - timedelta(days=1)).date(),
+                    document_kind="pdf",
+                    document_count=4,
+                    completed_document_count=3,
+                    failed_document_count=1,
+                    total_source_pages=10,
+                    ocr_attempted_document_count=2,
+                    ocr_successful_document_count=2,
+                    ocr_selected_document_count=1,
+                    ocr_attempted_page_count=5,
+                    ocr_successful_page_count=4,
+                    ocr_selected_page_count=2,
+                    ocr_failed_page_count=1,
+                ),
+                DocumentExtractionOcrDailyMetric(
+                    metric_date=current_time.date(),
+                    document_kind="image",
+                    document_count=2,
+                    completed_document_count=1,
+                    failed_document_count=1,
+                    total_source_pages=2,
+                    ocr_attempted_document_count=2,
+                    ocr_successful_document_count=1,
+                    ocr_selected_document_count=1,
+                    ocr_attempted_page_count=2,
+                    ocr_successful_page_count=1,
+                    ocr_selected_page_count=1,
+                    ocr_failed_page_count=1,
+                ),
+            ]
+        )
+        session.commit()
+
+    _login_platform_admin(runtime_client)
+    response = runtime_client.get("/v1/platform/runtime/overview")
+    assert response.status_code == 200, response.text
+    usage = response.json()["ocr_usage"]
+    assert usage == {
+        "recorded_from": (current_time - timedelta(days=1)).date().isoformat(),
+        "document_count": 6,
+        "completed_document_count": 4,
+        "failed_document_count": 2,
+        "total_source_pages": 12,
+        "ocr_attempted_document_count": 4,
+        "ocr_successful_document_count": 3,
+        "ocr_selected_document_count": 2,
+        "ocr_attempted_page_count": 7,
+        "ocr_successful_page_count": 5,
+        "ocr_selected_page_count": 3,
+        "ocr_failed_page_count": 2,
+    }
+    serialized = response.text
+    for forbidden in ("candidate", "resume_id", "job_id", "organization_id", "filename"):
         assert forbidden not in serialized
 
 

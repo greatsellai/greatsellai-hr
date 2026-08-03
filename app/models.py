@@ -590,6 +590,105 @@ class RuntimeWorkerHeartbeat(Base):
     )
 
 
+class DocumentExtractionOcrDailyMetric(Base):
+    """Privacy-safe daily totals for document-parser OCR usage.
+
+    This is deliberately an aggregate-only platform record.  It never stores
+    a workspace, candidate, resume, job, filename, path, extracted text,
+    provider payload, or raw error.  The composite key groups all worker
+    attempts by UTC date and a coarse source-file category, which is enough
+    to explain OCR volume and fallback effectiveness without creating a
+    document-level activity trail.
+    """
+
+    __tablename__ = "document_extraction_ocr_daily_metrics"
+    __table_args__ = (
+        CheckConstraint(
+            "document_kind IN ('pdf', 'office', 'spreadsheet', 'image', 'html', 'other')",
+            name="ck_doc_ocr_daily_metric_kind",
+        ),
+        CheckConstraint(
+            "document_count >= 0 AND completed_document_count >= 0 "
+            "AND failed_document_count >= 0 AND total_source_pages >= 0 "
+            "AND ocr_attempted_document_count >= 0 "
+            "AND ocr_successful_document_count >= 0 "
+            "AND ocr_selected_document_count >= 0 "
+            "AND ocr_attempted_page_count >= 0 "
+            "AND ocr_successful_page_count >= 0 "
+            "AND ocr_selected_page_count >= 0 "
+            "AND ocr_failed_page_count >= 0",
+            name="ck_doc_ocr_daily_metric_nonnegative",
+        ),
+        Index("ix_doc_ocr_daily_metric_date", "metric_date"),
+    )
+
+    metric_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    document_kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    document_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    completed_document_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    failed_document_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    # ``total_source_pages`` is the denominator for an explainable OCR page
+    # attempt rate.  A source page count carries no candidate content.
+    total_source_pages: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    ocr_attempted_document_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    ocr_successful_document_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    ocr_selected_document_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    ocr_attempted_page_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    ocr_successful_page_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    ocr_selected_page_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    ocr_failed_page_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class WorkspaceBackgroundLane(Base):
     """A fair, fenced execution lane for one workspace's heavy work.
 

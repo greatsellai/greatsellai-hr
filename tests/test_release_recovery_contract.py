@@ -350,6 +350,7 @@ load_current_runtime() {{
 }}
 validate_pending_target_source() {{ touch {str(case_root / 'source-validated')!r}; }}
 validate_pending_target_backup() {{ touch {str(case_root / 'backup-validated')!r}; }}
+require_production_caddy_image_without_legacy_staging_gateway() {{ :; }}
 compose_service_container_id() {{ printf 'synthetic-%s' "$4"; }}
 require_container_image() {{ :; }}
 require_container_state() {{ :; }}
@@ -858,7 +859,12 @@ def test_pending_target_source_validation_binds_the_staged_tree_to_its_checksum(
     history_dir = tmp_path / "history"
     source_dir = history_dir / "release-sources" / commit
     (source_dir / "deploy").mkdir(parents=True)
-    for relative in ("compose.yml", "Dockerfile", "deploy/Caddy.Dockerfile"):
+    for relative in (
+        "compose.yml",
+        "Dockerfile",
+        "deploy/Caddy.Dockerfile",
+        "deploy/Caddyfile",
+    ):
         (source_dir / relative).write_text(f"synthetic:{relative}\n", encoding="utf-8")
     (source_dir / ".greatsell-release-source.json").write_text(
         '{"archive_sha256":"' + "a" * 64 + '","format_version":1,"release_commit":"' + commit + '"}\n',

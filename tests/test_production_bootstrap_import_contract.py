@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -157,6 +158,110 @@ def test_bootstrap_workflows_are_manual_production_environment_actions() -> None
     assert "scripts/bootstrap-import-production.sh" in import_workflow
     assert "RESTORE_PRODUCTION_BOOTSTRAP" in restore_workflow
     assert "scripts/restore-production-bootstrap.sh" in restore_workflow
+
+
+def test_successful_bootstrap_import_returns_zero_and_wrapper_only_reports_remote_success(
+    tmp_path: Path,
+) -> None:
+    """A successful import must disarm its function-local EXIT cleanup trap.
+
+    The remote helper is a top-level Bash program.  A trap installed inside
+    ``bootstrap_import_unlocked`` otherwise remains registered after the
+    function returns, when its locals no longer exist under ``set -u``.  This
+    harness runs the real happy-path function with every Docker operation
+    stubbed, then lets the shell exit exactly as the remote wrapper does.
+    """
+
+    if os.name != "posix":
+        pytest.skip("the bootstrap success harness is exercised in Linux CI")
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required for the remote release helper contract")
+
+    helper = (ROOT / "scripts" / "remote-release-helper.sh").read_text(encoding="utf-8").replace(
+        "\r\n", "\n"
+    )
+    definitions, separator, _ = helper.partition('case "${1:-}" in')
+    assert separator, "remote helper dispatch block is missing"
+
+    history_dir = tmp_path / "history"
+    environment_dir = tmp_path / "environment"
+    validator = tmp_path / "validator.py"
+    harness = tmp_path / "bootstrap-import-success.sh"
+    harness.write_text(
+        definitions
+        + f"""
+history_dir={history_dir.as_posix()!r}
+environment_dir={environment_dir.as_posix()!r}
+validator={validator.as_posix()!r}
+import_id=bootstrap-success
+
+mkdir -p "$history_dir/incoming/$import_id" "$environment_dir"
+: > "$history_dir/incoming/$import_id/database.dump"
+: > "$validator"
+
+validate_environment_dir() {{ :; }}
+validate_history_dir() {{ :; }}
+require_safe_bootstrap_import_id() {{ :; }}
+require_no_production_runtime() {{ :; }}
+uploads_volume_exists() {{ return 1; }}
+postgres_volume_exists() {{ [[ "${{bootstrap_db_created:-0}}" == "1" ]]; }}
+validate_bootstrap_import_bundle() {{ :; }}
+write_bootstrap_database_compose() {{ : > "$1"; }}
+wait_for_bootstrap_database() {{ :; }}
+require_production_volume_provenance() {{ :; }}
+bootstrap_compose_run() {{
+  if [[ "$*" == *"up -d --no-build db"* ]]; then
+    bootstrap_db_created=1
+  fi
+  return 0
+}}
+sudo() {{ return 0; }}
+write_bootstrap_import_marker() {{
+  printf 'state=%s\\n' "$4" > "$1/bootstrap-import.env"
+}}
+
+bootstrap_import_unlocked \
+  "$environment_dir" \
+  "$history_dir" \
+  "$import_id" \
+  IMPORT_PRODUCTION_SNAPSHOT \
+  "$validator"
+
+[[ -f "$history_dir/bootstrap-import.env" ]]
+[[ -d "$history_dir/bootstrap-imports/$import_id" ]]
+[[ ! -e "$history_dir/bootstrap-imports/.$import_id.partial" ]]
+[[ -z "$(trap -p EXIT)" ]]
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [bash, str(harness)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Production bootstrap import completed." in completed.stdout
+    assert (history_dir / "bootstrap-import.env").read_text(encoding="utf-8") == "state=ready\n"
+
+    restore = helper.split("recover_bootstrap_import_unlocked()", maxsplit=1)[1].split(
+        "verify_public_runtime()", maxsplit=1
+    )[0]
+    assert restore.index("restored=1") < restore.index("trap - EXIT") < restore.index(
+        "Production bootstrap restore completed."
+    )
+
+    import_wrapper = (ROOT / "scripts" / "bootstrap-import-production.sh").read_text(
+        encoding="utf-8"
+    )
+    remote_call = 'ssh_run "bash $(shell_quote "$remote_helper") bootstrap-import'
+    success_message = 'echo "Production bootstrap import completed for $import_id."'
+    assert remote_call in import_wrapper
+    assert "|| true" not in import_wrapper[import_wrapper.index(remote_call) :]
+    assert import_wrapper.index(remote_call) < import_wrapper.index(success_message)
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="Bash is required on deployment targets")

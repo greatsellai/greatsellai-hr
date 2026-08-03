@@ -2791,6 +2791,13 @@ class RecruitingAgentConversationTurn(OrganizationScoped, Base):
     context_version: Mapped[int] = mapped_column(Integer)
     user_message: Mapped[str] = mapped_column(Text)
     assistant_message: Mapped[str] = mapped_column(Text)
+    # Persist only the bounded recruiter-facing execution summary. This is
+    # deliberately not a LangGraph checkpoint or a copy of tool calls.
+    tool_trace: Mapped[list[dict[str, str]]] = mapped_column(
+        JSON,
+        default=list,
+        server_default=text("'[]'"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     conversation: Mapped[RecruitingAgentConversation] = relationship(

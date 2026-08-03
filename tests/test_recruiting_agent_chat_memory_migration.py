@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateIndex, CreateTable
 
@@ -18,6 +18,33 @@ def test_chat_memory_migration_upgrades_existing_agent_conversations(tmp_path) -
     config.cmd_opts = SimpleNamespace(x=[f"database_url={database_url}"])
 
     command.upgrade(config, "20260727_0040")
+    command.upgrade(config, "20260803_0054")
+
+    legacy_engine = create_engine(database_url)
+    try:
+        with legacy_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO recruiting_agent_conversation_turns "
+                    "(id, organization_id, conversation_id, context_version, "
+                    "user_message, assistant_message, created_at) "
+                    "VALUES (:id, :organization_id, :conversation_id, "
+                    ":context_version, :user_message, :assistant_message, "
+                    ":created_at)"
+                ),
+                {
+                    "id": "legacy-agent-turn",
+                    "organization_id": "legacy-organization",
+                    "conversation_id": "legacy-conversation",
+                    "context_version": 1,
+                    "user_message": "Legacy recruiter question.",
+                    "assistant_message": "Legacy recruiter answer.",
+                    "created_at": "2026-08-03T00:00:00+00:00",
+                },
+            )
+    finally:
+        legacy_engine.dispose()
+
     command.upgrade(config, "head")
 
     engine = create_engine(database_url)
@@ -34,8 +61,16 @@ def test_chat_memory_migration_upgrades_existing_agent_conversations(tmp_path) -
             "context_version",
             "user_message",
             "assistant_message",
+            "tool_trace",
             "created_at",
         }.issubset(columns)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT tool_trace FROM recruiting_agent_conversation_turns "
+                    "WHERE id = 'legacy-agent-turn'"
+                )
+            ).scalar_one() == "[]"
         indexes = {
             index["name"]
             for index in inspector.get_indexes("recruiting_agent_conversation_turns")

@@ -512,6 +512,8 @@ export interface RecruitingAgentConversationTurn {
   context_version: number;
   user_message: string;
   assistant_message: string;
+  /** Safe, bounded tool summaries returned with a restored conversation turn. */
+  tool_trace?: RecruitingAgentToolTrace[];
   created_at: string;
 }
 

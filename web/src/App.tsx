@@ -26,7 +26,6 @@ import type {
 import { mailboxImportErrorMessages } from "./features/mailbox/mailbox-model";
 import { CandidateDrawer } from "./features/candidate-drawer/CandidateDrawer";
 import { useCandidateSearchController } from "./features/filter/useCandidateSearchController";
-import { RecruitingAgentDrawer } from "./features/recruiting-agent/RecruitingAgentDrawer";
 import {
   SideRail,
   Topbar,
@@ -416,7 +415,6 @@ function App() {
 }
 
 function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
-  const [agentOpen, setAgentOpen] = useState(false);
   const [pendingAgentFilterScope, setPendingAgentFilterScope] =
     useState<RecruitingAgentFilterScopeRequest | null>(null);
   const agentScopeRequestIdRef = useRef(0);
@@ -460,7 +458,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
   const clearWorkspaceAfterLogout = useCallback(() => {
     resetDrawer();
-    setAgentOpen(false);
     setPendingAgentFilterScope(null);
   }, [resetDrawer]);
   const {
@@ -540,17 +537,10 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     authSession?.role === "admin" &&
     authSession.plan?.feature_flags.ai_jd_generation === true;
 
-  const closeAgent = useCallback(() => {
-    setAgentOpen(false);
-    window.requestAnimationFrame(() => {
-      document.getElementById("recruiting-agent-trigger")?.focus();
-    });
-  }, []);
-
   const openRecruitingAgent = useCallback(() => {
     closeDrawer();
-    setAgentOpen(true);
-  }, [closeDrawer]);
+    navigateToView("agent");
+  }, [closeDrawer, navigateToView]);
 
   const openAgentWithFilterScope = useCallback(
     (filter: CandidateSearchRequest, totalCount: number) => {
@@ -560,9 +550,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         request_id: ++agentScopeRequestIdRef.current,
         total_count: totalCount,
       });
-      setAgentOpen(true);
+      navigateToView("agent");
     },
-    [closeDrawer],
+    [closeDrawer, navigateToView],
   );
 
   const completeAgentFilterScopeHandoff = useCallback((requestId: number) => {
@@ -579,8 +569,12 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       "reset-password": "设置新密码｜大卖智聘",
       "verify-email": "验证邮箱｜大卖智聘",
     };
-    document.title = authRoute ? titles[authRoute] : "大卖智聘｜AI 招聘决策工作台";
-  }, [authRoute]);
+    document.title = authRoute
+      ? titles[authRoute]
+      : view === "agent"
+        ? "招聘 Agent｜大卖智聘"
+        : "大卖智聘｜AI 招聘决策工作台";
+  }, [authRoute, view]);
 
   useEffect(() => {
     if (
@@ -596,16 +590,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (agentOpen) {
-        event.preventDefault();
-        closeAgent();
-        return;
-      }
       closeDrawer();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [agentOpen, closeAgent, closeDrawer]);
+  }, [closeDrawer]);
 
   const openCandidate = useCallback(
     (item: CandidateSearchItem, tab: DrawerTab = "summary") => {
@@ -682,7 +671,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         candidateId: item.candidate_id,
         candidateName: item.display_name?.trim() || "未命名候选人",
       });
-      setAgentOpen(false);
     },
     [openResume],
   );
@@ -767,17 +755,15 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       <SideRail
         activeView={view}
         canManageSettings={canManageSettings}
-        inert={drawerOpen || agentOpen}
+        inert={drawerOpen}
         onChangeView={navigateToView}
-        onOpenAgent={openRecruitingAgent}
         onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
       />
-      <div className="app-area" inert={drawerOpen || agentOpen}>
-      <Topbar
-        onOpenAgent={openRecruitingAgent}
+      <div className="app-area" inert={drawerOpen}>
+        <Topbar
+          onOpenAgent={openRecruitingAgent}
           onOpenFeedback={() => {
             closeDrawer();
-            setAgentOpen(false);
             openFeedback();
           }}
           canManageSettings={canManageSettings}
@@ -802,6 +788,18 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         <TrialStatusBanner trial={authSession?.trial ?? null} />
         <main className="main-content" id="main-content">
           <WorkspaceViewRouter
+            agent={{
+              conversationStorageScope:
+                authSession?.organization?.organization_id && authSession.user?.user_id
+                  ? `${authSession.organization.organization_id}:${authSession.user.user_id}`
+                  : null,
+              pendingFilterScope: pendingAgentFilterScope,
+              onPendingFilterScopeHandled: completeAgentFilterScopeHandoff,
+              onOpenMatchWorkspace: () => navigateToView("match"),
+              onOpenScoreWorkspace: () => navigateToView("score"),
+              onOpenMailboxSettings: () => openSettings("mailbox"),
+              onOpenResume: openAgentResume,
+            }}
             feedback={{
               formatError: humanizeError,
               notify,
@@ -855,43 +853,14 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
 
       <div
         aria-hidden="true"
-        className={`drawer-scrim${drawerOpen || agentOpen ? " is-open" : ""}`}
-        onClick={() => {
-          if (agentOpen) closeAgent();
-          else closeDrawer();
-        }}
+        className={`drawer-scrim${drawerOpen ? " is-open" : ""}`}
+        onClick={closeDrawer}
       />
       <CandidateDrawer
         {...candidateDrawerProps}
         languageCredentialOptions={filterOptions.language_credentials}
         canManageCandidateData={canManageCandidateData}
       />
-      <RecruitingAgentDrawer
-        conversationStorageScope={
-          authSession?.organization?.organization_id && authSession.user?.user_id
-            ? `${authSession.organization.organization_id}:${authSession.user.user_id}`
-            : null
-        }
-        formatError={humanizeError}
-        isOpen={agentOpen}
-        onClose={closeAgent}
-        onPendingFilterScopeHandled={completeAgentFilterScopeHandoff}
-        onOpenMatchWorkspace={() => {
-          setAgentOpen(false);
-          navigateToView("match");
-        }}
-        onOpenScoreWorkspace={() => {
-          setAgentOpen(false);
-          navigateToView("score");
-        }}
-        onOpenMailboxSettings={() => {
-          setAgentOpen(false);
-          openSettings("mailbox");
-        }}
-        onOpenResume={openAgentResume}
-        pendingFilterScope={pendingAgentFilterScope}
-      />
-
       <ToastRegion
         toasts={toasts}
         onDismiss={(id) =>

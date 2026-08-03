@@ -68,14 +68,12 @@ export function SideRail({
   activeView,
   canManageSettings,
   onChangeView,
-  onOpenAgent,
   onOpenSettings,
   inert,
 }: {
   activeView: WorkspaceView;
   canManageSettings: boolean;
   onChangeView: (view: WorkspaceNavigationView) => void;
-  onOpenAgent: () => void;
   onOpenSettings: () => void;
   inert: boolean;
 }) {
@@ -100,22 +98,6 @@ export function SideRail({
             <span aria-hidden="true" className="rail-nav-group-label">{group.label}</span>
             <div className="rail-nav-group-items">
               {group.items.map((item) => {
-                if (item.kind === "action") {
-                  return (
-                    <button
-                      aria-label={item.label}
-                      className="rail-item rail-item-action"
-                      key={item.action}
-                      onClick={onOpenAgent}
-                      type="button"
-                    >
-                      <Icon name={item.icon} size={19} />
-                      <span className="rail-label">{item.label}</span>
-                      <span className="rail-tooltip">{item.label}</span>
-                    </button>
-                  );
-                }
-
                 return (
                   <button
                     aria-current={activeView === item.view ? "page" : undefined}

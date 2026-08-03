@@ -730,6 +730,91 @@ def test_agent_persists_visible_history_and_supplies_it_to_a_follow_up(
     ] == expected_pairs
 
 
+def test_agent_history_restores_only_bounded_safe_tool_trace_fields(
+    ai_client: TestClient,
+    monkeypatch,
+) -> None:
+    """Reloaded chat history exposes no durable tool payload beyond its summary."""
+
+    model_inputs: list[list[dict[str, object]]] = []
+
+    def fake_completion(*, settings, messages):
+        del settings
+        model_inputs.append(list(messages))
+        return {"content": "已处理。"}
+
+    monkeypatch.setattr(
+        "app.services.recruiting_agent_service._model_completion",
+        fake_completion,
+    )
+    created = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={"message": "First question"},
+    )
+    assert created.status_code == 200, created.text
+    payload = created.json()
+
+    raw_payload_marker = "PRIVATE_RAW_TOOL_ARGUMENT"
+    candidate_marker = "PRIVATE_CANDIDATE_IDENTIFIER"
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        with bypass_organization_scope(session):
+            turn = session.scalar(
+                select(RecruitingAgentConversationTurn).where(
+                    RecruitingAgentConversationTurn.conversation_id
+                    == payload["conversation_id"]
+                )
+            )
+            assert turn is not None
+            turn.tool_trace = [
+                {
+                    "tool": "  candidate search  ",
+                    "summary": "  Found matching candidates.  ",
+                    "raw_tool_input": raw_payload_marker,
+                    "candidate_ids": [candidate_marker],
+                    "provider_payload": {"internal": raw_payload_marker},
+                },
+                {
+                    "tool": "T" * 140,
+                    "summary": "S" * 1_020,
+                    "prompt": raw_payload_marker,
+                    "internal_reasoning": raw_payload_marker,
+                },
+                {"tool": 42, "summary": "invalid shape"},
+                "not a trace object",
+            ]
+            session.commit()
+
+    restored = ai_client.get(
+        f"/v1/recruiting-agent/conversations/{payload['conversation_id']}"
+    )
+    assert restored.status_code == 200, restored.text
+    restored_trace = restored.json()["chat_history"][0]["tool_trace"]
+    assert restored_trace[0] == {
+        "tool": "candidate search",
+        "summary": "Found matching candidates.",
+    }
+    assert len(restored_trace) == 2
+    assert len(restored_trace[1]["tool"]) == 120
+    assert len(restored_trace[1]["summary"]) == 1_000
+    serialized_history = json.dumps(restored.json()["chat_history"], ensure_ascii=False)
+    assert raw_payload_marker not in serialized_history
+    assert candidate_marker not in serialized_history
+
+    follow_up = ai_client.post(
+        "/v1/recruiting-agent/turns",
+        json={
+            "message": "Second question",
+            "conversation_id": payload["conversation_id"],
+            "context_version": payload["context_version"],
+        },
+    )
+    assert follow_up.status_code == 200, follow_up.text
+    serialized_model_history = json.dumps(model_inputs[-1], ensure_ascii=False)
+    assert raw_payload_marker not in serialized_model_history
+    assert candidate_marker not in serialized_model_history
+
+
 def test_agent_does_not_persist_an_incomplete_or_failed_turn(
     ai_client: TestClient,
     monkeypatch,
@@ -926,6 +1011,7 @@ def test_agent_direct_request_creates_a_confirmation_first_profile_draft(
             "context_version": payload["context_version"],
             "user_message": "找做过 Agent 和 RAG，3 年以上经验的人",
             "assistant_message": payload["message"],
+            "tool_trace": payload["tool_trace"],
             "created_at": restored.json()["chat_history"][0]["created_at"],
         }
     ]
@@ -956,6 +1042,7 @@ def test_agent_direct_request_creates_a_confirmation_first_profile_draft(
             assert [(turn.user_message, turn.assistant_message) for turn in turns] == [
                 ("找做过 Agent 和 RAG，3 年以上经验的人", payload["message"])
             ]
+            assert turns[0].tool_trace == payload["tool_trace"]
             assert session.scalar(select(TalentSearchRun.id)) is None
 
 

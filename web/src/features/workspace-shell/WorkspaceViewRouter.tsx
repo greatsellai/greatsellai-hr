@@ -2,6 +2,8 @@ import type {
   CandidateSearchRequest,
   CandidateSearchItem,
   JobMatch,
+  RecruitingAgentCandidate,
+  RecruitingAgentFilterScopeRequest,
   ResumeLibraryItem,
   ScoreTemplate,
 } from "../../types";
@@ -16,6 +18,7 @@ import { RecruitingWorkspace } from "../recruiting/RecruitingWorkspace";
 import { UploadPage } from "../upload/UploadPage";
 import { WorkspaceSettingsPage } from "../workspace-settings/WorkspaceSettingsPage";
 import { WorkspaceFeedbackPage } from "../workspace-feedback/WorkspaceFeedbackPage";
+import { RecruitingAgentPage } from "../recruiting-agent/RecruitingAgentPage";
 import type { CandidateDrawerTab } from "../candidate-drawer/candidate-drawer-types";
 import { useCallback } from "react";
 import type {
@@ -45,6 +48,15 @@ type FilterWorkspaceController = Pick<
 type ToastKind = "success" | "error";
 
 export interface WorkspaceViewRouterProps {
+  agent: {
+    conversationStorageScope: string | null;
+    pendingFilterScope: RecruitingAgentFilterScopeRequest | null;
+    onPendingFilterScopeHandled: (requestId: number) => void;
+    onOpenMailboxSettings: () => void;
+    onOpenMatchWorkspace: () => void;
+    onOpenResume: (candidate: RecruitingAgentCandidate) => void;
+    onOpenScoreWorkspace: () => void;
+  };
   feedback: {
     formatError: (error: unknown) => string;
     notify: (kind: ToastKind, message: string) => void;
@@ -106,6 +118,7 @@ export interface WorkspaceViewRouterProps {
  * component only connects each feature page to their stable callbacks.
  */
 export function WorkspaceViewRouter({
+  agent,
   feedback,
   filter,
   library,
@@ -151,6 +164,19 @@ export function WorkspaceViewRouter({
 
   return (
     <>
+      <div className="recruiting-agent-view" hidden={view !== "agent"}>
+        <RecruitingAgentPage
+          active={view === "agent"}
+          conversationStorageScope={agent.conversationStorageScope}
+          formatError={feedback.formatError}
+          onOpenMailboxSettings={agent.onOpenMailboxSettings}
+          onOpenMatchWorkspace={agent.onOpenMatchWorkspace}
+          onOpenResume={agent.onOpenResume}
+          onOpenScoreWorkspace={agent.onOpenScoreWorkspace}
+          onPendingFilterScopeHandled={agent.onPendingFilterScopeHandled}
+          pendingFilterScope={agent.pendingFilterScope}
+        />
+      </div>
       {view === "workbench" && (
         <RecruitingOverview
           formatError={feedback.formatError}

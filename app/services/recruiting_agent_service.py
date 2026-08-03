@@ -206,6 +206,9 @@ _MAX_PERSISTED_CONVERSATION_TURNS = 12
 _MAX_MODEL_CONVERSATION_TURNS = 6
 _MAX_MODEL_CONVERSATION_HISTORY_CHARS = 12_000
 _MAX_PERSISTED_ASSISTANT_MESSAGE_CHARS = 8_000
+_MAX_PERSISTED_TOOL_TRACE_ITEMS = 12
+_MAX_PERSISTED_TOOL_TRACE_TOOL_CHARS = 120
+_MAX_PERSISTED_TOOL_TRACE_SUMMARY_CHARS = 1_000
 _CONTEXT_SOURCE_AGENT_SEARCH = "agent_search"
 _CONTEXT_SOURCE_CANDIDATE_FILTER = "candidate_filter"
 _CONTEXT_SOURCE_TALENT_SEARCH_RUN = "talent_search_run"
@@ -1309,6 +1312,7 @@ def _conversation_history_response(
             context_version=turn.context_version,
             user_message=turn.user_message,
             assistant_message=turn.assistant_message,
+            tool_trace=_safe_restored_tool_trace(turn.tool_trace),
             created_at=turn.created_at,
         )
         for turn in _completed_conversation_turns(
@@ -1366,12 +1370,74 @@ def _bounded_visible_assistant_message(value: str) -> str:
     return normalized[: _MAX_PERSISTED_ASSISTANT_MESSAGE_CHARS - len(marker)].rstrip() + marker
 
 
+def _bounded_recruiter_visible_trace_text(
+    value: object,
+    *,
+    max_chars: int,
+) -> str:
+    """Normalize one safe, recruiter-facing trace field before storage.
+
+    Persisted Agent history must never become a generic container for model
+    prompts, tool arguments, raw provider results, candidate IDs, or resume
+    content.  The execution trace therefore accepts only non-empty strings,
+    collapses whitespace, and applies a tight field bound.
+    """
+
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:max_chars].rstrip()
+
+
+def _safe_persisted_tool_trace(
+    traces: list[RecruitingAgentToolTrace],
+) -> list[dict[str, str]]:
+    """Keep only bounded server-written tool labels and result summaries."""
+
+    safe_trace: list[dict[str, str]] = []
+    for trace in traces[:_MAX_PERSISTED_TOOL_TRACE_ITEMS]:
+        tool = _bounded_recruiter_visible_trace_text(
+            trace.tool,
+            max_chars=_MAX_PERSISTED_TOOL_TRACE_TOOL_CHARS,
+        )
+        summary = _bounded_recruiter_visible_trace_text(
+            trace.summary,
+            max_chars=_MAX_PERSISTED_TOOL_TRACE_SUMMARY_CHARS,
+        )
+        if tool and summary:
+            safe_trace.append({"tool": tool, "summary": summary})
+    return safe_trace
+
+
+def _safe_restored_tool_trace(value: object) -> list[RecruitingAgentToolTrace]:
+    """Read only the bounded allow-listed trace shape from durable history."""
+
+    if not isinstance(value, list):
+        return []
+
+    restored: list[RecruitingAgentToolTrace] = []
+    for item in value[:_MAX_PERSISTED_TOOL_TRACE_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        tool = _bounded_recruiter_visible_trace_text(
+            item.get("tool"),
+            max_chars=_MAX_PERSISTED_TOOL_TRACE_TOOL_CHARS,
+        )
+        summary = _bounded_recruiter_visible_trace_text(
+            item.get("summary"),
+            max_chars=_MAX_PERSISTED_TOOL_TRACE_SUMMARY_CHARS,
+        )
+        if tool and summary:
+            restored.append(RecruitingAgentToolTrace(tool=tool, summary=summary))
+    return restored
+
+
 def _append_completed_conversation_turn(
     session: Session,
     *,
     conversation: RecruitingAgentConversation,
     user_message: str,
     assistant_message: str,
+    tool_trace: list[RecruitingAgentToolTrace],
 ) -> None:
     """Atomically save one completed visible turn and prune older pairs.
 
@@ -1387,6 +1453,7 @@ def _append_completed_conversation_turn(
             context_version=conversation.context_version,
             user_message=user_message.strip(),
             assistant_message=_bounded_visible_assistant_message(assistant_message),
+            tool_trace=_safe_persisted_tool_trace(tool_trace),
         )
     )
     session.flush()
@@ -4565,6 +4632,7 @@ def _finalize_graph_turn(state: _RecruitingAgentGraphState) -> dict[str, Any]:
         conversation=conversation,
         user_message=state["payload"].message,
         assistant_message=final_message,
+        tool_trace=state["traces"],
     )
     active_context = _conversation_context(
         state["session"],

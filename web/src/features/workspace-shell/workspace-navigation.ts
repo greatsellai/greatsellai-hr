@@ -1,8 +1,6 @@
 import type { IconName } from "../../icons";
 import type { WorkspaceNavigationView } from "./workspace-navigation-types";
 
-export type WorkspaceNavigationAction = "open-agent";
-
 export interface WorkspaceNavigationViewItem {
   kind: "view";
   view: WorkspaceNavigationView;
@@ -10,17 +8,10 @@ export interface WorkspaceNavigationViewItem {
   icon: IconName;
 }
 
-export interface WorkspaceNavigationActionItem {
-  kind: "action";
-  action: WorkspaceNavigationAction;
-  label: string;
-  icon: IconName;
-}
-
 export interface WorkspaceNavigationGroup {
   id: string;
   label: string;
-  items: Array<WorkspaceNavigationViewItem | WorkspaceNavigationActionItem>;
+  items: WorkspaceNavigationViewItem[];
 }
 
 /** Resource identifiers that are safe to carry in a browser route. */
@@ -45,7 +36,7 @@ export const workspaceNavigationGroups: WorkspaceNavigationGroup[] = [
     label: "工作台",
     items: [
       { kind: "view", view: "workbench", label: "工作台", icon: "activity" },
-      { kind: "action", action: "open-agent", label: "招聘 Agent", icon: "spark" },
+      { kind: "view", view: "agent", label: "招聘 Agent", icon: "spark" },
     ],
   },
   {
@@ -78,6 +69,7 @@ export const workspaceNavigationGroups: WorkspaceNavigationGroup[] = [
 
 const hashByView: Record<WorkspaceNavigationView, string> = {
   workbench: "#workbench",
+  agent: "#agent",
   jobs: "#jobs",
   workflow: "#workflow",
   library: "#library",
@@ -91,6 +83,8 @@ const hashByView: Record<WorkspaceNavigationView, string> = {
 const viewByRoute: Record<string, WorkspaceNavigationView> = {
   workbench: "workbench",
   dashboard: "workbench",
+  agent: "agent",
+  "recruiting-agent": "agent",
   jobs: "jobs",
   positions: "jobs",
   workflow: "workflow",

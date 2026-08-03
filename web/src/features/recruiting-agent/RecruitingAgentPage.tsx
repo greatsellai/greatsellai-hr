@@ -14,6 +14,7 @@ import type {
   RecruitingAgentConversationTurn,
   RecruitingAgentFilterScopeRequest,
   RecruitingAgentSearchSummary,
+  RecruitingAgentToolTrace,
   RecruitingAgentTurn,
   TalentSearchHardFilters,
   TalentSearchProfile,
@@ -113,6 +114,8 @@ interface AgentChatMessage {
   searchSummary?: RecruitingAgentSearchSummary | null;
   talentProfile?: TalentSearchProfile;
   talentRun?: TalentSearchRun;
+  /** Safe server-authored summaries of tools completed for this reply. */
+  toolTrace?: RecruitingAgentToolTrace[];
   failure?: boolean;
   retry?: AgentRetry;
 }
@@ -141,6 +144,7 @@ function restoredAgentMessages(
       id: `restored-${turn.context_version}-assistant`,
       role: "assistant" as const,
       content: turn.assistant_message,
+      toolTrace: turn.tool_trace ?? [],
     },
   ]);
 }
@@ -152,6 +156,39 @@ function agentContextSourceLabel(
   if (source === "candidate_filter") return "初筛结果";
   if (source === "talent_search_run") return "人才画像找人结果";
   return "尚未设置候选范围";
+}
+
+/**
+ * Deliberately renders only server-verified tool summaries. This is useful
+ * recruiter-facing process transparency, not model chain-of-thought, hidden
+ * prompts, or raw tool payloads.
+ */
+function AgentExecutionTrace({ trace }: { trace: RecruitingAgentToolTrace[] }) {
+  if (!trace.length) return null;
+
+  return (
+    <details className="agent-execution-trace">
+      <summary>
+        <span>
+          <Icon name="history" size={14} />
+          本轮处理过程
+        </span>
+        <small>已完成 {trace.length} 项操作</small>
+        <Icon aria-hidden="true" name="chevron-down" size={14} />
+      </summary>
+      <div className="agent-execution-trace-body">
+        <p>仅展示已执行的工具与结果摘要，不包含模型内部推理。</p>
+        <ol>
+          {trace.map((entry, index) => (
+            <li key={`${entry.tool}-${index}`}>
+              <strong>{entry.tool}</strong>
+              <span>{entry.summary}</span>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </details>
+  );
 }
 
 function talentProfileHardFilterLabels(filters: TalentSearchHardFilters): string[] {
@@ -601,12 +638,11 @@ function TalentSearchProfileCard({
   );
 }
 
-export function RecruitingAgentDrawer({
+export function RecruitingAgentPage({
   formatError,
-  isOpen,
+  active,
   conversationStorageScope,
   pendingFilterScope,
-  onClose,
   onPendingFilterScopeHandled,
   onOpenMatchWorkspace,
   onOpenScoreWorkspace,
@@ -614,10 +650,10 @@ export function RecruitingAgentDrawer({
   onOpenResume,
 }: {
   formatError: (error: unknown) => string;
-  isOpen: boolean;
+  /** The route is visible. The component stays mounted to preserve an active chat. */
+  active: boolean;
   conversationStorageScope: string | null;
   pendingFilterScope: RecruitingAgentFilterScopeRequest | null;
-  onClose: () => void;
   onPendingFilterScopeHandled: (requestId: number) => void;
   onOpenMatchWorkspace: () => void;
   onOpenScoreWorkspace: () => void;
@@ -644,8 +680,7 @@ export function RecruitingAgentDrawer({
     restoreConversation,
     restoreError,
   } = useRecruitingAgentConversation({ storageScope: conversationStorageScope });
-  const drawerRef = useRef<HTMLElement | null>(null);
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const pageHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const restoredTalentProfileKeyRef = useRef<string | null>(null);
   const restoredChatHistoryConversationIdRef = useRef<string | null>(null);
@@ -657,10 +692,20 @@ export function RecruitingAgentDrawer({
 
   useEffect(() => {
     restoredChatHistoryConversationIdRef.current = null;
+    restoredTalentProfileKeyRef.current = null;
+    autoBoundScopeRequestIdRef.current = null;
+    completedScopeRequestIdRef.current = null;
+    setMessages(initialAgentMessages());
+    setInput("");
+    setJobs([]);
+    setJobVersionId("");
+    setRecentTalentProfiles([]);
+    setBindingScopeRequestId(null);
+    setScopeBindingError(null);
   }, [conversationStorageScope]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!active) return;
     void api
       .listConfirmedJobVersions()
       .then((items) => {
@@ -680,7 +725,7 @@ export function RecruitingAgentDrawer({
       .listTalentSearchProfiles()
       .then((response) => setRecentTalentProfiles(response.items))
       .catch(() => setRecentTalentProfiles([]));
-  }, [isOpen]);
+  }, [active]);
 
   useEffect(() => {
     const restoredJobVersionId = conversation?.active_context.active_job_version_id;
@@ -693,7 +738,7 @@ export function RecruitingAgentDrawer({
   }, [conversation?.active_context.active_job_version_id, jobs]);
 
   useEffect(() => {
-    if (!isOpen || !conversation) return;
+    if (!active || !conversation) return;
     if (restoredChatHistoryConversationIdRef.current === conversation.conversation_id) {
       return;
     }
@@ -703,12 +748,12 @@ export function RecruitingAgentDrawer({
   }, [
     conversation?.chat_history,
     conversation?.conversation_id,
-    isOpen,
+    active,
   ]);
 
   useEffect(() => {
     const activeProfile = conversation?.active_context.active_talent_profile;
-    if (!isOpen || !activeProfile) {
+    if (!active || !activeProfile) {
       if (!activeProfile) restoredTalentProfileKeyRef.current = null;
       return;
     }
@@ -751,38 +796,14 @@ export function RecruitingAgentDrawer({
   }, [
     conversation?.active_context.active_talent_profile?.profile_id,
     conversation?.active_context.active_talent_profile?.revision_id,
-    isOpen,
+    active,
   ]);
 
   useEffect(() => {
-    if (!isOpen) return;
-    const frame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    if (!active) return;
+    const frame = window.requestAnimationFrame(() => pageHeadingRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [isOpen]);
-
-  const trapFocus = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (event.key !== "Tab") return;
-    const drawer = drawerRef.current;
-    if (!drawer) return;
-    const focusable = Array.from(
-      drawer.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ),
-    ).filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
+  }, [active]);
 
   const addAssistantReply = (turn: RecruitingAgentTurn) => {
     // This response is already rendered locally with cards/actions. Avoid
@@ -806,6 +827,7 @@ export function RecruitingAgentDrawer({
         actions: turn.actions,
         searchSummary: turn.search_summary,
         talentProfile: turn.talent_profile ?? undefined,
+        toolTrace: turn.tool_trace,
       },
     ]);
     if (turn.job_version_id) setJobVersionId(turn.job_version_id);
@@ -1069,7 +1091,7 @@ export function RecruitingAgentDrawer({
 
   useEffect(() => {
     if (
-      !isOpen
+      !active
       || !pendingFilterScope
       || isBindingScope
       || isRestoring
@@ -1082,7 +1104,7 @@ export function RecruitingAgentDrawer({
     void bindPendingFilterScope(pendingFilterScope);
   }, [
     isBindingScope,
-    isOpen,
+    active,
     isRestoring,
     pendingFilterScope,
     pendingFilterScope?.request_id,
@@ -1148,7 +1170,7 @@ export function RecruitingAgentDrawer({
   };
 
   useEffect(() => {
-    if (!isOpen || loading) return undefined;
+    if (!active || loading) return undefined;
     const pending = messages.find((item) => (
       item.talentProfile
       && item.talentRun
@@ -1168,7 +1190,7 @@ export function RecruitingAgentDrawer({
       });
     }, 4_000);
     return () => window.clearTimeout(timer);
-  }, [isOpen, loading, messages]);
+  }, [active, loading, messages]);
 
   const send = async (
     raw: string,
@@ -1244,32 +1266,48 @@ export function RecruitingAgentDrawer({
   };
 
   return (
-    <aside
-      aria-label="招聘助手"
-      aria-modal="true"
-      className={`recruiting-agent-drawer${isOpen ? " is-open" : ""}`}
-      inert={!isOpen}
-      onKeyDown={trapFocus}
-      ref={drawerRef}
-      role="dialog"
+    <section
+      aria-labelledby="recruiting-agent-title"
+      className="recruiting-agent-page"
+      data-testid="recruiting-agent-page"
     >
       <header className="agent-header">
         <div className="agent-title-wrap">
           <span className="agent-mark"><Icon name="spark" size={17} /></span>
           <div>
-            <h2>招聘助手</h2>
-            <p>工具执行，结论可追溯</p>
+            <h1 id="recruiting-agent-title" ref={pageHeadingRef} tabIndex={-1}>招聘 Agent</h1>
+            <p>对话协作 · 工具执行 · 结论可追溯</p>
           </div>
         </div>
-        <button
-          aria-label="关闭招聘助手"
-          className="icon-button"
-          onClick={onClose}
-          ref={closeButtonRef}
-          type="button"
-        >
-          <Icon name="close" size={18} />
-        </button>
+        <div className="agent-header-actions">
+          <div className="select-wrap agent-job-select">
+            <label className="sr-only" htmlFor="agent-job-version">关联 JD</label>
+            <select
+              className="select-field"
+              disabled={interactionPending}
+              id="agent-job-version"
+              onChange={(event) => setJobVersionId(event.target.value)}
+              value={jobVersionId}
+            >
+              <option value="">不关联 JD</option>
+              {jobs.map((item) => (
+                <option key={item.job_version_id} value={item.job_version_id}>
+                  {item.title} · v{item.version}{item.requirements.length ? "" : " · 原版"}
+                </option>
+              ))}
+            </select>
+            <Icon name="chevron-down" size={15} />
+          </div>
+          <button
+            className="button button-ghost agent-new-conversation"
+            disabled={interactionPending || !conversation}
+            onClick={() => void clearAgentConversation()}
+            type="button"
+          >
+            <Icon name="refresh" size={15} />
+            新对话
+          </button>
+        </div>
       </header>
       <div className="agent-context">
         <div
@@ -1324,36 +1362,10 @@ export function RecruitingAgentDrawer({
                   {"；最近 12 轮对话会在 24 小时无操作后自动清除"}
                 </small>
               </div>
-              <button
-                className="text-button"
-                disabled={interactionPending}
-                onClick={() => void clearAgentConversation()}
-                type="button"
-              >
-                清除范围
-              </button>
             </>
           ) : (
             <span>直接描述你想找的人，我会先整理条件，确认后才开始找人。</span>
           )}
-        </div>
-        <div className="select-wrap">
-          <label className="sr-only" htmlFor="agent-job-version">关联 JD</label>
-          <select
-            className="select-field"
-            disabled={interactionPending}
-            id="agent-job-version"
-            onChange={(event) => setJobVersionId(event.target.value)}
-            value={jobVersionId}
-          >
-            <option value="">不关联 JD</option>
-            {jobs.map((item) => (
-              <option key={item.job_version_id} value={item.job_version_id}>
-                {item.title} · v{item.version}{item.requirements.length ? "" : " · 原版"}
-              </option>
-            ))}
-          </select>
-          <Icon name="chevron-down" size={15} />
         </div>
         {!!recentTalentProfiles.length && (
           <div className="agent-profile-history" aria-label="已保存的人才画像">
@@ -1386,6 +1398,7 @@ export function RecruitingAgentDrawer({
             ) : (
               <p>{item.content}</p>
             )}
+            {!!item.toolTrace?.length && <AgentExecutionTrace trace={item.toolTrace} />}
             {item.retry && (
               <div className="agent-retry-row">
                 <button
@@ -1470,7 +1483,11 @@ export function RecruitingAgentDrawer({
         ))}
         {loading && (
           <article className="agent-message is-assistant agent-loading">
-            <i className="spinner" /> 正在调用招聘工具…
+            <div>
+              <i className="spinner" />
+              <span>正在处理请求并调用已授权工具…</span>
+            </div>
+            <small>完成后会显示本轮处理过程，不展示模型内部推理。</small>
           </article>
         )}
       </div>
@@ -1501,7 +1518,10 @@ export function RecruitingAgentDrawer({
             <Icon name="arrow-right" size={17} />
           </button>
         </form>
+        <p className="agent-composer-hint">
+          <kbd>Enter</kbd> 发送　<kbd>Shift + Enter</kbd> 换行
+        </p>
       </div>
-    </aside>
+    </section>
   );
 }

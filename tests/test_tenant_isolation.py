@@ -539,6 +539,7 @@ def test_recruiting_agent_conversations_are_private_to_owner_and_workspace(
             "context_version": 1,
             "user_message": "Owner-only recruiter question.",
             "assistant_message": "Owner-only recruiter reply.",
+            "tool_trace": [],
             "created_at": owner_read.json()["chat_history"][0]["created_at"],
         }
     ]

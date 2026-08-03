@@ -1,37 +1,38 @@
-.backoffice-ui-root .recruiting-agent-drawer {
-  position: fixed;
-  z-index: 30;
-  top: 4rem;
-  right: 0;
-  bottom: 0;
-  display: grid;
-  width: min(31rem, 42vw);
-  min-width: 26rem;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  overflow: hidden;
-  pointer-events: none;
-  background: var(--surface);
-  border-left: 1px solid var(--line-strong);
-  box-shadow: var(--shadow-md);
-  opacity: 0;
-  transform: translateX(102%);
-  transition: opacity 220ms var(--ease-out), transform 260ms var(--ease-out);
+.backoffice-ui-root .recruiting-agent-view {
+  height: 100%;
+  min-height: 38rem;
 }
 
-.backoffice-ui-root .recruiting-agent-drawer.is-open {
-  pointer-events: auto;
-  opacity: 1;
-  transform: translateX(0);
+.backoffice-ui-root .recruiting-agent-page {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 38rem;
+  overflow: hidden;
+  background: var(--workspace-canvas);
+}
+
+.backoffice-ui-root .recruiting-agent-page::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  background:
+    radial-gradient(circle at 88% -8%, rgb(215 22 24 / 0.1), transparent 26rem),
+    radial-gradient(circle at 16% -20%, rgb(24 27 33 / 0.055), transparent 30rem);
 }
 
 .backoffice-ui-root .agent-header {
   display: flex;
-  min-height: 4.875rem;
+  min-height: 5.5rem;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-sm);
-  padding: var(--space-md) var(--space-lg);
-  background: var(--surface);
+  gap: 1rem;
+  padding: 1rem clamp(1rem, 4vw, 4rem);
+  background: linear-gradient(105deg, rgb(255 255 255 / 0.94), rgb(255 248 247 / 0.82));
   border-bottom: 1px solid var(--line);
 }
 
@@ -48,12 +49,12 @@
   height: 2.125rem;
   place-items: center;
   color: #fff;
-  background: var(--red);
+  background: linear-gradient(135deg, var(--ink) 0%, #69201f 56%, var(--red) 100%);
   border-radius: var(--radius-sm);
-  box-shadow: 0 0.25rem 0.75rem rgb(215 22 24 / 0.2);
+  box-shadow: 0 0.375rem 1rem rgb(215 22 24 / 0.16);
 }
 
-.backoffice-ui-root .agent-title-wrap h2 {
+.backoffice-ui-root .agent-title-wrap h1 {
   margin: 0;
   color: var(--ink);
   font-size: 1.0625rem;
@@ -67,19 +68,36 @@
   font-size: 0.75rem;
 }
 
+.backoffice-ui-root .agent-header-actions {
+  display: flex;
+  min-width: 0;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.backoffice-ui-root .agent-job-select {
+  width: min(20rem, 34vw);
+}
+
+.backoffice-ui-root .agent-job-select .select-field {
+  min-height: 2.5rem;
+  font-size: 0.8125rem;
+  background: rgb(255 255 255 / 0.84);
+}
+
+.backoffice-ui-root .agent-new-conversation {
+  flex: 0 0 auto;
+  min-height: 2.5rem;
+  font-size: 0.75rem;
+}
+
 .backoffice-ui-root .agent-context {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0.375rem;
-  padding: 0.75rem var(--space-lg);
-  background: var(--surface-muted);
+  gap: 0.5rem;
+  padding: 0.75rem clamp(1rem, 4vw, 4rem);
+  background: rgb(255 255 255 / 0.5);
   border-bottom: 1px solid var(--line);
-}
-
-.backoffice-ui-root .agent-context .select-field {
-  min-height: 2.25rem;
-  font-size: 0.8125rem;
-  background: var(--surface);
 }
 
 .backoffice-ui-root .agent-work-context {
@@ -87,13 +105,15 @@
   gap: 0.5rem;
   align-items: center;
   justify-content: space-between;
-  padding: 0.4375rem 0.5rem;
+  width: min(100%, 58rem);
+  padding: 0.5625rem 0.75rem;
   color: var(--ink-muted);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   line-height: 1.4;
-  background: var(--surface);
+  background: rgb(255 255 255 / 0.82);
   border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0.375rem 1rem rgb(16 24 40 / 0.025);
 }
 
 .backoffice-ui-root .agent-work-context > div {
@@ -141,6 +161,7 @@
   display: grid;
   gap: 0.3125rem;
   min-width: 0;
+  width: min(100%, 58rem);
 }
 
 .backoffice-ui-root .agent-profile-history > span {
@@ -177,24 +198,23 @@
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 0.875rem;
-  padding: var(--space-lg);
+  gap: 1.125rem;
+  padding: 1.5rem clamp(1rem, 6vw, 7rem) 2rem;
   overflow-y: auto;
-  background:
-    linear-gradient(var(--surface), var(--surface)) padding-box,
-    linear-gradient(90deg, transparent 0 14%, rgb(35 24 21 / 0.025) 14% 14.2%, transparent 14.2% 86%, rgb(35 24 21 / 0.025) 86% 86.2%, transparent 86.2%) border-box;
+  scroll-behavior: smooth;
 }
 
 .backoffice-ui-root .agent-message {
-  width: fit-content;
-  max-width: 94%;
-  padding: 0.75rem 0.875rem;
+  width: min(100%, 52rem);
+  max-width: 100%;
+  align-self: center;
+  padding: 0.25rem 0;
   color: var(--ink-soft);
-  font-size: 0.875rem;
+  font-size: 0.9375rem;
   line-height: 1.6;
-  background: var(--surface-muted);
-  border: 1px solid var(--line);
-  border-radius: 0.625rem;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 
 .backoffice-ui-root .agent-message > p {
@@ -323,8 +343,11 @@
 
 .backoffice-ui-root .agent-message.is-user {
   align-self: flex-end;
+  width: fit-content;
+  max-width: min(82%, 42rem);
+  padding: 0.75rem 0.875rem;
   color: #fff;
-  background: var(--ink);
+  background: linear-gradient(135deg, #202329, #17191d);
   border-color: var(--ink);
   border-bottom-right-radius: 0.1875rem;
 }
@@ -334,9 +357,12 @@
 }
 
 .backoffice-ui-root .agent-message.is-error {
+  padding: 0.75rem 0.875rem;
   color: #8f1719;
   background: #fff7f7;
   border-color: #f0c7c7;
+  border: 1px solid #f0c7c7;
+  border-radius: var(--radius-sm);
 }
 
 .backoffice-ui-root .agent-retry-row {
@@ -355,6 +381,104 @@
   color: #741113;
   background: #fff;
   border-color: #f0c7c7;
+}
+
+.backoffice-ui-root .agent-execution-trace {
+  margin-top: 0.875rem;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.backoffice-ui-root .agent-execution-trace summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5625rem 0.6875rem;
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-weight: 700;
+  list-style: none;
+}
+
+.backoffice-ui-root .agent-execution-trace summary::-webkit-details-marker {
+  display: none;
+}
+
+.backoffice-ui-root .agent-execution-trace summary:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: -2px;
+}
+
+.backoffice-ui-root .agent-execution-trace summary > span {
+  display: inline-flex;
+  min-width: 0;
+  gap: 0.375rem;
+  align-items: center;
+}
+
+.backoffice-ui-root .agent-execution-trace summary > span svg {
+  flex: 0 0 auto;
+  color: var(--red-pressed);
+}
+
+.backoffice-ui-root .agent-execution-trace summary > small {
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+  font-weight: 500;
+}
+
+.backoffice-ui-root .agent-execution-trace summary > svg {
+  transition: transform 180ms var(--ease-out);
+}
+
+.backoffice-ui-root .agent-execution-trace[open] summary > svg {
+  transform: rotate(180deg);
+}
+
+.backoffice-ui-root .agent-execution-trace-body {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.625rem 0.6875rem 0.75rem;
+  border-top: 1px solid var(--line);
+  animation: agent-trace-reveal 180ms var(--ease-out);
+}
+
+.backoffice-ui-root .agent-execution-trace-body > p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+  line-height: 1.45;
+}
+
+.backoffice-ui-root .agent-execution-trace-body ol {
+  display: grid;
+  gap: 0.4375rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.backoffice-ui-root .agent-execution-trace-body li {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: start;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.backoffice-ui-root .agent-execution-trace-body strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.backoffice-ui-root .agent-execution-trace-body span {
+  overflow-wrap: anywhere;
 }
 
 .backoffice-ui-root .agent-search-summary {
@@ -969,18 +1093,35 @@
 }
 
 .backoffice-ui-root .agent-loading {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.6875rem 0.75rem;
+  color: var(--ink-muted);
+  background: linear-gradient(100deg, #fff, #fff3f1, #fff);
+  background-size: 220% 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  animation: agent-processing-sheen 1.8s ease-in-out infinite;
+}
+
+.backoffice-ui-root .agent-loading > div {
   display: inline-flex;
   gap: 0.5rem;
   align-items: center;
+}
+
+.backoffice-ui-root .agent-loading small {
   color: var(--ink-muted);
+  font-size: 0.6875rem;
+  line-height: 1.4;
 }
 
 .backoffice-ui-root .agent-composer {
   display: grid;
   gap: 0.625rem;
-  padding: 0.75rem var(--space-lg) var(--space-md);
-  background: var(--surface);
-  border-top: 1px solid var(--line);
+  padding: 1rem clamp(1rem, 6vw, 7rem) 1.125rem;
+  background: linear-gradient(0deg, var(--workspace-canvas) 64%, rgb(245 246 248 / 0.72));
+  border-top: 0;
 }
 
 .backoffice-ui-root .agent-input-row {
@@ -988,6 +1129,13 @@
   grid-template-columns: minmax(0, 1fr) 2.625rem;
   gap: 0.5rem;
   align-items: end;
+  width: min(100%, 52rem);
+  padding: 0.375rem;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.875rem;
+  box-shadow: 0 0.75rem 1.75rem rgb(16 24 40 / 0.07);
 }
 
 .backoffice-ui-root .agent-input-row textarea {
@@ -999,15 +1147,19 @@
   font-size: 0.8125rem;
   line-height: 1.4;
   resize: vertical;
-  background: var(--surface);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 0;
+  border-radius: 0.625rem;
 }
 
 .backoffice-ui-root .agent-input-row textarea:focus {
-  border-color: var(--red);
-  box-shadow: 0 0 0 0.1875rem rgb(215 22 24 / 0.12);
+  box-shadow: none;
   outline: 0;
+}
+
+.backoffice-ui-root .agent-input-row:focus-within {
+  border-color: var(--red);
+  box-shadow: 0 0 0 0.1875rem rgb(215 22 24 / 0.1), 0 0.75rem 1.75rem rgb(16 24 40 / 0.07);
 }
 
 .backoffice-ui-root .agent-input-row .button {
@@ -1016,23 +1168,96 @@
   padding: 0;
 }
 
-@media (max-width: 75rem) {
-  .backoffice-ui-root .recruiting-agent-drawer {
-    width: min(34rem, 48vw);
-  }
+.backoffice-ui-root .agent-composer-hint {
+  width: min(100%, 52rem);
+  margin: -0.125rem auto 0;
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+  text-align: center;
+}
+
+.backoffice-ui-root .agent-composer-hint kbd {
+  padding: 0.0625rem 0.25rem;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: inherit;
+  background: rgb(255 255 255 / 0.7);
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+}
+
+@keyframes agent-processing-sheen {
+  0%, 100% { background-position: 100% 0; }
+  50% { background-position: 0 0; }
+}
+
+@keyframes agent-trace-reveal {
+  from { opacity: 0; transform: translateY(-0.25rem); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @media (max-width: 60rem) {
-  .backoffice-ui-root .recruiting-agent-drawer {
-    width: calc(100vw - 4.75rem);
-    min-width: 0;
+  .backoffice-ui-root .agent-header,
+  .backoffice-ui-root .agent-context {
+    padding-right: 1.25rem;
+    padding-left: 1.25rem;
+  }
+
+  .backoffice-ui-root .agent-conversation,
+  .backoffice-ui-root .agent-composer {
+    padding-right: 1.5rem;
+    padding-left: 1.5rem;
   }
 }
 
 @media (max-width: 47rem) {
-  .backoffice-ui-root .recruiting-agent-drawer {
-    top: 0;
-    width: 100vw;
-    height: calc(100dvh - 4rem);
+  .backoffice-ui-root .recruiting-agent-view,
+  .backoffice-ui-root .recruiting-agent-page {
+    min-height: calc(100dvh - 4rem);
+  }
+
+  .backoffice-ui-root .agent-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .backoffice-ui-root .agent-header-actions {
+    width: 100%;
+  }
+
+  .backoffice-ui-root .agent-job-select {
+    flex: 1 1 12rem;
+    width: auto;
+  }
+
+  .backoffice-ui-root .agent-work-context {
+    align-items: flex-start;
+  }
+
+  .backoffice-ui-root .agent-conversation {
+    gap: 1rem;
+    padding: 1rem 0.875rem 1.5rem;
+  }
+
+  .backoffice-ui-root .agent-message.is-user {
+    max-width: 90%;
+  }
+
+  .backoffice-ui-root .agent-execution-trace-body li {
+    grid-template-columns: 1fr;
+    gap: 0.125rem;
+  }
+
+  .backoffice-ui-root .agent-composer {
+    padding: 0.75rem 0.875rem 0.875rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backoffice-ui-root .agent-loading,
+  .backoffice-ui-root .agent-execution-trace-body,
+  .backoffice-ui-root .agent-execution-trace summary > svg {
+    animation: none;
+    transition: none;
   }
 }

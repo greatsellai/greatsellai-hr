@@ -21,6 +21,10 @@ interface PasswordResetDeliveriesResponse {
   deliveries: PasswordResetDelivery[];
 }
 
+function recruitingAgentPage(page: import("@playwright/test").Page) {
+  return page.getByTestId("recruiting-agent-page");
+}
+
 function anonymousSession() {
   return {
     authenticated: false,
@@ -1183,9 +1187,9 @@ test.describe("招聘工作台关键路径", () => {
       await expect(refineAction).toContainText("交给 Agent 精筛当前 17 人");
       await refineAction.click();
 
-      const dialog = page.getByRole("dialog", { name: "招聘助手" });
-      await expect(dialog).toBeVisible();
-      await expect(dialog.getByText("初筛结果 · 17 位候选人", { exact: true })).toBeVisible();
+      const agentPage = recruitingAgentPage(page);
+      await expect(agentPage).toBeVisible();
+      await expect(agentPage.getByText("初筛结果 · 17 位候选人", { exact: true })).toBeVisible();
       expect(filterScopeRequests).toHaveLength(1);
       const scopePayload = filterScopeRequests[0];
       expect(scopePayload).toMatchObject({
@@ -1209,8 +1213,8 @@ test.describe("招聘工作台关键路径", () => {
       expect(agentTurnRequestCount).toBe(0);
 
       // Altering the form after handoff must not replace the existing
-      // server-side scope. It stays usable when the drawer is reopened.
-      await dialog.getByRole("button", { name: "关闭招聘助手" }).click();
+      // server-side scope. It stays usable when the Agent page is reopened.
+      await page.getByRole("button", { name: "条件筛选", exact: true }).click();
       const changedFilterResponse = page.waitForResponse((response) => {
         const request = response.request();
         return request.method() === "POST"
@@ -1223,7 +1227,7 @@ test.describe("招聘工作台关键路径", () => {
       await tenureRange.press("ArrowRight");
       await changedFilterResponse;
       await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-      await expect(dialog.getByText("初筛结果 · 17 位候选人", { exact: true })).toBeVisible();
+      await expect(agentPage.getByText("初筛结果 · 17 位候选人", { exact: true })).toBeVisible();
       expect(filterScopeRequests).toHaveLength(1);
       expect(agentTurnRequestCount).toBe(0);
     } finally {
@@ -1448,7 +1452,7 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("button", { name: "收起", exact: true })).toBeVisible();
   });
 
-  test("招聘助手打开后聚焦关闭键，关闭后返回触发按钮", async ({ page }) => {
+  test("招聘助手通过独立页面打开，不创建对话抽屉", async ({ page }) => {
     await registerAndVerify(page, "agent-focus");
 
     const trigger = page.getByRole("button", { name: "招聘助手", exact: true });
@@ -1456,16 +1460,22 @@ test.describe("招聘工作台关键路径", () => {
     await expect(trigger).toHaveClass(/semi-button-primary/);
     await expect(trigger).toHaveCSS("background-color", "rgb(215, 22, 24)");
     await trigger.click();
-    const dialog = page.getByRole("dialog", { name: "招聘助手" });
-    const closeButton = dialog.getByRole("button", { name: "关闭招聘助手" });
-    await expect(dialog).toBeVisible();
-    await expect(closeButton).toBeFocused();
-    await expect(dialog.getByText(/当前候选人：|未选择候选人/)).toHaveCount(0);
-    await expect(dialog.getByLabel("常用提问")).toHaveCount(0);
-    await expect(dialog.getByLabel("向招聘助手提问")).toBeVisible();
+    const agentPage = recruitingAgentPage(page);
+    await expect(agentPage).toBeVisible();
+    await expect(page).toHaveURL(/#agent$/);
+    await expect(agentPage.getByRole("heading", { level: 1, name: "招聘 Agent" })).toBeFocused();
+    await expect(page.getByRole("dialog", { name: "招聘助手" })).toHaveCount(0);
+    await expect(agentPage.getByText(/当前候选人：|未选择候选人/)).toHaveCount(0);
+    await expect(agentPage.getByLabel("常用提问")).toHaveCount(0);
+    await expect(agentPage.getByLabel("向招聘助手提问")).toBeVisible();
 
-    await page.keyboard.press("Escape");
-    await expect(trigger).toBeFocused();
+    await page.getByRole("button", { name: "工作台", exact: true }).click();
+    await expect(page).toHaveURL(/#workbench$/);
+    await expect(agentPage).toBeHidden();
+
+    await page.goto(new URL("#agent", page.url()).toString());
+    await expect(agentPage).toBeVisible();
+    await expect(page).toHaveURL(/#agent$/);
   });
 
   test("窄屏保留招聘助手入口", async ({ page }) => {
@@ -1477,7 +1487,23 @@ test.describe("招聘工作台关键路径", () => {
     await expect(trigger).toHaveClass(/semi-button-primary/);
     await expect(trigger).toHaveCSS("background-color", "rgb(215, 22, 24)");
     await trigger.click();
-    await expect(page.getByRole("dialog", { name: "招聘助手" })).toBeVisible();
+    await expect(recruitingAgentPage(page)).toBeVisible();
+    const layout = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+
+    await page.setViewportSize({ width: 320, height: 568 });
+    const composer = recruitingAgentPage(page).getByLabel("向招聘助手提问");
+    await expect(composer).toBeVisible();
+    await composer.focus();
+    await expect(composer).toBeFocused();
+    const compactLayout = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    expect(compactLayout.scrollWidth).toBeLessThanOrEqual(compactLayout.clientWidth);
   });
 
   test("招聘助手输入框使用 Enter 发送并保留 Shift 加 Enter 换行", async ({ page }) => {
@@ -1502,7 +1528,12 @@ test.describe("招聘工作台关键路径", () => {
           job_version_id: null,
           candidates: [],
           actions: [],
-          tool_trace: [],
+          tool_trace: [
+            {
+              tool: "候选人筛选",
+              summary: "已完成候选人筛选：找到 2 人",
+            },
+          ],
           search_summary: null,
           batch_id: null,
         },
@@ -1510,8 +1541,8 @@ test.describe("招聘工作台关键路径", () => {
     });
 
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "招聘助手" });
-    const composer = dialog.getByLabel("向招聘助手提问");
+    const agentPage = recruitingAgentPage(page);
+    const composer = agentPage.getByLabel("向招聘助手提问");
     await composer.fill("第一行");
     await composer.dispatchEvent("keydown", {
       key: "Enter",
@@ -1552,7 +1583,13 @@ test.describe("招聘工作台关键路径", () => {
       job_version_id: null,
     });
     await expect(composer).toHaveValue("");
-    await expect(dialog.getByText("已收到多行请求。")).toHaveCount(2);
+    await expect(agentPage.getByText("已收到多行请求。")).toHaveCount(2);
+    const executionTrace = agentPage.locator(".agent-execution-trace").first();
+    await expect(executionTrace).toContainText("本轮处理过程");
+    await expect(executionTrace).toContainText("已完成 1 项操作");
+    await executionTrace.locator("summary").click();
+    await expect(executionTrace).toContainText("已完成候选人筛选：找到 2 人");
+    await expect(executionTrace).toContainText("不包含模型内部推理");
   });
 
   test("招聘助手错误说明 AI 服务，并在重发时不重复用户消息", async ({ page }) => {
@@ -1593,7 +1630,7 @@ test.describe("招聘工作台关键路径", () => {
     });
 
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    const dialog = recruitingAgentPage(page);
     const question = "谁最适合这个岗位？";
     await dialog.getByLabel("向招聘助手提问").fill(question);
     await dialog.getByRole("button", { name: "发送提问" }).click();
@@ -1623,7 +1660,7 @@ test.describe("招聘工作台关键路径", () => {
     });
 
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    const dialog = recruitingAgentPage(page);
     await dialog.getByLabel("向招聘助手提问").fill("谁最适合这个岗位？");
     await dialog.getByRole("button", { name: "发送提问" }).click();
 
@@ -1935,7 +1972,7 @@ test.describe("招聘工作台关键路径", () => {
     });
 
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    let dialog = page.getByRole("dialog", { name: "招聘助手" });
+    let dialog = recruitingAgentPage(page);
     await expect(dialog.getByRole("button", { name: "新建人才画像" })).toHaveCount(0);
     await dialog.getByLabel("向招聘助手提问").fill("寻找有 LangChain 项目经验的本科毕业工程师");
     await dialog.getByRole("button", { name: "发送提问" }).click();
@@ -1947,7 +1984,7 @@ test.describe("招聘工作台关键路径", () => {
     // under the ordinary workspace-scoped profile endpoint.
     await page.reload();
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    dialog = page.getByRole("dialog", { name: "招聘助手" });
+    dialog = recruitingAgentPage(page);
     await expect(dialog.getByText("教育经历：含本科（任一）")).toBeVisible();
     await expect(dialog.getByText("具备 LangChain 的项目、实习或工作实践")).toBeVisible();
     await dialog.getByLabel("向招聘助手提问").fill("再加 985，工作年限改成 5 年");
@@ -2026,7 +2063,7 @@ test.describe("招聘工作台关键路径", () => {
     });
 
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    const dialog = recruitingAgentPage(page);
     await dialog.getByLabel("向招聘助手提问").fill("给我找过了英语四级的人");
     await dialog.getByRole("button", { name: "发送提问" }).click();
 
@@ -2034,7 +2071,8 @@ test.describe("招聘工作台关键路径", () => {
     await expect(dialog.getByText("已确认", { exact: true }).first()).toBeVisible();
     await expect(dialog.getByText("未确认", { exact: true })).toBeVisible();
     await expect(dialog.getByText("简历原文", { exact: true })).toBeVisible();
-    await expect(dialog.getByText("大学英语四级（CET-4）")).toBeVisible();
+    const candidateCard = dialog.locator(".agent-candidate-card").filter({ hasText: "候选人甲" });
+    await expect(candidateCard.getByText("大学英语四级（CET-4）", { exact: false })).toBeVisible();
     await expect(dialog.locator(".agent-tool-trace")).toHaveCount(0);
     await expect(dialog.getByText("language_credentials_any_of", { exact: false })).toHaveCount(0);
     await expect(
@@ -2057,6 +2095,12 @@ test.describe("招聘工作台关键路径", () => {
         context_version: 2,
         user_message: "先筛选符合条件的人",
         assistant_message: "已保存当前筛选范围。",
+        tool_trace: [
+          {
+            tool: "候选人筛选",
+            summary: "已完成候选人筛选：找到 2 人",
+          },
+        ],
         created_at: "2026-07-24T10:00:00Z",
       },
       {
@@ -2107,7 +2151,7 @@ test.describe("招聘工作台关键路径", () => {
     );
 
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "招聘助手" });
+    const dialog = recruitingAgentPage(page);
     await dialog.getByLabel("向招聘助手提问").fill("先筛选符合条件的人");
     await dialog.getByRole("button", { name: "发送提问" }).click();
     await expect(dialog.getByText("助手筛选结果 · 2 位候选人")).toBeVisible();
@@ -2125,21 +2169,27 @@ test.describe("招聘工作台关键路径", () => {
 
     await page.reload();
     await page.getByRole("button", { name: "招聘助手", exact: true }).click();
-    const reloadedDialog = page.getByRole("dialog", { name: "招聘助手" });
+    const reloadedDialog = recruitingAgentPage(page);
     await expect(reloadedDialog.getByText("助手筛选结果 · 2 位候选人")).toBeVisible();
     await expect(reloadedDialog.getByText("先筛选符合条件的人")).toBeVisible();
     await expect(reloadedDialog.getByText("已保存当前筛选范围。")).toBeVisible();
     await expect(reloadedDialog.getByText("在刚才这些人中继续比较")).toBeVisible();
     await expect(reloadedDialog.getByText("已在当前范围内继续处理。")).toBeVisible();
+    const restoredTrace = reloadedDialog.locator(".agent-execution-trace").first();
+    await expect(restoredTrace).toContainText("本轮处理过程");
+    await expect(restoredTrace).toContainText("已完成 1 项操作");
+    await restoredTrace.locator("summary").click();
+    await expect(restoredTrace).toContainText("候选人筛选");
+    await expect(restoredTrace).toContainText("已完成候选人筛选：找到 2 人");
 
-    await reloadedDialog.getByRole("button", { name: "清除范围" }).click();
+    await reloadedDialog.getByRole("button", { name: "新对话" }).click();
     await expect(
       reloadedDialog.getByText(
         "直接描述你想找的人，我会先整理条件，确认后才开始找人。",
         { exact: true },
       ),
     ).toBeVisible();
-    await expect(reloadedDialog.getByRole("button", { name: "清除范围" })).toHaveCount(0);
+    await expect(reloadedDialog.getByRole("button", { name: "新对话" })).toBeDisabled();
   });
 
   test("邮箱通道保存后同步请求只进入后台队列", async ({ page }) => {

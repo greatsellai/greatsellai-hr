@@ -1538,14 +1538,16 @@ class RecruitingAgentActiveContext(ApiModel):
 class RecruitingAgentConversationTurnResponse(ApiModel):
     """One completed, short-lived recruiter-visible Agent exchange.
 
-    This intentionally omits internal prompts, tool calls, candidate cards,
-    source evidence, and provider payloads.  The parent conversation enforces
-    the tenant, owner, TTL, and bounded-history policy.
+    This intentionally omits internal prompts, raw tool calls and payloads,
+    candidate cards, and source evidence. ``tool_trace`` is limited to the
+    server-written, recruiter-facing execution summary. The parent
+    conversation enforces the tenant, owner, TTL, and bounded-history policy.
     """
 
     context_version: int = Field(ge=1)
     user_message: str
     assistant_message: str
+    tool_trace: list["RecruitingAgentToolTrace"] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -1690,8 +1692,8 @@ class RecruitingAgentAction(ApiModel):
 
 
 class RecruitingAgentToolTrace(ApiModel):
-    tool: str
-    summary: str
+    tool: str = Field(min_length=1, max_length=120)
+    summary: str = Field(min_length=1, max_length=1000)
 
 
 class RecruitingAgentResponse(ApiModel):

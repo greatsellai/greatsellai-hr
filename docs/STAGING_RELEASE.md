@@ -21,8 +21,9 @@ ID 不一致、CI artifact 不完整或超过保留期时，晋级都会失败�
 
 - production：`resume-screening-v3`、生产 `.env.production`、生产数据卷和 `172.30.0.0/24`；
 - staging：`resume-screening-v3-staging`、独立 `.env.staging`、独立数据卷和 `172.31.0.0/24`；
-- staging Caddy 仅监听宿主机私有 `172.17.0.1:18080`；公网 HTTPS 仅由生产 Caddy 对
-  `staging.hr.greatsellai.net` 的精确路由代理。
+- staging Caddy 仍监听旧主机私有 `172.17.0.1:18080`。在生产迁移到新主机期间，旧主机上
+  **已经运行的** Caddy 保留 `staging.hr.greatsellai.net` 的既有精确路由；它不属于新生产
+  Compose 项目，也不会被任何生产发布、回滚或恢复工作流刷新、重建或接管。
 
 预发布不携带生产数据库、PDF 或任何生产数据快照。`.env.staging` 必须逐项人工复制当前
 生产实际运行值（包含非密钥开关、模型、限额和超时），但它仍是独立文件，绝不能直接引用
@@ -34,11 +35,9 @@ staging 值。生产数据快照是另一个显式、单向、脱敏优先的运
 
 ## GitHub Environments
 
-首次启用必须先由负责人从 `main` 手动运行 **Staging gateway bootstrap**，并输入
-`ENABLE_STAGING_GATEWAY`。该工作流使用 `production` Environment 的审批，只增加
-`staging.hr.greatsellai.net` 这一条精确边缘路由；**Staging release 不会修改生产 Caddy、
-生产卷、生产网络或生产环境文件**。首次初始化完成后，日常流程才是 CI 自动部署 staging，
-最后由人工 `PROMOTE` 晋级生产。
+当前迁移桥接期不运行任何 “staging gateway bootstrap”。旧机 Caddy 是保留中的既有运行时，
+不是新生产环境的一部分；不要停止、重建或用新版本覆盖它。日常流程仍是 CI 自动部署
+staging，最后由人工 `PROMOTE` 晋级生产；这些流程均不会修改旧机的 staging 网关。
 
 在 **Settings → Environments** 创建 `staging`。所有值只放在该 Environment，不进入仓库、
 Runner 常驻环境或代码。
@@ -55,8 +54,9 @@ Runner 常驻环境或代码。
 - `STAGING_HISTORY_DIR`：`/home/ubuntu/greatsellai-hr-staging-deployments`；
 - `STAGING_PUBLIC_URL`：`https://staging.hr.greatsellai.net`。
 
-`production` 继续保存既有 `PROD_*` secrets/variables。建议为 `production` 配置 Required
-reviewer；这会让 **Production promotion** 在验证完 staging 后暂停，直到负责人批准。
+`production` 的 `PROD_*` secrets/variables 必须只指向新生产主机；`staging` 的
+`STAGING_*` 继续指向旧主机。建议为 `production` 配置 Required reviewer；这会让
+**Production promotion** 在验证完 staging 后暂停，直到负责人批准。
 
 `STAGING_DEPLOY_HOST` 与 `PROD_DEPLOY_HOST` 可以指向不同 Docker 主机。生产晋级只接受 staging
 attestation 中的 CI run ID、run attempt 和 API/Caddy image ID；它会下载同一份 Actions artifact，逐项
@@ -72,11 +72,12 @@ attestation 中的 CI run ID、run attempt 和 API/Caddy image ID；它会下载
    回调地址，且不得直接引用或挂载 `.env.production`。
 3. 创建 staging history 目录，例如
    `/home/ubuntu/greatsellai-hr-staging-deployments`，仅部署用户可写。
-4. DNS 将 `staging.hr.greatsellai.net` 指向 staging 所在服务器。当前过渡期仍由旧生产 Caddy 的受版本控制配置只声明这个
-   精确子域，绝不接管 `greatsellai.net` 根目录或泛域名。
+4. DNS 将 `staging.hr.greatsellai.net` 继续指向旧 staging 服务器。迁移期间保留旧机现有
+   Caddy 容器及其精确路由，不修改该 DNS、Caddy、staging 数据卷或 `.env.staging`。绝不让
+   新生产主机接管该子域、`greatsellai.net` 根目录或泛域名。
 
-首次合并本链路后，当前已存在的临时 staging Caddy 路由仍可服务本次 staging。随后第一次成功的
-生产晋级会把版本化 Caddy 路由固化进生产 Caddy 镜像，后续 Caddy recreate 不会再丢失该路由。
+新生产镜像刻意不再携带 staging 路由。部署/回滚到带旧路由的历史 Caddy 源码或镜像会被
+生产发布脚本拒绝，避免新主机错误代理到自身不存在的 `172.17.0.1:18080`。
 
 ## 日常操作
 
@@ -98,7 +99,8 @@ attestation 中的 CI run ID、run attempt 和 API/Caddy image ID；它会下载
   可通过手动 `STAGE` 重试，已有同 SHA 的 `stg-*` 不会被移动。
 - **Production promotion 被拒绝**：优先看 staging attestation、`main` 是否已前进、artifact 是否仍在
   30 天保留窗口内，以及两边的 image ID 是否一致。不要在生产机上 build 来“补救”，这会破坏同一镜像保证。
-- **Caddy staging route 不可达**：检查生产 Caddy 使用的版本是否已包含 `deploy/Caddyfile` 中的
-  `staging.hr.greatsellai.net` 精确块；不修改根域、DNS 或生产 `.env.production` 来绕过。
+- **Staging 不可达**：检查旧 staging 主机上原有的 Caddy 容器和 `172.17.0.1:18080` 私有
+  监听是否仍在运行。新生产 Caddy 故意不包含 staging 路由；不要把 staging 域名、DNS 或
+  旧机 Caddy 改到新生产主机来“修复”。
 - **仅需要重试生产部署**：选择已有 `prod-*` 使用 **Production deploy**；不要手工伪造
   `stg-*` 或 `prod-*` 标签。

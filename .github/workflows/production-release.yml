@@ -254,15 +254,6 @@ jobs:
             --history-dir "$PROD_HISTORY_DIR" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote" \
             --prebuilt-images
-      - name: Preserve the staging gateway after Caddy recreation
-        if: ${{ always() && steps.production_ssh.outcome == 'success' }}
-        env:
-          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
-        run: |
-          set -Eeuo pipefail
-          scripts/ensure-staging-gateway.sh \
-            --host "$PROD_DEPLOY_HOST" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
       - name: Remove temporary CI images from release runner
         if: always()
         run: |

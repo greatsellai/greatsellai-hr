@@ -283,64 +283,14 @@ def test_stage_attestation_requires_a_public_smoke_pass_and_exact_image_identiti
     assert "original-file" in smoke
 
 
-def test_staging_route_is_exact_and_frontend_recognizes_the_staging_origin() -> None:
+def test_staging_stays_on_its_existing_host_while_production_edge_is_detached() -> None:
     caddy = (ROOT / "deploy" / "Caddyfile").read_text(encoding="utf-8")
     staging_caddy = (ROOT / "deploy" / "Caddyfile.staging").read_text(encoding="utf-8")
     app = (ROOT / "web" / "src" / "App.tsx").read_text(encoding="utf-8")
 
-    assert "staging.hr.greatsellai.net {" in caddy
-    assert "reverse_proxy 172.17.0.1:18080" in caddy
+    assert "staging.hr.greatsellai.net" not in caddy
+    assert "172.17.0.1:18080" not in caddy
     assert not re.search(r"(?m)^greatsellai\.net\s*\{", caddy)
     assert re.search(r"(?m)^:80\s*\{", staging_caddy)
     assert "staging.hr.greatsellai.net" not in staging_caddy
     assert 'hostname === "staging.hr.greatsellai.net"' in app
-
-
-def test_legacy_production_caddy_redeploys_restore_only_the_exact_staging_route() -> None:
-    gateway = (ROOT / "scripts" / "ensure-staging-gateway.sh").read_text(
-        encoding="utf-8"
-    )
-    production_deploy = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(
-        encoding="utf-8"
-    )
-    rollback = (ROOT / ".github" / "workflows" / "production-rollback.yml").read_text(
-        encoding="utf-8"
-    )
-
-    assert "StrictHostKeyChecking=yes" in gateway
-    assert "label=com.docker.compose.project=resume-screening-v3" in gateway
-    assert "staging.hr.greatsellai.net" in gateway
-    assert "reverse_proxy 172.17.0.1:18080" in gateway
-    assert not re.search(r"(?m)^greatsellai\.net\s*\{", gateway)
-    assert ".env.production" not in gateway
-    assert "scripts/ensure-staging-gateway.sh" in production_deploy
-    assert "scripts/ensure-staging-gateway.sh" in rollback
-
-
-def test_staging_gateway_bootstrap_is_manual_and_production_approved() -> None:
-    workflow = (
-        ROOT / ".github" / "workflows" / "staging-gateway-bootstrap.yml"
-    ).read_text(encoding="utf-8")
-
-    assert "workflow_dispatch:" in workflow
-    assert "ENABLE_STAGING_GATEWAY" in workflow
-    assert "Staging gateway bootstrap must be started from main." in workflow
-    assert "environment:\n      name: production" in workflow
-    assert "group: greatsellai-hr-release-lane" in workflow
-    assert "scripts/ensure-staging-gateway.sh" in workflow
-    assert "greatsellai.net {" not in workflow
-
-
-def test_production_recovery_workflows_restore_the_exact_staging_route_after_runtime_changes() -> None:
-    for workflow_name in (
-        "production-pending-finalize.yml",
-        "production-healthy-pending-finalize.yml",
-        "production-legacy-reconcile.yml",
-    ):
-        workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(
-            encoding="utf-8"
-        )
-
-        assert "id: production_ssh" in workflow
-        assert "scripts/ensure-staging-gateway.sh" in workflow
-        assert "steps.production_ssh.outcome == 'success'" in workflow

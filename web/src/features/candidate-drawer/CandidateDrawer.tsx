@@ -8,6 +8,7 @@ import type {
   ResumeReviewDetail,
   ResumeScore,
   ResumeSummary,
+  SourceTagReference,
 } from "../../types";
 import { Icon } from "../../icons";
 import { RESUME_EXTRACTION_FAILED_LABEL } from "../../resume-extraction-user-messages";
@@ -77,6 +78,30 @@ export interface CandidateDrawerProps {
   onToggleFavorite: () => void;
 }
 
+function SourceTagList({
+  sourceTags,
+  className,
+}: {
+  sourceTags: readonly SourceTagReference[] | null | undefined;
+  className?: string;
+}) {
+  if (!sourceTags?.length) return null;
+  return (
+    <div className={className}>
+      {sourceTags.map((tag) => (
+        <span className="tag" key={tag.source_tag_id}>{tag.display_name}</span>
+      ))}
+    </div>
+  );
+}
+
+function sourceTagOptionSuffix(
+  sourceTags: readonly SourceTagReference[] | null | undefined,
+): string {
+  if (!sourceTags?.length) return "";
+  return ` · 渠道：${sourceTags.map((tag) => tag.display_name).join("、")}`;
+}
+
 export function CandidateDrawer({
   candidate,
   review,
@@ -127,6 +152,8 @@ export function CandidateDrawer({
         created_at: "",
         extraction_status: review?.extraction_status ?? "",
         is_active: review?.is_active ?? false,
+        source_tags: review?.source_tags ?? [],
+        source_mailbox_label: review?.source_mailbox_label ?? null,
       }
     : null;
   const availableResumeVersions = selectedResumeVersion
@@ -187,28 +214,46 @@ export function CandidateDrawer({
             ) : null}
           </h2>
           {candidate && (
-            <div className="drawer-version-control">
-              <label htmlFor="candidate-drawer-resume-version">简历版本</label>
-              <select
-                aria-busy={resumeVersionsLoading}
-                aria-describedby="candidate-drawer-resume-version-note"
-                disabled={resumeVersionsLoading || reviewLoading}
-                id="candidate-drawer-resume-version"
-                onChange={(event) => onSelectResumeVersion(event.target.value)}
-                value={candidate.resumeId}
-              >
-                {availableResumeVersions.map((version) => (
-                  <option key={version.resume_id} value={version.resume_id}>
-                    {`${version.is_active ? "当前版本 · " : ""}${version.original_filename}${version.created_at ? ` · ${formatLibraryDate(version.created_at)}` : ""}`}
-                  </option>
-                ))}
-              </select>
-              <span id="candidate-drawer-resume-version-note">
-                {resumeVersionsLoading
-                  ? "正在加载版本"
-                  : `${availableResumeVersions.length} 个简历版本`}
-              </span>
-            </div>
+            <>
+              <div className="drawer-version-control">
+                <label htmlFor="candidate-drawer-resume-version">简历版本</label>
+                <select
+                  aria-busy={resumeVersionsLoading}
+                  aria-describedby="candidate-drawer-resume-version-note"
+                  disabled={resumeVersionsLoading || reviewLoading}
+                  id="candidate-drawer-resume-version"
+                  onChange={(event) => onSelectResumeVersion(event.target.value)}
+                  value={candidate.resumeId}
+                >
+                  {availableResumeVersions.map((version) => (
+                    <option key={version.resume_id} value={version.resume_id}>
+                      {`${version.is_active ? "当前版本 · " : ""}${version.original_filename}${version.created_at ? ` · ${formatLibraryDate(version.created_at)}` : ""}${version.source_mailbox_label ? ` · 收件：${version.source_mailbox_label}` : ""}${sourceTagOptionSuffix(version.source_tags)}`}
+                    </option>
+                  ))}
+                </select>
+                <span id="candidate-drawer-resume-version-note">
+                  {resumeVersionsLoading
+                    ? "正在加载版本"
+                    : `${availableResumeVersions.length} 个简历版本`}
+                </span>
+              </div>
+              {(selectedResumeVersion?.source_mailbox_label || selectedResumeVersion?.source_tags.length) && (
+                <div className="drawer-source-provenance">
+                  {selectedResumeVersion.source_mailbox_label && (
+                    <span>收件通道 · {selectedResumeVersion.source_mailbox_label}</span>
+                  )}
+                  {selectedResumeVersion.source_tags.length > 0 && (
+                    <>
+                      <span>投递渠道</span>
+                      <SourceTagList
+                        className="drawer-source-tags"
+                        sourceTags={selectedResumeVersion.source_tags}
+                      />
+                    </>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
         <div className="drawer-actions">

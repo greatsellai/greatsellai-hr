@@ -33,6 +33,7 @@ export function FilterPanel({
   const institutionClassifications = resolvedInstitutionClassificationOptions(
     filterOptions,
   );
+  const sourceTagOptions = filterOptions.resume_source_tags ?? [];
 
   const update = (patch: Partial<FilterDraft>) =>
     onDraftChange({ ...draft, ...patch });
@@ -367,6 +368,35 @@ export function FilterPanel({
             </div>
           </div>
         </section>
+
+        {sourceTagOptions.length > 0 && (
+          <section className="filter-section">
+            <div className="filter-section-heading">
+              <h3>投递渠道</h3>
+            </div>
+            <div aria-label="投递渠道条件" className="choice-grid" role="group">
+              {sourceTagOptions.map((option) => (
+                <label className="choice-row" key={option.value}>
+                  <input
+                    checked={draft.sourceTagIds.includes(option.value)}
+                    onChange={() =>
+                      update({
+                        sourceTagIds: draft.sourceTagIds.includes(option.value)
+                          ? draft.sourceTagIds.filter((value) => value !== option.value)
+                          : [...draft.sourceTagIds, option.value],
+                      })
+                    }
+                    type="checkbox"
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+            <p className="filter-field-note">
+              多选时命中任一渠道即可。
+            </p>
+          </section>
+        )}
 
         <section className="filter-section">
           <div className="filter-section-heading">

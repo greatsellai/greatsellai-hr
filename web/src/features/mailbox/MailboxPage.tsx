@@ -18,6 +18,9 @@ import type {
   MailboxRetentionPreview,
   MailboxRetentionRun,
   MailboxRetentionRuns,
+  MailboxSourceTagRule,
+  SourceTag,
+  SourceTagRuleMatchKind,
 } from "../../types";
 import { MailboxChannelList } from "./components/MailboxChannelList";
 import { MailboxProviderPicker } from "./components/MailboxProviderPicker";
@@ -58,6 +61,36 @@ interface MailboxPageProps {
   role: "admin" | "recruiter" | null;
 }
 
+interface SourceTagRuleDraft {
+  sourceTagId: string;
+  matchKind: SourceTagRuleMatchKind;
+  matchValue: string;
+  priority: string;
+}
+
+const sourceTagRuleMatchOptions: Array<{
+  value: SourceTagRuleMatchKind;
+  label: string;
+}> = [
+  { value: "sender_domain", label: "发件域名" },
+  { value: "sender_address", label: "发件地址" },
+  { value: "subject_keyword", label: "主题关键词" },
+];
+
+function newSourceTagRuleDraft(sourceTagId = ""): SourceTagRuleDraft {
+  return {
+    sourceTagId,
+    matchKind: "sender_domain",
+    matchValue: "",
+    priority: "100",
+  };
+}
+
+function sourceTagRuleMatchLabel(kind: SourceTagRuleMatchKind): string {
+  return sourceTagRuleMatchOptions.find((option) => option.value === kind)?.label
+    ?? "匹配条件";
+}
+
 export function MailboxPage({
   notify,
   onImported,
@@ -92,8 +125,20 @@ export function MailboxPage({
   const [cleaningRetention, setCleaningRetention] = useState(false);
   const [retentionPreview, setRetentionPreview] = useState<MailboxRetentionPreview | null>(null);
   const [retentionPolicy, setRetentionPolicy] = useState<MailboxRetentionPolicy>("standard");
+  const [sourceTags, setSourceTags] = useState<SourceTag[]>([]);
+  const [sourceTagRules, setSourceTagRules] = useState<MailboxSourceTagRule[]>([]);
+  const [sourceTagRulesLoading, setSourceTagRulesLoading] = useState(false);
+  const [sourceTagRulesError, setSourceTagRulesError] = useState<string | null>(null);
+  const [sourceTagRuleDraft, setSourceTagRuleDraft] = useState<SourceTagRuleDraft>(() => newSourceTagRuleDraft());
+  const [editingSourceTagRuleId, setEditingSourceTagRuleId] = useState<string | null>(null);
+  const [savingSourceTagRule, setSavingSourceTagRule] = useState(false);
+  const [disablingSourceTagRuleId, setDisablingSourceTagRuleId] = useState<string | null>(null);
+  const [creatingSourceTag, setCreatingSourceTag] = useState(false);
+  const [newSourceTagName, setNewSourceTagName] = useState("");
+  const [savingSourceTag, setSavingSourceTag] = useState(false);
   const retentionRequestRef = useRef(0);
   const historyRequestRef = useRef(0);
+  const sourceTagRulesRequestRef = useRef(0);
   const mailboxJobPollInFlightRef = useRef(false);
   const manualMailboxJobIdsRef = useRef(new Set<string>());
   const handledMailboxJobIdsRef = useRef(new Set<string>());
@@ -197,6 +242,44 @@ export function MailboxPage({
     }
   }, [historyFilterMailboxId, humanizeError, notify]);
 
+  const clearSourceTagRules = useCallback(() => {
+    sourceTagRulesRequestRef.current += 1;
+    setSourceTagRules([]);
+    setSourceTagRulesError(null);
+    setSourceTagRulesLoading(false);
+    setEditingSourceTagRuleId(null);
+    setSourceTagRuleDraft(newSourceTagRuleDraft());
+    setCreatingSourceTag(false);
+    setNewSourceTagName("");
+  }, []);
+
+  const loadSourceTagRules = useCallback(async (mailboxId: string) => {
+    const requestId = ++sourceTagRulesRequestRef.current;
+    setSourceTagRulesLoading(true);
+    setSourceTagRulesError(null);
+    try {
+      const [nextTags, nextRules] = await Promise.all([
+        api.listSourceTags(),
+        api.listMailboxSourceTagRules(mailboxId),
+      ]);
+      if (requestId !== sourceTagRulesRequestRef.current) return;
+      setSourceTags(nextTags);
+      setSourceTagRules(nextRules);
+      setSourceTagRuleDraft((current) => (
+        current.sourceTagId || !nextTags.some((tag) => tag.source_tag_id === current.sourceTagId)
+          ? newSourceTagRuleDraft(nextTags.find((tag) => tag.enabled)?.source_tag_id ?? "")
+          : current
+      ));
+    } catch (error) {
+      if (requestId !== sourceTagRulesRequestRef.current) return;
+      setSourceTagRulesError(humanizeError(error));
+    } finally {
+      if (requestId === sourceTagRulesRequestRef.current) {
+        setSourceTagRulesLoading(false);
+      }
+    }
+  }, [humanizeError]);
+
   const confirmDiscardMailboxDraft = () => {
     if (!mailboxDraftIsDirty(draft, selectedConfig, isCreating)) return true;
     return window.confirm("尚未保存的收件通道设置会丢失，仍要离开吗？");
@@ -204,6 +287,7 @@ export function MailboxPage({
 
   const selectMailbox = (config: MailboxConfig, force = false) => {
     if (!force && !confirmDiscardMailboxDraft()) return false;
+    clearSourceTagRules();
     setSelectedMailboxId(config.mailbox_id);
     setDraft(mailboxDraftFromConfig(config));
     setIsCreating(false);
@@ -215,6 +299,7 @@ export function MailboxPage({
 
   const startCreatingMailbox = (force = false) => {
     if (!force && !confirmDiscardMailboxDraft()) return false;
+    clearSourceTagRules();
     setSelectedMailboxId(null);
     setDraft(newMailboxDraft());
     setIsCreating(true);
@@ -410,6 +495,17 @@ export function MailboxPage({
     selectedConfig?.configured,
     selectedConfig?.mailbox_id,
   ]);
+
+  useEffect(() => {
+    if (!selectedConfig?.configured) {
+      clearSourceTagRules();
+      return undefined;
+    }
+    void loadSourceTagRules(selectedConfig.mailbox_id);
+    return () => {
+      sourceTagRulesRequestRef.current += 1;
+    };
+  }, [clearSourceTagRules, loadSourceTagRules, selectedConfig?.configured, selectedConfig?.mailbox_id]);
 
   useEffect(() => {
     if (!selectedConfig?.configured || !retentionHasActiveRun) return undefined;
@@ -635,6 +731,125 @@ export function MailboxPage({
       notify("error", humanizeError(error));
     } finally {
       setEnqueuingRetryImportId(null);
+    }
+  };
+
+  const updateSourceTagRuleDraft = <Key extends keyof SourceTagRuleDraft>(
+    key: Key,
+    value: SourceTagRuleDraft[Key],
+  ) => {
+    setSourceTagRuleDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const editSourceTagRule = (rule: MailboxSourceTagRule) => {
+    setEditingSourceTagRuleId(rule.rule_id);
+    setCreatingSourceTag(false);
+    setNewSourceTagName("");
+    setSourceTagRuleDraft({
+      sourceTagId: rule.source_tag.source_tag_id,
+      matchKind: rule.match_kind,
+      matchValue: rule.match_value,
+      priority: String(rule.priority),
+    });
+  };
+
+  const cancelSourceTagRuleEdit = () => {
+    setEditingSourceTagRuleId(null);
+    setSourceTagRuleDraft(
+      newSourceTagRuleDraft(sourceTags.find((tag) => tag.enabled)?.source_tag_id ?? ""),
+    );
+  };
+
+  const createSourceTag = async () => {
+    const displayName = newSourceTagName.trim();
+    if (!displayName) {
+      notify("error", "请填写投递渠道名称。");
+      return;
+    }
+    setSavingSourceTag(true);
+    try {
+      const created = await api.createSourceTag({ display_name: displayName });
+      setSourceTags((current) => [...current, created].sort((left, right) => (
+        left.sort_order - right.sort_order || left.display_name.localeCompare(right.display_name, "zh-Hans-CN")
+      )));
+      updateSourceTagRuleDraft("sourceTagId", created.source_tag_id);
+      setCreatingSourceTag(false);
+      setNewSourceTagName("");
+      notify("success", `已创建投递渠道“${created.display_name}”。`);
+    } catch (error) {
+      notify("error", humanizeError(error));
+    } finally {
+      setSavingSourceTag(false);
+    }
+  };
+
+  const saveSourceTagRule = async () => {
+    if (!selectedConfig?.configured) {
+      notify("error", "请先保存收件通道，再设置投递渠道规则。");
+      return;
+    }
+    const matchValue = sourceTagRuleDraft.matchValue.trim();
+    const priority = Number(sourceTagRuleDraft.priority);
+    if (!sourceTagRuleDraft.sourceTagId) {
+      notify("error", "请选择投递渠道，或先新建一个渠道标签。");
+      return;
+    }
+    if (!matchValue) {
+      notify("error", "请填写规则匹配值。");
+      return;
+    }
+    if (!Number.isInteger(priority) || priority < 0 || priority > 10_000) {
+      notify("error", "优先级请填写 0 到 10000 的整数。");
+      return;
+    }
+
+    setSavingSourceTagRule(true);
+    try {
+      const input = {
+        source_tag_id: sourceTagRuleDraft.sourceTagId,
+        match_kind: sourceTagRuleDraft.matchKind,
+        match_value: matchValue,
+        priority,
+        enabled: true,
+      };
+      const saved = editingSourceTagRuleId
+        ? await api.updateMailboxSourceTagRule(
+          selectedConfig.mailbox_id,
+          editingSourceTagRuleId,
+          input,
+        )
+        : await api.createMailboxSourceTagRule(selectedConfig.mailbox_id, input);
+      setSourceTagRules((current) => [
+        saved,
+        ...current.filter((rule) => rule.rule_id !== saved.rule_id),
+      ].sort((left, right) => (
+        left.priority - right.priority || left.created_at.localeCompare(right.created_at)
+      )));
+      setEditingSourceTagRuleId(null);
+      setSourceTagRuleDraft(newSourceTagRuleDraft(saved.source_tag.source_tag_id));
+      notify("success", editingSourceTagRuleId ? "投递渠道规则已保存。" : "投递渠道规则已添加。");
+    } catch (error) {
+      notify("error", humanizeError(error));
+    } finally {
+      setSavingSourceTagRule(false);
+    }
+  };
+
+  const disableSourceTagRule = async (rule: MailboxSourceTagRule) => {
+    if (!selectedConfig?.configured || !rule.enabled || disablingSourceTagRuleId === rule.rule_id) return;
+    if (!window.confirm(`停用“${rule.source_tag.display_name}”的这条投递渠道规则？后续邮件将不再按此规则标记。`)) return;
+    setDisablingSourceTagRuleId(rule.rule_id);
+    try {
+      await api.disableMailboxSourceTagRule(selectedConfig.mailbox_id, rule.rule_id);
+      setSourceTagRules((current) => current.map((item) => (
+        item.rule_id === rule.rule_id ? { ...item, enabled: false } : item
+      )));
+      if (editingSourceTagRuleId === rule.rule_id) cancelSourceTagRuleEdit();
+      notify("success", "投递渠道规则已停用，已有简历的历史标签会保留。" );
+    } catch (error) {
+      notify("error", humanizeError(error));
+    } finally {
+      setDisablingSourceTagRuleId(null);
     }
   };
 
@@ -1015,6 +1230,215 @@ export function MailboxPage({
     </div>
   );
 
+  const selectableSourceTags = sourceTags.filter(
+    (tag) => tag.enabled || tag.source_tag_id === sourceTagRuleDraft.sourceTagId,
+  );
+  const activeSourceTagRuleCount = sourceTagRules.filter((rule) => rule.enabled).length;
+  const mailboxSourceTagRulesPanel = (
+    <details className="panel mailbox-source-tag-rules">
+      <summary className="panel-heading mailbox-disclosure-heading">
+        <div>
+          <h2>投递渠道规则</h2>
+          <p>标记后续邮件的投递来源，可用于筛选。</p>
+        </div>
+        {selectedConfig?.configured && (
+          <span className="status-pill">
+            {activeSourceTagRuleCount ? `${activeSourceTagRuleCount} 条已启用` : "未设置"}
+          </span>
+        )}
+      </summary>
+      {sourceTagRulesLoading ? (
+        <TableSkeleton />
+      ) : !selectedConfig?.configured ? (
+        <div className="mailbox-source-tag-empty">
+          <strong>先保存收件通道</strong>
+          <span>保存后可为这个通道设置后续邮件的投递渠道识别规则。</span>
+        </div>
+      ) : (
+        <>
+          <p className="mailbox-source-tag-note">
+            只匹配后续邮件，不保存实际邮件头；已有标签不会因改规则而改变。
+          </p>
+          {sourceTagRulesError && (
+            <div className="mailbox-source-tag-error" role="alert">
+              <span>{sourceTagRulesError}</span>
+              <BackofficeButton
+                disabled={sourceTagRulesLoading}
+                icon={<Icon name="refresh" size={15} />}
+                onClick={() => void loadSourceTagRules(selectedConfig.mailbox_id)}
+              >
+                重试
+              </BackofficeButton>
+            </div>
+          )}
+          {sourceTagRules.length > 0 ? (
+            <div className="mailbox-source-tag-rule-list">
+              {sourceTagRules.map((rule) => {
+                const editing = editingSourceTagRuleId === rule.rule_id;
+                const disabling = disablingSourceTagRuleId === rule.rule_id;
+                return (
+                  <div
+                    className={`mailbox-source-tag-rule${rule.enabled ? "" : " is-disabled"}${editing ? " is-editing" : ""}`}
+                    key={rule.rule_id}
+                  >
+                    <div className="mailbox-source-tag-rule-copy">
+                      <div className="mailbox-source-tag-rule-title">
+                        <span className="tag">{rule.source_tag.display_name}</span>
+                        <span className={`status-pill${rule.enabled ? " is-success" : ""}`}>
+                          {rule.enabled ? "已启用" : "已停用"}
+                        </span>
+                      </div>
+                      <span>
+                        {sourceTagRuleMatchLabel(rule.match_kind)} · {rule.match_value}
+                        {rule.priority !== 100 ? ` · 优先级 ${rule.priority}` : ""}
+                      </span>
+                    </div>
+                    <div className="mailbox-source-tag-rule-actions">
+                      <BackofficeButton
+                        disabled={savingSourceTagRule || disabling || !rule.enabled}
+                        onClick={() => editSourceTagRule(rule)}
+                      >
+                        编辑
+                      </BackofficeButton>
+                      {rule.enabled && (
+                        <BackofficeButton
+                          disabled={savingSourceTagRule || disabling}
+                          loading={disabling}
+                          onClick={() => void disableSourceTagRule(rule)}
+                          tone="danger"
+                        >
+                          停用
+                        </BackofficeButton>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : !sourceTagRulesError ? (
+            <div className="mailbox-source-tag-empty">
+              <strong>还没有投递渠道规则</strong>
+              <span>可先用下方规则把后续投递标记为招聘平台、内推或其他来源。</span>
+            </div>
+          ) : null}
+
+          <section aria-label={editingSourceTagRuleId ? "编辑投递渠道规则" : "添加投递渠道规则"} className="mailbox-source-tag-rule-editor">
+            <div className="mailbox-source-tag-rule-editor-heading">
+              <div>
+                <h3>{editingSourceTagRuleId ? "编辑规则" : "添加规则"}</h3>
+                <p>命中后为附件保留投递渠道标签。</p>
+              </div>
+              {editingSourceTagRuleId && (
+                <BackofficeButton disabled={savingSourceTagRule} onClick={cancelSourceTagRuleEdit}>
+                  取消编辑
+                </BackofficeButton>
+              )}
+            </div>
+            <div className="form-grid mailbox-source-tag-rule-fields">
+              <div className="field-stack">
+                <label className="field-label" htmlFor="mailbox-source-tag" id="mailbox-source-tag-label">投递渠道</label>
+                {selectableSourceTags.length ? (
+                  <BackofficeSelect
+                    ariaLabelledBy="mailbox-source-tag-label"
+                    disabled={savingSourceTagRule || savingSourceTag}
+                    id="mailbox-source-tag"
+                    onChange={(value) => updateSourceTagRuleDraft("sourceTagId", value)}
+                    options={selectableSourceTags.map((tag) => ({
+                      label: tag.enabled ? tag.display_name : `${tag.display_name}（已停用）`,
+                      value: tag.source_tag_id,
+                    }))}
+                    value={sourceTagRuleDraft.sourceTagId}
+                  />
+                ) : (
+                  <div className="mailbox-source-tag-empty-inline">先新建一个投递渠道标签。</div>
+                )}
+                <div className="mailbox-source-tag-create-toggle">
+                  <button
+                    className="text-button"
+                    disabled={savingSourceTag || savingSourceTagRule}
+                    onClick={() => setCreatingSourceTag((current) => !current)}
+                    type="button"
+                  >
+                    {creatingSourceTag ? "收起新建标签" : "新建投递渠道标签"}
+                  </button>
+                </div>
+                {creatingSourceTag && (
+                  <div className="mailbox-source-tag-create">
+                    <BackofficeInput
+                      disabled={savingSourceTag}
+                      maxLength={64}
+                      onChange={setNewSourceTagName}
+                      placeholder="例如：员工内推"
+                      value={newSourceTagName}
+                    />
+                    <BackofficeButton
+                      disabled={savingSourceTag || !newSourceTagName.trim()}
+                      loading={savingSourceTag}
+                      onClick={() => void createSourceTag()}
+                    >
+                      创建标签
+                    </BackofficeButton>
+                  </div>
+                )}
+              </div>
+              <div className="field-stack">
+                <label className="field-label" htmlFor="mailbox-source-tag-match-kind" id="mailbox-source-tag-match-kind-label">匹配字段</label>
+                <BackofficeSelect
+                  ariaLabelledBy="mailbox-source-tag-match-kind-label"
+                  disabled={savingSourceTagRule}
+                  id="mailbox-source-tag-match-kind"
+                  onChange={(value) => updateSourceTagRuleDraft("matchKind", value as SourceTagRuleMatchKind)}
+                  options={sourceTagRuleMatchOptions}
+                  value={sourceTagRuleDraft.matchKind}
+                />
+              </div>
+              <div className="field-stack">
+                <label className="field-label" htmlFor="mailbox-source-tag-match-value">匹配值</label>
+                <BackofficeInput
+                  disabled={savingSourceTagRule}
+                  id="mailbox-source-tag-match-value"
+                  maxLength={255}
+                  onChange={(value) => updateSourceTagRuleDraft("matchValue", value)}
+                  placeholder={
+                    sourceTagRuleDraft.matchKind === "sender_domain"
+                      ? "例如：example.com"
+                      : sourceTagRuleDraft.matchKind === "sender_address"
+                        ? "例如：no-reply@example.com"
+                        : "例如：候选人简历"
+                  }
+                  value={sourceTagRuleDraft.matchValue}
+                />
+              </div>
+              <div className="field-stack">
+                <label className="field-label" htmlFor="mailbox-source-tag-priority">优先级</label>
+                <BackofficeInput
+                  disabled={savingSourceTagRule}
+                  id="mailbox-source-tag-priority"
+                  inputMode="numeric"
+                  maxLength={5}
+                  onChange={(value) => updateSourceTagRuleDraft("priority", value.replace(/[^0-9]/g, ""))}
+                  value={sourceTagRuleDraft.priority}
+                />
+                <p className="field-help">数值越小越优先，默认 100。</p>
+              </div>
+            </div>
+            <div className="review-actions mailbox-source-tag-rule-editor-actions">
+              <BackofficeButton
+                disabled={savingSourceTagRule || savingSourceTag || !sourceTagRuleDraft.sourceTagId}
+                icon={savingSourceTagRule ? undefined : <Icon name="check" size={16} />}
+                loading={savingSourceTagRule}
+                onClick={() => void saveSourceTagRule()}
+                tone="primary"
+              >
+                {savingSourceTagRule ? "正在保存" : editingSourceTagRuleId ? "保存规则" : "添加规则"}
+              </BackofficeButton>
+            </div>
+          </section>
+        </>
+      )}
+    </details>
+  );
+
   const mailboxOperationalOverview = selectedConfig && (
     <section className="panel mailbox-operation-overview" aria-label={`${selectedConfig.display_name} 收件概览`}>
       <div className="mailbox-operation-heading">
@@ -1299,6 +1723,8 @@ export function MailboxPage({
           </div>
           )}
 
+          {mailboxSourceTagRulesPanel}
+
           <details className="panel mailbox-retention-panel">
             <summary className="panel-heading mailbox-disclosure-heading">
               <div>
@@ -1450,7 +1876,23 @@ export function MailboxPage({
                       return (
                         <tr key={item.import_id}>
                           <th scope="row"><strong>{item.attachment_filename}</strong></th>
-                          <td className="mailbox-source-cell">{item.mailbox_display_name || "已归档收件通道"}</td>
+                          <td className="mailbox-source-cell">
+                            <div className="mailbox-import-source">
+                              <strong>{item.mailbox_display_name || "已归档收件通道"}</strong>
+                              {item.source_tags.length > 0 && (
+                                <div
+                                  aria-label={`投递渠道：${item.source_tags.map((tag) => tag.display_name).join("、")}`}
+                                  className="mailbox-import-source-tags"
+                                  title={`投递渠道：${item.source_tags.map((tag) => tag.display_name).join("、")}`}
+                                >
+                                  {item.source_tags.slice(0, 2).map((tag) => (
+                                    <span className="tag" key={tag.source_tag_id}>{tag.display_name}</span>
+                                  ))}
+                                  {item.source_tags.length > 2 && <span>+{item.source_tags.length - 2}</span>}
+                                </div>
+                              )}
+                            </div>
+                          </td>
                           <td>
                             <span className={`status-pill mailbox-import-status ${statusClass}`}>{mailboxImportStatusLabel(item.status, item.can_retry)}</span>
                             {item.error && <small className="mailbox-import-error">{mailboxImportErrorLabel(item.error)}</small>}

@@ -52,6 +52,8 @@ export interface FilterDraft {
   competitionAwardStatus: PresenceStatus;
   leadershipContexts: LeadershipContext[];
   leadershipRoles: string[];
+  /** Email-platform scope. Selected channels always use OR semantics. */
+  sourceTagIds: string[];
   keywords: string[];
   keywordsMode: KeywordMode;
 }

@@ -15,7 +15,7 @@ from email.message import Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterator, Literal
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Literal
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -92,6 +92,13 @@ from app.services.mailbox_provider_catalog import (
 from app.services.mailbox_sync_alert_service import (
     active_sync_alert,
     resolve_mailbox_sync_alert,
+)
+from app.services.source_tag_service import (
+    SourceTagMatch,
+    attach_source_tag_matches_to_import,
+    mailbox_import_source_tag_references,
+    match_mailbox_source_tags,
+    sync_resume_source_tag_projection,
 )
 from app.services.resume_service import (
     UploadValidationError,
@@ -2333,8 +2340,18 @@ def list_mailbox_imports(
         .limit(limit)
     ).all()
     total = session.scalar(count_statement)
+    source_tags_by_import = mailbox_import_source_tag_references(
+        session,
+        import_ids=[record.id for record in records],
+    )
     return MailboxImportHistoryResponse(
-        items=[_import_response(item) for item in records],
+        items=[
+            _import_response(
+                item,
+                source_tags=source_tags_by_import.get(item.id, []),
+            )
+            for item in records
+        ],
         total=int(total or 0),
     )
 
@@ -2411,7 +2428,11 @@ def get_retryable_mailbox_attachment(
     return record
 
 
-def _import_response(item: EmailAttachmentImport) -> MailboxImportResponse:
+def _import_response(
+    item: EmailAttachmentImport,
+    *,
+    source_tags: list | None = None,
+) -> MailboxImportResponse:
     return MailboxImportResponse(
         import_id=item.id,
         mailbox_config_id=item.mailbox_config_id,
@@ -2426,6 +2447,7 @@ def _import_response(item: EmailAttachmentImport) -> MailboxImportResponse:
         last_attempted_at=item.last_attempted_at,
         can_retry=_can_retry(item),
         created_at=item.created_at,
+        source_tags=source_tags or [],
     )
 
 
@@ -2443,6 +2465,7 @@ def _record(
     received_at: datetime | None,
     canonical_import_id: str | None = None,
     source_uidvalidity: int | None = None,
+    source_tag_matches: Iterable[SourceTagMatch] = (),
     trigger: str = "automatic",
     attempt_completed: bool = True,
 ) -> EmailAttachmentImport:
@@ -2469,6 +2492,11 @@ def _record(
     )
     session.add(record)
     session.flush()
+    attach_source_tag_matches_to_import(
+        session,
+        attachment_import=record,
+        matches=source_tag_matches,
+    )
     session.add(
         EmailAttachmentImportAttempt(
             organization_id=config.organization_id,
@@ -3087,6 +3115,11 @@ def _complete_processing_import(
     if attempt.rowcount != 1:
         session.rollback()
         raise _ContentClaimLost("mailbox_content_claim_lost")
+    if status == "imported" and resume_id:
+        # `_complete_content_claim` has already linked every waiting forwarded
+        # attachment to this canonical resume. Rebuild the projection from all
+        # event facts so no platform is lost to deduplication.
+        sync_resume_source_tag_projection(session, resume_id=resume_id)
     session.commit()
     return _import_response(stored)
 
@@ -3167,6 +3200,8 @@ def _complete_non_owner_processing_import(
     if attempt.rowcount != 1:
         session.rollback()
         raise _ContentClaimLost("mailbox_content_claim_lost")
+    if status == "duplicate" and resume_id:
+        sync_resume_source_tag_projection(session, resume_id=resume_id)
     session.commit()
     return _import_response(stored)
 
@@ -3181,6 +3216,7 @@ def _begin_automatic_content_import(
     attachment_sha256: str,
     received_at: datetime | None,
     source_uidvalidity: int | None,
+    source_tag_matches: Iterable[SourceTagMatch],
     settings: AppSettings,
 ) -> tuple[EmailAttachmentImport, _ContentClaim | None, MailboxImportResponse | None]:
     """Create the per-email audit row, then reserve or reuse its bytes."""
@@ -3197,6 +3233,7 @@ def _begin_automatic_content_import(
         resume_id=None,
         received_at=received_at,
         source_uidvalidity=source_uidvalidity,
+        source_tag_matches=source_tag_matches,
         attempt_completed=False,
     )
     claim = _claim_attachment_content(session, record=record, settings=settings)
@@ -3803,6 +3840,8 @@ def _complete_retry(
     if completed_attempt.rowcount != 1:
         session.rollback()
         raise _RetryClaimLost("mailbox_import_retry_superseded")
+    if status in {"imported", "duplicate"} and resume_id:
+        sync_resume_source_tag_projection(session, resume_id=resume_id)
     session.commit()
     return _import_response(record)
 
@@ -4828,6 +4867,14 @@ def sync_mailbox(
                 continue
             message_id = str(message.get("Message-ID") or "").strip() or None
             received_at = _received_at(message)
+            # Source classification only observes headers while this parsed
+            # message is in memory.  The resulting labels, not sender/subject
+            # text, are stored on each attachment import event below.
+            source_tag_matches = (
+                match_mailbox_source_tags(session, config=config, message=message)
+                if attachments
+                else ()
+            )
             # Keep only a bounded plain-text body cache, and only for mail
             # carrying a supported resume.  The IMAP RFC822 payload itself is
             # never persisted.
@@ -4858,6 +4905,7 @@ def sync_mailbox(
                     resume_id=None,
                     received_at=received_at,
                     source_uidvalidity=imap_uidvalidity,
+                    source_tag_matches=source_tag_matches,
                 )
                 session.commit()
                 skipped += 1
@@ -4891,6 +4939,7 @@ def sync_mailbox(
                         resume_id=None,
                         received_at=received_at,
                         source_uidvalidity=imap_uidvalidity,
+                        source_tag_matches=source_tag_matches,
                     )
                     session.commit()
                     skipped += 1
@@ -4915,6 +4964,7 @@ def sync_mailbox(
                     attachment_sha256=digest,
                     received_at=received_at,
                     source_uidvalidity=imap_uidvalidity,
+                    source_tag_matches=source_tag_matches,
                     settings=settings,
                 )
                 if terminal is not None:

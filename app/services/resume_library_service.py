@@ -12,6 +12,7 @@ from app.services.ai_extraction_job_service import ai_extraction_state
 from app.services.candidate_favorite_service import favorite_candidate_ids
 from app.services.candidate_name_job_service import candidate_name_extraction_state
 from app.services.resume_summary_job_service import summary_generation_state
+from app.services.source_tag_service import resume_source_tag_references
 
 
 _SUMMARY_SECTION_ORDER = (
@@ -130,6 +131,10 @@ def list_resume_library(
         .limit(page_size)
     )
     resumes = session.scalars(statement).all()
+    source_tags_by_resume = resume_source_tag_references(
+        session,
+        resume_ids=[resume.id for resume in resumes],
+    )
     favorited_candidate_ids = (
         favorite_candidate_ids(
             session,
@@ -167,6 +172,7 @@ def list_resume_library(
                 ingestion_source_type=resume.ingestion_source_type,
                 source_mailbox_config_id=resume.source_mailbox_config_id,
                 source_mailbox_label=resume.source_mailbox_label_snapshot,
+                source_tags=source_tags_by_resume.get(resume.id, []),
                 quality_flags=resume.quality_flags or [],
                 summary_preview=_summary_preview(summary.content) if summary else None,
                 summary_created_at=_isoformat(summary.created_at) if summary else None,

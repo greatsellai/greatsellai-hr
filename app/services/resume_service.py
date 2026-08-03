@@ -22,6 +22,7 @@ from app.models import (
     ResumeScholarship,
     ResumeSkill,
     ResumeSourceBlock,
+    ResumeSourceTag,
     ResumeSummary,
     ResumeUploadIdempotencyKey,
     utcnow,
@@ -631,6 +632,21 @@ def reparse_active_resume_as_new_version(
     )
     source_resume.quality_flags = source_new_quality_flags
 
+    # The canonical resume version can later be repaired because its source
+    # text was unreliable.  Preserve submission provenance on the replacement
+    # version before it becomes eligible; otherwise a successful parser repair
+    # would make an email-imported candidate disappear from source-tag filters.
+    # The historical mail import rows remain owned by the original version, so
+    # clone their query projection without copying first/last import foreign
+    # keys.  That keeps future physical deletion of the archived source from
+    # being blocked by a repair clone while retaining the recruiter-facing tag
+    # snapshot and occurrence count.
+    source_tag_projections = session.scalars(
+        select(ResumeSourceTag)
+        .where(ResumeSourceTag.resume_id == source_resume.id)
+        .order_by(ResumeSourceTag.source_tag_id)
+    ).all()
+
     organization_id = organization_context_id(session)
     storage_key = build_resume_storage_key(
         organization_id=organization_id,
@@ -660,9 +676,26 @@ def reparse_active_resume_as_new_version(
             parser_version="document-worker",
             raw_text=None,
             is_985_211=None,
+            ingestion_source_type=source_resume.ingestion_source_type,
+            source_mailbox_config_id=source_resume.source_mailbox_config_id,
+            source_mailbox_label_snapshot=source_resume.source_mailbox_label_snapshot,
         )
         session.add(replacement)
         session.flush()
+        for source_projection in source_tag_projections:
+            session.add(
+                ResumeSourceTag(
+                    organization_id=organization_id,
+                    resume_id=replacement.id,
+                    source_tag_id=source_projection.source_tag_id,
+                    tag_name_snapshot=source_projection.tag_name_snapshot,
+                    first_import_id=None,
+                    last_import_id=None,
+                    first_seen_at=source_projection.first_seen_at,
+                    last_seen_at=source_projection.last_seen_at,
+                    source_count=source_projection.source_count,
+                )
+            )
         # This is the same durable parser queue used by browser and mailbox
         # uploads.  It is intentionally created before the audit rows so a
         # committed repair action can never point at a replacement that is

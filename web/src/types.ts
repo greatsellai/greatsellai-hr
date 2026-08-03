@@ -222,6 +222,68 @@ export interface CandidateCreated {
   candidate_id: string;
 }
 
+/** A safe, historical label describing where an email-delivered resume came from. */
+export interface SourceTagReference {
+  source_tag_id: string;
+  display_name: string;
+}
+
+export type SourceTagRuleMatchKind =
+  | "sender_domain"
+  | "sender_address"
+  | "subject_keyword";
+
+export interface SourceTag {
+  source_tag_id: string;
+  display_name: string;
+  enabled: boolean;
+  is_system: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SourceTagCreate {
+  display_name: string;
+  enabled?: boolean;
+  sort_order?: number;
+}
+
+export interface SourceTagPatch {
+  display_name?: string;
+  enabled?: boolean;
+  sort_order?: number;
+}
+
+/** One named mailbox's rule for classifying subsequent inbound messages. */
+export interface MailboxSourceTagRule {
+  rule_id: string;
+  mailbox_config_id: string;
+  source_tag: SourceTagReference;
+  match_kind: SourceTagRuleMatchKind;
+  match_value: string;
+  priority: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailboxSourceTagRuleCreate {
+  source_tag_id: string;
+  match_kind: SourceTagRuleMatchKind;
+  match_value: string;
+  priority?: number;
+  enabled?: boolean;
+}
+
+export interface MailboxSourceTagRulePatch {
+  source_tag_id?: string;
+  match_kind?: SourceTagRuleMatchKind;
+  match_value?: string;
+  priority?: number;
+  enabled?: boolean;
+}
+
 export interface MailboxConfig {
   /** Stable ID of this named mailbox source. */
   mailbox_id: string;
@@ -393,6 +455,8 @@ export interface MailboxImportHistoryItem {
   last_attempted_at: string | null;
   can_retry: boolean;
   created_at: string;
+  /** Immutable labels from the message attachment import event. */
+  source_tags: SourceTagReference[];
 }
 
 export interface MailboxImportHistory {
@@ -669,6 +733,10 @@ export interface ResumeDetail {
   source_page_count: number;
   parsed_page_count: number;
   quality_flags: string[];
+  /** Named receiving mailbox, separate from platform/referral tags. */
+  source_mailbox_label: string | null;
+  /** All email-platform labels that reached this resume version. */
+  source_tags: SourceTagReference[];
 }
 
 /**
@@ -1050,6 +1118,8 @@ export interface FilterOptions {
   graduation_statuses: Array<FilterOption<"any" | "fresh" | "previous">>;
   presence_statuses: Array<FilterOption<PresenceStatus>>;
   keyword_modes: Array<FilterOption<"broad" | "precise">>;
+  /** Workspace-local, live resume source labels; empty until an email matches one. */
+  resume_source_tags: Array<FilterOption>;
 }
 
 export interface CandidateSearchRequest {
@@ -1085,6 +1155,8 @@ export interface CandidateSearchRequest {
   keyword_match_mode?: "broad" | "precise";
   keywords_all_of?: string[];
   keywords_any_of?: string[];
+  /** Explicit platform scope; selected values use fixed OR semantics. */
+  source_tag_ids_any_of?: string[];
   /** Current score template used only for comparable score ordering. */
   score_template_id?: string | null;
   limit?: number;
@@ -1155,6 +1227,8 @@ export interface CandidateSearchItem {
   latest_experience_type: string | null;
   skill_highlights: string[];
   summary_preview: string | null;
+  /** Derived from the selected resume's immutable mail-import facts. */
+  source_tags: SourceTagReference[];
   score_id: string | null;
   score_template_id: string | null;
   score_total: number | null;
@@ -1346,6 +1420,8 @@ export interface ResumeLibraryItem {
   ingestion_source_type: string;
   source_mailbox_config_id: string | null;
   source_mailbox_label: string | null;
+  /** Platform/referral labels are separate from the named receiving mailbox. */
+  source_tags: SourceTagReference[];
   /** Source extraction warnings. These take precedence over an old active state. */
   quality_flags: string[];
   summary_preview: string | null;
@@ -1377,6 +1453,9 @@ export interface CandidateResumeVersionPreview {
   created_at: string;
   extraction_status: string;
   is_active: boolean;
+  /** Named receiving mailbox, separate from platform/referral tags. */
+  source_mailbox_label: string | null;
+  source_tags: SourceTagReference[];
 }
 
 export interface CandidateResumeVersionsResponse {

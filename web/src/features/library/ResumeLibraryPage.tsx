@@ -415,10 +415,28 @@ export function ResumeLibraryPage({
                               {status.label}
                             </span>
                           )}
-                          {item.source_mailbox_label && (
-                            <span className="candidate-meta library-source-label">
-                              邮箱 · {item.source_mailbox_label}
-                            </span>
+                          {(item.source_mailbox_label || item.source_tags.length > 0) && (
+                            <div className="library-source-provenance">
+                              {item.source_mailbox_label && (
+                                <span className="candidate-meta library-source-label">
+                                  收件通道 · {item.source_mailbox_label}
+                                </span>
+                              )}
+                              {item.source_tags.length > 0 && (
+                                <div
+                                  aria-label={`投递渠道：${item.source_tags.map((tag) => tag.display_name).join("、")}`}
+                                  className="library-source-tags"
+                                  title={`投递渠道：${item.source_tags.map((tag) => tag.display_name).join("、")}`}
+                                >
+                                  {item.source_tags.slice(0, 2).map((tag) => (
+                                    <span className="tag" key={tag.source_tag_id}>{tag.display_name}</span>
+                                  ))}
+                                  {item.source_tags.length > 2 && (
+                                    <span className="library-source-tags-more">+{item.source_tags.length - 2}</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                           )}
                         </div>
                       </td>

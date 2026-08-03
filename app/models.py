@@ -962,6 +962,15 @@ class CandidateFavorite(OrganizationScoped, Base):
 class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
     __tablename__ = "resumes"
     __table_args__ = (
+        # The redundant tenant key is intentional: source-tag projections use
+        # it to enforce that a tag can only point at a resume in the same
+        # workspace, even when a write bypasses service-layer scoping.
+        Index(
+            "uq_resumes_id_organization",
+            "id",
+            "organization_id",
+            unique=True,
+        ),
         Index(
             "uq_active_resume_per_candidate",
             "candidate_id",
@@ -1115,6 +1124,15 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
     source_mailbox_config: Mapped["MailboxConfig | None"] = relationship(
         back_populates="ingested_resumes",
         foreign_keys=[source_mailbox_config_id],
+    )
+    source_tag_assignments: Mapped[list["ResumeSourceTag"]] = relationship(
+        back_populates="resume",
+        cascade="all, delete-orphan",
+        foreign_keys="ResumeSourceTag.resume_id",
+        primaryjoin=(
+            "and_(Resume.id == ResumeSourceTag.resume_id, "
+            "Resume.organization_id == ResumeSourceTag.organization_id)"
+        ),
     )
 
 
@@ -1528,6 +1546,14 @@ class MailboxConfig(OrganizationScoped, Base):
 
     __tablename__ = "mailbox_configs"
     __table_args__ = (
+        # Child source-tag rules use this key for an enforced workspace-bound
+        # reference rather than trusting a mailbox ID alone.
+        Index(
+            "uq_mailbox_configs_id_organization",
+            "id",
+            "organization_id",
+            unique=True,
+        ),
         CheckConstraint(
             "initial_sync_lookback_days >= 0 AND initial_sync_lookback_days <= 365",
             name="ck_mailbox_configs_initial_sync_lookback_days",
@@ -1659,6 +1685,15 @@ class MailboxConfig(OrganizationScoped, Base):
         back_populates="mailbox_config",
         cascade="all, delete-orphan",
         uselist=False,
+    )
+    source_tag_rules: Mapped[list["MailboxSourceTagRule"]] = relationship(
+        back_populates="mailbox_config",
+        cascade="all, delete-orphan",
+        foreign_keys="MailboxSourceTagRule.mailbox_config_id",
+        primaryjoin=(
+            "and_(MailboxConfig.id == MailboxSourceTagRule.mailbox_config_id, "
+            "MailboxConfig.organization_id == MailboxSourceTagRule.organization_id)"
+        ),
     )
 
 
@@ -1820,6 +1855,14 @@ class EmailAttachmentImport(OrganizationScoped, Base):
 
     __tablename__ = "email_attachment_imports"
     __table_args__ = (
+        # Tag-assignment rows must prove both the import ID and workspace at
+        # the database boundary; an ID by itself is not a tenant boundary.
+        Index(
+            "uq_email_attachment_imports_id_organization",
+            "id",
+            "organization_id",
+            unique=True,
+        ),
         UniqueConstraint(
             "mailbox_config_id",
             "message_uid",
@@ -1887,6 +1930,410 @@ class EmailAttachmentImport(OrganizationScoped, Base):
     )
     background_jobs: Mapped[list["MailboxBackgroundJob"]] = relationship(
         back_populates="attachment_import",
+    )
+    source_tag_assignments: Mapped[list["EmailAttachmentImportTag"]] = relationship(
+        back_populates="attachment_import",
+        cascade="all, delete-orphan",
+        foreign_keys="EmailAttachmentImportTag.email_attachment_import_id",
+        primaryjoin=(
+            "and_(EmailAttachmentImport.id == EmailAttachmentImportTag.email_attachment_import_id, "
+            "EmailAttachmentImport.organization_id == EmailAttachmentImportTag.organization_id)"
+        ),
+    )
+
+
+class SourceTag(OrganizationScoped, Base):
+    """A workspace-local, recruiter-managed source label.
+
+    A source tag is deliberately independent from a mailbox configuration:
+    one candidate may arrive through several channels, while a mailbox can
+    carry rules for several sources.  Names are stored with a normalized key
+    so a workspace cannot accidentally create visually equivalent tags.
+    """
+
+    __tablename__ = "source_tags"
+    __table_args__ = (
+        # Child rows use this candidate key for workspace-bound foreign keys.
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            name="uq_source_tags_id_organization",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "name_key",
+            name="uq_source_tags_organization_name_key",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "system_key",
+            name="uq_source_tags_organization_system_key",
+        ),
+        CheckConstraint("sort_order >= 0", name="ck_source_tags_sort_order_nonnegative"),
+        Index(
+            "ix_source_tags_organization_enabled_order",
+            "organization_id",
+            "enabled",
+            "sort_order",
+            "display_name",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    display_name: Mapped[str] = mapped_column(String(64))
+    name_key: Mapped[str] = mapped_column(String(128))
+    # Reserved for reviewed built-in labels. User-created tags leave it NULL;
+    # all major supported databases permit more than one NULL unique value.
+    system_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        index=True,
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    mailbox_rules: Mapped[list["MailboxSourceTagRule"]] = relationship(
+        back_populates="source_tag",
+        foreign_keys="MailboxSourceTagRule.source_tag_id",
+        primaryjoin=(
+            "and_(SourceTag.id == MailboxSourceTagRule.source_tag_id, "
+            "SourceTag.organization_id == MailboxSourceTagRule.organization_id)"
+        ),
+    )
+    import_assignments: Mapped[list["EmailAttachmentImportTag"]] = relationship(
+        back_populates="source_tag",
+        foreign_keys="EmailAttachmentImportTag.source_tag_id",
+        primaryjoin=(
+            "and_(SourceTag.id == EmailAttachmentImportTag.source_tag_id, "
+            "SourceTag.organization_id == EmailAttachmentImportTag.organization_id)"
+        ),
+    )
+    resume_assignments: Mapped[list["ResumeSourceTag"]] = relationship(
+        back_populates="source_tag",
+        foreign_keys="ResumeSourceTag.source_tag_id",
+        primaryjoin=(
+            "and_(SourceTag.id == ResumeSourceTag.source_tag_id, "
+            "SourceTag.organization_id == ResumeSourceTag.organization_id)"
+        ),
+    )
+
+
+class MailboxSourceTagRule(OrganizationScoped, Base):
+    """A privacy-safe mailbox matcher that assigns one source tag.
+
+    The rule stores only the workspace-approved matching value. Raw sender
+    headers and subjects remain transient while a message is being imported;
+    only the resulting tag assignment is kept on the attachment event.
+    """
+
+    __tablename__ = "mailbox_source_tag_rules"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["mailbox_config_id", "organization_id"],
+            ["mailbox_configs.id", "mailbox_configs.organization_id"],
+            name="fk_mailbox_source_tag_rules_mailbox_organization",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["source_tag_id", "organization_id"],
+            ["source_tags.id", "source_tags.organization_id"],
+            name="fk_mailbox_source_tag_rules_source_tag_organization",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            name="uq_mailbox_source_tag_rules_id_organization",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "mailbox_config_id",
+            "source_tag_id",
+            "match_kind",
+            "match_value_key",
+            name="uq_mailbox_source_tag_rule_match",
+        ),
+        CheckConstraint(
+            "match_kind IN ('sender_domain', 'sender_address', 'subject_keyword')",
+            name="ck_mailbox_source_tag_rule_match_kind",
+        ),
+        CheckConstraint(
+            "priority >= 0",
+            name="ck_mailbox_source_tag_rule_priority_nonnegative",
+        ),
+        Index(
+            "ix_mb_source_tag_rules_org_mb_active_priority",
+            "organization_id",
+            "mailbox_config_id",
+            "enabled",
+            "priority",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    # Composite tenant FKs below deliberately replace single-column FKs.
+    mailbox_config_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_tag_id: Mapped[str] = mapped_column(String(36), index=True)
+    match_kind: Mapped[str] = mapped_column(String(32))
+    match_value: Mapped[str] = mapped_column(String(320))
+    match_value_key: Mapped[str] = mapped_column(String(320))
+    priority: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text("true"),
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    mailbox_config: Mapped[MailboxConfig] = relationship(
+        back_populates="source_tag_rules",
+        foreign_keys=[mailbox_config_id],
+        primaryjoin=(
+            "and_(MailboxSourceTagRule.mailbox_config_id == MailboxConfig.id, "
+            "MailboxSourceTagRule.organization_id == MailboxConfig.organization_id)"
+        ),
+    )
+    source_tag: Mapped[SourceTag] = relationship(
+        back_populates="mailbox_rules",
+        foreign_keys=[source_tag_id],
+        primaryjoin=(
+            "and_(MailboxSourceTagRule.source_tag_id == SourceTag.id, "
+            "MailboxSourceTagRule.organization_id == SourceTag.organization_id)"
+        ),
+    )
+    matched_import_assignments: Mapped[list["EmailAttachmentImportTag"]] = relationship(
+        back_populates="matched_rule",
+        foreign_keys="EmailAttachmentImportTag.matched_rule_id",
+        primaryjoin=(
+            "and_(MailboxSourceTagRule.id == EmailAttachmentImportTag.matched_rule_id, "
+            "MailboxSourceTagRule.organization_id == EmailAttachmentImportTag.organization_id)"
+        ),
+    )
+
+
+class EmailAttachmentImportTag(OrganizationScoped, Base):
+    """Immutable source-tag result for one ingested email attachment."""
+
+    __tablename__ = "email_attachment_import_tags"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["email_attachment_import_id", "organization_id"],
+            [
+                "email_attachment_imports.id",
+                "email_attachment_imports.organization_id",
+            ],
+            name="fk_email_attachment_import_tags_import_organization",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["source_tag_id", "organization_id"],
+            ["source_tags.id", "source_tags.organization_id"],
+            name="fk_email_attachment_import_tags_source_tag_organization",
+            ondelete="RESTRICT",
+        ),
+        # A historical assignment must keep its originating rule auditable.
+        # Rules are disabled rather than deleted, so RESTRICT is intentional.
+        ForeignKeyConstraint(
+            ["matched_rule_id", "organization_id"],
+            ["mailbox_source_tag_rules.id", "mailbox_source_tag_rules.organization_id"],
+            name="fk_email_attachment_import_tags_rule_organization",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            name="uq_email_attachment_import_tags_id_organization",
+        ),
+        UniqueConstraint(
+            "email_attachment_import_id",
+            "source_tag_id",
+            name="uq_email_attachment_import_tag",
+        ),
+        CheckConstraint(
+            "assignment_kind IN ('builtin', 'mailbox_rule')",
+            name="ck_email_attachment_import_tag_assignment_kind",
+        ),
+        CheckConstraint(
+            "assignment_kind != 'mailbox_rule' OR matched_rule_id IS NOT NULL",
+            name="ck_email_attachment_import_tag_rule_required",
+        ),
+        Index(
+            "ix_email_attachment_import_tags_organization_tag_import",
+            "organization_id",
+            "source_tag_id",
+            "email_attachment_import_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    email_attachment_import_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_tag_id: Mapped[str] = mapped_column(String(36), index=True)
+    assignment_kind: Mapped[str] = mapped_column(String(32))
+    matched_rule_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # This snapshot remains recruiter-readable even if the label is renamed.
+    tag_name_snapshot: Mapped[str] = mapped_column(String(64))
+    assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    attachment_import: Mapped[EmailAttachmentImport] = relationship(
+        back_populates="source_tag_assignments",
+        foreign_keys=[email_attachment_import_id],
+        primaryjoin=(
+            "and_(EmailAttachmentImportTag.email_attachment_import_id == EmailAttachmentImport.id, "
+            "EmailAttachmentImportTag.organization_id == EmailAttachmentImport.organization_id)"
+        ),
+    )
+    source_tag: Mapped[SourceTag] = relationship(
+        back_populates="import_assignments",
+        foreign_keys=[source_tag_id],
+        primaryjoin=(
+            "and_(EmailAttachmentImportTag.source_tag_id == SourceTag.id, "
+            "EmailAttachmentImportTag.organization_id == SourceTag.organization_id)"
+        ),
+    )
+    matched_rule: Mapped[MailboxSourceTagRule | None] = relationship(
+        back_populates="matched_import_assignments",
+        foreign_keys=[matched_rule_id],
+        primaryjoin=(
+            "and_(EmailAttachmentImportTag.matched_rule_id == MailboxSourceTagRule.id, "
+            "EmailAttachmentImportTag.organization_id == MailboxSourceTagRule.organization_id)"
+        ),
+    )
+
+
+class ResumeSourceTag(OrganizationScoped, Base):
+    """Current source-tag projection for filtering and candidate display.
+
+    Unlike ``EmailAttachmentImportTag``, this row collapses repeated forwarded
+    copies of one resume. The first/last import references preserve enough
+    traceability to rebuild the projection without storing raw mail headers.
+    """
+
+    __tablename__ = "resume_source_tags"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["resume_id", "organization_id"],
+            ["resumes.id", "resumes.organization_id"],
+            name="fk_resume_source_tags_resume_organization",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["source_tag_id", "organization_id"],
+            ["source_tags.id", "source_tags.organization_id"],
+            name="fk_resume_source_tags_source_tag_organization",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["first_import_id", "organization_id"],
+            [
+                "email_attachment_imports.id",
+                "email_attachment_imports.organization_id",
+            ],
+            name="fk_resume_source_tags_first_import_organization",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["last_import_id", "organization_id"],
+            [
+                "email_attachment_imports.id",
+                "email_attachment_imports.organization_id",
+            ],
+            name="fk_resume_source_tags_last_import_organization",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "id",
+            "organization_id",
+            name="uq_resume_source_tags_id_organization",
+        ),
+        UniqueConstraint(
+            "resume_id",
+            "source_tag_id",
+            name="uq_resume_source_tag",
+        ),
+        CheckConstraint(
+            "source_count >= 0",
+            name="ck_resume_source_tag_source_count_nonnegative",
+        ),
+        Index(
+            "ix_resume_source_tags_organization_tag_resume",
+            "organization_id",
+            "source_tag_id",
+            "resume_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    resume_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_tag_id: Mapped[str] = mapped_column(String(36), index=True)
+    tag_name_snapshot: Mapped[str] = mapped_column(String(64))
+    first_import_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_import_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Manual labels have no import event and start at zero. Each tagged mail
+    # attachment increments this count without duplicating the projection row.
+    source_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    resume: Mapped[Resume] = relationship(
+        back_populates="source_tag_assignments",
+        foreign_keys=[resume_id],
+        primaryjoin=(
+            "and_(ResumeSourceTag.resume_id == Resume.id, "
+            "ResumeSourceTag.organization_id == Resume.organization_id)"
+        ),
+    )
+    source_tag: Mapped[SourceTag] = relationship(
+        back_populates="resume_assignments",
+        foreign_keys=[source_tag_id],
+        primaryjoin=(
+            "and_(ResumeSourceTag.source_tag_id == SourceTag.id, "
+            "ResumeSourceTag.organization_id == SourceTag.organization_id)"
+        ),
+    )
+    first_import: Mapped[EmailAttachmentImport | None] = relationship(
+        foreign_keys=[first_import_id],
+        primaryjoin=(
+            "and_(ResumeSourceTag.first_import_id == EmailAttachmentImport.id, "
+            "ResumeSourceTag.organization_id == EmailAttachmentImport.organization_id)"
+        ),
+    )
+    last_import: Mapped[EmailAttachmentImport | None] = relationship(
+        foreign_keys=[last_import_id],
+        primaryjoin=(
+            "and_(ResumeSourceTag.last_import_id == EmailAttachmentImport.id, "
+            "ResumeSourceTag.organization_id == EmailAttachmentImport.organization_id)"
+        ),
     )
 
 

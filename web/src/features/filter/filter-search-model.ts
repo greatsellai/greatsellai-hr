@@ -56,6 +56,7 @@ const defaultFilterDraft: FilterDraft = {
   competitionAwardStatus: "any",
   leadershipContexts: [],
   leadershipRoles: [],
+  sourceTagIds: [],
   keywords: [],
   keywordsMode: "broad",
 };
@@ -183,6 +184,7 @@ export const fallbackFilterOptions: FilterOptions = {
     { value: "broad", label: "任一命中" },
     { value: "precise", label: "全部命中" },
   ],
+  resume_source_tags: [],
 };
 
 export function freshDefaultFilter(): FilterDraft {
@@ -198,6 +200,7 @@ export function freshDefaultFilter(): FilterDraft {
     scholarshipLevels: [],
     leadershipContexts: [],
     leadershipRoles: [],
+    sourceTagIds: [],
     keywords: [],
   };
 }
@@ -221,6 +224,7 @@ export function snapshotFilterDraft(draft: FilterDraft): FilterDraft {
     scholarshipLevels: [...draft.scholarshipLevels],
     leadershipContexts: [...draft.leadershipContexts],
     leadershipRoles: [...draft.leadershipRoles],
+    sourceTagIds: [...draft.sourceTagIds],
     keywords: [...draft.keywords],
   };
 }
@@ -268,6 +272,9 @@ export function draftToSearchRequest(
   if (draft.keywords.length) {
     request.keywords = draft.keywords;
     request.keyword_match_mode = draft.keywordsMode;
+  }
+  if (draft.sourceTagIds.length) {
+    request.source_tag_ids_any_of = draft.sourceTagIds;
   }
   if (scoreTemplateId) request.score_template_id = scoreTemplateId;
   return request;
@@ -404,6 +411,7 @@ export function searchRequestToDraft(
         savedEducation?.min_academic_score_percent ?? 0,
       ),
       maxRankPercent: clampPercentage(savedEducation?.max_rank_percent ?? 0),
+      sourceTagIds: [...new Set(request.source_tag_ids_any_of ?? [])],
       keywords: [...new Set(savedKeywords)],
       keywordsMode: keywordMode,
     },

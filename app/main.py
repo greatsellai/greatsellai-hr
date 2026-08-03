@@ -99,6 +99,9 @@ from app.schemas import (
     MailboxConfigPatch,
     MailboxConfigResponse,
     MailboxConfigUpdate,
+    MailboxSourceTagRuleCreate,
+    MailboxSourceTagRulePatch,
+    MailboxSourceTagRuleResponse,
     MailboxOAuthStartRequest,
     MailboxOAuthStartResponse,
     MailboxProviderListResponse,
@@ -203,6 +206,9 @@ from app.schemas import (
     SavedFilterResponse,
     ScoreTemplateCreate,
     ScoreTemplateResponse,
+    SourceTagCreate,
+    SourceTagPatch,
+    SourceTagResponse,
     WorkspaceFeedbackListResponse,
 )
 from app.services.identity_service import (
@@ -530,9 +536,26 @@ from app.services.workspace_feedback_service import (
     list_workspace_feedback,
     submit_workspace_feedback,
 )
+from app.services.source_tag_service import (
+    SourceTagServiceError,
+    create_mailbox_source_tag_rule,
+    create_source_tag,
+    delete_mailbox_source_tag_rule,
+    list_mailbox_source_tag_rules,
+    list_source_tags,
+    resume_source_tag_references,
+    source_tag_filter_options,
+    update_mailbox_source_tag_rule,
+    update_source_tag,
+)
 
 
-def _resume_detail(resume: object, *, is_favorited: bool = False) -> ResumeDetail:
+def _resume_detail(
+    resume: object,
+    *,
+    is_favorited: bool = False,
+    source_tags: list[object] | None = None,
+) -> ResumeDetail:
     ai_extraction_status, ai_extraction_error = ai_extraction_state(resume)
     candidate_name_extraction_status, candidate_name_extraction_error = (
         candidate_name_extraction_state(resume)
@@ -559,6 +582,8 @@ def _resume_detail(resume: object, *, is_favorited: bool = False) -> ResumeDetai
         source_page_count=resume.source_page_count,
         parsed_page_count=resume.parsed_page_count,
         quality_flags=resume.quality_flags or [],
+        source_mailbox_label=resume.source_mailbox_label_snapshot,
+        source_tags=source_tags or [],
     )
 
 
@@ -1073,6 +1098,27 @@ def _mailbox_error_http_exception(exc: MailboxImportError) -> HTTPException:
         "mailbox_import_not_retryable",
         "mailbox_import_retry_in_progress",
         "mailbox_import_retry_superseded",
+    }:
+        response_status = status.HTTP_409_CONFLICT
+    else:
+        response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+    return HTTPException(status_code=response_status, detail=code)
+
+
+def _source_tag_error_http_exception(exc: SourceTagServiceError) -> HTTPException:
+    """Keep cross-workspace source-tag IDs indistinguishable from typos."""
+
+    code = str(exc)
+    if code in {
+        "source_tag_not_found",
+        "source_tag_rule_not_found",
+        "mailbox_config_not_found",
+        "resume_not_found",
+    }:
+        response_status = status.HTTP_404_NOT_FOUND
+    elif code in {
+        "source_tag_duplicate_display_name",
+        "source_tag_rule_duplicate",
     }:
         response_status = status.HTTP_409_CONFLICT
     else:
@@ -1917,8 +1963,13 @@ def _resume_review_detail(
     resume: object,
     *,
     is_favorited: bool = False,
+    source_tags: list[object] | None = None,
 ) -> ResumeReviewDetail:
-    base = _resume_detail(resume, is_favorited=is_favorited)
+    base = _resume_detail(
+        resume,
+        is_favorited=is_favorited,
+        source_tags=source_tags,
+    )
     return ResumeReviewDetail(
         **base.model_dump(),
         original_filename=resume.original_filename,
@@ -3670,6 +3721,144 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             settings=settings,
         )
 
+    @app.get(
+        "/v1/source-tags",
+        response_model=list[SourceTagResponse],
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_source_tags(
+        include_disabled: bool = True,
+        session: Session = Depends(get_session),
+    ) -> list[SourceTagResponse]:
+        return list_source_tags(session, include_disabled=include_disabled)
+
+    @app.post(
+        "/v1/source-tags",
+        response_model=SourceTagResponse,
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_source_tag(
+        payload: SourceTagCreate,
+        session: Session = Depends(get_session),
+    ) -> SourceTagResponse:
+        try:
+            response = create_source_tag(session, payload=payload)
+        except SourceTagServiceError as exc:
+            session.rollback()
+            raise _source_tag_error_http_exception(exc) from exc
+        _commit_or_raise(session)
+        return response
+
+    @app.patch(
+        "/v1/source-tags/{source_tag_id}",
+        response_model=SourceTagResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def patch_source_tag(
+        source_tag_id: str,
+        payload: SourceTagPatch,
+        session: Session = Depends(get_session),
+    ) -> SourceTagResponse:
+        try:
+            response = update_source_tag(
+                session,
+                source_tag_id=source_tag_id,
+                payload=payload,
+            )
+        except SourceTagServiceError as exc:
+            session.rollback()
+            raise _source_tag_error_http_exception(exc) from exc
+        _commit_or_raise(session)
+        return response
+
+    # Keep source-tag rule routes before ``/v1/mailboxes/{mailbox_id}`` so
+    # the rule segment remains unambiguous in every FastAPI router backend.
+    @app.get(
+        "/v1/mailboxes/{mailbox_id}/source-tag-rules",
+        response_model=list[MailboxSourceTagRuleResponse],
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def get_mailbox_source_tag_rules(
+        mailbox_id: str,
+        session: Session = Depends(get_session),
+    ) -> list[MailboxSourceTagRuleResponse]:
+        try:
+            return list_mailbox_source_tag_rules(
+                session,
+                mailbox_config_id=mailbox_id,
+            )
+        except SourceTagServiceError as exc:
+            raise _source_tag_error_http_exception(exc) from exc
+
+    @app.post(
+        "/v1/mailboxes/{mailbox_id}/source-tag-rules",
+        response_model=MailboxSourceTagRuleResponse,
+        status_code=status.HTTP_201_CREATED,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def post_mailbox_source_tag_rule(
+        mailbox_id: str,
+        payload: MailboxSourceTagRuleCreate,
+        session: Session = Depends(get_session),
+    ) -> MailboxSourceTagRuleResponse:
+        try:
+            response = create_mailbox_source_tag_rule(
+                session,
+                mailbox_config_id=mailbox_id,
+                payload=payload,
+            )
+        except SourceTagServiceError as exc:
+            session.rollback()
+            raise _source_tag_error_http_exception(exc) from exc
+        _commit_or_raise(session)
+        return response
+
+    @app.patch(
+        "/v1/mailboxes/{mailbox_id}/source-tag-rules/{rule_id}",
+        response_model=MailboxSourceTagRuleResponse,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def patch_mailbox_source_tag_rule(
+        mailbox_id: str,
+        rule_id: str,
+        payload: MailboxSourceTagRulePatch,
+        session: Session = Depends(get_session),
+    ) -> MailboxSourceTagRuleResponse:
+        try:
+            response = update_mailbox_source_tag_rule(
+                session,
+                mailbox_config_id=mailbox_id,
+                rule_id=rule_id,
+                payload=payload,
+            )
+        except SourceTagServiceError as exc:
+            session.rollback()
+            raise _source_tag_error_http_exception(exc) from exc
+        _commit_or_raise(session)
+        return response
+
+    @app.delete(
+        "/v1/mailboxes/{mailbox_id}/source-tag-rules/{rule_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        dependencies=[Depends(require_mailbox_feature)],
+    )
+    def delete_mailbox_source_tag_rule_endpoint(
+        mailbox_id: str,
+        rule_id: str,
+        session: Session = Depends(get_session),
+    ) -> None:
+        try:
+            delete_mailbox_source_tag_rule(
+                session,
+                mailbox_config_id=mailbox_id,
+                rule_id=rule_id,
+            )
+        except SourceTagServiceError as exc:
+            session.rollback()
+            raise _source_tag_error_http_exception(exc) from exc
+        _commit_or_raise(session)
+
     @app.post(
         "/v1/mailboxes",
         response_model=MailboxConfigResponse,
@@ -5140,6 +5329,10 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 user_id=principal.user.id,
                 candidate_id=resume.candidate_id,
             ).is_favorited,
+            source_tags=resume_source_tag_references(
+                session,
+                resume_ids=[resume.id],
+            ).get(resume.id, []),
         )
 
     @app.get(
@@ -5163,6 +5356,10 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 user_id=principal.user.id,
                 candidate_id=resume.candidate_id,
             ).is_favorited,
+            source_tags=resume_source_tag_references(
+                session,
+                resume_ids=[resume.id],
+            ).get(resume.id, []),
         )
 
     @app.post(
@@ -5877,7 +6074,11 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             )
         except SearchValidationError as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=(
+                    status.HTTP_404_NOT_FOUND
+                    if str(exc) == "source_tag_not_found"
+                    else status.HTTP_422_UNPROCESSABLE_CONTENT
+                ),
                 detail=str(exc),
             ) from exc
 
@@ -5886,8 +6087,12 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         response_model=dict[str, object],
         dependencies=[Depends(require_single_admin)],
     )
-    def get_filter_options() -> dict[str, object]:
-        return filter_options_payload()
+    def get_filter_options(
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        return filter_options_payload(
+            resume_source_tags=source_tag_filter_options(session),
+        )
 
     @app.get(
         "/v1/resume-library",

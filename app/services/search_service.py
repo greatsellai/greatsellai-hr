@@ -20,6 +20,7 @@ from app.models import (
     Resume,
     ResumeLanguageCredential,
     ResumeScore,
+    ResumeSourceTag,
     ResumeSummary,
     ScoreTemplate,
 )
@@ -43,6 +44,11 @@ from app.services.contact_extraction_service import redact_contact_values
 from app.services.candidate_favorite_service import favorite_candidate_ids
 from app.services.normalization import DEGREE_RANK, normalized_contains, normalized_key
 from app.services.resume_eligibility import is_resume_screening_eligible
+from app.services.source_tag_service import (
+    SourceTagServiceError,
+    resume_source_tag_references,
+    validate_source_tag_ids,
+)
 
 
 # A score that needs a recruiter review is still the latest usable AI score.  Hiding
@@ -2264,6 +2270,38 @@ def _fuzzy_candidate_item(
     )
 
 
+def _with_source_tag_scope(statement, *, source_tag_ids: set[str]):
+    """Restrict a search to resumes carrying any selected source label.
+
+    Channel selection is an explicit recruiter's scope, not an AI fact. It is
+    therefore always ANDed with the rest of the screen and its multi-select
+    semantics are fixed to OR within the selected tag list.
+    """
+
+    if not source_tag_ids:
+        return statement
+    return statement.where(
+        Resume.id.in_(
+            select(ResumeSourceTag.resume_id).where(
+                ResumeSourceTag.source_tag_id.in_(sorted(source_tag_ids))
+            )
+        )
+    )
+
+
+def _attach_source_tags_to_search_items(
+    session: Session,
+    *,
+    items: list[CandidateSearchItem],
+) -> None:
+    source_tags_by_resume = resume_source_tag_references(
+        session,
+        resume_ids=[item.resume_id for item in items],
+    )
+    for item in items:
+        item.source_tags = source_tags_by_resume.get(item.resume_id, [])
+
+
 def _fuzzy_search_candidates(
     session: Session,
     request: CandidateSearchRequest,
@@ -2271,6 +2309,7 @@ def _fuzzy_search_candidates(
     score_template: ScoreTemplate | None,
     include_source_language_evidence: bool,
     resume_ids: set[str] | None,
+    source_tag_ids: set[str],
     viewer_user_id: str | None,
 ) -> CandidateSearchResponse:
     statement = (
@@ -2294,6 +2333,7 @@ def _fuzzy_search_candidates(
         if not resume_ids:
             return CandidateSearchResponse(items=[], total_count=0)
         statement = statement.where(Resume.id.in_(sorted(resume_ids)))
+    statement = _with_source_tag_scope(statement, source_tag_ids=source_tag_ids)
     cursor_resume_id: str | None = None
     if request.cursor is not None:
         _, cursor_resume_id = _decode_cursor(request.cursor)
@@ -2365,6 +2405,10 @@ def _fuzzy_search_candidates(
             raise SearchValidationError("invalid_cursor")
         results = results[cursor_index + 1 :]
     page_results = results[: request.limit]
+    _attach_source_tags_to_search_items(
+        session,
+        items=[result.item for result in page_results],
+    )
     next_cursor = (
         _encode_cursor(
             updated_at=page_results[-1].updated_at,
@@ -2379,6 +2423,7 @@ def _fuzzy_search_candidates(
     )
     if resume_ids is not None:
         review_scope = review_scope.where(Resume.id.in_(sorted(resume_ids)))
+    review_scope = _with_source_tag_scope(review_scope, source_tag_ids=source_tag_ids)
     needs_review_candidate_ids = set(session.scalars(review_scope).all())
     unreliable_active_statement = select(Resume).where(
         Resume.is_active.is_(True),
@@ -2388,6 +2433,10 @@ def _fuzzy_search_candidates(
         unreliable_active_statement = unreliable_active_statement.where(
             Resume.id.in_(sorted(resume_ids))
         )
+    unreliable_active_statement = _with_source_tag_scope(
+        unreliable_active_statement,
+        source_tag_ids=source_tag_ids,
+    )
     needs_review_candidate_ids.update(
         resume.candidate_id
         for resume in session.scalars(unreliable_active_statement).all()
@@ -2424,6 +2473,14 @@ def search_candidates(
         if score_template is None or score_template.is_archived:
             raise SearchValidationError("score_template_not_found")
 
+    try:
+        source_tag_ids = validate_source_tag_ids(
+            session,
+            source_tag_ids=request.source_tag_ids_any_of,
+        )
+    except SourceTagServiceError as exc:
+        raise SearchValidationError(str(exc)) from exc
+
     if request.condition_match_mode == "any":
         return _fuzzy_search_candidates(
             session,
@@ -2431,6 +2488,7 @@ def search_candidates(
             score_template=score_template,
             include_source_language_evidence=include_source_language_evidence,
             resume_ids=resume_ids,
+            source_tag_ids=source_tag_ids,
             viewer_user_id=viewer_user_id,
         )
 
@@ -2455,6 +2513,7 @@ def search_candidates(
         if not resume_ids:
             return CandidateSearchResponse(items=[], total_count=0)
         statement = statement.where(Resume.id.in_(sorted(resume_ids)))
+    statement = _with_source_tag_scope(statement, source_tag_ids=source_tag_ids)
     if request.is_985_211 is not None:
         statement = statement.where(Resume.is_985_211.is_(request.is_985_211))
     if request.highest_degree_in:
@@ -3418,6 +3477,7 @@ def search_candidates(
 
     page_results = results[: request.limit]
     page_items = [result.item for result in page_results]
+    _attach_source_tags_to_search_items(session, items=page_items)
     next_cursor = (
         _encode_cursor(
             updated_at=page_results[-1].updated_at,
@@ -3431,6 +3491,7 @@ def search_candidates(
     )
     if resume_ids is not None:
         review_scope = review_scope.where(Resume.id.in_(sorted(resume_ids)))
+    review_scope = _with_source_tag_scope(review_scope, source_tag_ids=source_tag_ids)
     needs_review_candidate_ids = set(session.scalars(review_scope).all())
     # An older bad extraction may already be ``ready`` and active.  Surface it
     # in the same review counter so it is not silently lost after exclusion
@@ -3443,6 +3504,10 @@ def search_candidates(
         unreliable_active_statement = unreliable_active_statement.where(
             Resume.id.in_(sorted(resume_ids))
         )
+    unreliable_active_statement = _with_source_tag_scope(
+        unreliable_active_statement,
+        source_tag_ids=source_tag_ids,
+    )
     unreliable_active_candidate_ids = {
         resume.candidate_id
         for resume in session.scalars(unreliable_active_statement).all()

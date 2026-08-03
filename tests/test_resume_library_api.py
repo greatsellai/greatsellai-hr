@@ -134,6 +134,8 @@ def test_resume_library_keeps_pending_upload_visible_without_ai_outputs(client) 
     assert item["score_total"] is None
     assert item["analysis_wait_estimate"] is not None
     assert item["analysis_wait_estimate"]["target"] == "analysis"
+    assert item["analysis_wait_estimate"]["phase"] == "source_reading"
+    assert item["analysis_wait_estimate"]["state"] == "queued"
     assert item["analysis_wait_estimate"]["confidence"] == "baseline"
 
 
@@ -181,11 +183,59 @@ def test_resume_library_estimates_pending_candidate_name_without_exposing_queue_
     assert item["candidate_name_extraction_status"] == "queued"
     assert estimate is not None
     assert estimate["target"] == "candidate_name"
+    assert estimate["phase"] == "name_completion"
+    assert estimate["state"] == "queued"
     assert estimate["estimated_min_seconds"] > 0
     assert estimate["estimated_max_seconds"] >= estimate["estimated_min_seconds"]
     assert estimate["confidence"] == "baseline"
     assert "queue" not in estimate
     assert "worker" not in estimate
+
+
+def test_resume_library_exposes_the_running_rich_analysis_phase(client) -> None:
+    uploaded = client.post(
+        "/v1/resumes/upload",
+        files={
+            "file": (
+                "running-analysis.pdf",
+                b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<<>>\n%%EOF",
+                "application/pdf",
+            )
+        },
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    now = datetime.now(timezone.utc)
+    database = client.app.state.database
+    with database.session_factory() as session:
+        resume = session.get(Resume, uploaded.json()["resume_id"])
+        assert resume is not None
+        document_job = session.scalar(
+            select(ResumeDocumentExtractionJob).where(
+                ResumeDocumentExtractionJob.resume_id == resume.id
+            )
+        )
+        assert document_job is not None
+        document_job.status = "completed"
+        document_job.started_at = now
+        document_job.completed_at = now
+        session.add(
+            ResumeAiExtractionJob(
+                organization_id=resume.organization_id,
+                resume_id=resume.id,
+                status="running",
+                requested_at=now,
+                started_at=now,
+            )
+        )
+        session.commit()
+
+    response = client.get("/v1/resume-library")
+    assert response.status_code == 200, response.text
+    estimate = response.json()["items"][0]["analysis_wait_estimate"]
+    assert estimate is not None
+    assert estimate["target"] == "analysis"
+    assert estimate["phase"] == "resume_analysis"
+    assert estimate["state"] == "running"
 
 
 def test_resume_library_does_not_guess_an_eta_while_a_retry_is_delayed(client) -> None:

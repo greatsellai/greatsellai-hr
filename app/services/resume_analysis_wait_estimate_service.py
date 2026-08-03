@@ -45,6 +45,14 @@ _SUCCESS_STATUS_BY_STAGE = {
     "ai": "completed",
     "candidate_name": "succeeded",
 }
+_PUBLIC_PHASE_BY_STAGE = {
+    # These phase names describe what a recruiter can understand from the
+    # pipeline. They intentionally do not expose parser/OCR implementation
+    # choices, worker identity, or model-routing internals.
+    "document": "source_reading",
+    "ai": "resume_analysis",
+    "candidate_name": "name_completion",
+}
 _MODEL_BY_STAGE: dict[str, type[Any]] = {
     "document": ResumeDocumentExtractionJob,
     "ai": ResumeAiExtractionJob,
@@ -57,6 +65,8 @@ class ResumeAnalysisWaitEstimate:
     """A UI-safe estimate for the next meaningful unnamed-candidate update."""
 
     target: str
+    phase: str
+    state: str
     estimated_min_seconds: int
     estimated_max_seconds: int
     confidence: str
@@ -289,6 +299,8 @@ def estimate_pending_resume_analysis_waits(
         maximum = max(60, int(round(expected_seconds * 1.55)) + 20)
         estimates[resume.id] = ResumeAnalysisWaitEstimate(
             target="candidate_name" if target_job.stage == "candidate_name" else "analysis",
+            phase=_PUBLIC_PHASE_BY_STAGE[target_job.stage],
+            state=target_job.status,
             estimated_min_seconds=min(_MAX_ESTIMATE_SECONDS, minimum),
             estimated_max_seconds=min(_MAX_ESTIMATE_SECONDS, maximum),
             confidence=confidence,

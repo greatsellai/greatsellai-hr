@@ -2660,6 +2660,10 @@ class ResumeAnalysisWaitEstimate(ApiModel):
     """A conservative interval for the next unnamed-candidate update."""
 
     target: Literal["analysis", "candidate_name"]
+    # Deliberately recruiter-facing phases. These never expose model, OCR,
+    # queue-worker, or route-policy implementation details.
+    phase: Literal["source_reading", "resume_analysis", "name_completion"]
+    state: Literal["queued", "running"]
     estimated_min_seconds: int = Field(ge=0, le=1800)
     estimated_max_seconds: int = Field(ge=0, le=1800)
     # ``baseline`` means the workspace has not accumulated enough recent

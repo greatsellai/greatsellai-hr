@@ -176,6 +176,8 @@ def list_resume_library(
                 analysis_wait_estimate=(
                     ResumeAnalysisWaitEstimateResponse(
                         target=wait_estimate.target,
+                        phase=wait_estimate.phase,
+                        state=wait_estimate.state,
                         estimated_min_seconds=wait_estimate.estimated_min_seconds,
                         estimated_max_seconds=wait_estimate.estimated_max_seconds,
                         confidence=wait_estimate.confidence,

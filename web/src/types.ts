@@ -1329,6 +1329,10 @@ export interface TalentSearchRun {
 
 export interface ResumeAnalysisWaitEstimate {
   target: "analysis" | "candidate_name";
+  /** Optional so a web release remains readable during a rolling API deploy. */
+  phase?: "source_reading" | "resume_analysis" | "name_completion";
+  /** Optional so a web release remains readable during a rolling API deploy. */
+  state?: "queued" | "running";
   estimated_min_seconds: number;
   estimated_max_seconds: number;
   confidence: "observed" | "baseline";

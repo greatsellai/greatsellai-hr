@@ -21,6 +21,43 @@ interface PasswordResetDeliveriesResponse {
   deliveries: PasswordResetDelivery[];
 }
 
+function anonymousSession() {
+  return {
+    authenticated: false,
+    login_required: true,
+    is_platform_admin: false,
+    email_verified: false,
+    email_verification_required: false,
+    user: null,
+    organization: null,
+    role: null,
+    plan: null,
+    trial: null,
+  };
+}
+
+function pendingEmailVerificationSession() {
+  return {
+    authenticated: true,
+    login_required: false,
+    is_platform_admin: false,
+    email_verified: false,
+    email_verification_required: true,
+    user: {
+      user_id: "pending-verification-user",
+      display_name: "待验证用户",
+      email: "pending-verification@example.test",
+    },
+    organization: {
+      organization_id: "pending-verification-workspace",
+      name: "待验证工作区",
+    },
+    role: "admin",
+    plan: null,
+    trial: null,
+  };
+}
+
 test.describe("招聘工作台关键路径", () => {
   test("注册验证后可退出并重新登录", async ({ page }) => {
     const email = await registerAndVerify(page, "registration-login");
@@ -64,6 +101,84 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("alert")).toContainText("操作没有完成。请检查网络后重试。");
     await expect(page.getByRole("heading", { name: "请查收验证邮件" })).toBeVisible();
     await expect(page.getByRole("button", { name: "退出当前账号，使用其他邮箱登录" })).toBeEnabled();
+  });
+
+  test("退出会忽略已经发出的待验证会话轮询", async ({ page }) => {
+    await registerAndAwaitEmailVerification(page, "verification-exit-race");
+    const exitButton = page.getByRole("button", { name: "退出当前账号，使用其他邮箱登录" });
+    let releaseStaleSessionResponse: (() => void) | null = null;
+    let markStaleSessionRequest: (() => void) | null = null;
+    const staleSessionRequest = new Promise<void>((resolve) => {
+      markStaleSessionRequest = resolve;
+    });
+    let delayOneSessionRequest = true;
+    await page.route("**/v1/auth/session", async (route) => {
+      if (!delayOneSessionRequest) {
+        await route.continue();
+        return;
+      }
+      delayOneSessionRequest = false;
+      markStaleSessionRequest?.();
+      await new Promise<void>((resolve) => {
+        releaseStaleSessionResponse = resolve;
+      });
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify(pendingEmailVerificationSession()),
+      });
+    });
+    await staleSessionRequest;
+
+    let releaseLogout: (() => void) | null = null;
+    let markLogoutRequest: (() => void) | null = null;
+    const logoutRequest = new Promise<void>((resolve) => {
+      markLogoutRequest = resolve;
+    });
+    await page.route("**/v1/auth/logout", async (route) => {
+      markLogoutRequest?.();
+      await new Promise<void>((resolve) => {
+        releaseLogout = resolve;
+      });
+      await route.continue();
+    });
+
+    await exitButton.click();
+    await logoutRequest;
+
+    const staleSessionResponse = page.waitForResponse((response) => {
+      const { pathname } = new URL(response.url());
+      return response.request().method() === "GET" && pathname === "/v1/auth/session";
+    });
+    releaseStaleSessionResponse?.();
+    await staleSessionResponse;
+    await page.waitForTimeout(100);
+    await expect(page.getByText("pe•••@example.test", { exact: false })).toHaveCount(0);
+    releaseLogout?.();
+    await expect(page).toHaveURL(/\/login$/);
+  });
+
+  test("兼容入口的待验证账号会退出到兼容登录页", async ({ page }) => {
+    let sessionActive = true;
+    await page.route("**/greatsellhr/v1/auth/session", (route) => route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(sessionActive ? pendingEmailVerificationSession() : anonymousSession()),
+    }));
+    await page.route("**/greatsellhr/v1/auth/logout", (route) => {
+      sessionActive = false;
+      return route.fulfill({ status: 204 });
+    });
+
+    await page.goto("/greatsellhr/verify-email");
+    await expect(page.getByRole("heading", { name: "请查收验证邮件" })).toBeVisible();
+
+    const logoutRequest = page.waitForRequest((request) => {
+      const { pathname } = new URL(request.url());
+      return request.method() === "POST" && pathname === "/greatsellhr/v1/auth/logout";
+    });
+    await page.getByRole("button", { name: "退出当前账号，使用其他邮箱登录" }).click();
+    await logoutRequest;
+    await expect(page).toHaveURL(/\/greatsellhr\/login$/);
+    await expect(page.getByRole("button", { name: "登录工作台" })).toBeVisible();
   });
 
   test("试用额度只在账户菜单内展示，并支持 Escape 关闭", async ({ page }) => {

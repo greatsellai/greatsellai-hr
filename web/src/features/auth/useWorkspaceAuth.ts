@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type {
   AuthLoginInput,
@@ -32,8 +32,13 @@ export function useWorkspaceAuth({
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [workspaceMemberships, setWorkspaceMemberships] = useState<AuthWorkspaceMembership[]>([]);
+  const authSessionEpochRef = useRef(0);
 
   const applyAuthSession = useCallback((session: AuthSession) => {
+    // A newer session state makes every older in-flight session refresh
+    // obsolete. This matters most when a user signs out from the email
+    // verification page while its short-interval poll is still in flight.
+    authSessionEpochRef.current += 1;
     setAuthSession(session);
     setAuthState(session.authenticated ? "authenticated" : "unauthenticated");
   }, []);
@@ -42,8 +47,10 @@ export function useWorkspaceAuth({
   // registration tab keeps its own signed session, so polling the current
   // session is enough to learn that the user record was verified elsewhere.
   const refreshAuthSession = useCallback(async (): Promise<AuthSession | null> => {
+    const requestEpoch = authSessionEpochRef.current;
     try {
       const session = await api.getAuthSession();
+      if (requestEpoch !== authSessionEpochRef.current) return null;
       applyAuthSession(session);
       return session;
     } catch {
@@ -67,15 +74,22 @@ export function useWorkspaceAuth({
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const requestEpoch = authSessionEpochRef.current;
     void api
       .getAuthSession()
       .then((session) => {
+        if (!active || requestEpoch !== authSessionEpochRef.current) return;
         applyAuthSession(session);
       })
       .catch(() => {
+        if (!active || requestEpoch !== authSessionEpochRef.current) return;
         setAuthSession(null);
         setAuthState("unauthenticated");
       });
+    return () => {
+      active = false;
+    };
   }, [applyAuthSession]);
 
   useEffect(() => {
@@ -262,6 +276,9 @@ export function useWorkspaceAuth({
   );
 
   const logout = useCallback(async (): Promise<boolean> => {
+    // Invalidate any session refresh that was started before the person chose
+    // to leave. A delayed response must never resurrect this browser session.
+    authSessionEpochRef.current += 1;
     setAuthError(null);
     setAuthLoading(true);
     try {

@@ -261,14 +261,27 @@ export function useWorkspaceAuth({
     [applyAuthSession, formatError, onLogoutCleanup, workspaceHref],
   );
 
-  const logout = useCallback(async () => {
-    await api.logout();
-    onLogoutCleanup();
-    setAuthSession(null);
-    setWorkspaceMemberships([]);
-    setAuthState("unauthenticated");
-    window.location.assign(workspaceHref("/login"));
-  }, [onLogoutCleanup, workspaceHref]);
+  const logout = useCallback(async (): Promise<boolean> => {
+    setAuthError(null);
+    setAuthLoading(true);
+    try {
+      await api.logout();
+      onLogoutCleanup();
+      setAuthSession(null);
+      setWorkspaceMemberships([]);
+      setAuthState("unauthenticated");
+      window.location.assign(workspaceHref("/login"));
+      return true;
+    } catch (error) {
+      // Do not clear the local session when the server did not acknowledge
+      // the logout. This keeps the verification gate intact and lets the
+      // page explain that the person can retry instead of appearing to leave.
+      setAuthError(formatError(error));
+      return false;
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [formatError, onLogoutCleanup, workspaceHref]);
 
   return {
     authError,

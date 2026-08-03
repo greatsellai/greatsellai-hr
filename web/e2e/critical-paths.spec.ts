@@ -35,6 +35,37 @@ test.describe("招聘工作台关键路径", () => {
     await expect(accountMenuTrigger(page)).toBeVisible();
   });
 
+  test("未验证账号可安全退出验证页，且不会获得工作台访问权限", async ({ page }) => {
+    await registerAndAwaitEmailVerification(page, "verification-exit");
+    const exitButton = page.getByRole("button", { name: "退出当前账号，使用其他邮箱登录" });
+    await expect(exitButton).toBeVisible();
+
+    const logoutResponse = page.waitForResponse((response) => {
+      const { pathname } = new URL(response.url());
+      return response.request().method() === "POST" && pathname === "/v1/auth/logout";
+    });
+    await exitButton.click();
+    await expect((await logoutResponse).status()).toBe(204);
+    await expect(page).toHaveURL(/\/login$/);
+    await expect(page.getByRole("button", { name: "登录工作台" })).toBeVisible();
+
+    const libraryResponse = await page.context().request.get(
+      new URL("/v1/resume-library", page.url()).toString(),
+    );
+    expect(libraryResponse.status()).toBe(401);
+    await expect(accountMenuTrigger(page)).toHaveCount(0);
+  });
+
+  test("待验证账号退出失败时会留在验证页并说明原因", async ({ page }) => {
+    await registerAndAwaitEmailVerification(page, "verification-exit-failure");
+    await page.route("**/v1/auth/logout", (route) => route.abort("failed"));
+
+    await page.getByRole("button", { name: "退出当前账号，使用其他邮箱登录" }).click();
+    await expect(page.getByRole("alert")).toContainText("操作没有完成。请检查网络后重试。");
+    await expect(page.getByRole("heading", { name: "请查收验证邮件" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "退出当前账号，使用其他邮箱登录" })).toBeEnabled();
+  });
+
   test("试用额度只在账户菜单内展示，并支持 Escape 关闭", async ({ page }) => {
     const email = await registerAndVerify(page, "account-menu");
     const trigger = accountMenuTrigger(page);

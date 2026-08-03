@@ -235,6 +235,7 @@ export function EmailVerificationPage({
   loading,
   session,
   onComplete,
+  onExit,
   onRefreshSession,
   onResend,
   workspaceHref,
@@ -243,6 +244,7 @@ export function EmailVerificationPage({
   loading: boolean;
   session: AuthSession | null;
   onComplete: (token: string) => Promise<AuthSession | null>;
+  onExit: () => Promise<boolean>;
   onRefreshSession: () => Promise<AuthSession | null>;
   onResend: () => Promise<{ accepted: boolean; delivery_available: boolean } | null>;
   workspaceHref: WorkspaceHref;
@@ -253,10 +255,12 @@ export function EmailVerificationPage({
     "waiting" | "verifying" | "verified" | "failed"
   >(token ? "verifying" : "waiting");
   const [resendState, setResendState] = useState<"idle" | "sent" | "unavailable">("idle");
+  const [isExiting, setIsExiting] = useState(false);
   const email = session?.user?.email ?? null;
   const canResend = Boolean(session?.authenticated && session.email_verification_required);
+  const canExit = Boolean(session?.authenticated && session.email_verification_required);
   const isWaitingForVerification = Boolean(
-    !token && session?.authenticated && session.email_verification_required,
+    !token && session?.authenticated && session.email_verification_required && !isExiting,
   );
   const verificationSucceeded = Boolean(token && verificationState === "verified");
   const verificationInProgress = Boolean(token && verificationState === "verifying");
@@ -318,6 +322,15 @@ export function EmailVerificationPage({
   const maskedEmail = email
     ? email.replace(/^(.{1,2}).*(@.*)$/, "$1•••$2")
     : null;
+
+  const exitCurrentAccount = async () => {
+    if (isExiting || loading) return;
+    // Stop future verification polling before sending logout, so it cannot
+    // keep competing with the transition back to the login page.
+    setIsExiting(true);
+    const exited = await onExit();
+    if (!exited) setIsExiting(false);
+  };
 
   return (
     <AuthPageLayout
@@ -386,6 +399,21 @@ export function EmailVerificationPage({
         )}
         {resendState === "unavailable" && (
           <p className="auth-error" role="status">暂时无法发送验证邮件，请稍后重试。</p>
+        )}
+        {canExit && (
+          <div className="auth-recovery-actions">
+            <p>邮箱填写错误或暂时无法访问？退出后可使用其他账号登录或重新注册。</p>
+            <button
+              className="button auth-submit"
+              disabled={loading || isExiting}
+              onClick={() => {
+                void exitCurrentAccount();
+              }}
+              type="button"
+            >
+              {isExiting ? <><i className="spinner" />正在退出</> : "退出当前账号，使用其他邮箱登录"}
+            </button>
+          </div>
         )}
         {!canResend && !token && (
           <a className="button button-primary auth-submit" href={workspaceHref("/login")}>返回登录</a>

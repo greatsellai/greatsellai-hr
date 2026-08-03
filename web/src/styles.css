@@ -1491,6 +1491,22 @@ button {
   line-height: 1.65;
 }
 
+.auth-recovery-actions {
+  display: grid;
+  gap: 0.55rem;
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--line);
+}
+
+.auth-recovery-actions p {
+  max-width: none;
+  font-size: 0.75rem;
+}
+
+.auth-recovery-actions .auth-submit {
+  margin-top: 0;
+}
+
 .trial-banner {
   display: flex;
   gap: var(--space-md);

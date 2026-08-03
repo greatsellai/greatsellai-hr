@@ -249,8 +249,14 @@ function isRootMarketingHost(hostname: string) {
   return hostname === "greatsellai.net";
 }
 
+const CANONICAL_HR_ORIGIN = "https://hr.greatsell.cn";
+
 function isHrApplicationHost(hostname: string) {
-  return hostname === "hr.greatsellai.net" || hostname === "staging.hr.greatsellai.net";
+  return (
+    hostname === "hr.greatsell.cn" ||
+    hostname === "hr.greatsellai.net" ||
+    hostname === "staging.hr.greatsellai.net"
+  );
 }
 
 const HR_WORKSPACE_BASE_PATH = "/workspace";
@@ -277,7 +283,7 @@ function workspaceHref(path = "") {
   }
 
   if (isRootMarketingHost(hostname)) {
-    return `https://hr.greatsellai.net${normalizedPath || "/"}`;
+    return `${CANONICAL_HR_ORIGIN}${normalizedPath || "/"}`;
   }
 
   return normalizedPath || "/";

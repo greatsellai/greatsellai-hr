@@ -4,6 +4,7 @@ import { accountMenuTrigger, registerAndVerify } from "./helpers";
 
 const ICP_FILING_NUMBER = "粤ICP备2026106428号";
 const ICP_FILING_URL = "https://beian.miit.gov.cn/";
+const HR_CANONICAL_URL = "https://hr.greatsell.cn/";
 
 function json(route: Route, body: unknown) {
   return route.fulfill({
@@ -76,6 +77,8 @@ test.describe("备案链接", () => {
 
     await expect(page.locator(".landing-page")).toBeVisible();
     await expectIcpFilingLink(page);
+    await expect(page.locator('link[rel="canonical"]')).toHaveAttribute("href", HR_CANONICAL_URL);
+    await expect(page.locator('meta[property="og:url"]')).toHaveAttribute("content", HR_CANONICAL_URL);
   });
 
   test("登录页与兼容登录页展示备案号", async ({ page }) => {

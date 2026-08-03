@@ -69,7 +69,7 @@
 
 飞书、腾讯企业邮箱和 QQ 邮箱使用服务商提供的授权码或客户端专用密码；更新时不显示旧值，也不重置收件起点。Gmail/Google Workspace 与 Microsoft 365/Outlook 通过 OAuth 授权，系统不收集登录密码；重新授权只替换服务端加密保存的 refresh token。新建通道时，HR 可选择从当前时刻开始，或首次回溯最近指定天数。IMAP 按自然日回溯，选择“最近 7 天”表示当天与此前 6 个自然日。回溯范围在绑定时固化，后台完成后立即切换为仅接收新邮件；编辑、重新授权和恢复通道均不得扩大或重置已选范围。若用户明确重绑一个尚无入库记录的通道，系统按其既有首次范围重新读取水位线。
 
-OAuth 的生产回调统一为 `https://hr.greatsellai.net/v1/mailbox-oauth/callback`。兼容入口 `https://greatsellai.net/greatsellhr/` 可以发起授权，但完成后回到主入口；后端用短期、安全的浏览器关联 Cookie、一次性 state、PKCE、当前工作区和管理员成员关系共同校验，不放宽普通登录 Cookie 的 `SameSite=Strict` 策略。回调 URL、服务商 OAuth 客户端配置和公共应用入口必须指向同一受控主入口；不满足时安全拒绝开始授权。
+OAuth 的生产回调统一为 `https://hr.greatsell.cn/v1/mailbox-oauth/callback`。授权必须从该主入口发起并回到该主入口；后端用短期、安全的浏览器关联 Cookie、一次性 state、PKCE、当前工作区和管理员成员关系共同校验，不放宽普通登录 Cookie 的 `SameSite=Strict` 策略。旧 `greatsellai.net` 兼容入口与 `.cn` 主入口不是同一父域，不能共享 OAuth 关联 Cookie，因此不会发起跨域授权。回调 URL、服务商 OAuth 客户端配置和公共应用入口必须指向同一受控主入口；不满足时安全拒绝开始授权。
 
 已有旧版原始 IMAP 接口仅保留一个兼容发布周期：它仍须通过服务端精确白名单和 TLS 安全校验，但不再是新建通道的浏览器入口，也不得借此新增任意网络端点。
 

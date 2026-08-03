@@ -34,10 +34,10 @@ RESUME_V3_MAILBOX_MICROSOFT_OAUTH_REDIRECT_URI
 生产回调统一使用主入口：
 
 ```text
-https://hr.greatsellai.net/v1/mailbox-oauth/callback
+https://hr.greatsell.cn/v1/mailbox-oauth/callback
 ```
 
-兼容入口 `https://greatsellai.net/greatsellhr/` 可以发起授权；浏览器会用短期、安全 Cookie 把流程交给上述主入口，完成后落在 `hr.greatsellai.net`。OAuth 不会把授权 code、state、token 或错误详情带回前端 URL。若部署把主入口或回调地址改为不属于同一受控域名的地址，后端会安全拒绝启动，而不是创建无法完成的授权。
+授权必须从 `https://hr.greatsell.cn/` 发起并回到该主入口。旧 `https://greatsellai.net/greatsellhr/` 与新的 `.cn` 主入口不是同一父域，不能安全共享 OAuth 关联 Cookie，因此不会作为授权入口。OAuth 不会把授权 code、state、token 或错误详情带回前端 URL。若部署把主入口或回调地址改为不属于同一受控域名的地址，后端会安全拒绝启动，而不是创建无法完成的授权。
 
 页面工作方式：
 

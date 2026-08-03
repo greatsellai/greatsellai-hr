@@ -1328,6 +1328,49 @@ def test_oauth_compatibility_entry_can_finish_on_canonical_callback_host(
     )
 
 
+def test_oauth_legacy_net_entry_cannot_start_for_cn_canonical_callback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Never widen OAuth correlation cookies across unrelated registrable domains."""
+
+    settings = AppSettings(
+        project_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        upload_dir=tmp_path / "data" / "uploads",
+        database_url="sqlite://",
+        allow_unauthenticated=True,
+        min_text_chars_per_page=20,
+        public_app_url="https://hr.greatsell.cn",
+        mailbox_imap_allowed_hosts=("imap.gmail.com",),
+        mailbox_google_oauth_client_id="google-client-id-for-cn-domain-test",
+        mailbox_google_oauth_client_secret="google-client-secret-for-cn-domain-test",
+        mailbox_google_oauth_redirect_uri=(
+            "https://hr.greatsell.cn/v1/mailbox-oauth/callback"
+        ),
+    )
+    app = create_app(settings)
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "authorization_url",
+        lambda *args, **kwargs: pytest.fail("an unrelated host must not start OAuth"),
+    )
+
+    with TestClient(app, base_url="https://greatsellai.net") as client:
+        response = client.post(
+            "/v1/mailbox-oauth/start",
+            json={
+                "provider_key": "gmail_oauth",
+                "display_name": "Legacy CN OAuth",
+                "email_address": "recruiting@example.test",
+                "mailbox": "INBOX",
+            },
+        )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "mailbox_oauth_callback_origin_invalid"
+
+
 def test_oauth_state_cannot_cross_workspaces_or_consume_another_admin_intent(
     oauth_workspace_clients: tuple[TestClient, TestClient],
     monkeypatch,

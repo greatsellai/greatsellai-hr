@@ -1081,8 +1081,8 @@ def _mailbox_error_http_exception(exc: MailboxImportError) -> HTTPException:
 
 
 # ``__Secure-`` keeps the browser-enforced Secure requirement while still
-# allowing the compatibility entry on ``greatsellai.net`` to set a cookie that
-# the canonical ``hr.greatsellai.net`` callback can receive. ``__Host-`` would
+# allowing a same-parent compatibility entry to set a cookie that the canonical
+# HR callback can receive. ``__Host-`` would
 # forbid the required, narrowly scoped parent-domain cookie.
 _MAILBOX_OAUTH_CALLBACK_COOKIE_NAME = "__Secure-resume_v3_mailbox_oauth"
 _MAILBOX_OAUTH_CALLBACK_COOKIE_SALT = "greatsell-hr-mailbox-oauth-callback-v1"
@@ -1185,9 +1185,9 @@ def _mailbox_oauth_cookie_domain_for_start(
     The canonical entry and the legacy compatibility entry are deliberately
     separate hosts.  A host-only cookie works for the canonical entry.  The
     compatibility entry may set a parent-domain cookie only when its host is a
-    real parent of the configured callback host (for example
-    ``greatsellai.net`` -> ``hr.greatsellai.net``).  Sibling or unrelated
-    hosts must never receive a silent, weak fallback.
+    real parent of the configured callback host. Sibling or unrelated hosts
+    must never receive a silent, weak fallback. In particular, the legacy
+    ``greatsellai.net`` entry cannot share a cookie with ``hr.greatsell.cn``.
     """
 
     expected_origin = _mailbox_oauth_callback_origin(

@@ -117,9 +117,9 @@ UserAccount
 
 ### 3.3 兼容入口
 
-- 主入口 `https://hr.greatsellai.net` 直接承载工作台、`/v1`、`/health`、`/login`、`/register` 与 `/forgot-password`。
-- `https://greatsellai.net/greatsellhr/` 是可选兼容入口，使用 `/greatsellhr/v1` 与 `/greatsellhr/health`；它只能由官网自身的边缘代理转发到 HR 主站，不能要求或导致 `greatsellai.net/` 根域映射到 HR 服务器。
-- 前端根据当前入口选择 API 前缀，主入口始终使用同源 `/v1`。
+- 主入口 `https://hr.greatsell.cn` 直接承载工作台、`/v1`、`/health`、`/login`、`/register` 与 `/forgot-password`。
+- `https://greatsellai.net/` 是独立官网占位；它只能把 CTA 跳转到 `https://hr.greatsell.cn/`，绝不承载 HR API、登录 Cookie 或 `/greatsellhr/` 兼容代理。
+- 旧 HR 链接如需兼容，仅在 HR 主入口内保留受控的 `/greatsellhr/` 路径；主入口始终使用同源 `/v1`。
 
 ## 4. 数据与文件隔离
 

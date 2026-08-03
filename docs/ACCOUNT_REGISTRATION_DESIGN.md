@@ -42,7 +42,7 @@
 外发验证邮件与收取简历的 IMAP 是两套服务。腾讯云 SES API 已是支持的事务发信 Provider；飞书 SMTP 仅保留为兼容回退：
 
 - 飞书：创建独立公共邮箱，例如 `noreply@greatsell.ai`，开启其 SMTP 服务，使用飞书生成的专用密码；不得使用个人邮箱或简历收件 IMAP 凭据。
-- 腾讯云 SES：发件域建议使用独立子域，例如 `mail.greatsellai.net`；使用审核通过的两份事务邮件模板。两份模板都只接收 `token` 和 `expires_minutes`：HTML 中必须保留固定公开域名和路由，验证链接为 `https://hr.greatsellai.net/verify-email?token={{token}}`，重置链接为 `https://hr.greatsellai.net/reset-password?token={{token}}`。不得传入或使用整条 `verify_url` / `reset_url` 变量，避免模板审核无法确认跳转域名。两份模板不可复用，避免将不同的一次性动作混淆。
+- 腾讯云 SES：发件域建议使用独立子域，例如 `mail.greatsellai.net`；使用审核通过的两份事务邮件模板。两份模板都只接收 `token` 和 `expires_minutes`：HTML 中必须保留固定公开域名和路由，验证链接为 `https://hr.greatsell.cn/verify-email?token={{token}}`，重置链接为 `https://hr.greatsell.cn/reset-password?token={{token}}`。不得传入或使用整条 `verify_url` / `reset_url` 变量，避免模板审核无法确认跳转域名。两份模板不可复用，避免将不同的一次性动作混淆。
 - 应用从环境读取 Provider、发件地址、公开应用地址和对应 Provider 凭据；所有密码、API 密钥都只通过环境变量提供，绝不写入仓库或数据库。
 - 生产反向代理部署还需显式配置可信代理网段，才会按真实浏览器 IP 限流；未配置时系统会安全地按直接代理连接并叠加全局限流。
 - Provider 未配置或发送失败时，注册不会获得业务访问权，页面会明确提示重发或稍后重试。

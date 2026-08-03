@@ -6,11 +6,12 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Resume, ResumeScore, ResumeSummary
+from app.models import Resume, ResumeEducation, ResumeScore, ResumeSummary
 from app.schemas import ResumeLibraryItem, ResumeLibraryResponse
 from app.services.ai_extraction_job_service import ai_extraction_state
 from app.services.candidate_favorite_service import favorite_candidate_ids
 from app.services.candidate_name_job_service import candidate_name_extraction_state
+from app.services.normalization import DEGREE_RANK
 from app.services.resume_summary_job_service import summary_generation_state
 
 
@@ -97,6 +98,20 @@ def _latest_current_score(resume: Resume) -> ResumeScore | None:
     return max(candidates, key=lambda score: (score.created_at, score.id), default=None)
 
 
+def _highest_education(resume: Resume) -> ResumeEducation | None:
+    """Return the education record that grounds the compact library profile."""
+
+    return max(
+        resume.educations,
+        key=lambda item: (
+            DEGREE_RANK.get(item.degree, 0),
+            item.end_month or "",
+            item.id,
+        ),
+        default=None,
+    )
+
+
 def list_resume_library(
     session: Session,
     *,
@@ -120,6 +135,7 @@ def list_resume_library(
             selectinload(Resume.document_extraction_job),
             selectinload(Resume.ai_extraction_job),
             selectinload(Resume.candidate_name_extraction_job),
+            selectinload(Resume.educations),
             selectinload(Resume.summaries),
             selectinload(Resume.summary_jobs),
             selectinload(Resume.scores).selectinload(ResumeScore.template),
@@ -141,6 +157,7 @@ def list_resume_library(
     )
     items: list[ResumeLibraryItem] = []
     for resume in resumes:
+        highest_education = _highest_education(resume)
         summary = _current_summary(resume)
         score = _latest_current_score(resume)
         ai_status, ai_error = ai_extraction_state(resume)
@@ -168,6 +185,20 @@ def list_resume_library(
                 source_mailbox_config_id=resume.source_mailbox_config_id,
                 source_mailbox_label=resume.source_mailbox_label_snapshot,
                 quality_flags=resume.quality_flags or [],
+                graduation_month=(
+                    highest_education.end_month if highest_education is not None else None
+                ),
+                employment_months=resume.employment_months,
+                education_school=(
+                    highest_education.school_name_raw
+                    if highest_education is not None
+                    else None
+                ),
+                highest_degree=(
+                    highest_education.degree
+                    if highest_education is not None
+                    else resume.highest_degree
+                ),
                 summary_preview=_summary_preview(summary.content) if summary else None,
                 summary_created_at=_isoformat(summary.created_at) if summary else None,
                 score_total=score.total_score if score else None,

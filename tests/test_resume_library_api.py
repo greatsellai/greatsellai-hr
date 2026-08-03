@@ -65,6 +65,10 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
         "source_mailbox_config_id",
         "source_mailbox_label",
         "quality_flags",
+        "graduation_month",
+        "employment_months",
+        "education_school",
+        "highest_degree",
         "summary_preview",
         "summary_created_at",
         "score_total",
@@ -90,6 +94,10 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["source_mailbox_config_id"] is None
     assert item["source_mailbox_label"] is None
     assert item["quality_flags"] == []
+    assert item["graduation_month"] is None
+    assert item["employment_months"] == 0
+    assert item["education_school"] == "清华大学"
+    assert item["highest_degree"] == "bachelor"
     assert item["summary_preview"] == "Backend-oriented candidate."
     assert item["summary_created_at"] == summary.json()["created_at"]
     # All scoring dimensions now use a fixed 100-point scale: 40 * 60% +
@@ -123,6 +131,32 @@ def test_resume_library_keeps_pending_upload_visible_without_ai_outputs(client) 
     assert item["is_active"] is False
     assert item["summary_preview"] is None
     assert item["score_total"] is None
+
+
+def test_resume_library_exposes_source_backed_candidate_profile_fields(ai_client) -> None:
+    _, resume_id = _save_ready_resume(
+        ai_client,
+        source_text=(
+            "教育经历 清华大学 计算机 本科。工作经历 "
+            "Acme Python Engineer。技能 Python SQL"
+        ),
+    )
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        resume = session.get(Resume, resume_id)
+        assert resume is not None
+        assert len(resume.educations) == 1
+        resume.educations[0].end_month = "2026-06"
+        resume.employment_months = 30
+        session.commit()
+
+    response = ai_client.get("/v1/resume-library")
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["graduation_month"] == "2026-06"
+    assert item["employment_months"] == 30
+    assert item["education_school"] == "清华大学"
+    assert item["highest_degree"] == "bachelor"
 
 
 def test_resume_library_exposes_source_quality_flags_for_an_active_version(

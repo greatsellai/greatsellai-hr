@@ -1348,6 +1348,11 @@ export interface ResumeLibraryItem {
   source_mailbox_label: string | null;
   /** Source extraction warnings. These take precedence over an old active state. */
   quality_flags: string[];
+  /** Structured, source-backed facts shown beneath the candidate name. */
+  graduation_month: string | null;
+  employment_months: number;
+  education_school: string | null;
+  highest_degree: DegreeLevel | null;
   summary_preview: string | null;
   summary_created_at: string | null;
   score_total: number | null;

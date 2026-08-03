@@ -2683,6 +2683,14 @@ class ResumeLibraryItem(ApiModel):
     # identified as unreliable, so the client must not infer trust from
     # ``is_active`` alone.
     quality_flags: list[str] = Field(default_factory=list)
+    # Compact, source-backed candidate profile facts for the recruiter table.
+    # They intentionally stay separate from the AI-written summary preview so
+    # the browser never has to infer graduation, education, or tenure from
+    # prose.
+    graduation_month: Month | None = None
+    employment_months: int = 0
+    education_school: str | None = None
+    highest_degree: DegreeLevel | None = None
     summary_preview: str | None = None
     summary_created_at: str | None = None
     score_total: float | None = None

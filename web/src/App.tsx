@@ -755,6 +755,33 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">跳到主要内容</a>
+      <Topbar
+        canManageSettings={canManageSettings}
+        inert={drawerOpen || agentOpen}
+        onAccountMenuOpen={() => {
+          void refreshAuthSession();
+        }}
+        onLogout={() => void logout()}
+        onNewUpload={() => navigateToView("upload")}
+        onOpenAgent={openRecruitingAgent}
+        onOpenFeedback={() => {
+          closeDrawer();
+          setAgentOpen(false);
+          openFeedback();
+        }}
+        onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
+        onSwitchWorkspace={(membershipId) => void switchWorkspace(membershipId)}
+        organizationId={authSession?.organization?.organization_id ?? null}
+        organizationName={authSession?.organization?.name ?? null}
+        planName={authSession?.plan?.name ?? null}
+        platformAdmin={authSession?.is_platform_admin ?? false}
+        platformAdminHref={platformHref()}
+        role={authSession?.role ?? null}
+        trial={authSession?.trial ?? null}
+        userDisplayName={authSession?.user?.display_name ?? null}
+        userEmail={authSession?.user?.email ?? null}
+        workspaceMemberships={workspaceMemberships}
+      />
       <SideRail
         activeView={view}
         canManageSettings={canManageSettings}
@@ -764,32 +791,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
       />
       <div className="app-area" inert={drawerOpen || agentOpen}>
-      <Topbar
-        onOpenAgent={openRecruitingAgent}
-          onOpenFeedback={() => {
-            closeDrawer();
-            setAgentOpen(false);
-            openFeedback();
-          }}
-          canManageSettings={canManageSettings}
-          onAccountMenuOpen={() => {
-            void refreshAuthSession();
-          }}
-          onLogout={() => void logout()}
-          onNewUpload={() => navigateToView("upload")}
-          onOpenSettings={() => openSettings(canManageMailbox ? "mailbox" : "data")}
-          onSwitchWorkspace={(membershipId) => void switchWorkspace(membershipId)}
-          organizationId={authSession?.organization?.organization_id ?? null}
-          organizationName={authSession?.organization?.name ?? null}
-          platformAdmin={authSession?.is_platform_admin ?? false}
-          platformAdminHref={platformHref()}
-          planName={authSession?.plan?.name ?? null}
-          role={authSession?.role ?? null}
-          trial={authSession?.trial ?? null}
-          userDisplayName={authSession?.user?.display_name ?? null}
-          userEmail={authSession?.user?.email ?? null}
-          workspaceMemberships={workspaceMemberships}
-        />
         <TrialStatusBanner trial={authSession?.trial ?? null} />
         <main className="main-content" id="main-content">
           <WorkspaceViewRouter

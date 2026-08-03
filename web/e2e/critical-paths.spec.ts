@@ -497,7 +497,7 @@ test.describe("招聘工作台关键路径", () => {
     expect(originalJdField.resize).toBe("vertical");
   });
 
-  test("初筛支持学历、学业表现、毕业状态、工作年限与关键词，评分与 JD 仍按全量批处理", async ({ page }) => {
+  test("候选人库把直接初筛收进面板，并保留评分详情与批处理入口", async ({ page }) => {
     await registerAndVerify(page, "screen-score-match");
     const fixture = await seedWorkspaceFixture(page);
     await page.reload();
@@ -506,49 +506,26 @@ test.describe("招聘工作台关键路径", () => {
     await expect(
       page.getByText("E2E 评分规则 · v1", { exact: true }),
     ).toBeVisible();
+    const firstPassToggle = page.getByRole("button", { name: "初筛", exact: true });
+    await expect(firstPassToggle).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "初筛条件" })).toHaveCount(0);
+    await firstPassToggle.click();
+
     const basicFilters = page.getByRole("complementary", { name: "初筛条件" });
     const institutionGroup = basicFilters.getByRole("group", { name: "院校等级条件" });
     const degreeGroup = basicFilters.getByRole("group", { name: "最高学历条件" });
-    const graduationGroup = basicFilters.getByRole("radiogroup", { name: "毕业状态" });
+    const graduationGroup = basicFilters.getByRole("group", { name: "毕业状态条件" });
+    const tenureGroup = basicFilters.getByRole("group", { name: "最低工作年限" });
     const keywordInput = basicFilters.getByLabel("添加匹配关键词");
-    const tenureRange = basicFilters.locator("#min-experience");
-    const academicScoreRange = basicFilters.locator("#min-academic-score");
-    const rankPercentRange = basicFilters.locator("#max-rank-percent");
     await expect(basicFilters).toBeVisible();
-    await expect(page.locator("details.filter-match-rules")).toHaveCount(0);
-    await expect(page.locator("#saved-filter")).toHaveCount(0);
-    await expect(page.locator("#school-name")).toHaveCount(0);
-    await expect(page.locator("#filter-rule-language")).toHaveCount(0);
+    await expect(institutionGroup.getByRole("button", { name: "985", exact: true })).toBeVisible();
+    await expect(degreeGroup.getByRole("button", { name: "本科", exact: true })).toBeVisible();
+    await expect(graduationGroup.getByRole("button", { name: "应届", exact: true })).toBeVisible();
+    await expect(tenureGroup.getByRole("button", { name: "3 年+", exact: true })).toBeVisible();
+    await expect(keywordInput).toBeVisible();
     await expect(basicFilters.getByRole("heading", { name: "英语能力", exact: true })).toHaveCount(0);
     await expect(basicFilters.getByRole("heading", { name: "技能", exact: true })).toHaveCount(0);
-    await expect(basicFilters.getByRole("heading", { name: "毕业状态", exact: true })).toBeVisible();
-    await expect(basicFilters.getByRole("heading", { name: "学业表现", exact: true })).toBeVisible();
-    await expect(basicFilters.getByRole("heading", { name: "匹配关键词", exact: true })).toBeVisible();
-    await expect(basicFilters.locator("select")).toHaveCount(0);
-    await expect(institutionGroup.getByRole("checkbox")).toHaveCount(6);
-    for (const label of ["985", "211", "本科", "大专", "中专", "海外院校"]) {
-      await expect(institutionGroup.getByRole("checkbox", { name: label })).toBeVisible();
-    }
-    await expect(degreeGroup.getByRole("checkbox")).toHaveCount(6);
-    await expect(degreeGroup.getByRole("checkbox", { name: "本科" })).toBeVisible();
-    await expect(basicFilters.getByRole("heading", { name: "经历要求", exact: true })).toHaveCount(0);
-    await expect(basicFilters.getByRole("group", { name: "经历类型条件" })).toHaveCount(0);
-    await expect(basicFilters.locator("#min-work-internship")).toHaveCount(0);
-    await expect(tenureRange).toHaveAttribute("type", "range");
-    await expect(tenureRange).toHaveAttribute("min", "0");
-    await expect(tenureRange).toHaveAttribute("max", "240");
-    await expect(tenureRange).toHaveAttribute("step", "12");
-    for (const range of [academicScoreRange, rankPercentRange]) {
-      await expect(range).toHaveAttribute("type", "range");
-      await expect(range).toHaveAttribute("min", "0");
-      await expect(range).toHaveAttribute("max", "100");
-      await expect(range).toHaveAttribute("step", "1");
-      await expect(range).toHaveAttribute("aria-valuetext", "不限");
-    }
-    await expect(graduationGroup.getByRole("radio", { name: "不限" })).toBeChecked();
-    await expect(graduationGroup.getByRole("radio", { name: "应届" })).toBeVisible();
-    await expect(graduationGroup.getByRole("radio", { name: "往届" })).toBeVisible();
-    await expect(keywordInput).toBeVisible();
+    await expect(basicFilters.getByRole("heading", { name: "学业表现", exact: true })).toHaveCount(0);
 
     const fullInitialFilterRequest = (response: import("@playwright/test").Response) => {
       if (
@@ -560,8 +537,6 @@ test.describe("招聘工作台关键路径", () => {
       const request = response.request().postDataJSON() as {
         education_any_of?: Array<{
           institution_classifications_any_of?: string[];
-          min_academic_score_percent?: number;
-          max_rank_percent?: number;
         }>;
         highest_degree_in?: string[];
         min_employment_months?: number;
@@ -575,86 +550,36 @@ test.describe("招聘工作台关键路径", () => {
       };
       return Boolean(
         request.education_any_of?.[0]?.institution_classifications_any_of?.includes("985")
-        && request.education_any_of?.[0]?.min_academic_score_percent === 90
-        && request.education_any_of?.[0]?.max_rank_percent === 100
         && request.highest_degree_in?.includes("bachelor")
-        && request.min_employment_or_internship_months === 48
+        && request.min_employment_or_internship_months === 36
         && request.graduation_status === "fresh"
-        && request.fresh_graduate_start_month === "2026-01"
-        && request.fresh_graduate_end_month === "2026-12"
+        && /^\d{4}-\d{2}$/.test(request.fresh_graduate_start_month ?? "")
+        && /^\d{4}-\d{2}$/.test(request.fresh_graduate_end_month ?? "")
         && request.keywords?.includes("Python")
         && request.keyword_match_mode === "broad"
         && !request.min_employment_months
         && !request.experience_any_of,
       );
     };
-    const increaseRange = async (
-      range: typeof tenureRange,
-      steps: number,
-    ) => {
-      await range.focus();
-      for (let index = 0; index < steps; index += 1) {
-        await range.press("ArrowRight");
-      }
-    };
-
-    const institution985 = institutionGroup.getByRole("checkbox", { name: "985" });
-    await institution985.check();
-    await degreeGroup.getByRole("checkbox", { name: "本科" }).check();
-    await graduationGroup.getByRole("radio", { name: "应届" }).check();
-    await basicFilters.locator("#fresh-graduate-start-month").fill("2026-01");
-    await basicFilters.locator("#fresh-graduate-end-month").fill("2026-12");
+    const institution985 = institutionGroup.getByRole("button", { name: "985", exact: true });
+    await institution985.click();
+    await degreeGroup.getByRole("button", { name: "本科", exact: true }).click();
+    await graduationGroup.getByRole("button", { name: "应届", exact: true }).click();
+    await tenureGroup.getByRole("button", { name: "3 年+", exact: true }).click();
+    const completeInitialSearch = page.waitForResponse(fullInitialFilterRequest);
     await keywordInput.fill("Python");
     await keywordInput.press("Enter");
-    await academicScoreRange.focus();
-    await academicScoreRange.press("End");
-    for (let index = 0; index < 10; index += 1) {
-      await academicScoreRange.press("ArrowLeft");
-    }
-    await rankPercentRange.focus();
-    await rankPercentRange.press("End");
-    const completeInitialSearch = page.waitForResponse(fullInitialFilterRequest);
-    await increaseRange(tenureRange, 4);
     await completeInitialSearch;
-    await expect(institution985).toBeChecked();
+    await expect(institution985).toHaveAttribute("aria-pressed", "true");
     const appliedFilterBar = page.getByLabel("已应用的筛选条件");
     await expect(appliedFilterBar).toContainText("院校：985");
     await expect(appliedFilterBar).toContainText("最高学历：本科");
-    await expect(appliedFilterBar).toContainText("工作年限：至少 4 年");
-    await expect(appliedFilterBar).toContainText(
-      "学业表现：不低于 90 分 · 排名前 100%（仅有排名记录）",
-    );
-    await expect(appliedFilterBar).toContainText("毕业状态：应届（2026-01 至 2026-12）");
-    await expect(appliedFilterBar).toContainText("匹配关键词：任一命中 · Python");
-    const dynamicColumnSearch = page.waitForResponse((response) => {
-      if (
-        response.request().method() !== "POST"
-        || new URL(response.url()).pathname !== "/v1/candidates/search"
-      ) {
-        return false;
-      }
-      const request = response.request().postDataJSON() as Record<string, unknown>;
-      return request.graduation_status === "fresh"
-        && request.fresh_graduate_start_month === "2026-01"
-        && request.fresh_graduate_end_month === "2026-12"
-        && Array.isArray(request.keywords)
-        && request.keywords.includes("Python")
-        && Array.isArray(request.education_any_of)
-        && request.education_any_of[0]?.min_academic_score_percent === 90
-        && request.education_any_of[0]?.max_rank_percent === 100
-        && !request.min_employment_or_internship_months;
-    });
-    await tenureRange.focus();
-    for (let index = 0; index < 4; index += 1) {
-      await tenureRange.press("ArrowLeft");
-    }
-    await dynamicColumnSearch;
-    await expect(page.getByRole("columnheader", { name: "毕业时间", exact: true })).toBeVisible();
-    await expect(page.getByRole("columnheader", { name: "学业表现", exact: true })).toBeVisible();
-    await expect(page.getByRole("columnheader", { name: "关键词命中", exact: true })).toBeVisible();
-    await expect(page.getByLabel(/学业表现：平均分 92；GPA 3\.8\/4 \(95%\)；排名前 5%/).first()).toBeVisible();
-    await expect(page.getByLabel("毕业时间：2026-06").first()).toBeVisible();
-    await expect(page.getByLabel("关键词命中：Python").first()).toBeVisible();
+    await expect(appliedFilterBar).toContainText("工作年限：至少 3 年");
+    await expect(appliedFilterBar).toContainText("毕业状态：应届");
+    await expect(appliedFilterBar).toContainText("关键词：Python");
+
+    await basicFilters.getByRole("button", { name: "关闭初筛" }).click();
+    await expect(basicFilters).toHaveCount(0);
 
     const resetSearch = page.waitForResponse((response) => {
       if (response.request().method() !== "POST") return false;
@@ -671,31 +596,21 @@ test.describe("招聘工作台关键路径", () => {
         && !request.keyword_match_mode
         && !request.experience_any_of;
     });
-    await basicFilters.getByRole("button", { name: "清空", exact: true }).click();
+    await page.getByRole("button", { name: "清空筛选条件", exact: true }).click();
     await resetSearch;
     await expect(appliedFilterBar).toHaveCount(0);
-    await expect(page.getByText("E2E 推荐候选人")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "E2E 推荐候选人", exact: true })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "学历 / 院校", exact: true })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "经历", exact: true })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "核心技能", exact: true })).toBeVisible();
     await expect(page.getByText("e2e-fixture-1.pdf", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("待核实", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText("未设门槛")).toHaveCount(0);
-    await expect(page.getByText("当前已加载", { exact: false })).toHaveCount(0);
-    await expect(page.getByText("评分口径", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("columnheader", { name: "毕业时间", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("columnheader", { name: "关键词命中", exact: true })).toHaveCount(0);
+    const inspector = page.getByRole("complementary", { name: "候选人档案" });
+    await expect(inspector).toBeVisible();
+    await expect(inspector.getByText("E2E 推荐候选人", { exact: true })).toBeVisible();
 
-    const candidateTableFillsResultsPane = await page
-      .locator(".filter-workspace .candidate-table")
-      .evaluate((table) => {
-        const scrollRegion = table.parentElement;
-        return Boolean(
-          scrollRegion &&
-            table.getBoundingClientRect().width >= scrollRegion.clientWidth - 1,
-        );
-      });
-    expect(candidateTableFillsResultsPane).toBeTruthy();
-
-    await page.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" }).click();
+    await inspector.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" }).click();
     const drawer = page.getByRole("dialog", { name: "E2E 推荐候选人 的简历详情" });
     await expect(drawer.getByRole("tab", { name: "评分详情" })).toHaveAttribute(
       "aria-selected",
@@ -807,7 +722,7 @@ test.describe("招聘工作台关键路径", () => {
         experience_any_of?: Array<{ experience_types?: string[] }>;
       };
       return Boolean(
-        body.min_employment_or_internship_months === 48
+        body.min_employment_or_internship_months === 60
         && body.education_any_of?.some((condition) =>
           condition.institution_classifications_any_of?.includes("985"),
         )
@@ -836,10 +751,11 @@ test.describe("招聘工作台关键路径", () => {
       });
     });
 
+    await page.getByRole("button", { name: "初筛", exact: true }).click();
     const basicFilters = page.getByRole("complementary", { name: "初筛条件" });
     const institutionGroup = basicFilters.getByRole("group", { name: "院校等级条件" });
     const degreeGroup = basicFilters.getByRole("group", { name: "最高学历条件" });
-    const tenureRange = basicFilters.locator("#min-experience");
+    const tenureGroup = basicFilters.getByRole("group", { name: "最低工作年限" });
     const searchFor985 = page.waitForResponse((response) => {
       const request = response.request();
       if (
@@ -857,17 +773,15 @@ test.describe("招聘工作台关键路径", () => {
         condition.institution_classifications_any_of?.includes("985"),
       ) ?? false;
     });
-    await institutionGroup.getByRole("checkbox", { name: "985" }).check();
+    await institutionGroup.getByRole("button", { name: "985", exact: true }).click();
     await searchFor985;
-    await degreeGroup.getByRole("checkbox", { name: "本科" }).check();
+    await degreeGroup.getByRole("button", { name: "本科", exact: true }).click();
 
     const firstPassResponse = page.waitForResponse((response) => isCompleteFirstPass(response.request()));
-    await tenureRange.focus();
-    await tenureRange.press("ArrowRight");
-    await tenureRange.press("ArrowRight");
-    await tenureRange.press("ArrowRight");
-    await tenureRange.press("ArrowRight");
+    await tenureGroup.getByRole("button", { name: "5 年+", exact: true }).click();
     await firstPassResponse;
+    await basicFilters.getByRole("button", { name: "关闭初筛" }).click();
+    await expect(basicFilters).toHaveCount(0);
 
     const filterScopeRequests: Array<Record<string, unknown>> = [];
     let agentTurnRequestCount = 0;
@@ -900,7 +814,7 @@ test.describe("招聘工作台关键路径", () => {
 
     try {
       const refineAction = page.getByRole("button", { name: /交给 Agent 精筛当前 17/ });
-      await expect(refineAction).toContainText("交给 Agent 精筛当前 17 人");
+      await expect(refineAction).toBeVisible();
       await refineAction.click();
 
       const dialog = page.getByRole("dialog", { name: "招聘助手" });
@@ -913,7 +827,7 @@ test.describe("招聘工作台关键路径", () => {
           schema_version: "candidate_filter.v2",
           education_any_of: [{ institution_classifications_any_of: ["985"] }],
           highest_degree_in: ["bachelor"],
-          min_employment_or_internship_months: 48,
+          min_employment_or_internship_months: 60,
         },
       });
       const scopeFilter = scopePayload.filter as Record<string, unknown>;
@@ -931,17 +845,18 @@ test.describe("招聘工作台关键路径", () => {
       // Altering the form after handoff must not replace the existing
       // server-side scope. It stays usable when the drawer is reopened.
       await dialog.getByRole("button", { name: "关闭招聘助手" }).click();
+      await page.getByRole("button", { name: "初筛", exact: true }).click();
       const changedFilterResponse = page.waitForResponse((response) => {
         const request = response.request();
         return request.method() === "POST"
           && new URL(request.url()).pathname === "/v1/candidates/search"
           && (request.postDataJSON() as {
             min_employment_or_internship_months?: number;
-          }).min_employment_or_internship_months === 60;
+          }).min_employment_or_internship_months === 36;
       });
-      await tenureRange.focus();
-      await tenureRange.press("ArrowRight");
+      await tenureGroup.getByRole("button", { name: "3 年+", exact: true }).click();
       await changedFilterResponse;
+      await basicFilters.getByRole("button", { name: "关闭初筛" }).click();
       await page.getByRole("button", { name: "招聘助手", exact: true }).click();
       await expect(dialog.getByText("初筛结果 · 17 位候选人", { exact: true })).toBeVisible();
       expect(filterScopeRequests).toHaveLength(1);
@@ -1068,14 +983,18 @@ test.describe("招聘工作台关键路径", () => {
 
     await page.getByRole("button", { name: "条件筛选", exact: true }).click();
     await expect(page.getByText("e2e-contact@example.test", { exact: true })).toHaveCount(0);
-    await page
-      .getByRole("complementary", { name: "初筛条件" })
-      .getByRole("checkbox", { name: "985" })
-      .check();
+    await page.getByRole("button", { name: "初筛", exact: true }).click();
+    const contactFilters = page.getByRole("complementary", { name: "初筛条件" });
+    await contactFilters
+      .getByRole("group", { name: "院校等级条件" })
+      .getByRole("button", { name: "985", exact: true })
+      .click();
+    await contactFilters.getByRole("button", { name: "关闭初筛" }).click();
+    const contactInspector = page.getByRole("complementary", { name: "候选人档案" });
     await expect(
-      page.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" }),
+      contactInspector.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" }),
     ).toBeVisible();
-    await page
+    await contactInspector
       .getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" })
       .click();
 
@@ -1101,10 +1020,13 @@ test.describe("招聘工作台关键路径", () => {
     await seedWorkspaceFixture(page);
 
     await page.getByRole("button", { name: "条件筛选", exact: true }).click();
-    await page
-      .getByRole("complementary", { name: "初筛条件" })
-      .getByRole("checkbox", { name: "985" })
-      .check();
+    await page.getByRole("button", { name: "初筛", exact: true }).click();
+    const deleteFilters = page.getByRole("complementary", { name: "初筛条件" });
+    await deleteFilters
+      .getByRole("group", { name: "院校等级条件" })
+      .getByRole("button", { name: "985", exact: true })
+      .click();
+    await deleteFilters.getByRole("button", { name: "关闭初筛" }).click();
     await expect(page.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" })).toBeVisible();
     await page.getByRole("button", { name: "查看 E2E 推荐候选人 的评分详情" }).click();
 
@@ -1134,18 +1056,17 @@ test.describe("招聘工作台关键路径", () => {
     await expect(drawer).toBeHidden();
   });
 
-  test("窄屏仍可展开筛选条件并自动应用", async ({ page }) => {
+  test("窄屏可打开并关闭初筛面板，条件会自动应用", async ({ page }) => {
     await registerAndVerify(page, "mobile-filter");
     await page.setViewportSize({ width: 390, height: 844 });
 
     await page.getByRole("button", { name: "条件筛选", exact: true }).click();
+    const firstPassToggle = page.getByRole("button", { name: "初筛", exact: true });
+    await expect(firstPassToggle).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "初筛条件" })).toHaveCount(0);
+    await firstPassToggle.click();
     const filters = page.getByRole("complementary", { name: "初筛条件" });
-    const toggle = page.getByRole("button", { name: "展开", exact: true });
-    await expect(toggle).toBeVisible();
-    await expect(filters.locator("#min-experience")).not.toBeVisible();
-
-    await toggle.click();
-    await expect(filters.locator("#min-experience")).toBeVisible();
+    await expect(filters).toBeVisible();
     const searchFor985 = page.waitForResponse((response) => {
       if (
         response.request().method() !== "POST"
@@ -1162,10 +1083,14 @@ test.describe("招聘工作台关键路径", () => {
         condition.institution_classifications_any_of?.includes("985"),
       ) ?? false;
     });
-    await filters.getByRole("checkbox", { name: "985" }).check();
+    await filters
+      .getByRole("group", { name: "院校等级条件" })
+      .getByRole("button", { name: "985", exact: true })
+      .click();
     await searchFor985;
     await expect(page.getByRole("button", { name: "应用筛选条件" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "收起", exact: true })).toBeVisible();
+    await filters.getByRole("button", { name: "关闭初筛" }).click();
+    await expect(filters).toHaveCount(0);
   });
 
   test("招聘助手打开后聚焦关闭键，关闭后返回触发按钮", async ({ page }) => {

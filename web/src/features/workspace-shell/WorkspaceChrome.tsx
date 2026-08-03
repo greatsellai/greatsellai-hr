@@ -82,17 +82,8 @@ export function SideRail({
   return (
     <aside aria-label="主导航" className="side-rail" inert={inert}>
       <div className="rail-mark">
-        <img
-          alt="大卖数智"
-          className="rail-brand-logo"
-          src="/brand/greatsell-logo-cn-white.png"
-        />
-        <p className="rail-brand-tagline">让每一次招聘决策，都拥有 AI 驱动的判断能力。</p>
-        <img
-          alt="大卖数智"
-          className="rail-brand-symbol"
-          src="/brand/greatsell-logo-symbol-red.png"
-        />
+        <span className="rail-brand-name">GreatSell AI</span>
+        <span className="rail-brand-subtitle">招聘工作台</span>
       </div>
       <nav aria-label="招聘工作台导航" className="rail-nav">
         {workspaceNavigationGroups.map((group) => (
@@ -155,6 +146,7 @@ export function SideRail({
 }
 
 export function Topbar({
+  inert,
   onOpenAgent,
   onOpenFeedback,
   canManageSettings,
@@ -174,6 +166,7 @@ export function Topbar({
   userEmail,
   workspaceMemberships,
 }: {
+  inert: boolean;
   onOpenAgent: () => void;
   onOpenFeedback: () => void;
   canManageSettings: boolean;
@@ -194,7 +187,6 @@ export function Topbar({
   workspaceMemberships: AuthWorkspaceMembership[];
 }) {
   const trialDays = trial?.trial_days_remaining;
-  const roleLabel = role === "admin" ? "管理员" : role === "recruiter" ? "招聘官" : null;
   const trialLabel =
     trial?.plan_status === "trial" && typeof trialDays === "number"
       ? `试用 ${Math.max(0, trialDays)} 天`
@@ -206,18 +198,10 @@ export function Topbar({
       ? Math.max(0, trial.llm_call_remaining)
       : null;
   return (
-    <header className="topbar">
-      <div className="topbar-title-wrap">
-        <p className="topbar-title">
-          AI 简历筛选 <span>/ 工作台</span>
-        </p>
-        {(organizationName || roleLabel || planName) && (
-          <p className="topbar-workspace" title={organizationName ?? undefined}>
-            <span>{organizationName || "我的工作区"}</span>
-            {roleLabel && <small>{roleLabel}</small>}
-            {planName && <small>{planName}</small>}
-          </p>
-        )}
+    <header className="topbar" inert={inert}>
+      <div className="topbar-brand" aria-label="GreatSell AI 招聘工作台">
+        <strong>GreatSell AI</strong>
+        <span>招聘工作台</span>
       </div>
       <div className="topbar-actions">
         {trialLabel && <span className={`topbar-trial${trial?.plan_status === "expired" ? " is-expired" : ""}`}>{trialLabel}</span>}
@@ -227,7 +211,6 @@ export function Topbar({
           icon={<Icon name="spark" size={16} />}
           id="recruiting-agent-trigger"
           onClick={onOpenAgent}
-          tone="primary"
         >
           <span className="topbar-action-label">招聘助手</span>
         </BackofficeButton>
@@ -235,6 +218,7 @@ export function Topbar({
           aria-label="上传简历"
           icon={<Icon name="upload" size={16} />}
           onClick={onNewUpload}
+          tone="primary"
         >
           <span className="topbar-action-label">上传简历</span>
         </BackofficeButton>

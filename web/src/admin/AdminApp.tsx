@@ -6,7 +6,6 @@ import {
   type FormEvent,
 } from "react";
 import { Icon, type IconName } from "../icons";
-import { IcpFilingLink } from "../IcpFilingLink";
 import type { AuthSession } from "../types";
 import { adminApi, adminErrorMessage } from "./admin-api";
 import type { AdminView } from "./admin-types";
@@ -77,7 +76,6 @@ function AdminBootState({ message }: { message: string }) {
           <p><i className="spinner" /> {message}</p>
         </div>
       </main>
-      <footer className="admin-compliance-footer"><IcpFilingLink /></footer>
     </div>
   );
 }
@@ -100,7 +98,6 @@ function AdminDenied({ session }: { session: AuthSession }) {
           </div>
         </div>
       </main>
-      <footer className="admin-compliance-footer"><IcpFilingLink /></footer>
     </div>
   );
 }
@@ -118,7 +115,6 @@ function AdminLoadError({ message, onRetry }: { message: string; onRetry: () => 
           <button className="button button-primary" onClick={onRetry} type="button">重新验证</button>
         </div>
       </main>
-      <footer className="admin-compliance-footer"><IcpFilingLink /></footer>
     </div>
   );
 }
@@ -327,7 +323,6 @@ export default function AdminApp() {
             <AdminAuditPage />
           )}
         </main>
-        <footer className="admin-compliance-footer"><IcpFilingLink /></footer>
       </div>
     </div>
   );

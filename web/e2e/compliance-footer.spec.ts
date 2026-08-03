@@ -54,6 +54,10 @@ async function expectIcpFilingLink(page: Page) {
   await expect(link).toHaveAttribute("rel", /noreferrer/);
 }
 
+async function expectNoIcpFilingLink(page: Page) {
+  await expect(page.getByRole("link", { name: ICP_FILING_NUMBER, exact: true })).toHaveCount(0);
+}
+
 async function mockPlatformAiRequests(page: Page) {
   await page.route("**/v1/auth/session", (route) => json(route, platformAdminSession()));
   await page.route("**/v1/platform/organizations**", (route) => json(route, {
@@ -69,7 +73,7 @@ async function mockPlatformAiRequests(page: Page) {
   await page.route("**/v1/platform/ai/routes", (route) => json(route, []));
 }
 
-test.describe("备案链接", () => {
+test.describe("备案链接展示范围", () => {
   test("公开落地页展示备案号", async ({ page }) => {
     const webPort = process.env.E2E_WEB_PORT ?? "5176";
     await page.goto(`http://landing.localhost:${webPort}/`);
@@ -78,30 +82,30 @@ test.describe("备案链接", () => {
     await expectIcpFilingLink(page);
   });
 
-  test("登录页与兼容登录页展示备案号", async ({ page }) => {
+  test("登录页与兼容登录页不展示备案号", async ({ page }) => {
     await page.route("**/v1/auth/session", (route) => json(route, anonymousSession()));
     await page.goto("/login");
     await expect(page.locator(".auth-page")).toBeVisible();
-    await expectIcpFilingLink(page);
+    await expectNoIcpFilingLink(page);
 
     await page.route("**/greatsellhr/v1/auth/session", (route) => json(route, anonymousSession()));
     await page.goto("/greatsellhr/login");
     await expect(page.locator(".auth-page")).toBeVisible();
-    await expectIcpFilingLink(page);
+    await expectNoIcpFilingLink(page);
   });
 
-  test("登录后的招聘工作台展示备案号", async ({ page }) => {
+  test("登录后的招聘工作台不展示备案号", async ({ page }) => {
     await registerAndVerify(page, "icp-footer-workspace");
 
     await expect(accountMenuTrigger(page)).toBeVisible();
-    await expectIcpFilingLink(page);
+    await expectNoIcpFilingLink(page);
   });
 
-  test("平台管理展示备案号", async ({ page }) => {
+  test("平台管理不展示备案号", async ({ page }) => {
     await mockPlatformAiRequests(page);
     await page.goto("/platform/ai");
 
     await expect(page.locator(".admin-shell")).toBeVisible();
-    await expectIcpFilingLink(page);
+    await expectNoIcpFilingLink(page);
   });
 });

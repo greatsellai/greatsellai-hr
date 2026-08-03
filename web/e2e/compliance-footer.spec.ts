@@ -81,12 +81,12 @@ test.describe("备案链接", () => {
   test("登录页与兼容登录页展示备案号", async ({ page }) => {
     await page.route("**/v1/auth/session", (route) => json(route, anonymousSession()));
     await page.goto("/login");
-    await expect(page.getByRole("heading", { name: "登录招聘工作台" })).toBeVisible();
+    await expect(page.locator(".auth-page")).toBeVisible();
     await expectIcpFilingLink(page);
 
     await page.route("**/greatsellhr/v1/auth/session", (route) => json(route, anonymousSession()));
     await page.goto("/greatsellhr/login");
-    await expect(page.getByRole("heading", { name: "登录招聘工作台" })).toBeVisible();
+    await expect(page.locator(".auth-page")).toBeVisible();
     await expectIcpFilingLink(page);
   });
 

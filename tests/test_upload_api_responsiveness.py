@@ -147,7 +147,12 @@ async def test_upload_persistence_backpressure_rejects_without_queueing_unbounde
                         },
                     )
                 )
-                assert await asyncio.to_thread(write_started.wait, 1.0)
+                # The assertion only waits for the executor to *begin* the
+                # deliberately blocked fsync.  On a loaded CI runner, thread
+                # scheduling can exceed one second even though the bounded
+                # persistence lane is working correctly; the 503 assertion
+                # below remains the actual backpressure deadline.
+                assert await asyncio.to_thread(write_started.wait, 3.0)
 
                 waiting_started_at = time.perf_counter()
                 saturated = await client.post(

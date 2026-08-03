@@ -251,7 +251,10 @@ def test_staging_matches_production_for_shared_runtime_integrations() -> None:
     )
 
 
-def test_stage_attestation_requires_a_public_smoke_pass_and_exact_image_identities() -> None:
+def test_stage_attestation_requires_a_public_smoke_pass_and_portable_image_identities() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "staging-release.yml").read_text(
+        encoding="utf-8"
+    )
     deploy = (ROOT / "scripts" / "deploy-staging.sh").read_text(encoding="utf-8")
     verify = (ROOT / "scripts" / "verify-staging-release.sh").read_text(
         encoding="utf-8"
@@ -262,6 +265,13 @@ def test_stage_attestation_requires_a_public_smoke_pass_and_exact_image_identiti
     smoke = (ROOT / "scripts" / "smoke-test-staging.sh").read_text(encoding="utf-8")
 
     assert "archive_sha256=$archive_sha256" in deploy
+    assert "ci_image_archive_sha256=$ci_image_archive_sha256" in deploy
+    assert "api_image_config_digest=$api_image_config_digest" in deploy
+    assert "caddy_image_config_digest=$caddy_image_config_digest" in deploy
+    assert ' --archive "$RUNNER_TEMP/greatsell-release-images/release-images-$RELEASE_SHA-$CI_RUN_ID-$CI_RUN_ATTEMPT.tar.gz"' in workflow
+    assert '--archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}"' in workflow
+    assert '--api-image-config-digest "${{ steps.load_ci_images.outputs.api_image_config_digest }}"' in workflow
+    assert '--caddy-image-config-digest "${{ steps.load_ci_images.outputs.caddy_image_config_digest }}"' in workflow
     assert "public_smoke_check=pending" in deploy
     assert '"$repo_root/scripts/smoke-test-staging.sh" "$public_url"' in deploy
     assert "public_smoke_check=pass" in deploy
@@ -275,8 +285,12 @@ def test_stage_attestation_requires_a_public_smoke_pass_and_exact_image_identiti
     assert "Staging image CI workflow run attempts are invalid." in verify
     assert "printf 'ci_run_id=%s\\n'" in verify
     assert "printf 'ci_run_attempt=%s\\n'" in verify
-    assert "Promotion image identity does not match completed staging" in image_verify
+    assert "printf 'ci_image_archive_sha256=%s\\n'" in verify
+    assert "printf 'api_image_config_digest=%s\\n'" in verify
+    assert "printf 'caddy_image_config_digest=%s\\n'" in verify
+    assert "Promotion image identity does not match completed staging" not in image_verify
     assert "Promotion image revision does not match completed staging" in image_verify
+    assert "Promotion image CI workflow run ID does not match completed staging" in image_verify
     assert "https://staging.hr.greatsellai.net" in smoke
     assert '"$base_url/login"' in smoke
     assert '"$base_url/v1/auth/session"' in smoke

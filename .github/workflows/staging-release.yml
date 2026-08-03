@@ -285,6 +285,8 @@ jobs:
           [[ "$CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "Missing CI workflow run attempt." >&2; exit 1; }
           scripts/transfer-production-images.sh "$RELEASE_SHA" \
             --host "$STAGING_DEPLOY_HOST" \
+            --archive "$RUNNER_TEMP/greatsell-release-images/release-images-$RELEASE_SHA-$CI_RUN_ID-$CI_RUN_ATTEMPT.tar.gz" \
+            --archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}" \
             --expected-ci-run-id "$CI_RUN_ID" \
             --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
@@ -305,6 +307,9 @@ jobs:
             --project-dir "$STAGING_PROJECT_DIR" \
             --history-dir "$STAGING_HISTORY_DIR" \
             --public-url "$STAGING_PUBLIC_URL" \
+            --ci-image-archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}" \
+            --api-image-config-digest "${{ steps.load_ci_images.outputs.api_image_config_digest }}" \
+            --caddy-image-config-digest "${{ steps.load_ci_images.outputs.caddy_image_config_digest }}" \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
       - name: Remove CI images after successful staging deployment
         # The CI artifact remains available for its short retention window when

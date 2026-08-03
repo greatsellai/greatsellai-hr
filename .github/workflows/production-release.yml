@@ -23,8 +23,9 @@ jobs:
       staging_tag: ${{ steps.verified.outputs.staging_tag }}
       release_sha: ${{ steps.verified.outputs.release_sha }}
       archive_sha256: ${{ steps.verified.outputs.archive_sha256 }}
-      api_image_id: ${{ steps.verified.outputs.api_image_id }}
-      caddy_image_id: ${{ steps.verified.outputs.caddy_image_id }}
+      ci_image_archive_sha256: ${{ steps.verified.outputs.ci_image_archive_sha256 }}
+      api_image_config_digest: ${{ steps.verified.outputs.api_image_config_digest }}
+      caddy_image_config_digest: ${{ steps.verified.outputs.caddy_image_config_digest }}
       ci_run_id: ${{ steps.verified.outputs.ci_run_id }}
       ci_run_attempt: ${{ steps.verified.outputs.ci_run_attempt }}
     steps:
@@ -115,8 +116,9 @@ jobs:
     env:
       RELEASE_SHA: ${{ needs.verify-staging.outputs.release_sha }}
       STAGING_TAG: ${{ needs.verify-staging.outputs.staging_tag }}
-      STAGING_API_IMAGE_ID: ${{ needs.verify-staging.outputs.api_image_id }}
-      STAGING_CADDY_IMAGE_ID: ${{ needs.verify-staging.outputs.caddy_image_id }}
+      STAGING_CI_IMAGE_ARCHIVE_SHA256: ${{ needs.verify-staging.outputs.ci_image_archive_sha256 }}
+      STAGING_API_IMAGE_CONFIG_DIGEST: ${{ needs.verify-staging.outputs.api_image_config_digest }}
+      STAGING_CADDY_IMAGE_CONFIG_DIGEST: ${{ needs.verify-staging.outputs.caddy_image_config_digest }}
       CI_RUN_ID: ${{ needs.verify-staging.outputs.ci_run_id }}
       CI_RUN_ATTEMPT: ${{ needs.verify-staging.outputs.ci_run_attempt }}
     steps:
@@ -185,8 +187,9 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --ci-run-id "$CI_RUN_ID" \
             --ci-run-attempt "$CI_RUN_ATTEMPT" \
-            --expected-api-image-id "$STAGING_API_IMAGE_ID" \
-            --expected-caddy-image-id "$STAGING_CADDY_IMAGE_ID" \
+            --expected-ci-image-archive-sha256 "$STAGING_CI_IMAGE_ARCHIVE_SHA256" \
+            --expected-api-image-config-digest "$STAGING_API_IMAGE_CONFIG_DIGEST" \
+            --expected-caddy-image-config-digest "$STAGING_CADDY_IMAGE_CONFIG_DIGEST" \
             --github-output "$GITHUB_OUTPUT"
       - name: Transfer exact completed staging images to production
         env:
@@ -195,18 +198,20 @@ jobs:
           set -Eeuo pipefail
           scripts/transfer-production-images.sh "$RELEASE_SHA" \
             --host "$PROD_DEPLOY_HOST" \
+            --archive "$RUNNER_TEMP/greatsell-release-images/release-images-$RELEASE_SHA-$CI_RUN_ID-$CI_RUN_ATTEMPT.tar.gz" \
+            --archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}" \
             --expected-ci-run-id "$CI_RUN_ID" \
             --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
-      - name: Verify production host holds the exact staged images
+      - name: Verify production host holds CI-attested images
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
         run: |
           set -Eeuo pipefail
           scripts/verify-release-images.sh "$RELEASE_SHA" \
             --host "$PROD_DEPLOY_HOST" \
-            --api-image-id "$STAGING_API_IMAGE_ID" \
-            --caddy-image-id "$STAGING_CADDY_IMAGE_ID" \
+            --expected-ci-run-id "$CI_RUN_ID" \
+            --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
       - name: Reconfirm promotion target before production tagging
         run: |

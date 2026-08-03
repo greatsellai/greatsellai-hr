@@ -17,7 +17,8 @@ Options:
   --github-output <path>    Write verified non-secret identifiers for a workflow job
 
 The command only accepts a completed public-smoke-tested staging record with
-the exact tag, source checksum, container image IDs, and image revisions.
+the exact tag, source checksum, portable CI image identities, and image
+revisions.
 EOF
 }
 
@@ -103,6 +104,12 @@ test -f "$record"
 [[ "$(record_value "$record" private_api_health_check)" == "pass" ]] || die "Staging private API health was not recorded as passing."
 [[ "$(record_value "$record" private_edge_health_check)" == "pass" ]] || die "Staging private edge health was not recorded as passing."
 [[ "$(record_value "$record" public_smoke_check)" == "pass" ]] || die "Staging public smoke check was not recorded as passing."
+ci_image_archive_sha256="$(record_value "$record" ci_image_archive_sha256)"
+api_image_config_digest="$(record_value "$record" api_image_config_digest)"
+caddy_image_config_digest="$(record_value "$record" caddy_image_config_digest)"
+[[ "$ci_image_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Staging CI image archive checksum is invalid."
+[[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging API image config digest is invalid."
+[[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging Caddy image config digest is invalid."
 
 api_image="greatsellai-hr-api:$release_commit"
 caddy_image="greatsellai-hr-caddy:$release_commit"
@@ -125,8 +132,9 @@ caddy_container="$(sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" doc
 [[ "$(sudo -n docker inspect --format '{{.Image}}' "$api_container")" == "$api_image_id" ]] || die "Staging API container differs from attested image."
 [[ "$(sudo -n docker inspect --format '{{.Image}}' "$caddy_container")" == "$caddy_image_id" ]] || die "Staging Caddy container differs from attested image."
 
-printf 'api_image_id=%s\n' "$api_image_id"
-printf 'caddy_image_id=%s\n' "$caddy_image_id"
+printf 'ci_image_archive_sha256=%s\n' "$ci_image_archive_sha256"
+printf 'api_image_config_digest=%s\n' "$api_image_config_digest"
+printf 'caddy_image_config_digest=%s\n' "$caddy_image_config_digest"
 printf 'ci_run_id=%s\n' "$api_ci_run_id"
 printf 'ci_run_attempt=%s\n' "$api_ci_run_attempt"
 EOF
@@ -134,12 +142,14 @@ EOF
 
 verification="$(ssh "${ssh_options[@]}" "$remote_host" \
   "bash -c $(shell_quote "$remote_verify_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256")")"
-api_image_id="$(printf '%s\n' "$verification" | sed -n 's/^api_image_id=//p' | tail -n 1)"
-caddy_image_id="$(printf '%s\n' "$verification" | sed -n 's/^caddy_image_id=//p' | tail -n 1)"
+ci_image_archive_sha256="$(printf '%s\n' "$verification" | sed -n 's/^ci_image_archive_sha256=//p' | tail -n 1)"
+api_image_config_digest="$(printf '%s\n' "$verification" | sed -n 's/^api_image_config_digest=//p' | tail -n 1)"
+caddy_image_config_digest="$(printf '%s\n' "$verification" | sed -n 's/^caddy_image_config_digest=//p' | tail -n 1)"
 ci_run_id="$(printf '%s\n' "$verification" | sed -n 's/^ci_run_id=//p' | tail -n 1)"
 ci_run_attempt="$(printf '%s\n' "$verification" | sed -n 's/^ci_run_attempt=//p' | tail -n 1)"
-[[ "$api_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging API image ID is malformed."
-[[ "$caddy_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging Caddy image ID is malformed."
+[[ "$ci_image_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Staging CI image archive checksum is malformed."
+[[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging API image config digest is malformed."
+[[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging Caddy image config digest is malformed."
 [[ "$ci_run_id" =~ ^[0-9]+$ ]] || die "Staging CI workflow run ID is malformed."
 [[ "$ci_run_attempt" =~ ^[1-9][0-9]*$ ]] || die "Staging CI workflow run attempt is malformed."
 
@@ -148,8 +158,9 @@ if [[ -n "$github_output" ]]; then
     printf 'staging_tag=%s\n' "$tag"
     printf 'release_sha=%s\n' "$release_commit"
     printf 'archive_sha256=%s\n' "$archive_sha256"
-    printf 'api_image_id=%s\n' "$api_image_id"
-    printf 'caddy_image_id=%s\n' "$caddy_image_id"
+    printf 'ci_image_archive_sha256=%s\n' "$ci_image_archive_sha256"
+    printf 'api_image_config_digest=%s\n' "$api_image_config_digest"
+    printf 'caddy_image_config_digest=%s\n' "$caddy_image_config_digest"
     printf 'ci_run_id=%s\n' "$ci_run_id"
     printf 'ci_run_attempt=%s\n' "$ci_run_attempt"
   } >> "$github_output"

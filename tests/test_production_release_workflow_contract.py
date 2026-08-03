@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
+import io
+import json
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -37,7 +41,7 @@ def test_production_is_a_manual_promotion_of_a_completed_staging_candidate() -> 
     download = workflow.index("Download completed staging CI images")
     verify_and_load = workflow.index("Verify and load completed staging CI images")
     transfer = workflow.index("Transfer exact completed staging images to production")
-    image_identity = workflow.index("Verify production host holds the exact staged images")
+    image_identity = workflow.index("Verify production host holds CI-attested images")
     create_tag = workflow.index("Create immutable production tag for the staged candidate")
     deploy = workflow.index("Deploy tagged release from the exact staged images")
     assert preflight < download < verify_and_load < transfer < image_identity < create_tag < deploy
@@ -46,12 +50,18 @@ def test_production_is_a_manual_promotion_of_a_completed_staging_candidate() -> 
     assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' in workflow
     assert 'name: release-images-${{ env.RELEASE_SHA }}-${{ env.CI_RUN_ID }}-${{ env.CI_RUN_ATTEMPT }}' in workflow
     assert 'run-id: ${{ env.CI_RUN_ID }}' in workflow
-    assert '--expected-api-image-id "$STAGING_API_IMAGE_ID"' in workflow
-    assert '--expected-caddy-image-id "$STAGING_CADDY_IMAGE_ID"' in workflow
+    assert '--expected-ci-image-archive-sha256 "$STAGING_CI_IMAGE_ARCHIVE_SHA256"' in workflow
+    assert '--expected-api-image-config-digest "$STAGING_API_IMAGE_CONFIG_DIGEST"' in workflow
+    assert '--expected-caddy-image-config-digest "$STAGING_CADDY_IMAGE_CONFIG_DIGEST"' in workflow
+    assert '--archive "$RUNNER_TEMP/greatsell-release-images/release-images-$RELEASE_SHA-$CI_RUN_ID-$CI_RUN_ATTEMPT.tar.gz"' in workflow
+    assert '--archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}"' in workflow
     assert '--expected-ci-run-id "$CI_RUN_ID"' in workflow
     assert '--expected-ci-run-attempt "$CI_RUN_ATTEMPT"' in workflow
     assert "ci_run_id: ${{ steps.verified.outputs.ci_run_id }}" in workflow
     assert "ci_run_attempt: ${{ steps.verified.outputs.ci_run_attempt }}" in workflow
+    assert "ci_image_archive_sha256: ${{ steps.verified.outputs.ci_image_archive_sha256 }}" in workflow
+    assert "api_image_config_digest: ${{ steps.verified.outputs.api_image_config_digest }}" in workflow
+    assert "caddy_image_config_digest: ${{ steps.verified.outputs.caddy_image_config_digest }}" in workflow
     assert "main advanced after staging verification" in workflow
     assert "scripts/ensure-staging-gateway.sh" not in workflow
 
@@ -255,7 +265,11 @@ def test_main_ci_archives_only_labeled_images_that_the_release_workflow_can_tran
     assert "sha256sum \"$archive_name\" > \"$archive_name.sha256\"" in ci
     assert "retention-days: 30" in ci
     assert "compression-level: 0" in ci
-    assert 'docker image save "$api_image" "$caddy_image" | gzip -1' in transfer
+    assert 'cat -- "$archive" | ssh' in transfer
+    assert 'docker image save "$api_image" "$caddy_image"' not in transfer
+    assert "Transferred CI release-image archive checksum does not match." in transfer
+    assert "Verified CI release-image archive checksum changed before transfer." in transfer
+    assert "--archive-sha256" in transfer
     assert "StrictHostKeyChecking=yes" in transfer
     assert "org.opencontainers.image.revision" in transfer
     assert "org.opencontainers.image.workflow_run_id" in transfer
@@ -268,7 +282,7 @@ def test_main_ci_archives_only_labeled_images_that_the_release_workflow_can_tran
     assert 'docker image rm -f "greatsellai-hr-caddy:${{ github.sha }}" || true' in ci
 
 
-def test_release_image_loader_rechecks_artifact_integrity_and_completed_staging_identity() -> None:
+def test_release_image_loader_rechecks_portable_archive_and_config_identity() -> None:
     loader = (ROOT / "scripts" / "load-verified-release-images.sh").read_text(
         encoding="utf-8"
     )
@@ -285,16 +299,26 @@ def test_release_image_loader_rechecks_artifact_integrity_and_completed_staging_
     assert "org.opencontainers.image.revision" in loader
     assert "org.opencontainers.image.workflow_run_id" in loader
     assert "org.opencontainers.image.workflow_run_attempt" in loader
-    assert "--expected-api-image-id" in loader
-    assert "--expected-caddy-image-id" in loader
-    assert "Expected API and Caddy image IDs must be provided together." in loader
-    assert "Loaded API image identity does not match completed staging." in loader
+    assert "archive_image_config_digests()" in loader
+    assert 'item.name == "manifest.json"' in loader
+    assert "tarfile.open(archive, \"r|*\")" in loader
+    assert "--expected-ci-image-archive-sha256" in loader
+    assert "--expected-api-image-config-digest" in loader
+    assert "--expected-caddy-image-config-digest" in loader
+    assert "Expected CI archive and image config identities must be provided together." in loader
+    assert "portable content identities" in loader
     assert "ci_run_id=%s" in staging_verify
     assert "ci_run_attempt=%s" in staging_verify
+    assert "ci_image_archive_sha256=%s" in staging_verify
+    assert "api_image_config_digest=%s" in staging_verify
+    assert "caddy_image_config_digest=%s" in staging_verify
     assert "Staging image CI workflow run identities are invalid." in staging_verify
     assert "Staging image CI workflow run attempts are invalid." in staging_verify
     assert "docker version --format '{{.Server.Os}}/{{.Server.Arch}}'" in image_verify
     assert "Promotion target platform must be linux/amd64" in image_verify
+    assert "Promotion image CI workflow run ID does not match completed staging" in image_verify
+    assert "Promotion image CI workflow run attempt does not match completed staging" in image_verify
+    assert "Promotion image identity does not match completed staging" not in image_verify
 
 
 def test_image_transfer_script_loads_and_rechecks_the_ci_images(tmp_path: Path) -> None:
@@ -309,6 +333,9 @@ def test_image_transfer_script_loads_and_rechecks_the_ci_images(tmp_path: Path) 
     release_commit = "a" * 40
     ci_run_id = "123456789"
     ci_run_attempt = "2"
+    archive = tmp_path / "ci-release-images.tar.gz"
+    archive.write_bytes(gzip.compress(b"image archive stream\n"))
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "docker").write_text(
@@ -360,6 +387,10 @@ exec bash -c "$command"
             release_commit,
             "--host",
             "ubuntu@example.test",
+            "--archive",
+            str(archive),
+            "--archive-sha256",
+            archive_sha256,
             "--expected-ci-run-id",
             ci_run_id,
             "--expected-ci-run-attempt",
@@ -378,13 +409,44 @@ exec bash -c "$command"
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "Production images transferred and verified" in completed.stdout
+    assert "Exact CI release archive transferred and images verified" in completed.stdout
+
+    tampered = subprocess.run(
+        [
+            bash,
+            str(ROOT / "scripts" / "transfer-production-images.sh"),
+            release_commit,
+            "--host",
+            "ubuntu@example.test",
+            "--archive",
+            str(archive),
+            "--archive-sha256",
+            "0" * 64,
+            "--expected-ci-run-id",
+            ci_run_id,
+            "--expected-ci-run-attempt",
+            ci_run_attempt,
+        ],
+        text=True,
+        capture_output=True,
+        env=os.environ
+        | {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "EXPECTED_RELEASE_COMMIT": release_commit,
+            "EXPECTED_CI_RUN_ID": ci_run_id,
+            "EXPECTED_CI_RUN_ATTEMPT": ci_run_attempt,
+        },
+        check=False,
+    )
+    assert tampered.returncode != 0
+    assert "archive checksum changed before transfer" in tampered.stderr
 
 
-def test_release_image_loader_checks_metadata_labels_and_staging_image_ids(
-    tmp_path: Path,
+@pytest.mark.parametrize("config_layout", ("legacy", "oci"))
+def test_release_image_loader_checks_metadata_labels_and_portable_config_identities(
+    tmp_path: Path, config_layout: str
 ) -> None:
-    """Exercise the shared artifact verifier without a Docker daemon."""
+    """Exercise both supported Docker-save config-path variants."""
 
     if os.name != "posix":
         pytest.skip("the release-image shell harness is exercised in Linux CI")
@@ -395,15 +457,56 @@ def test_release_image_loader_checks_metadata_labels_and_staging_image_ids(
     release_commit = "b" * 40
     ci_run_id = "123456790"
     ci_run_attempt = "3"
-    api_image_id = f"sha256:{'1' * 64}"
-    caddy_image_id = f"sha256:{'2' * 64}"
+    api_config = b'{"architecture":"amd64","image":"api"}'
+    caddy_config = b'{"architecture":"amd64","image":"caddy"}'
+    api_image_config_digest = f"sha256:{hashlib.sha256(api_config).hexdigest()}"
+    caddy_image_config_digest = f"sha256:{hashlib.sha256(caddy_config).hexdigest()}"
+    # Docker daemons may expose different local IDs for the same archive.
+    # Those IDs deliberately differ from the portable config digests here.
+    api_local_image_id = f"sha256:{'3' * 64}"
+    caddy_local_image_id = f"sha256:{'4' * 64}"
     artifact_dir = tmp_path / "artifact"
     artifact_dir.mkdir()
     archive_name = f"release-images-{release_commit}-{ci_run_id}-{ci_run_attempt}.tar.gz"
     archive = artifact_dir / archive_name
-    archive.write_bytes(b"fake docker release image archive\n")
+    api_config_path = (
+        f"{api_image_config_digest.removeprefix('sha256:')}.json"
+        if config_layout == "legacy"
+        else f"blobs/sha256/{api_image_config_digest.removeprefix('sha256:')}"
+    )
+    caddy_config_path = (
+        f"{caddy_image_config_digest.removeprefix('sha256:')}.json"
+        if config_layout == "legacy"
+        else f"blobs/sha256/{caddy_image_config_digest.removeprefix('sha256:')}"
+    )
+    manifest = [
+        {
+            "Config": api_config_path,
+            "RepoTags": [f"greatsellai-hr-api:{release_commit}"],
+            "Layers": [],
+        },
+        {
+            "Config": caddy_config_path,
+            "RepoTags": [f"greatsellai-hr-caddy:{release_commit}"],
+            "Layers": [],
+        },
+    ]
+    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+    with tarfile.open(archive, "w:gz") as tar:
+        entry = tarfile.TarInfo("manifest.json")
+        entry.size = len(manifest_bytes)
+        tar.addfile(entry, io.BytesIO(manifest_bytes))
+        api_entry = tarfile.TarInfo(api_config_path)
+        api_entry.size = len(api_config)
+        tar.addfile(api_entry, io.BytesIO(api_config))
+        caddy_entry = tarfile.TarInfo(caddy_config_path)
+        caddy_entry.size = len(caddy_config)
+        tar.addfile(caddy_entry, io.BytesIO(caddy_config))
+    with tarfile.open(archive, "r:gz") as tar:
+        assert not any(member.name == "index.json" for member in tar.getmembers())
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
     (artifact_dir / f"{archive_name}.sha256").write_text(
-        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive_name}\n",
+        f"{archive_sha256}  {archive_name}\n",
         encoding="utf-8",
     )
     (artifact_dir / f"{archive_name.removesuffix('.tar.gz')}.metadata").write_text(
@@ -434,9 +537,9 @@ if [[ "$1" == "image" && "$2" == "inspect" ]]; then
   image="$5"
   if [[ "$format" == *".Id"* ]]; then
     if [[ "$image" == *"api:"* ]]; then
-      printf '%s\\n' "$EXPECTED_API_IMAGE_ID"
+      printf '%s\\n' "$EXPECTED_API_LOCAL_IMAGE_ID"
     else
-      printf '%s\\n' "$EXPECTED_CADDY_IMAGE_ID"
+      printf '%s\\n' "$EXPECTED_CADDY_LOCAL_IMAGE_ID"
     fi
   elif [[ "$format" == *"workflow_run_attempt"* ]]; then
     printf '%s\\n' "$EXPECTED_CI_RUN_ATTEMPT"
@@ -471,10 +574,12 @@ exit 1
             ci_run_id,
             "--ci-run-attempt",
             ci_run_attempt,
-            "--expected-api-image-id",
-            api_image_id,
-            "--expected-caddy-image-id",
-            caddy_image_id,
+            "--expected-ci-image-archive-sha256",
+            archive_sha256,
+            "--expected-api-image-config-digest",
+            api_image_config_digest,
+            "--expected-caddy-image-config-digest",
+            caddy_image_config_digest,
             "--github-output",
             str(github_output),
         ],
@@ -486,8 +591,8 @@ exit 1
             "EXPECTED_RELEASE_COMMIT": release_commit,
             "EXPECTED_CI_RUN_ID": ci_run_id,
             "EXPECTED_CI_RUN_ATTEMPT": ci_run_attempt,
-            "EXPECTED_API_IMAGE_ID": api_image_id,
-            "EXPECTED_CADDY_IMAGE_ID": caddy_image_id,
+            "EXPECTED_API_LOCAL_IMAGE_ID": api_local_image_id,
+            "EXPECTED_CADDY_LOCAL_IMAGE_ID": caddy_local_image_id,
         },
         check=False,
     )
@@ -495,8 +600,9 @@ exit 1
     assert completed.returncode == 0, completed.stderr
     assert "CI-verified release images loaded" in completed.stdout
     assert github_output.read_text(encoding="utf-8") == (
-        f"api_image_id={api_image_id}\n"
-        f"caddy_image_id={caddy_image_id}\n"
+        f"ci_image_archive_sha256={archive_sha256}\n"
+        f"api_image_config_digest={api_image_config_digest}\n"
+        f"caddy_image_config_digest={caddy_image_config_digest}\n"
     )
 
     incomplete_identity = subprocess.run(
@@ -512,8 +618,8 @@ exit 1
             ci_run_id,
             "--ci-run-attempt",
             ci_run_attempt,
-            "--expected-caddy-image-id",
-            caddy_image_id,
+            "--expected-caddy-image-config-digest",
+            caddy_image_config_digest,
         ],
         text=True,
         capture_output=True,
@@ -521,7 +627,127 @@ exit 1
         check=False,
     )
     assert incomplete_identity.returncode != 0
-    assert "Expected API and Caddy image IDs must be provided together." in incomplete_identity.stderr
+    assert "Expected CI archive and image config identities must be provided together." in incomplete_identity.stderr
+
+    mismatched_config = subprocess.run(
+        [
+            bash,
+            str(ROOT / "scripts" / "load-verified-release-images.sh"),
+            release_commit,
+            "--artifact-dir",
+            str(artifact_dir),
+            "--repository",
+            "greatsellai/greatsellai-hr",
+            "--ci-run-id",
+            ci_run_id,
+            "--ci-run-attempt",
+            ci_run_attempt,
+            "--expected-ci-image-archive-sha256",
+            archive_sha256,
+            "--expected-api-image-config-digest",
+            f"sha256:{'f' * 64}",
+            "--expected-caddy-image-config-digest",
+            caddy_image_config_digest,
+        ],
+        text=True,
+        capture_output=True,
+        env=os.environ
+        | {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "EXPECTED_RELEASE_COMMIT": release_commit,
+            "EXPECTED_CI_RUN_ID": ci_run_id,
+            "EXPECTED_CI_RUN_ATTEMPT": ci_run_attempt,
+            "EXPECTED_API_LOCAL_IMAGE_ID": api_local_image_id,
+            "EXPECTED_CADDY_LOCAL_IMAGE_ID": caddy_local_image_id,
+        },
+        check=False,
+    )
+    assert mismatched_config.returncode != 0
+    assert "API image config does not match the completed staging attestation." in mismatched_config.stderr
+
+
+def test_release_image_loader_rejects_a_tampered_config_blob_before_image_load(
+    tmp_path: Path,
+) -> None:
+    """The manifest path is not trusted without hashing its named config blob."""
+
+    if os.name != "posix":
+        pytest.skip("the release-image shell harness is exercised in Linux CI")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required for the release-image contract")
+
+    release_commit = "c" * 40
+    ci_run_id = "123456791"
+    ci_run_attempt = "1"
+    archive_name = f"release-images-{release_commit}-{ci_run_id}-{ci_run_attempt}.tar.gz"
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    archive = artifact_dir / archive_name
+    expected_api_config = b'{"architecture":"amd64","image":"api"}'
+    expected_caddy_config = b'{"architecture":"amd64","image":"caddy"}'
+    api_config_path = f"{hashlib.sha256(expected_api_config).hexdigest()}.json"
+    caddy_config_path = f"{hashlib.sha256(expected_caddy_config).hexdigest()}.json"
+    manifest = [
+        {
+            "Config": api_config_path,
+            "RepoTags": [f"greatsellai-hr-api:{release_commit}"],
+            "Layers": [],
+        },
+        {
+            "Config": caddy_config_path,
+            "RepoTags": [f"greatsellai-hr-caddy:{release_commit}"],
+            "Layers": [],
+        },
+    ]
+    with tarfile.open(archive, "w:gz") as tar:
+        for name, content in (
+            ("manifest.json", json.dumps(manifest).encode("utf-8")),
+            (api_config_path, expected_api_config + b"-tampered"),
+            (caddy_config_path, expected_caddy_config),
+        ):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(content)
+            tar.addfile(entry, io.BytesIO(content))
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (artifact_dir / f"{archive_name}.sha256").write_text(
+        f"{archive_sha256}  {archive_name}\n", encoding="utf-8"
+    )
+    (artifact_dir / f"{archive_name.removesuffix('.tar.gz')}.metadata").write_text(
+        "\n".join(
+            (
+                "repository=greatsellai/greatsellai-hr",
+                f"release_sha={release_commit}",
+                f"ci_run_id={ci_run_id}",
+                f"ci_run_attempt={ci_run_attempt}",
+                f"archive={archive_name}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            bash,
+            str(ROOT / "scripts" / "load-verified-release-images.sh"),
+            release_commit,
+            "--artifact-dir",
+            str(artifact_dir),
+            "--repository",
+            "greatsellai/greatsellai-hr",
+            "--ci-run-id",
+            ci_run_id,
+            "--ci-run-attempt",
+            ci_run_attempt,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "config blob digest does not match" in completed.stderr
 
 
 def test_remote_preflight_template_uses_its_stdin_compose_and_removes_it(

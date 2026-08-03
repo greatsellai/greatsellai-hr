@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
@@ -262,7 +263,11 @@ from app.services.transactional_email_outbox_service import (
     TransactionalEmailOutboxError,
     enqueue_password_reset_delivery,
 )
-from app.tenant_scope import organization_context_id, set_organization_context
+from app.tenant_scope import (
+    clear_organization_context,
+    organization_context_id,
+    set_organization_context,
+)
 from app.services.institution_service import (
     is_institution_registry_seeded,
     seed_institution_registry,
@@ -593,6 +598,181 @@ _SUPPORTED_RESUME_MEDIA_TYPES = frozenset(
         "application/octet-stream",
     }
 )
+
+
+# Upload persistence is deliberately isolated from FastAPI's event loop and
+# from the shared synchronous-endpoint thread pool.  Original-file storage
+# performs fsync and the durable queue write needs a database transaction;
+# either can wait on slow storage or a database lock.  Two concurrent units
+# keep the API responsive while remaining below the default API DB pool.
+_UPLOAD_PERSISTENCE_CONCURRENCY = 2
+_UPLOAD_PERSISTENCE_QUEUE_TIMEOUT_SECONDS = 5.0
+
+
+class _UploadPersistenceBusyError(RuntimeError):
+    """Raised when the bounded upload persistence lane is saturated."""
+
+
+async def _run_upload_persistence(
+    request: Request,
+    operation: Callable[[], ResumeUploadResponse],
+) -> ResumeUploadResponse:
+    """Run one durable upload unit without ever blocking the ASGI event loop.
+
+    The semaphore is held until the worker-thread operation actually exits,
+    including after a client disconnects.  Shielding the future prevents task
+    cancellation from releasing capacity while a filesystem/DB transaction is
+    still running in the executor.
+    """
+
+    limiter: asyncio.Semaphore = request.app.state.upload_persistence_limiter
+    try:
+        await asyncio.wait_for(
+            limiter.acquire(),
+            timeout=_UPLOAD_PERSISTENCE_QUEUE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        raise _UploadPersistenceBusyError("upload_persistence_busy") from exc
+
+    try:
+        executor: ThreadPoolExecutor = request.app.state.upload_persistence_executor
+        future = asyncio.get_running_loop().run_in_executor(executor, operation)
+    except Exception:
+        limiter.release()
+        raise
+
+    # ``run_in_executor`` returns an asyncio future, so its callback is run on
+    # this event loop.  Do not release in a request-task ``finally``: a client
+    # cancellation cannot stop a running fsync or transaction safely.
+    future.add_done_callback(lambda _: limiter.release())
+    return await asyncio.shield(future)
+
+
+def _persist_existing_candidate_resume(
+    *,
+    database: Database,
+    settings: AppSettings,
+    organization_id: str,
+    candidate_id: str,
+    original_filename: str | None,
+    content: bytes,
+) -> ResumeUploadResponse:
+    """Persist one existing-candidate upload inside its own scoped Session."""
+
+    with database.session_factory() as session:
+        set_organization_context(session, organization_id)
+        try:
+            storage_key: str | None = None
+            try:
+                resume = save_pdf_resume(
+                    session,
+                    candidate_id=candidate_id,
+                    original_filename=original_filename,
+                    content=content,
+                    settings=settings,
+                )
+                storage_key = resume.storage_key
+                _commit_or_raise(session)
+            except Exception:
+                session.rollback()
+                discard_uploaded_pdf(
+                    settings,
+                    storage_key=storage_key,
+                    organization_id=organization_id,
+                )
+                raise
+            # Build while the Session is still scoped and open: this response
+            # touches the candidate relationship but never returns an ORM row
+            # across the executor boundary.
+            return _resume_upload_response(resume)
+        finally:
+            clear_organization_context(session)
+
+
+def _persist_new_candidate_resume(
+    *,
+    database: Database,
+    settings: AppSettings,
+    organization_id: str,
+    original_filename: str | None,
+    content: bytes,
+    idempotency_key: str | None,
+) -> ResumeUploadResponse:
+    """Persist a new candidate + original using a fresh, scoped Session."""
+
+    with database.session_factory() as session:
+        set_organization_context(session, organization_id)
+        try:
+            # Keep byte hashing and document-signature validation off the
+            # event loop with the rest of the upload persistence unit.
+            validate_pdf_resume_upload(
+                original_filename=original_filename,
+                content=content,
+                settings=settings,
+            )
+            content_sha256 = hashlib.sha256(content).hexdigest()
+
+            if idempotency_key is not None:
+                replayed_resume = get_idempotent_upload_resume(
+                    session,
+                    idempotency_key=idempotency_key,
+                    content_sha256=content_sha256,
+                )
+                if replayed_resume is not None:
+                    return _resume_upload_response(replayed_resume)
+
+            storage_key: str | None = None
+            try:
+                # A new upload starts unnamed. The AI extraction worker may
+                # fill Candidate.display_name only from source-grounded text.
+                candidate = create_candidate(session, display_name=None)
+                resume = save_pdf_resume(
+                    session,
+                    candidate_id=candidate.id,
+                    original_filename=original_filename,
+                    content=content,
+                    settings=settings,
+                )
+                storage_key = resume.storage_key
+                if idempotency_key is not None:
+                    register_upload_idempotency_key(
+                        session,
+                        idempotency_key=idempotency_key,
+                        content_sha256=content_sha256,
+                        resume_id=resume.id,
+                    )
+                    # Surface a competing idempotency key before commit, so
+                    # the just-written original can be removed safely.
+                    session.flush()
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                discard_uploaded_pdf(
+                    settings,
+                    storage_key=storage_key,
+                    organization_id=organization_id,
+                )
+                if idempotency_key is not None:
+                    replayed_resume = get_idempotent_upload_resume(
+                        session,
+                        idempotency_key=idempotency_key,
+                        content_sha256=content_sha256,
+                    )
+                    if replayed_resume is not None:
+                        return _resume_upload_response(replayed_resume)
+                raise
+            except Exception:
+                session.rollback()
+                discard_uploaded_pdf(
+                    settings,
+                    storage_key=storage_key,
+                    organization_id=organization_id,
+                )
+                raise
+
+            return _resume_upload_response(resume)
+        finally:
+            clear_organization_context(session)
 
 
 def _resume_original_file_path(
@@ -2002,9 +2182,25 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.database = database
         app.state.transactional_email_provider = build_transactional_email_provider(settings)
+        upload_persistence_executor = ThreadPoolExecutor(
+            max_workers=_UPLOAD_PERSISTENCE_CONCURRENCY,
+            thread_name_prefix="resume-upload-persist",
+        )
+        app.state.upload_persistence_limiter = asyncio.Semaphore(
+            _UPLOAD_PERSISTENCE_CONCURRENCY
+        )
+        app.state.upload_persistence_executor = upload_persistence_executor
         try:
             yield
         finally:
+            # Finish an already accepted durable write before disposing its DB
+            # engine. Pending units are cancelled; running fsync/commit calls
+            # are allowed to cleanly finish their all-or-nothing unit.
+            await asyncio.to_thread(
+                upload_persistence_executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
             database.dispose()
 
     app = FastAPI(
@@ -4634,45 +4830,54 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
     @app.post(
         "/v1/candidates/{candidate_id}/resumes",
         response_model=ResumeUploadResponse,
-        dependencies=[Depends(require_single_admin)],
     )
     async def post_resume(
+        request: Request,
         candidate_id: str,
         file: UploadFile = File(...),
-        session: Session = Depends(get_session),
+        principal: AuthPrincipal = Depends(require_single_admin),
+        auth_session: Session = Depends(get_session),
     ) -> ResumeUploadResponse:
         if file.content_type and file.content_type not in _SUPPORTED_RESUME_MEDIA_TYPES:
             raise HTTPException(
                 status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
                 detail="content_type_not_supported",
             )
+        database: Database = request.app.state.database
+        organization_id = principal.organization_id
+        original_filename = file.filename
+        # FastAPI caches this dependency with the authorization dependency.
+        # We have copied the only scalar needed by the durable unit, so return
+        # the auth lookup connection before this request waits for capacity or
+        # a slow original-file write.
+        auth_session.close()
         content = await file.read(settings.max_upload_bytes + 1)
-        storage_key: str | None = None
         try:
-            resume = save_pdf_resume(
-                session,
-                candidate_id=candidate_id,
-                original_filename=file.filename,
-                content=content,
-                settings=settings,
+            return await _run_upload_persistence(
+                request,
+                lambda: _persist_existing_candidate_resume(
+                    database=database,
+                    settings=settings,
+                    organization_id=organization_id,
+                    candidate_id=candidate_id,
+                    original_filename=original_filename,
+                    content=content,
+                ),
             )
-            storage_key = resume.storage_key
-            _commit_or_raise(session)
+        except _UploadPersistenceBusyError as exc:
+            log_event(
+                "upload_persistence_busy",
+                level=logging.WARNING,
+                workspace_id=organization_id,
+                error_code="upload_persistence_busy",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="upload_persistence_busy",
+            ) from exc
         except NotFoundError as exc:
-            session.rollback()
-            discard_uploaded_pdf(
-                settings,
-                storage_key=storage_key,
-                organization_id=organization_context_id(session),
-            )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except UploadValidationError as exc:
-            session.rollback()
-            discard_uploaded_pdf(
-                settings,
-                storage_key=storage_key,
-                organization_id=organization_context_id(session),
-            )
             response_status = (
                 status.HTTP_413_CONTENT_TOO_LARGE
                 if str(exc) == "file_too_large"
@@ -4680,34 +4885,21 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             )
             raise HTTPException(status_code=response_status, detail=str(exc)) from exc
         except HTTPException:
-            discard_uploaded_pdf(
-                settings,
-                storage_key=storage_key,
-                organization_id=organization_context_id(session),
-            )
             raise
-        except Exception:
-            session.rollback()
-            discard_uploaded_pdf(
-                settings,
-                storage_key=storage_key,
-                organization_id=organization_context_id(session),
-            )
-            raise
-        return _resume_upload_response(resume)
 
     @app.post(
         "/v1/resumes/upload",
         response_model=ResumeUploadResponse,
-        dependencies=[Depends(require_single_admin)],
     )
     async def post_new_candidate_resume(
+        request: Request,
         file: UploadFile = File(...),
         idempotency_key: Annotated[
             str | None,
             Header(alias="Idempotency-Key"),
         ] = None,
-        session: Session = Depends(get_session),
+        principal: AuthPrincipal = Depends(require_single_admin),
+        auth_session: Session = Depends(get_session),
     ) -> ResumeUploadResponse:
         """Convenience upload flow used by the single-account web app."""
 
@@ -4725,68 +4917,38 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=str(exc),
             ) from exc
+        database: Database = request.app.state.database
+        organization_id = principal.organization_id
+        original_filename = file.filename
+        # See the existing-candidate upload path above. Holding this Session
+        # while durable work runs would reserve a second DB connection for
+        # every accepted upload without serving any request work.
+        auth_session.close()
         content = await file.read(settings.max_upload_bytes + 1)
         try:
-            validate_pdf_resume_upload(
-                original_filename=file.filename,
-                content=content,
-                settings=settings,
-            )
-        except UploadValidationError as exc:
-            response_status = (
-                status.HTTP_413_CONTENT_TOO_LARGE
-                if str(exc) == "file_too_large"
-                else status.HTTP_422_UNPROCESSABLE_CONTENT
-            )
-            raise HTTPException(status_code=response_status, detail=str(exc)) from exc
-
-        content_sha256 = hashlib.sha256(content).hexdigest()
-        if normalized_idempotency_key is not None:
-            try:
-                replayed_resume = get_idempotent_upload_resume(
-                    session,
+            return await _run_upload_persistence(
+                request,
+                lambda: _persist_new_candidate_resume(
+                    database=database,
+                    settings=settings,
+                    organization_id=organization_id,
+                    original_filename=original_filename,
+                    content=content,
                     idempotency_key=normalized_idempotency_key,
-                    content_sha256=content_sha256,
-                )
-            except IdempotencyConflictError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=str(exc),
-                ) from exc
-            if replayed_resume is not None:
-                return _resume_upload_response(replayed_resume)
-
-        storage_key: str | None = None
-        try:
-            # A new upload starts unnamed. The AI extraction worker may fill
-            # Candidate.display_name only from source-grounded resume text.
-            candidate = create_candidate(session, display_name=None)
-            resume = save_pdf_resume(
-                session,
-                candidate_id=candidate.id,
-                original_filename=file.filename,
-                content=content,
-                settings=settings,
+                ),
             )
-            storage_key = resume.storage_key
-            if normalized_idempotency_key is not None:
-                register_upload_idempotency_key(
-                    session,
-                    idempotency_key=normalized_idempotency_key,
-                    content_sha256=content_sha256,
-                    resume_id=resume.id,
-                )
-                # Surface a competing idempotency key before the transaction
-                # commits, so its just-written PDF can be removed.
-                session.flush()
-            session.commit()
+        except _UploadPersistenceBusyError as exc:
+            log_event(
+                "upload_persistence_busy",
+                level=logging.WARNING,
+                workspace_id=organization_id,
+                error_code="upload_persistence_busy",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="upload_persistence_busy",
+            ) from exc
         except UploadValidationError as exc:
-            session.rollback()
-            discard_uploaded_pdf(
-                settings,
-                storage_key=storage_key,
-                organization_id=organization_context_id(session),
-            )
             response_status = (
                 status.HTTP_413_CONTENT_TOO_LARGE
                 if str(exc) == "file_too_large"
@@ -4794,39 +4956,17 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             )
             raise HTTPException(status_code=response_status, detail=str(exc)) from exc
         except IntegrityError as exc:
-            session.rollback()
-            discard_uploaded_pdf(
-                settings,
-                storage_key=storage_key,
-                organization_id=organization_context_id(session),
-            )
-            if normalized_idempotency_key is not None:
-                try:
-                    replayed_resume = get_idempotent_upload_resume(
-                        session,
-                        idempotency_key=normalized_idempotency_key,
-                        content_sha256=content_sha256,
-                    )
-                except IdempotencyConflictError as conflict:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=str(conflict),
-                    ) from conflict
-                if replayed_resume is not None:
-                    return _resume_upload_response(replayed_resume)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="database_conflict",
             ) from exc
+        except IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
         except Exception:
-            session.rollback()
-            discard_uploaded_pdf(
-                settings,
-                storage_key=storage_key,
-                organization_id=organization_context_id(session),
-            )
             raise
-        return _resume_upload_response(resume)
 
     @app.get(
         "/v1/resumes/review-queue",

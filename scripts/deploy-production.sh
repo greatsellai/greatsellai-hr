@@ -160,6 +160,7 @@ previous_tag_arg="${previous_tag:-__none__}"
 previous_commit_arg="${previous_commit:-__none__}"
 remote_helper="/tmp/greatsell-release-${tag}.sh"
 remote_stage_tool="/tmp/greatsell-release-stage-${tag}.py"
+remote_bootstrap_validator="/tmp/greatsell-bootstrap-validator-${tag}.py"
 
 # The transport helpers come from the current reviewed deployment tooling. The
 # application source itself is still archived strictly from the selected tag,
@@ -168,8 +169,10 @@ cat "$repo_root/scripts/remote-release-helper.sh" | ssh "${ssh_options[@]}" "$re
   "umask 077 && cat > $(shell_quote "$remote_helper") && chmod 700 $(shell_quote "$remote_helper")"
 cat "$repo_root/scripts/release_source_stage.py" | ssh "${ssh_options[@]}" "$remote_host" \
   "umask 077 && cat > $(shell_quote "$remote_stage_tool") && chmod 700 $(shell_quote "$remote_stage_tool")"
+cat "$repo_root/scripts/validate_production_bootstrap_bundle.py" | ssh "${ssh_options[@]}" "$remote_host" \
+  "umask 077 && cat > $(shell_quote "$remote_bootstrap_validator") && chmod 700 $(shell_quote "$remote_bootstrap_validator")"
 cleanup_remote_tools() {
-  ssh_run "rm -f $(shell_quote "$remote_helper") $(shell_quote "$remote_stage_tool")" >/dev/null 2>&1 || true
+  ssh_run "rm -f $(shell_quote "$remote_helper") $(shell_quote "$remote_stage_tool") $(shell_quote "$remote_bootstrap_validator")" >/dev/null 2>&1 || true
 }
 trap cleanup_remote_tools EXIT
 
@@ -182,6 +185,6 @@ if [[ "$mode" == "rollback" && "$migration_changed" -eq 1 ]]; then
 fi
 
 git archive --format=tar "$tag" | ssh "${ssh_options[@]}" "$remote_host" \
-  "bash $(shell_quote "$remote_helper") release $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$migration_changed") $(shell_quote "$skip_migrate") $(shell_quote "$archive_sha256") $(shell_quote "$remote_stage_tool") $(shell_quote "$image_mode")"
+  "bash $(shell_quote "$remote_helper") release $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$previous_tag_arg") $(shell_quote "$previous_commit_arg") $(shell_quote "$mode") $(shell_quote "$migration_changed") $(shell_quote "$skip_migrate") $(shell_quote "$archive_sha256") $(shell_quote "$remote_stage_tool") $(shell_quote "$image_mode") $(shell_quote "$remote_bootstrap_validator")"
 
 echo "Deployment succeeded: $tag ($release_commit)"

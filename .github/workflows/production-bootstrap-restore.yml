@@ -1,0 +1,76 @@
+name: Production bootstrap data restore
+
+on:
+  workflow_dispatch:
+    inputs:
+      import_id:
+        description: Exact non-secret ID of the failed bootstrap import to recover.
+        required: true
+        type: string
+      confirm:
+        description: Type RESTORE_PRODUCTION_BOOTSTRAP to restore the imported snapshot after a failed first release.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    name: Restore failed bootstrap snapshot
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    concurrency:
+      group: greatsellai-hr-release-lane
+      cancel-in-progress: false
+    environment:
+      name: production
+    env:
+      IMPORT_ID: ${{ inputs.import_id }}
+      CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - name: Validate restore request
+        run: |
+          set -Eeuo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Production bootstrap restores must be started from main." >&2; exit 1; }
+          [[ "$CONFIRM" == "RESTORE_PRODUCTION_BOOTSTRAP" ]] || { echo "Confirmation must be RESTORE_PRODUCTION_BOOTSTRAP." >&2; exit 1; }
+          [[ "$IMPORT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]] || { echo "Invalid production bootstrap import ID." >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+      - name: Configure production SSH
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+          PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
+          : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
+          : "${PROD_SSH_PRIVATE_KEY:?Missing production secret PROD_SSH_PRIVATE_KEY}"
+          : "${PROD_SSH_KNOWN_HOSTS:?Missing production secret PROD_SSH_KNOWN_HOSTS}"
+          [[ "$PROD_PROJECT_DIR" == /home/ubuntu/* && "$PROD_PROJECT_DIR" != /home/ubuntu/ ]] || exit 1
+          [[ "$PROD_HISTORY_DIR" == /home/ubuntu/* && "$PROD_HISTORY_DIR" != /home/ubuntu/ ]] || exit 1
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-production-bootstrap-restore"
+          chmod 600 "$RUNNER_TEMP/greatsell-production-bootstrap-restore"
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "${PROD_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null
+      - name: Restore the imported production snapshot
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+        run: |
+          set -Eeuo pipefail
+          scripts/restore-production-bootstrap.sh "$IMPORT_ID" \
+            --host "$PROD_DEPLOY_HOST" \
+            --project-dir "$PROD_PROJECT_DIR" \
+            --history-dir "$PROD_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-bootstrap-restore" \
+            --confirm-restore

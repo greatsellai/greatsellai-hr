@@ -191,6 +191,8 @@ def test_public_repository_routes_all_release_orchestration_to_hosted_runners() 
         ".github/workflows/production-healthy-pending-finalize.yml",
         ".github/workflows/production-pending-finalize.yml",
         ".github/workflows/production-legacy-reconcile.yml",
+        ".github/workflows/production-bootstrap-import.yml",
+        ".github/workflows/production-bootstrap-restore.yml",
     )
 
     for workflow_path in workflow_paths:

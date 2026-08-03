@@ -24,20 +24,27 @@
 ## 人工迁移顺序
 
 1. 保持旧主机的 staging Compose、Caddy、数据卷和 DNS 运行，不执行任何 staging 发布或清理。
-2. 在新主机准备独立的生产目录、Docker、80/443 防火墙、生产 `.env.production` 和生产数据
-   副本。不要复制 staging 数据到生产，也不要让 staging 使用生产数据库或上传卷。
-3. 新生产 `.env.production` 的公开值设置为：
+2. 在新主机准备独立的生产目录、Docker、80/443 防火墙和生产 `.env.production`。不要复制
+   staging 数据到生产，也不要让 staging 使用生产数据库或上传卷。
+3. 按 [生产数据导入与首发](PRODUCTION_BOOTSTRAP_IMPORT.md) 先冻结旧生产的 API/worker 写入，重新生成并校验
+   最终 production 四文件数据包，再导入新主机。旧 staging 始终保持运行；导入器只允许 `resume-screening-v3_postgres_data` 与
+   `resume-screening-v3_uploads_data` 两个精确卷，且要求新主机尚无生产发布记录、运行时或目标卷。
+   它不读取或复制 `.env.production`，也不会接触旧主机的任何 staging 资源。
+4. 数据导入成功会留下 `bootstrap-import.env`。首次 Production promotion 仍使用已完成的 staging
+   候选和精确 CI 镜像；它会先备份导入数据，再迁移并在新机本地验证，不会把生产数据导入当作绕过
+   staging 门禁的发布入口。
+5. 新生产 `.env.production` 的公开值设置为：
    - `RESUME_V3_DOMAIN=hr.greatsell.cn`
    - `RESUME_V3_PUBLIC_APP_URL=https://hr.greatsell.cn`
    私钥、数据库密码、AI/邮件/OCR 凭据继续只保存在新主机的忽略环境文件中。
-4. 在 GitHub `production` Environment 中将 `PROD_DEPLOY_HOST`、SSH known-hosts、私钥和
+6. 在 GitHub `production` Environment 中将 `PROD_DEPLOY_HOST`、SSH known-hosts、私钥和
    生产目录变量切到新主机。保留 `staging` Environment 的全部 `STAGING_*` 值不变。
-5. 对已通过 staging 验收的当前候选运行受控 **Production promotion**，让它在新主机创建并部署
-   `prod-*`；检查 `/health`、登录、匿名原文件拒绝、worker 和 TLS。旧版本若含 staging 网关会
-   安全拒绝，而不是在新主机错误部署。
-6. 仅在新主机健康检查通过后，将 `hr.greatsell.cn` 的 A/AAAA 记录切到新主机。不要把
+7. 对已通过 staging 验收的当前候选运行受控 **Production promotion**，让它在新主机创建并部署
+   `prod-*`。DNS 尚未切换时，首发只验证新机本地 API、匿名保护和 Caddy 配置；旧版本若含
+   staging 网关会安全拒绝，而不是在新主机错误部署。
+8. 仅在新机本地验证通过后，将 `hr.greatsell.cn` 的 A/AAAA 记录切到新主机。不要把
    `greatsellai.net` 根域或泛域名指向 HR 项目。
-7. 分别验证 `https://hr.greatsell.cn/health` 和
+9. DNS/TLS 生效后，分别验证 `https://hr.greatsell.cn/health` 和
    `https://staging.hr.greatsellai.net/health`。两者必须独立可用；生产发布不应改变 staging。
 
 ## ICP 备案检查

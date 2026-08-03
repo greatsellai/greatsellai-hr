@@ -59,6 +59,15 @@ checksum、metadata、镜像 label 和 staging 已验收的 image ID，再把该
   验证的预构建镜像；镜像缺失时快速失败，绝不在生产机重建一个“看起来相同”的镜像。迁移到新的生产
   主机前，当前生产版本及约定的回滚版本必须由受控迁移步骤预加载；不能把 **Production deploy** 当作
   新主机初始化入口。
+- **Production bootstrap data import**：只用于新生产主机迁移前的单次数据预灌入，必须从 `main`
+  手动输入 `IMPORT_PRODUCTION_SNAPSHOT`。它只消费已经通过私有传输放入 production history
+  `incoming/<import-id>` 的固定四文件数据包；重新验证来源、checksum、PostgreSQL dump 与上传归档，
+  只恢复两个精确 production 卷。导入没有应用代码、没有 `prod-*` 标签、没有 staging 绕过能力；
+  后续仍须走标准 **Production promotion**。详见
+  [生产数据导入与首发](PRODUCTION_BOOTSTRAP_IMPORT.md)。
+- **Production bootstrap data restore**：仅在上述首个 promotion 失败、无 active release record 时可
+  手动输入 `RESTORE_PRODUCTION_BOOTSTRAP`。它恢复保留的已导入数据包并归档相应 pending 标记；
+  不属于普通回滚，也不会接触 staging。
 - **Production rollback**：只能手动触发，且只接受已有 `prod-*` 标签。默认拒绝
   回滚到数据库 schema 落后的代码；只有已确认兼容时才可显式允许该情形。
 - **Production legacy pending reconciliation**：仅用于历史发布器遗留的中断
@@ -165,8 +174,7 @@ staging 或 production。
 - CI 不读取生产 Environment 的 SSH 密钥或变量。
 - 自动 staging 只接受本仓库的成功 `main` 推送 CI；PR CI、手动 CI、取消或失败的 CI 都不能
   连接 staging。生产只接受已完成 staging 候选的人工 `PROMOTE`。
-- 工作流只调用现有 `scripts/preflight-production-release.sh`、`scripts/deploy-production.sh` 与
-  `scripts/rollback-production.sh`，并始终显式传入 GitHub Environment 中的目标主机和
+- 工作流只调用受审阅的 production 脚本（包括预检、发布、回滚和 bootstrap import/restore），并始终显式传入 GitHub Environment 中的目标主机和
   路径，因此不会误用脚本中的历史默认服务器地址。
 - 不要把部署密钥、主机指纹、环境文件、候选人 PDF、数据库或任何 API 密钥加入 Git。
 - GitHub 使用的 `GITHUB_TOKEN` 创建标签不会触发第二个工作流；因此 **Staging release** 会在

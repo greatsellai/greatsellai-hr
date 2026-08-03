@@ -1,0 +1,76 @@
+name: Production bootstrap data import
+
+on:
+  workflow_dispatch:
+    inputs:
+      import_id:
+        description: Exact non-secret ID of the verified bundle already placed in PROD_HISTORY_DIR/incoming.
+        required: true
+        type: string
+      confirm:
+        description: Type IMPORT_PRODUCTION_SNAPSHOT to import production data into a fresh host.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  import:
+    name: Import verified production snapshot
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    concurrency:
+      group: greatsellai-hr-release-lane
+      cancel-in-progress: false
+    environment:
+      name: production
+    env:
+      IMPORT_ID: ${{ inputs.import_id }}
+      CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - name: Validate import request
+        run: |
+          set -Eeuo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "Production bootstrap imports must be started from main." >&2; exit 1; }
+          [[ "$CONFIRM" == "IMPORT_PRODUCTION_SNAPSHOT" ]] || { echo "Confirmation must be IMPORT_PRODUCTION_SNAPSHOT." >&2; exit 1; }
+          [[ "$IMPORT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]] || { echo "Invalid production bootstrap import ID." >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+      - name: Configure production SSH
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+          PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
+          : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
+          : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
+          : "${PROD_SSH_PRIVATE_KEY:?Missing production secret PROD_SSH_PRIVATE_KEY}"
+          : "${PROD_SSH_KNOWN_HOSTS:?Missing production secret PROD_SSH_KNOWN_HOSTS}"
+          [[ "$PROD_PROJECT_DIR" == /home/ubuntu/* && "$PROD_PROJECT_DIR" != /home/ubuntu/ ]] || exit 1
+          [[ "$PROD_HISTORY_DIR" == /home/ubuntu/* && "$PROD_HISTORY_DIR" != /home/ubuntu/ ]] || exit 1
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-production-bootstrap-import"
+          chmod 600 "$RUNNER_TEMP/greatsell-production-bootstrap-import"
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "${PROD_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null
+      - name: Import the already transferred production snapshot
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
+          PROD_PROJECT_DIR: ${{ vars.PROD_PROJECT_DIR }}
+        run: |
+          set -Eeuo pipefail
+          scripts/bootstrap-import-production.sh "$IMPORT_ID" \
+            --host "$PROD_DEPLOY_HOST" \
+            --project-dir "$PROD_PROJECT_DIR" \
+            --history-dir "$PROD_HISTORY_DIR" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-bootstrap-import" \
+            --confirm-import

@@ -22,6 +22,18 @@
 	file_server
 }
 
+# This listener is intentionally private to the Docker proxy network: Compose
+# publishes only Caddy's 80/443 ports.  It is used by the first-host bootstrap
+# verifier to prove that this Caddy instance can reach its API before public
+# DNS is switched to the new host.  It does not provide a public route.
+:8081 {
+	@bootstrap_local_health path /health
+	handle @bootstrap_local_health {
+		reverse_proxy api:8000
+	}
+	respond "Not found" 404
+}
+
 {$RESUME_V3_DOMAIN} {
 	encode zstd gzip
 

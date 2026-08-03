@@ -16,6 +16,8 @@ readonly api_proxy_ip="172.30.0.3"
 current_tag=""
 current_commit=""
 current_source_dir=""
+bootstrap_import_id=""
+bootstrap_import_dir=""
 
 die() {
   echo "$*" >&2
@@ -42,6 +44,10 @@ require_safe_backup_id() {
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]] || die "Invalid backup ID."
 }
 
+require_safe_bootstrap_import_id() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]] || die "Invalid production bootstrap import ID."
+}
+
 require_release_reference() {
   [[ "$1" =~ ^prod-[0-9]{8}-[0-9a-f]{7,40}$ ]] || die "Invalid production tag."
   [[ "$2" =~ ^[0-9a-f]{40}$ ]] || die "Invalid production commit."
@@ -49,6 +55,18 @@ require_release_reference() {
 
 release_sources_root() {
   printf '%s/%s' "$1" "$release_sources_directory_name"
+}
+
+bootstrap_import_record_path() {
+  printf '%s/bootstrap-import.env' "$1"
+}
+
+bootstrap_imports_root() {
+  printf '%s/bootstrap-imports' "$1"
+}
+
+bootstrap_imports_incoming_root() {
+  printf '%s/incoming' "$1"
 }
 
 validate_environment_dir() {
@@ -138,6 +156,564 @@ validate_upload_archive() {
     '
 }
 
+require_production_volume_provenance() {
+  local volume="$1" expected_logical_name="$2"
+  local project_label logical_label
+  project_label="$(sudo -n docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$volume")"
+  logical_label="$(sudo -n docker volume inspect --format '{{index .Labels "com.docker.compose.volume"}}' "$volume")"
+  [[ "$project_label" == "resume-screening-v3" && "$logical_label" == "$expected_logical_name" ]] || \
+    die "Production bootstrap import refuses a volume without exact production Compose ownership."
+}
+
+require_no_production_runtime() {
+  local containers
+  containers="$(sudo -n docker ps -aq --filter label=com.docker.compose.project=resume-screening-v3)"
+  [[ -z "$containers" ]] || \
+    die "Production bootstrap import refuses an existing production runtime."
+}
+
+validate_bootstrap_import_bundle() {
+  local bundle_dir="$1" import_id="$2" validator="$3"
+  [[ -f "$validator" && ! -L "$validator" ]] || \
+    die "Production bootstrap bundle validator is missing."
+  if ! python3 "$validator" --bundle-dir "$bundle_dir" --import-id "$import_id" >/dev/null 2>&1; then
+    die "Production bootstrap bundle validation failed."
+  fi
+  if ! sudo -n docker run --rm --network none -v "$bundle_dir:/bundle:ro" postgres:16-alpine \
+    pg_restore --list /bundle/database.dump >/dev/null 2>&1; then
+    die "Production bootstrap database dump validation failed."
+  fi
+  if ! validate_upload_archive "$bundle_dir" >/dev/null 2>&1; then
+    die "Production bootstrap uploads archive validation failed."
+  fi
+}
+
+load_bootstrap_import() {
+  local history_dir="$1" validator="$2"
+  local record import_id state format_version bundle_dir database_file uploads_file
+  local expected_database_sha256 expected_uploads_sha256 database_sha256 uploads_sha256
+  local postgres_volume uploads_volume
+
+  bootstrap_import_id=""
+  bootstrap_import_dir=""
+  [[ -z "$current_commit" ]] || return 0
+  record="$(bootstrap_import_record_path "$history_dir")"
+  if [[ ! -e "$record" && ! -L "$record" ]]; then
+    return 0
+  fi
+  [[ -f "$record" && ! -L "$record" ]] || \
+    die "Production bootstrap import marker must be a regular file."
+
+  format_version="$(record_value "$record" format_version)"
+  state="$(record_value "$record" state)"
+  import_id="$(record_value "$record" import_id)"
+  bundle_dir="$(record_value "$record" bundle_dir)"
+  database_file="$(record_value "$record" database_file)"
+  uploads_file="$(record_value "$record" uploads_file)"
+  expected_database_sha256="$(record_value "$record" database_sha256)"
+  expected_uploads_sha256="$(record_value "$record" uploads_sha256)"
+  require_safe_bootstrap_import_id "$import_id"
+  [[ "$format_version" == "1" && "$state" == "ready" ]] || \
+    die "Production bootstrap import is not ready for its first deployment. Use the explicit bootstrap restore flow after a failed first deployment."
+  [[ "$bundle_dir" == "$(bootstrap_imports_root "$history_dir")/$import_id" ]] || \
+    die "Production bootstrap import bundle path is invalid."
+  [[ "$database_file" == "database.dump" && "$uploads_file" == "uploads.tar.gz" ]] || \
+    die "Production bootstrap import marker has unexpected artifact names."
+  validate_bootstrap_import_bundle "$bundle_dir" "$import_id" "$validator"
+  database_sha256="$(sha256sum "$bundle_dir/database.dump" | awk '{print $1}')"
+  uploads_sha256="$(sha256sum "$bundle_dir/uploads.tar.gz" | awk '{print $1}')"
+  [[ "$expected_database_sha256" == "$database_sha256" && "$expected_uploads_sha256" == "$uploads_sha256" ]] || \
+    die "Production bootstrap import artifacts no longer match their import record."
+
+  postgres_volume_exists || die "Production bootstrap import PostgreSQL volume is missing."
+  uploads_volume_exists || die "Production bootstrap import uploads volume is missing."
+  require_production_volume_provenance "$postgres_volume_name" postgres_data
+  require_production_volume_provenance "$uploads_volume_name" uploads_data
+  postgres_volume="$(record_value "$record" postgres_volume)"
+  uploads_volume="$(record_value "$record" uploads_volume)"
+  [[ "$postgres_volume" == "$postgres_volume_name" && "$uploads_volume" == "$uploads_volume_name" ]] || \
+    die "Production bootstrap import marker does not target the exact production volumes."
+
+  bootstrap_import_id="$import_id"
+  bootstrap_import_dir="$bundle_dir"
+}
+
+write_bootstrap_import_marker() {
+  local history_dir="$1" import_id="$2" bundle_dir="$3" state="$4"
+  local attempted_tag="${5:-}" attempted_commit="${6:-}" attempt_backup_id="${7:-}"
+  local record temporary database_sha256 uploads_sha256
+  require_safe_bootstrap_import_id "$import_id"
+  [[ "$state" == "ready" || "$state" == "deploy_attempted" ]] || \
+    die "Invalid production bootstrap import state."
+  record="$(bootstrap_import_record_path "$history_dir")"
+  temporary="$history_dir/.bootstrap-import.$$.tmp"
+  database_sha256="$(sha256sum "$bundle_dir/database.dump" | awk '{print $1}')"
+  uploads_sha256="$(sha256sum "$bundle_dir/uploads.tar.gz" | awk '{print $1}')"
+  [[ "$database_sha256" =~ ^[0-9a-f]{64}$ && "$uploads_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+    die "Unable to checksum production bootstrap import artifacts."
+  umask 077
+  cat > "$temporary" <<EOF
+format_version=1
+state=$state
+import_id=$import_id
+bundle_dir=$bundle_dir
+postgres_volume=$postgres_volume_name
+uploads_volume=$uploads_volume_name
+database_file=database.dump
+uploads_file=uploads.tar.gz
+database_sha256=$database_sha256
+uploads_sha256=$uploads_sha256
+EOF
+  if [[ "$state" == "deploy_attempted" ]]; then
+    require_release_reference "$attempted_tag" "$attempted_commit"
+    require_safe_backup_id "$attempt_backup_id"
+    cat >> "$temporary" <<EOF
+attempted_tag=$attempted_tag
+attempted_commit=$attempted_commit
+attempt_backup_id=$attempt_backup_id
+attempted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  else
+    cat >> "$temporary" <<EOF
+imported_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  fi
+  mv -f "$temporary" "$record"
+}
+
+write_bootstrap_attempted_marker() {
+  local history_dir="$1" target_tag="$2" target_commit="$3" backup_id="$4"
+  local record import_id bundle_dir
+  record="$(bootstrap_import_record_path "$history_dir")"
+  [[ -f "$record" && ! -L "$record" ]] || die "Production bootstrap import marker is missing."
+  import_id="$(record_value "$record" import_id)"
+  bundle_dir="$(record_value "$record" bundle_dir)"
+  write_bootstrap_import_marker "$history_dir" "$import_id" "$bundle_dir" deploy_attempted \
+    "$target_tag" "$target_commit" "$backup_id"
+}
+
+archive_bootstrap_import_marker() {
+  local history_dir="$1" import_id="$2" target_tag="$3" target_commit="$4"
+  local record record_import_id timestamp archive temporary
+  require_safe_bootstrap_import_id "$import_id"
+  require_release_reference "$target_tag" "$target_commit"
+  record="$(bootstrap_import_record_path "$history_dir")"
+  [[ -f "$record" && ! -L "$record" ]] || return 0
+  record_import_id="$(record_value "$record" import_id)"
+  [[ "$record_import_id" == "$import_id" ]] || return 1
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive="$history_dir/releases/bootstrap-import-consumed-$timestamp-$import_id.env"
+  temporary="$history_dir/releases/.bootstrap-import-consumed-$timestamp-$import_id.partial"
+  [[ ! -e "$archive" && ! -e "$temporary" ]] || return 1
+  umask 077
+  {
+    cat "$record"
+    cat <<EOF
+state=consumed
+consumed_by_tag=$target_tag
+consumed_by_commit=$target_commit
+consumed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  } > "$temporary"
+  mv "$temporary" "$archive"
+  rm -f "$record" || echo "Warning: production bootstrap import marker remains after a healthy release." >&2
+}
+
+write_bootstrap_database_compose() {
+  local compose_path="$1"
+  # This deliberately contains only the production PostgreSQL service. It
+  # never starts API, worker, Caddy, migrations, or any staging resource while
+  # a snapshot is being restored into a fresh host.
+  cat > "$compose_path" <<'EOF'
+name: resume-screening-v3
+services:
+  db:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      POSTGRES_DB: resume_v3
+      POSTGRES_USER: resume_v3
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    network_mode: none
+volumes:
+  postgres_data:
+    name: resume-screening-v3_postgres_data
+EOF
+}
+
+bootstrap_compose_run() {
+  local compose_path="$1" environment_dir="$2"
+  shift 2
+  # Docker Compose receives the ignored environment file directly. The helper
+  # never cats, parses, or logs that file or its values.
+  sudo -n docker compose --project-name resume-screening-v3 -f "$compose_path" \
+    --env-file "$environment_dir/.env.production" "$@"
+}
+
+wait_for_bootstrap_database() {
+  local compose_path="$1" environment_dir="$2"
+  for attempt in $(seq 1 30); do
+    if bootstrap_compose_run "$compose_path" "$environment_dir" exec -T db \
+      pg_isready -U resume_v3 -d resume_v3 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  die "Production bootstrap PostgreSQL did not become ready."
+}
+
+create_bootstrap_import_backup() (
+  # The first target release has no previous application runtime, but it still
+  # needs a normal paired pre-migration backup. Start only PostgreSQL from the
+  # reviewed target Compose model, snapshot the two exact production volumes,
+  # then remove that temporary database container before target migration.
+  set -Eeuo pipefail
+  local target_source_dir="$1" environment_dir="$2" history_dir="$3"
+  local target_tag="$4" target_commit="$5" import_id="$6"
+  local backup_id timestamp staging_dir final_dir completed=0 database_started=0
+
+  require_safe_bootstrap_import_id "$import_id"
+  require_no_production_runtime
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_id="pre-$target_tag-$timestamp"
+  require_safe_backup_id "$backup_id"
+  final_dir="$history_dir/backups/$backup_id"
+  staging_dir="$history_dir/backups/.$backup_id.partial"
+  [[ ! -e "$final_dir" && ! -e "$staging_dir" ]] || die "Bootstrap backup ID collision; retry the release."
+
+  # Persist the recovery state before Docker is allowed to start the temporary
+  # database.  An interrupted backup must be recoverable with the explicit
+  # bootstrap restore command; it must never leave a ready marker beside a
+  # production database container that later commands cannot safely classify.
+  write_bootstrap_attempted_marker "$history_dir" "$target_tag" "$target_commit" "$backup_id"
+
+  cleanup() {
+    local status=$?
+    if [[ "$completed" != "1" && "$database_started" == "1" ]]; then
+      compose_run "$target_source_dir" "$environment_dir" "$target_commit" \
+        rm -sf db >/dev/null 2>&1 || true
+    fi
+    if [[ "$completed" != "1" && -n "$staging_dir" ]]; then
+      rm -rf -- "$staging_dir"
+    fi
+    exit "$status"
+  }
+  trap cleanup EXIT
+
+  umask 077
+  mkdir -p "$staging_dir"
+  chmod 700 "$staging_dir"
+  # There is no old application source to execute here. The staged, immutable
+  # promotion target contributes only the `db` Compose service.
+  database_started=1
+  compose_run "$target_source_dir" "$environment_dir" "$target_commit" \
+    up -d --no-build db >/dev/null
+  for attempt in $(seq 1 30); do
+    if compose_run "$target_source_dir" "$environment_dir" "$target_commit" exec -T db \
+      pg_isready -U resume_v3 -d resume_v3 >/dev/null 2>&1; then
+      break
+    fi
+    [[ "$attempt" -eq 30 ]] && die "Imported PostgreSQL did not become ready for the first release backup."
+    sleep 2
+  done
+  compose_run "$target_source_dir" "$environment_dir" "$target_commit" exec -T db \
+    pg_dump -U resume_v3 -d resume_v3 -Fc </dev/null > "$staging_dir/database.dump"
+  [[ -s "$staging_dir/database.dump" ]] || die "Bootstrap database backup is empty."
+  sudo -n docker run --rm --network none -v "$staging_dir:/backup:ro" postgres:16-alpine \
+    pg_restore --list /backup/database.dump >/dev/null 2>&1 || \
+    die "Bootstrap database backup validation failed."
+
+  sudo -n docker run --rm --network none --user 0 \
+    -v "$uploads_volume_name:/source:ro" -v "$staging_dir:/backup" postgres:16-alpine \
+    sh -ceu 'tar -C /source -czf /backup/uploads.tar.gz .'
+  [[ -s "$staging_dir/uploads.tar.gz" ]] || die "Bootstrap uploads backup is empty."
+  validate_upload_archive "$staging_dir"
+  (
+    cd "$staging_dir"
+    sha256sum database.dump uploads.tar.gz > checksums.sha256
+    sha256sum --check checksums.sha256 >/dev/null
+  )
+  cat > "$staging_dir/manifest.env" <<EOF
+format_version=1
+state=complete
+backup_id=$backup_id
+release_tag=$target_tag
+release_commit=$target_commit
+previous_tag=
+previous_commit=
+# This is the paired backup for the forward deployment represented by the
+# pending release record.  Keep that mode aligned so the existing audited
+# pending-finalization path can validate it after an interrupted first release.
+mode=deploy
+database_file=database.dump
+uploads_file=uploads.tar.gz
+bootstrap_import_id=$import_id
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  # Do not leave the temporary bootstrap database container behind.  The
+  # normal deployment path will create the target database dependency again;
+  # this exact-service removal neither removes volumes nor touches staging.
+  compose_run "$target_source_dir" "$environment_dir" "$target_commit" \
+    rm -sf db >/dev/null
+  database_started=0
+  mv "$staging_dir" "$final_dir"
+  completed=1
+  printf '%s\n' "$backup_id"
+)
+
+bootstrap_import_unlocked() {
+  local environment_dir="$1" history_dir="$2" import_id="$3" confirmation="$4" validator="$5"
+  local current_record pending_record marker incoming_root imports_root incoming_dir partial_dir final_dir
+  local compose_path="" bundle_location="incoming" database_volume_touched=0 uploads_volume_touched=0
+  local database_started=0 completed=0
+
+  validate_environment_dir "$environment_dir"
+  validate_history_dir "$history_dir"
+  require_safe_bootstrap_import_id "$import_id"
+  [[ "$confirmation" == "IMPORT_PRODUCTION_SNAPSHOT" ]] || \
+    die "Production bootstrap import requires the exact confirmation IMPORT_PRODUCTION_SNAPSHOT."
+  [[ -f "$validator" && ! -L "$validator" ]] || die "Production bootstrap bundle validator is missing."
+
+  mkdir -p "$history_dir/releases" "$history_dir/backups" "$(bootstrap_imports_incoming_root "$history_dir")" "$(bootstrap_imports_root "$history_dir")"
+  chmod 700 "$history_dir" "$history_dir/releases" "$history_dir/backups" \
+    "$(bootstrap_imports_incoming_root "$history_dir")" "$(bootstrap_imports_root "$history_dir")"
+  current_record="$history_dir/current-release.env"
+  pending_record="$history_dir/pending-release.env"
+  marker="$(bootstrap_import_record_path "$history_dir")"
+  [[ ! -e "$current_record" && ! -L "$current_record" && \
+     ! -e "$pending_record" && ! -L "$pending_record" && \
+     ! -e "$marker" && ! -L "$marker" ]] || \
+    die "Production bootstrap import requires a fresh host with no release or import marker."
+  require_no_production_runtime
+  ! postgres_volume_exists || die "Production bootstrap import refuses an existing PostgreSQL volume."
+  ! uploads_volume_exists || die "Production bootstrap import refuses an existing uploads volume."
+
+  incoming_root="$(bootstrap_imports_incoming_root "$history_dir")"
+  imports_root="$(bootstrap_imports_root "$history_dir")"
+  incoming_dir="$incoming_root/$import_id"
+  partial_dir="$imports_root/.$import_id.partial"
+  final_dir="$imports_root/$import_id"
+  [[ -d "$incoming_dir" && ! -L "$incoming_dir" ]] || \
+    die "Production bootstrap bundle is not present in the approved incoming directory."
+  [[ ! -e "$partial_dir" && ! -L "$partial_dir" && \
+     ! -e "$final_dir" && ! -L "$final_dir" ]] || \
+    die "Production bootstrap import ID already exists."
+  validate_bootstrap_import_bundle "$incoming_dir" "$import_id" "$validator"
+
+  cleanup() {
+    local status=$?
+    if [[ "$database_started" == "1" && -n "$compose_path" ]]; then
+      # Scope cleanup to the temporary db service.  Never use Compose's
+      # orphan discovery here: a manual production container must not become
+      # collateral damage during a failed bootstrap import.
+      bootstrap_compose_run "$compose_path" "$environment_dir" rm -sf db >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$compose_path" 2>/dev/null || true
+    if [[ "$completed" != "1" ]]; then
+      if [[ "$uploads_volume_touched" == "1" ]]; then
+        sudo -n docker volume rm "$uploads_volume_name" >/dev/null 2>&1 || true
+      fi
+      if [[ "$database_volume_touched" == "1" ]]; then
+        sudo -n docker volume rm "$postgres_volume_name" >/dev/null 2>&1 || true
+      fi
+      if [[ "$bundle_location" == "final" && -d "$final_dir" && ! -e "$incoming_dir" ]]; then
+        mv "$final_dir" "$incoming_dir" >/dev/null 2>&1 || true
+      elif [[ "$bundle_location" == "partial" && -d "$partial_dir" && ! -e "$incoming_dir" ]]; then
+        mv "$partial_dir" "$incoming_dir" >/dev/null 2>&1 || true
+      fi
+    fi
+    exit "$status"
+  }
+  trap cleanup EXIT
+
+  mv "$incoming_dir" "$partial_dir"
+  bundle_location="partial"
+  validate_bootstrap_import_bundle "$partial_dir" "$import_id" "$validator"
+  compose_path="$(mktemp "/tmp/greatsell-bootstrap-import-$import_id.XXXXXX.yml")"
+  write_bootstrap_database_compose "$compose_path"
+  # The volume can be created while `up` is still returning an error, so mark
+  # it as touched before invoking Compose. The cleanup trap only removes these
+  # exact new production volume names after the fresh-host precondition.
+  database_volume_touched=1
+  database_started=1
+  bootstrap_compose_run "$compose_path" "$environment_dir" up -d --no-build db >/dev/null
+  wait_for_bootstrap_database "$compose_path" "$environment_dir"
+  postgres_volume_exists || die "Production bootstrap PostgreSQL volume was not created."
+  require_production_volume_provenance "$postgres_volume_name" postgres_data
+  if ! bootstrap_compose_run "$compose_path" "$environment_dir" exec -T db \
+    pg_restore -U resume_v3 -d resume_v3 --clean --if-exists --no-owner < "$partial_dir/database.dump" >/dev/null 2>&1; then
+    die "Production bootstrap database restore failed."
+  fi
+
+  uploads_volume_touched=1
+  sudo -n docker volume create \
+    --label com.docker.compose.project=resume-screening-v3 \
+    --label com.docker.compose.volume=uploads_data \
+    "$uploads_volume_name" >/dev/null
+  require_production_volume_provenance "$uploads_volume_name" uploads_data
+  if ! sudo -n docker run --rm --network none --user 0 \
+    -v "$uploads_volume_name:/target" -v "$partial_dir:/bundle:ro" postgres:16-alpine \
+    sh -ceu 'tar -xzf /bundle/uploads.tar.gz -C /target && chown -R 10001:10001 /target' >/dev/null 2>&1; then
+    die "Production bootstrap uploads restore failed."
+  fi
+
+  bootstrap_compose_run "$compose_path" "$environment_dir" rm -sf db >/dev/null
+  database_started=0
+  rm -f -- "$compose_path"
+  compose_path=""
+  mv "$partial_dir" "$final_dir"
+  bundle_location="final"
+  write_bootstrap_import_marker "$history_dir" "$import_id" "$final_dir" ready
+  completed=1
+  printf '%s\n' 'Production bootstrap import completed.'
+}
+
+bootstrap_import() {
+  local environment_dir="$1" history_dir="$2"
+  shift 2
+  with_release_lock "$history_dir" bootstrap_import_unlocked "$environment_dir" "$history_dir" "$@"
+}
+
+stop_bootstrap_attempted_production_runtime() {
+  # Recovery is intentionally scoped to the one exact production Compose
+  # project. It never names, stops, or removes a staging container, network,
+  # volume, Caddy data, or Caddy config.
+  local service containers
+  for service in api worker caddy migrate db; do
+    containers="$(sudo -n docker ps -aq \
+      --filter label=com.docker.compose.project=resume-screening-v3 \
+      --filter "label=com.docker.compose.service=$service")"
+    [[ -z "$containers" ]] && continue
+    sudo -n docker stop $containers >/dev/null 2>&1 || true
+    sudo -n docker rm -f $containers >/dev/null 2>&1 || true
+  done
+}
+
+archive_bootstrap_restore_pending_record() {
+  local history_dir="$1" pending_record="$2" import_id="$3"
+  local timestamp archive temporary
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive="$history_dir/releases/bootstrap-import-restored-$timestamp-$import_id.env"
+  temporary="$history_dir/releases/.bootstrap-import-restored-$timestamp-$import_id.partial"
+  [[ ! -e "$archive" && ! -e "$temporary" ]] || die "Bootstrap recovery archive path already exists; retry."
+  umask 077
+  {
+    cat "$pending_record"
+    cat <<EOF
+state=restored_to_imported_snapshot
+restored_bootstrap_import_id=$import_id
+restored_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  } > "$temporary"
+  mv "$temporary" "$archive"
+  rm -f "$pending_record" || die "Unable to clear the archived bootstrap pending release metadata."
+}
+
+recover_bootstrap_import_unlocked() {
+  local environment_dir="$1" history_dir="$2" expected_import_id="$3" confirmation="$4" validator="$5"
+  local record pending_record import_id state format_version bundle_dir attempted_tag attempted_commit attempt_backup_id
+  local expected_database_sha256 expected_uploads_sha256 database_sha256 uploads_sha256 postgres_volume uploads_volume
+  local pending_tag="" pending_commit="" pending_state="" compose_path="" database_started=0 restored=0
+
+  validate_environment_dir "$environment_dir"
+  validate_history_dir "$history_dir"
+  require_safe_bootstrap_import_id "$expected_import_id"
+  [[ "$confirmation" == "RESTORE_PRODUCTION_BOOTSTRAP" ]] || \
+    die "Production bootstrap restore requires the exact confirmation RESTORE_PRODUCTION_BOOTSTRAP."
+  [[ ! -e "$history_dir/current-release.env" && ! -L "$history_dir/current-release.env" ]] || \
+    die "Production bootstrap restore refuses a host with an active release record."
+  record="$(bootstrap_import_record_path "$history_dir")"
+  [[ -f "$record" && ! -L "$record" ]] || die "Production bootstrap import marker is missing."
+  format_version="$(record_value "$record" format_version)"
+  state="$(record_value "$record" state)"
+  import_id="$(record_value "$record" import_id)"
+  bundle_dir="$(record_value "$record" bundle_dir)"
+  attempted_tag="$(record_value "$record" attempted_tag)"
+  attempted_commit="$(record_value "$record" attempted_commit)"
+  attempt_backup_id="$(record_value "$record" attempt_backup_id)"
+  expected_database_sha256="$(record_value "$record" database_sha256)"
+  expected_uploads_sha256="$(record_value "$record" uploads_sha256)"
+  postgres_volume="$(record_value "$record" postgres_volume)"
+  uploads_volume="$(record_value "$record" uploads_volume)"
+  require_safe_bootstrap_import_id "$import_id"
+  [[ "$import_id" == "$expected_import_id" ]] || die "Production bootstrap import ID does not match the operator confirmation."
+  [[ "$format_version" == "1" && "$state" == "deploy_attempted" ]] || \
+    die "Production bootstrap restore requires a failed first deployment marker."
+  require_release_reference "$attempted_tag" "$attempted_commit"
+  require_safe_backup_id "$attempt_backup_id"
+  [[ "$bundle_dir" == "$(bootstrap_imports_root "$history_dir")/$import_id" ]] || \
+    die "Production bootstrap restore bundle path is invalid."
+  validate_bootstrap_import_bundle "$bundle_dir" "$import_id" "$validator"
+  database_sha256="$(sha256sum "$bundle_dir/database.dump" | awk '{print $1}')"
+  uploads_sha256="$(sha256sum "$bundle_dir/uploads.tar.gz" | awk '{print $1}')"
+  [[ "$expected_database_sha256" == "$database_sha256" && "$expected_uploads_sha256" == "$uploads_sha256" ]] || \
+    die "Production bootstrap restore artifacts no longer match their import record."
+  [[ "$postgres_volume" == "$postgres_volume_name" && "$uploads_volume" == "$uploads_volume_name" ]] || \
+    die "Production bootstrap restore marker does not target the exact production volumes."
+  postgres_volume_exists || die "Production bootstrap restore PostgreSQL volume is missing."
+  uploads_volume_exists || die "Production bootstrap restore uploads volume is missing."
+  require_production_volume_provenance "$postgres_volume_name" postgres_data
+  require_production_volume_provenance "$uploads_volume_name" uploads_data
+
+  pending_record="$history_dir/pending-release.env"
+  if [[ -e "$pending_record" || -L "$pending_record" ]]; then
+    [[ -f "$pending_record" && ! -L "$pending_record" ]] || die "Production bootstrap pending release marker is invalid."
+    pending_tag="$(record_value "$pending_record" tag)"
+    pending_commit="$(record_value "$pending_record" commit)"
+    pending_state="$(record_value "$pending_record" state)"
+    [[ "$pending_tag" == "$attempted_tag" && "$pending_commit" == "$attempted_commit" && "$pending_state" == "prepared" ]] || \
+      die "Production bootstrap restore refuses an unrelated pending release."
+  fi
+
+  cleanup() {
+    local status=$?
+    if [[ "$database_started" == "1" && -n "$compose_path" ]]; then
+      bootstrap_compose_run "$compose_path" "$environment_dir" rm -sf db >/dev/null 2>&1 || true
+    fi
+    rm -f -- "$compose_path" 2>/dev/null || true
+    if [[ "$restored" != "1" ]]; then
+      echo "Production bootstrap restore did not complete; imported data remains protected by the attempted marker." >&2
+    fi
+    exit "$status"
+  }
+  trap cleanup EXIT
+
+  stop_bootstrap_attempted_production_runtime
+  require_no_production_runtime
+  compose_path="$(mktemp "/tmp/greatsell-bootstrap-restore-$import_id.XXXXXX.yml")"
+  write_bootstrap_database_compose "$compose_path"
+  database_started=1
+  bootstrap_compose_run "$compose_path" "$environment_dir" up -d --no-build db >/dev/null
+  wait_for_bootstrap_database "$compose_path" "$environment_dir"
+  if ! bootstrap_compose_run "$compose_path" "$environment_dir" exec -T db \
+    pg_restore -U resume_v3 -d resume_v3 --clean --if-exists --no-owner < "$bundle_dir/database.dump" >/dev/null 2>&1; then
+    die "Production bootstrap database recovery failed."
+  fi
+  if ! sudo -n docker run --rm --network none --user 0 \
+    -v "$uploads_volume_name:/target" -v "$bundle_dir:/bundle:ro" postgres:16-alpine \
+    sh -ceu 'find /target -mindepth 1 -depth -exec rm -rf -- {} \; && tar -xzf /bundle/uploads.tar.gz -C /target && chown -R 10001:10001 /target' >/dev/null 2>&1; then
+    die "Production bootstrap uploads recovery failed."
+  fi
+  bootstrap_compose_run "$compose_path" "$environment_dir" rm -sf db >/dev/null
+  database_started=0
+  rm -f -- "$compose_path"
+  compose_path=""
+  if [[ -e "$pending_record" ]]; then
+    archive_bootstrap_restore_pending_record "$history_dir" "$pending_record" "$import_id"
+  fi
+  write_bootstrap_import_marker "$history_dir" "$import_id" "$bundle_dir" ready
+  restored=1
+  printf '%s\n' 'Production bootstrap restore completed.'
+}
+
+recover_bootstrap_import() {
+  local environment_dir="$1" history_dir="$2"
+  shift 2
+  with_release_lock "$history_dir" recover_bootstrap_import_unlocked "$environment_dir" "$history_dir" "$@"
+}
+
 verify_public_runtime() {
   local environment_dir="$1" domain session_body protected_status
   # The ignored production environment file may be root-owned. Read only the
@@ -157,6 +733,74 @@ verify_public_runtime() {
     die "Unexpected unauthenticated session response."
   protected_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 5 --max-time 15 "https://$domain/v1/resumes/00000000-0000-0000-0000-000000000000/original-file")"
   [[ "$protected_status" == "401" ]] || die "Protected PDF endpoint did not reject an unauthenticated request."
+}
+
+verify_bootstrap_target_runtime() {
+  # Before DNS points at the new production host, a public HTTPS curl can hit
+  # the legacy host and falsely verify the wrong runtime. The first imported
+  # deployment therefore verifies the target API and Caddy containers directly.
+  # Public DNS/TLS smoke remains a separate, explicit post-cutover operation.
+  local source_dir="$1" environment_dir="$2" image_tag="$3"
+  local api_container caddy_container api_proxy_address caddy_proxy_address api_proxy_aliases
+  api_container="$(compose_service_container_id "$source_dir" "$environment_dir" "$image_tag" api)"
+  caddy_container="$(compose_service_container_id "$source_dir" "$environment_dir" "$image_tag" caddy)"
+  require_container_image "$api_container" "greatsellai-hr-api:$image_tag"
+  require_container_image "$caddy_container" "greatsellai-hr-caddy:$image_tag"
+  require_container_state "$api_container" running
+  require_container_state "$caddy_container" running
+  api_proxy_address="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{.IPAddress}}{{end}}' "$api_container")"
+  caddy_proxy_address="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{.IPAddress}}{{end}}' "$caddy_container")"
+  api_proxy_aliases="$(sudo -n docker inspect --format '{{with index .NetworkSettings.Networks "resume-screening-v3_proxy"}}{{range .Aliases}}{{.}}{{"\n"}}{{end}}{{end}}' "$api_container" | sed '/^$/d')"
+  [[ "$api_proxy_address" == "$api_proxy_ip" && "$caddy_proxy_address" == "$caddy_proxy_ip" ]] || \
+    die "Local bootstrap target does not have the expected Caddy/API proxy addresses."
+  grep -qx 'api' <<< "$api_proxy_aliases" || \
+    die "Local bootstrap target API is missing its Caddy proxy DNS alias."
+  if ! sudo -n docker exec "$api_container" python - <<'PY' >/dev/null 2>&1
+from urllib.error import HTTPError
+from urllib.request import urlopen
+
+with urlopen("http://127.0.0.1:8000/health", timeout=5) as response:
+    if response.status != 200:
+        raise SystemExit(1)
+with urlopen("http://127.0.0.1:8000/v1/auth/session", timeout=5) as response:
+    body = response.read().decode("utf-8")
+if '"authenticated":false' not in body or '"login_required":true' not in body:
+    raise SystemExit(1)
+try:
+    urlopen(
+        "http://127.0.0.1:8000/v1/resumes/00000000-0000-0000-0000-000000000000/original-file",
+        timeout=5,
+    )
+except HTTPError as error:
+    if error.code != 401:
+        raise SystemExit(1)
+else:
+    raise SystemExit(1)
+PY
+  then
+    die "Local bootstrap target runtime verification failed."
+  fi
+  # The API and Caddy share only the private proxy network.  Caddy's explicit
+  # non-published listener lets this check prove the target's Caddy -> api
+  # path without resolving the public hostname or requiring DNS/TLS cutover.
+  local caddy_proxy_ready=0
+  for attempt in $(seq 1 15); do
+    if sudo -n docker exec "$api_container" python - "$caddy_proxy_ip" <<'PY' >/dev/null 2>&1
+import sys
+from urllib.request import urlopen
+
+caddy_address = sys.argv[1]
+with urlopen(f"http://{caddy_address}:8081/health", timeout=5) as response:
+    if response.status != 200:
+        raise SystemExit(1)
+PY
+    then
+      caddy_proxy_ready=1
+      break
+    fi
+    sleep 2
+  done
+  [[ "$caddy_proxy_ready" == "1" ]] || die "Local bootstrap Caddy-to-API verification failed."
 }
 
 validate_pending_target_source() {
@@ -277,7 +921,10 @@ load_current_runtime() {
   current_commit=""
   current_source_dir="$environment_dir"
   record="$history_dir/current-release.env"
-  [[ -f "$record" ]] || return 0
+  if [[ ! -e "$record" && ! -L "$record" ]]; then
+    return 0
+  fi
+  [[ -f "$record" && ! -L "$record" ]] || die "Current production release record must be a regular file."
 
   current_tag="$(record_value "$record" tag)"
   current_commit="$(record_value "$record" commit)"
@@ -291,7 +938,11 @@ resolve_pending_release() {
   local history_dir="$1" pending_record
   local pending_tag pending_commit pending_backup_id
   pending_record="$history_dir/pending-release.env"
-  [[ -f "$pending_record" ]] || return 0
+  if [[ ! -e "$pending_record" && ! -L "$pending_record" ]]; then
+    return 0
+  fi
+  [[ -f "$pending_record" && ! -L "$pending_record" ]] || \
+    die "Pending production release record must be a regular file."
 
   pending_tag="$(record_value "$pending_record" tag)"
   pending_commit="$(record_value "$pending_record" commit)"
@@ -451,7 +1102,10 @@ prepare_target_images() {
 write_release_records() {
   local history_dir="$1" tag="$2" target_commit="$3" target_source_dir="$4"
   local mode="$5" skip_migrate="$6" backup_state="$7" backup_id="$8" image_mode="$9"
+  local verification_mode="${10:-public_https}"
   local timestamp record temporary_record temporary_current api_image_id caddy_image_id
+  [[ "$verification_mode" == "public_https" || "$verification_mode" == "bootstrap_target_local" ]] || \
+    die "Invalid production runtime verification mode."
   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
   record="$history_dir/releases/$timestamp-$tag.env"
   temporary_record="$history_dir/releases/.$timestamp-$tag.partial"
@@ -477,8 +1131,13 @@ caddy_image_id=$caddy_image_id
 health_check=pass
 session_protection=pass
 protected_pdf_check=pass
+runtime_verification=$verification_mode
+public_cutover_check=$([[ "$verification_mode" == "bootstrap_target_local" ]] && printf pending || printf pass)
 deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
+  if [[ -n "$bootstrap_import_id" ]]; then
+    printf 'bootstrap_import_id=%s\n' "$bootstrap_import_id" >> "$temporary_current"
+  fi
   # Commit the authoritative current record first. No release history file is
   # created before this move, so a failed record write cannot make a target
   # that was recovered to the old runtime look rollback-eligible.
@@ -496,7 +1155,7 @@ EOF
 deploy_target() {
   local environment_dir="$1" history_dir="$2" tag="$3" target_commit="$4" target_source_dir="$5"
   local mode="$6" migration_changed="$7" skip_migrate="$8" stage_tool="$9" image_mode="${10}"
-  local backup_id backup_state deployment_succeeded=0 writers_quiesced=0 previous_schema_revision=""
+  local backup_id backup_state verification_mode deployment_succeeded=0 writers_quiesced=0 previous_schema_revision=""
   backup_id="$(record_value "$history_dir/pending-release.env" backup_id)"
   backup_state="$(record_value "$history_dir/pending-release.env" backup_state)"
 
@@ -548,10 +1207,21 @@ deploy_target() {
   fi
   compose_run "$target_source_dir" "$environment_dir" "$target_commit" exec -T caddy \
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null >/dev/null
-  verify_public_runtime "$environment_dir"
+  if [[ -n "$bootstrap_import_id" ]]; then
+    verify_bootstrap_target_runtime "$target_source_dir" "$environment_dir" "$target_commit"
+    verification_mode="bootstrap_target_local"
+  else
+    verify_public_runtime "$environment_dir"
+    verification_mode="public_https"
+  fi
 
   write_release_records "$history_dir" "$tag" "$target_commit" "$target_source_dir" \
-    "$mode" "$skip_migrate" "$backup_state" "$backup_id" "$image_mode"
+    "$mode" "$skip_migrate" "$backup_state" "$backup_id" "$image_mode" "$verification_mode"
+  if [[ -n "$bootstrap_import_id" ]]; then
+    if ! archive_bootstrap_import_marker "$history_dir" "$bootstrap_import_id" "$tag" "$target_commit"; then
+      echo "Warning: production bootstrap import marker could not be archived after a healthy release." >&2
+    fi
+  fi
   # ``current-release.env`` is the source of truth for an active deployment.
   # The symlink is only an operator convenience, so it cannot undo a healthy
   # target if that optional update fails.
@@ -569,7 +1239,7 @@ release_unlocked() {
   local environment_dir="$1" history_dir="$2" tag="$3" target_commit="$4"
   local expected_previous_tag="$5" expected_previous_commit="$6" mode="$7"
   local migration_changed="$8" skip_migrate="$9" archive_sha256="${10}" stage_tool="${11}" image_mode="${12:-build}"
-  local target_source_dir backup_id backup_state
+  local bootstrap_validator="${13:-}" target_source_dir backup_id backup_state
 
   validate_environment_dir "$environment_dir"
   validate_history_dir "$history_dir"
@@ -582,6 +1252,9 @@ release_unlocked() {
   chmod 700 "$history_dir" "$history_dir/releases" "$history_dir/backups"
 
   load_current_runtime "$environment_dir" "$history_dir"
+  load_bootstrap_import "$history_dir" "$bootstrap_validator"
+  [[ -z "$current_commit" || -z "$bootstrap_import_id" ]] || \
+    die "Production bootstrap import marker cannot coexist with an active release."
   resolve_pending_release "$history_dir"
   release_phase "Stage immutable source"
   target_source_dir="$(stage_target_source "$history_dir" "$target_commit" "$archive_sha256" "$stage_tool")"
@@ -600,14 +1273,24 @@ release_unlocked() {
     die "Current release changed during preparation; retry the deployment."
 
   if [[ -z "$current_commit" ]]; then
-    if [[ -n "$(compose_run "$target_source_dir" "$environment_dir" "$target_commit" ps -q db)" ]]; then
-      die "Current release record is missing; refusing to stop a populated runtime."
+    if [[ -n "$bootstrap_import_id" ]]; then
+      [[ "$mode" == "deploy" && "$migration_changed" == "1" && "$skip_migrate" == "0" ]] || \
+        die "An imported production snapshot can only be consumed by a forward migration-aware deployment."
+      release_phase "Create verified production backup from imported snapshot"
+      backup_id="$(create_bootstrap_import_backup "$target_source_dir" "$environment_dir" "$history_dir" \
+        "$tag" "$target_commit" "$bootstrap_import_id")"
+      backup_state="complete"
+      release_phase_end
+    else
+      if [[ -n "$(compose_run "$target_source_dir" "$environment_dir" "$target_commit" ps -q db)" ]]; then
+        die "Current release record is missing; refusing to stop a populated runtime."
+      fi
+      if uploads_volume_exists || postgres_volume_exists; then
+        die "Current release record is missing; refusing to treat persistent data as an initial deployment."
+      fi
+      backup_id=""
+      backup_state="initial_empty"
     fi
-    if uploads_volume_exists || postgres_volume_exists; then
-      die "Current release record is missing; refusing to treat persistent data as an initial deployment."
-    fi
-    backup_id=""
-    backup_state="initial_empty"
   else
     release_phase "Create verified production backup"
     backup_id="$(create_backup_bundle "$current_source_dir" "$environment_dir" "$history_dir" \
@@ -635,6 +1318,7 @@ mode=$mode
 backup_state=$backup_state
 backup_id=$backup_id
 image_mode=$image_mode
+bootstrap_import_id=$bootstrap_import_id
 prepared_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
   mv -f "$history_dir/.pending-release.$$.tmp" "$history_dir/pending-release.env"
@@ -885,7 +1569,8 @@ finalize_healthy_pending_target_unlocked() {
   local pending_record current_record pending_tag pending_commit pending_source_dir
   local pending_previous_tag pending_previous_commit pending_mode pending_backup_state
   local pending_backup_id pending_prepared_at pending_state pending_format
-  local current_state
+  local pending_bootstrap_import_id current_bootstrap_import_id current_previous_tag current_previous_commit
+  local current_state current_runtime_verification current_public_cutover_check initial_bootstrap_pending=0
   local api_container worker_container caddy_container migrate_container
   local api_proxy_address caddy_proxy_address api_proxy_aliases
   local api_container_name caddy_container_name attached_containers expected_members
@@ -916,9 +1601,17 @@ finalize_healthy_pending_target_unlocked() {
   pending_prepared_at="$(record_value "$pending_record" prepared_at)"
   pending_state="$(record_value "$pending_record" state)"
   pending_format="$(record_value "$pending_record" format_version)"
+  pending_bootstrap_import_id="$(record_value "$pending_record" bootstrap_import_id)"
 
   require_release_reference "$pending_tag" "$pending_commit"
-  require_release_reference "$pending_previous_tag" "$pending_previous_commit"
+  if [[ -n "$pending_bootstrap_import_id" ]]; then
+    require_safe_bootstrap_import_id "$pending_bootstrap_import_id"
+    [[ -z "$pending_previous_tag" && -z "$pending_previous_commit" ]] || \
+      die "Bootstrap first-release pending metadata has an unexpected predecessor."
+    initial_bootstrap_pending=1
+  else
+    require_release_reference "$pending_previous_tag" "$pending_previous_commit"
+  fi
   [[ "$pending_tag" == "$expected_pending_tag" && "$pending_commit" == "$expected_pending_commit" ]] || \
     die "Pending release does not match the exact operator-confirmed healthy target."
   [[ "$pending_format" == "1" && "$pending_state" == "prepared" && "$pending_mode" == "deploy" ]] || \
@@ -928,12 +1621,30 @@ finalize_healthy_pending_target_unlocked() {
 
   load_current_runtime "$environment_dir" "$history_dir"
   current_state="$(record_value "$current_record" state)"
+  current_bootstrap_import_id="$(record_value "$current_record" bootstrap_import_id)"
+  current_previous_tag="$(record_value "$current_record" previous_tag)"
+  current_previous_commit="$(record_value "$current_record" previous_commit)"
+  current_runtime_verification="$(record_value "$current_record" runtime_verification)"
+  current_public_cutover_check="$(record_value "$current_record" public_cutover_check)"
   [[ "$current_state" == "complete" && "$current_tag" == "$pending_tag" && "$current_commit" == "$pending_commit" ]] || \
     die "Current release is not the exact healthy pending target."
   [[ "$current_source_dir" == "$pending_source_dir" ]] || \
     die "Current release source does not match the healthy pending target."
-  [[ "$pending_previous_tag" == "$current_tag" && "$pending_previous_commit" == "$current_commit" ]] || \
-    die "Healthy pending predecessor does not match the recorded current release."
+  if [[ "$initial_bootstrap_pending" == "1" ]]; then
+    [[ "$current_bootstrap_import_id" == "$pending_bootstrap_import_id" && \
+       -z "$current_previous_tag" && -z "$current_previous_commit" && \
+       "$current_runtime_verification" == "bootstrap_target_local" && \
+       "$current_public_cutover_check" == "pending" ]] || \
+      die "Current release does not match the recorded imported first deployment."
+  else
+    # Existing healthy-pending recovery accepts only the narrow replay shape:
+    # the pending record must name the already-recorded current runtime as its
+    # predecessor. Keep that established contract unchanged for non-bootstrap
+    # releases; imported first releases are handled by the explicit branch.
+    [[ "$pending_previous_tag" == "$current_tag" && \
+       "$pending_previous_commit" == "$current_commit" ]] || \
+      die "Healthy pending predecessor does not match the recorded current release."
+  fi
 
   validate_pending_target_source "$history_dir" "$pending_source_dir" "$pending_commit" "$expected_tree_sha256"
   require_production_caddy_image_without_legacy_staging_gateway "greatsellai-hr-caddy:$pending_commit"
@@ -971,8 +1682,21 @@ finalize_healthy_pending_target_unlocked() {
 
   compose_run "$pending_source_dir" "$environment_dir" "$pending_commit" exec -T caddy \
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null >/dev/null
-  verify_public_runtime "$environment_dir"
+  if [[ "$initial_bootstrap_pending" == "1" ]]; then
+    # The first imported host has not received public DNS yet. Re-run the
+    # private Caddy/API verifier instead of allowing a legacy host to satisfy
+    # a public-domain request during recovery of an interrupted cleanup.
+    verify_bootstrap_target_runtime "$pending_source_dir" "$environment_dir" "$pending_commit"
+  else
+    verify_public_runtime "$environment_dir"
+  fi
   archive_verified_healthy_pending_record "$history_dir" "$pending_record" "$pending_tag" "$pending_commit"
+  if [[ "$initial_bootstrap_pending" == "1" ]]; then
+    if ! archive_bootstrap_import_marker "$history_dir" "$pending_bootstrap_import_id" \
+      "$pending_tag" "$pending_commit"; then
+      echo "Warning: production bootstrap import marker could not be archived after healthy pending finalization." >&2
+    fi
+  fi
 }
 
 finalize_healthy_pending_target() {
@@ -1308,6 +2032,14 @@ case "${1:-}" in
     shift
     restore "$@"
     ;;
+  bootstrap-import)
+    shift
+    bootstrap_import "$@"
+    ;;
+  bootstrap-restore)
+    shift
+    recover_bootstrap_import "$@"
+    ;;
   reconcile-legacy-pending)
     shift
     reconcile_legacy_pending "$@"
@@ -1321,7 +2053,7 @@ case "${1:-}" in
     finalize_healthy_pending_target "$@"
     ;;
   *)
-    echo "Usage: $0 {release|restore|reconcile-legacy-pending|finalize-pending-target|finalize-healthy-pending-target} <release arguments>" >&2
+    echo "Usage: $0 {release|restore|bootstrap-import|bootstrap-restore|reconcile-legacy-pending|finalize-pending-target|finalize-healthy-pending-target} <release arguments>" >&2
     exit 2
     ;;
 esac

@@ -72,6 +72,17 @@ git push --force-with-lease origin <branch>
 推荐提交粒度是“一次提交解决一个可解释问题”。不要把不同功能、格式化和同事改动混在
 同一个提交中。
 
+### 连续合并的基线规则
+
+多个 PR 即使都显示绿灯，也不能按同一个旧 `main` 基线连续合并。每合并一个 PR，下一
+个待合并 PR 都必须先 fetch 最新 `origin/main`、更新或 rebase 到该基线，并等待更新后
+head 的完整 PR CI 再次变绿。这样发布溯源门校验的才是实际的组合代码树。
+
+如果 `Main release provenance` 因旧基线合并而失败，不要重跑 main CI、直接推送 main 或
+手动触发 staging。保留失败提交作为审计记录，从当前 `origin/main` 创建一个明确、可审查
+的后续修复 PR，完成该 PR 的完整 CI 后再合并；合并前若 main 又前进，必须再次更新基线和
+重新验证。
+
 ## 3. 创建 PR：所有 Agent 可复现的流程
 
 创建 PR 不是“push 完分支就结束”。PR 是共享交付物，必须能被其他人复核、测试和安全

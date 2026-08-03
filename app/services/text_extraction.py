@@ -88,7 +88,6 @@ class _TextQuality:
     control_chars: int
     unassigned_chars: int
     cjk_radical_chars: int
-    symbol_chars: int
     latin1_mojibake_pairs: int
     damaged_char_count: int
 
@@ -342,7 +341,6 @@ def _assess_text_quality(text: str) -> _TextQuality:
     control_chars = 0
     unassigned_chars = 0
     cjk_radical_chars = 0
-    symbol_chars = 0
     damaged_character_positions: set[int] = set()
 
     for index, character in enumerate(text):
@@ -365,8 +363,6 @@ def _assess_text_quality(text: str) -> _TextQuality:
         elif category == "Cn":
             unassigned_chars += 1
             damaged_character_positions.add(index)
-        elif category == "So":
-            symbol_chars += 1
         if _is_cjk_radical(character):
             cjk_radical_chars += 1
             damaged_character_positions.add(index)
@@ -382,7 +378,6 @@ def _assess_text_quality(text: str) -> _TextQuality:
         control_chars=control_chars,
         unassigned_chars=unassigned_chars,
         cjk_radical_chars=cjk_radical_chars,
-        symbol_chars=symbol_chars,
         latin1_mojibake_pairs=len(_LATIN1_MOJIBAKE_PAIR.findall(text)),
         damaged_char_count=sum(
             1

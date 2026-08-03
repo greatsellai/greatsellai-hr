@@ -27,6 +27,10 @@ _CJK_RADICAL_RANGES = (
     (0x31C0, 0x31EF),  # CJK Strokes
 )
 _NON_BLOCKING_QUALITY_FLAG_SUFFIXES = ("_pymupdf_text_recovered",)
+# A page is not blocked from the hiring workflow merely because a handful of
+# glyphs could not be recovered.  The repair path is deliberately sensitive;
+# the final evidence gate is deliberately stricter.
+_HARD_SOURCE_TEXT_DAMAGE_RATIO = 0.10
 
 
 class PdfExtractionError(RuntimeError):
@@ -48,6 +52,13 @@ class PdfExtractionResult:
     raw_text: str
     quality_flags: list[str]
     parser_version: str
+    # These are the counters for the *latest* normalization attempt.  They
+    # make runtime reporting possible without storing page images, OCR output,
+    # filenames or any other candidate content in platform diagnostics.
+    ocr_attempted_page_count: int = 0
+    ocr_successful_page_count: int = 0
+    ocr_selected_page_count: int = 0
+    ocr_failed_page_count: int = 0
 
     @property
     def status(self) -> str:
@@ -79,6 +90,7 @@ class _TextQuality:
     cjk_radical_chars: int
     symbol_chars: int
     latin1_mojibake_pairs: int
+    damaged_char_count: int
 
     @property
     def unicode_damage(self) -> int:
@@ -90,7 +102,6 @@ class _TextQuality:
             + self.control_chars * 8
             + self.unassigned_chars * 8
             + self.cjk_radical_chars * 3
-            + self.symbol_chars
             + self.latin1_mojibake_pairs * 3
         )
 
@@ -121,17 +132,38 @@ class _TextQuality:
                 self.control_chars >= 2,
                 self.unassigned_chars >= 2,
                 self.cjk_radical_chars >= max(4, math.ceil(non_whitespace * 0.005)),
-                self.symbol_chars >= max(8, math.ceil(non_whitespace * 0.04)),
                 self.latin1_mojibake_pairs >= max(3, math.ceil(non_whitespace * 0.01)),
             )
         )
+
+    @property
+    def source_text_unreliable(self) -> bool:
+        """Whether unrecovered text is too damaged to support AI conclusions.
+
+        A low signal remains useful for asking PyMuPDF/Tencent OCR to repair
+        the page.  It becomes a user-visible extraction failure only when at
+        least ten percent of the readable payload is made up of known broken
+        Unicode glyphs.  Ordinary layout symbols are intentionally excluded.
+        """
+
+        return (
+            self.non_whitespace_chars > 0
+            and self.damaged_char_count / self.non_whitespace_chars
+            >= _HARD_SOURCE_TEXT_DAMAGE_RATIO
+        )
+
+    @property
+    def replacement_character_ratio(self) -> float:
+        if not self.non_whitespace_chars:
+            return 0.0
+        return self.replacement_chars / self.non_whitespace_chars
 
 
 def extract_pdf_text(
     path: Path,
     *,
     min_text_chars_per_page: int,
-    ocr_sparse_text_chars_per_page: int = 500,
+    ocr_sparse_text_chars_per_page: int = 200,
     tencent_ocr_config: TencentOcrConfig | None = None,
     max_pages: int | None = None,
     max_text_chars: int | None = None,
@@ -209,6 +241,9 @@ def extract_pdf_text(
             else:
                 _append_parser_label(parser_labels, "pymupdf-sparse-fallback")
 
+    ocr_attempted_pages: set[int] = set()
+    ocr_successful_pages: set[int] = set()
+    ocr_selected_pages: set[int] = set()
     ocr_failed_pages: set[int] = set()
     if tencent_ocr_config is not None:
         for page_no, text in enumerate(page_texts, start=1):
@@ -220,6 +255,7 @@ def extract_pdf_text(
                 and not current_quality.unicode_suspect
             ):
                 continue
+            ocr_attempted_pages.add(page_no)
             try:
                 ocr_text = extract_pdf_page_text(
                     path=path,
@@ -229,6 +265,7 @@ def extract_pdf_text(
             except TencentOcrError:
                 ocr_failed_pages.add(page_no)
                 continue
+            ocr_successful_pages.add(page_no)
             ocr_quality = _assess_text_quality(ocr_text)
             if _should_prefer_recovery(
                 current_quality,
@@ -236,6 +273,7 @@ def extract_pdf_text(
                 sparse_text_chars=ocr_sparse_text_chars_per_page,
             ):
                 page_texts[page_index] = ocr_text
+                ocr_selected_pages.add(page_no)
                 _append_parser_label(parser_labels, "tencent-ocr")
 
     pages: list[ExtractedPage] = []
@@ -252,11 +290,11 @@ def extract_pdf_text(
         if non_whitespace_chars < min_text_chars_per_page:
             flags.append(f"page_{page_no}_insufficient_text")
         quality = _assess_text_quality(text)
-        if text and text.count("\ufffd") / max(len(text), 1) > 0.01:
+        if quality.replacement_character_ratio >= _HARD_SOURCE_TEXT_DAMAGE_RATIO:
             flags.append(f"page_{page_no}_possible_mojibake")
         if page_no in pymupdf_recovered_page_numbers:
             flags.append(f"page_{page_no}_pymupdf_text_recovered")
-        if quality.unicode_suspect:
+        if quality.source_text_unreliable:
             flags.append(f"page_{page_no}_source_text_unreliable")
         if (
             page_no in ocr_failed_pages
@@ -285,6 +323,10 @@ def extract_pdf_text(
         raw_text=raw_text,
         quality_flags=sorted(set(flags)),
         parser_version="+".join(parser_labels),
+        ocr_attempted_page_count=len(ocr_attempted_pages),
+        ocr_successful_page_count=len(ocr_successful_pages),
+        ocr_selected_page_count=len(ocr_selected_pages),
+        ocr_failed_page_count=len(ocr_failed_pages),
     )
 
 
@@ -301,8 +343,9 @@ def _assess_text_quality(text: str) -> _TextQuality:
     unassigned_chars = 0
     cjk_radical_chars = 0
     symbol_chars = 0
+    damaged_character_positions: set[int] = set()
 
-    for character in text:
+    for index, character in enumerate(text):
         if character.isspace():
             continue
 
@@ -312,16 +355,24 @@ def _assess_text_quality(text: str) -> _TextQuality:
             textual_chars += 1
         if character == "\ufffd":
             replacement_chars += 1
+            damaged_character_positions.add(index)
         if category == "Co":
             private_use_chars += 1
+            damaged_character_positions.add(index)
         elif category == "Cc":
             control_chars += 1
+            damaged_character_positions.add(index)
         elif category == "Cn":
             unassigned_chars += 1
+            damaged_character_positions.add(index)
         elif category == "So":
             symbol_chars += 1
         if _is_cjk_radical(character):
             cjk_radical_chars += 1
+            damaged_character_positions.add(index)
+
+    for match in _LATIN1_MOJIBAKE_PAIR.finditer(text):
+        damaged_character_positions.update(range(match.start(), match.end()))
 
     return _TextQuality(
         non_whitespace_chars=non_whitespace_chars,
@@ -333,6 +384,11 @@ def _assess_text_quality(text: str) -> _TextQuality:
         cjk_radical_chars=cjk_radical_chars,
         symbol_chars=symbol_chars,
         latin1_mojibake_pairs=len(_LATIN1_MOJIBAKE_PAIR.findall(text)),
+        damaged_char_count=sum(
+            1
+            for index in damaged_character_positions
+            if not text[index].isspace()
+        ),
     )
 
 

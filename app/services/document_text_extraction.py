@@ -261,6 +261,10 @@ def _result(
     parser: str,
     max_pages: int,
     max_text_chars: int,
+    ocr_attempted_page_count: int = 0,
+    ocr_successful_page_count: int = 0,
+    ocr_selected_page_count: int = 0,
+    ocr_failed_page_count: int = 0,
 ) -> PdfExtractionResult:
     if len(texts) > max_pages:
         raise DocumentExtractionError("document_page_limit_exceeded")
@@ -294,6 +298,10 @@ def _result(
         ),
         quality_flags=flags,
         parser_version=parser,
+        ocr_attempted_page_count=ocr_attempted_page_count,
+        ocr_successful_page_count=ocr_successful_page_count,
+        ocr_selected_page_count=ocr_selected_page_count,
+        ocr_failed_page_count=ocr_failed_page_count,
     )
 
 
@@ -502,4 +510,7 @@ def _extract_image(
         parser="tencent-ocr",
         max_pages=1,
         max_text_chars=max_text_chars,
+        ocr_attempted_page_count=1,
+        ocr_successful_page_count=1,
+        ocr_selected_page_count=1,
     )

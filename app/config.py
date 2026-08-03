@@ -227,7 +227,7 @@ class AppSettings:
     tencent_secret_key: str | None = field(default=None, repr=False)
     tencent_ocr_region: str = "ap-guangzhou"
     tencent_ocr_timeout_seconds: int = 20
-    ocr_sparse_text_chars_per_page: int = 500
+    ocr_sparse_text_chars_per_page: int = 200
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -586,7 +586,7 @@ class AppSettings:
                 os.getenv("TENCENT_OCR_TIMEOUT_SECONDS", "20")
             ),
             ocr_sparse_text_chars_per_page=int(
-                os.getenv("OCR_SPARSE_TEXT_CHARS_PER_PAGE", "500")
+                os.getenv("OCR_SPARSE_TEXT_CHARS_PER_PAGE", "200")
             ),
         )
 

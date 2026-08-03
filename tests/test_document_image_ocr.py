@@ -45,6 +45,10 @@ def test_png_and_jpg_use_tencent_ocr(
         result = _extract(image_path, config=_config())
         assert result.parser_version == "tencent-ocr"
         assert result.raw_text.endswith("Candidate Python project experience")
+        assert result.ocr_attempted_page_count == 1
+        assert result.ocr_successful_page_count == 1
+        assert result.ocr_selected_page_count == 1
+        assert result.ocr_failed_page_count == 0
 
     assert [call["path"].suffix for call in calls] == [".png", ".jpg"]
     assert all(call["config"] == _config() for call in calls)

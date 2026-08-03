@@ -86,6 +86,8 @@ die() { echo "Staging verification error: $*" >&2; exit 1; }
 record_value() { sed -n "s/^$2=//p" "$1" | tail -n 1; }
 image_id() { sudo -n docker image inspect --format '{{.Id}}' "$1"; }
 image_revision() { sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$1"; }
+image_ci_run_id() { sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_id" }}' "$1"; }
+image_ci_run_attempt() { sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_attempt" }}' "$1"; }
 
 [[ "$project_dir" == /home/ubuntu/* && "$project_dir" == *staging* && "$project_dir" != /home/ubuntu/ ]] || die "Unsafe staging project directory."
 [[ "$history_dir" == /home/ubuntu/* && "$history_dir" == *staging* && "$history_dir" != /home/ubuntu/ ]] || die "Unsafe staging history directory."
@@ -110,6 +112,12 @@ caddy_image_id="$(image_id "$caddy_image")" || die "Staging Caddy image is unava
 [[ "$caddy_image_id" == "$(record_value "$record" caddy_image_id)" ]] || die "Staging Caddy image identity no longer matches its attestation."
 [[ "$(image_revision "$api_image")" == "$release_commit" ]] || die "Staging API image revision is invalid."
 [[ "$(image_revision "$caddy_image")" == "$release_commit" ]] || die "Staging Caddy image revision is invalid."
+api_ci_run_id="$(image_ci_run_id "$api_image")"
+caddy_ci_run_id="$(image_ci_run_id "$caddy_image")"
+api_ci_run_attempt="$(image_ci_run_attempt "$api_image")"
+caddy_ci_run_attempt="$(image_ci_run_attempt "$caddy_image")"
+[[ "$api_ci_run_id" =~ ^[0-9]+$ && "$api_ci_run_id" == "$caddy_ci_run_id" ]] || die "Staging image CI workflow run identities are invalid."
+[[ "$api_ci_run_attempt" =~ ^[1-9][0-9]*$ && "$api_ci_run_attempt" == "$caddy_ci_run_attempt" ]] || die "Staging image CI workflow run attempts are invalid."
 
 api_container="$(sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" docker compose --project-directory "$project_dir" -f "$project_dir/compose.yml" --env-file "$project_dir/.env.staging" ps -q api)"
 caddy_container="$(sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" docker compose --project-directory "$project_dir" -f "$project_dir/compose.yml" --env-file "$project_dir/.env.staging" ps -q caddy)"
@@ -119,6 +127,8 @@ caddy_container="$(sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" doc
 
 printf 'api_image_id=%s\n' "$api_image_id"
 printf 'caddy_image_id=%s\n' "$caddy_image_id"
+printf 'ci_run_id=%s\n' "$api_ci_run_id"
+printf 'ci_run_attempt=%s\n' "$api_ci_run_attempt"
 EOF
 )"
 
@@ -126,8 +136,12 @@ verification="$(ssh "${ssh_options[@]}" "$remote_host" \
   "bash -c $(shell_quote "$remote_verify_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256")")"
 api_image_id="$(printf '%s\n' "$verification" | sed -n 's/^api_image_id=//p' | tail -n 1)"
 caddy_image_id="$(printf '%s\n' "$verification" | sed -n 's/^caddy_image_id=//p' | tail -n 1)"
+ci_run_id="$(printf '%s\n' "$verification" | sed -n 's/^ci_run_id=//p' | tail -n 1)"
+ci_run_attempt="$(printf '%s\n' "$verification" | sed -n 's/^ci_run_attempt=//p' | tail -n 1)"
 [[ "$api_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging API image ID is malformed."
 [[ "$caddy_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging Caddy image ID is malformed."
+[[ "$ci_run_id" =~ ^[0-9]+$ ]] || die "Staging CI workflow run ID is malformed."
+[[ "$ci_run_attempt" =~ ^[1-9][0-9]*$ ]] || die "Staging CI workflow run attempt is malformed."
 
 if [[ -n "$github_output" ]]; then
   {
@@ -136,6 +150,8 @@ if [[ -n "$github_output" ]]; then
     printf 'archive_sha256=%s\n' "$archive_sha256"
     printf 'api_image_id=%s\n' "$api_image_id"
     printf 'caddy_image_id=%s\n' "$caddy_image_id"
+    printf 'ci_run_id=%s\n' "$ci_run_id"
+    printf 'ci_run_attempt=%s\n' "$ci_run_attempt"
   } >> "$github_output"
 fi
 

@@ -72,13 +72,12 @@ def test_staging_preflights_tags_transfers_deploys_and_smokes_in_order() -> None
     assert "github-token: ${{ github.token }}" in workflow
     assert 'echo "run_attempt=$ci_run_attempt" >> "$GITHUB_OUTPUT"' in workflow
     assert 'echo "name=release-images-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" >> "$GITHUB_OUTPUT"' in workflow
-    assert 'archive_name="release-images-${RELEASE_SHA}-${CI_RUN_ID}-${CI_RUN_ATTEMPT}.tar.gz"' in workflow
-    assert 'metadata_name="${archive_name%.tar.gz}.metadata"' in workflow
-    assert 'sha256sum --check "$archive_name.sha256"' in workflow
-    assert "docker image load --input \"$archive\"" in workflow
-    assert "Loaded image revision does not match the release commit" in workflow
-    assert "Loaded image CI workflow run ID does not match" in workflow
-    assert "Loaded image CI workflow run attempt does not match" in workflow
+    assert 'scripts/load-verified-release-images.sh "$RELEASE_SHA"' in workflow
+    assert '--artifact-dir "$RUNNER_TEMP/greatsell-release-images"' in workflow
+    assert '--repository "$GITHUB_REPOSITORY"' in workflow
+    assert '--ci-run-id "$CI_RUN_ID"' in workflow
+    assert '--ci-run-attempt "$CI_RUN_ATTEMPT"' in workflow
+    assert '--github-output "$GITHUB_OUTPUT"' in workflow
     assert "CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}" in workflow
     assert "CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}" in workflow
     assert 'id: transfer_ci_images' in workflow
@@ -270,6 +269,12 @@ def test_stage_attestation_requires_a_public_smoke_pass_and_exact_image_identiti
     assert '$(record_value "$record" public_smoke_check)" == "pass"' in verify
     assert "Staging API container differs from attested image." in verify
     assert "Staging Caddy container differs from attested image." in verify
+    assert "image_ci_run_id()" in verify
+    assert "image_ci_run_attempt()" in verify
+    assert "Staging image CI workflow run identities are invalid." in verify
+    assert "Staging image CI workflow run attempts are invalid." in verify
+    assert "printf 'ci_run_id=%s\\n'" in verify
+    assert "printf 'ci_run_attempt=%s\\n'" in verify
     assert "Promotion image identity does not match completed staging" in image_verify
     assert "Promotion image revision does not match completed staging" in image_verify
     assert "https://staging.hr.greatsellai.net" in smoke

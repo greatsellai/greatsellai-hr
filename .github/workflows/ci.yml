@@ -258,7 +258,11 @@ jobs:
           name: release-images-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/greatsell-release-images/
           if-no-files-found: error
-          retention-days: 7
+          # Production promotion may wait for a human approval after staging.
+          # Keep the attested artifact long enough to cross that approval
+          # window; when it expires, the commit must be re-staged instead of
+          # being rebuilt on a deployment host.
+          retention-days: 30
           compression-level: 0
       - name: Remove temporary release regression resources
         if: always()

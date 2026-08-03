@@ -31,11 +31,11 @@ repo-level 自托管 Runner 解绑，或将其迁入只允许受保护 `main` �
 由负责人输入 `PROMOTE` 晋级生产。
 
 成功的 `main` CI 会将已完成运行时回归的 API 与 Caddy 镜像以完整 commit SHA、OCI revision
-label、CI run ID 和 run attempt 标记后归档。**Staging release** 只下载并校验该 CI 的精确 artifact，再使用这些
-镜像部署隔离的 staging；它通过后记录 source archive SHA-256、API/Caddy image ID 与健康检查。
-**Production promotion** 只接受当前 `main` 的已完成 `stg-*` 候选，并在生产部署前核对同一台
-Docker 主机上的 image ID，随后以
-`--prebuilt-images` 部署，不会在生产机重新构建镜像。详细操作见
+label、CI run ID 和 run attempt 标记后归档 30 天。**Staging release** 只下载并校验该 CI 的精确 artifact，再使用这些
+镜像部署隔离的 staging；它通过后记录 source archive SHA-256、API/Caddy image ID、CI run ID 与健康检查。
+**Production promotion** 只接受当前 `main` 的已完成 `stg-*` 候选：它重新下载同一 CI run 的 artifact，复核
+checksum、metadata、镜像 label 和 staging 已验收的 image ID，再把该镜像传到目标生产主机，以
+`--prebuilt-images` 部署。生产机不重新构建镜像，也不再要求与 staging 位于同一台 Docker 主机。详细操作见
 [预发布与生产晋级](STAGING_RELEASE.md)。
 
 ## 已提供的工作流
@@ -47,15 +47,18 @@ Docker 主机上的 image ID，随后以
 - **Staging release**：监听本仓库 `main` 上成功的 CI `push` 运行。它只接受当前 main，先用
   该提交的 `deploy/compose.staging.yml` 与服务器既有 `.env.staging` 做只读预检，再创建或复用
   不可变 `stg-YYYYMMDD-<commit>` 标签，传输 CI 已验证镜像、部署隔离 staging 并跑公网 smoke。
-  `main` 在预检期间前进时会安全跳过旧候选；staging 成功后 Runner 清理临时镜像，因为同机生产
-  晋级只使用 staging 主机上已验的 image ID。
+  `main` 在预检期间前进时会安全跳过旧候选；staging 成功后 Runner 清理临时镜像，已验收 artifact
+  仍保留 30 天，供人工批准后的生产晋级重新下载。
 - **Production promotion**：只能从 `main` 手动运行并输入 `PROMOTE`。它先验证当前 main 对应的
   唯一 `stg-*` tag、source archive SHA-256、staging release record、staging 运行中容器与生产
-  主机的 API/Caddy image ID；任何不一致都会失败。之后才做生产 `.env.production` 只读预检、
-  创建 `prod-*` 并以同一预构建镜像部署。它没有 `workflow_run` 自动生产入口。
+  主机的 API/Caddy image ID；生产目标在校验前会从记录的同一 CI run 下载并验证 artifact，再加载和
+  传输镜像。任何不一致都会失败。之后才做生产 `.env.production` 只读预检、创建 `prod-*` 并以同一
+  预构建镜像部署。它没有 `workflow_run` 自动生产入口。
 - **Production deploy**：只用于手动重部署已有 `prod-*` 标签，必须输入 `DEPLOY`；不再
   监听任意标签推送，避免受保护流程外的标签绕过预检。它同样要求服务器已保有经 staging
-  验证的预构建镜像；镜像缺失时快速失败，绝不在生产机重建一个“看起来相同”的镜像。
+  验证的预构建镜像；镜像缺失时快速失败，绝不在生产机重建一个“看起来相同”的镜像。迁移到新的生产
+  主机前，当前生产版本及约定的回滚版本必须由受控迁移步骤预加载；不能把 **Production deploy** 当作
+  新主机初始化入口。
 - **Production rollback**：只能手动触发，且只接受已有 `prod-*` 标签。默认拒绝
   回滚到数据库 schema 落后的代码；只有已确认兼容时才可显式允许该情形。
 - **Production legacy pending reconciliation**：仅用于历史发布器遗留的中断

@@ -9,6 +9,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -24,6 +25,8 @@ jobs:
       archive_sha256: ${{ steps.verified.outputs.archive_sha256 }}
       api_image_id: ${{ steps.verified.outputs.api_image_id }}
       caddy_image_id: ${{ steps.verified.outputs.caddy_image_id }}
+      ci_run_id: ${{ steps.verified.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.verified.outputs.ci_run_attempt }}
     steps:
       - name: Validate promotion request
         env:
@@ -114,6 +117,8 @@ jobs:
       STAGING_TAG: ${{ needs.verify-staging.outputs.staging_tag }}
       STAGING_API_IMAGE_ID: ${{ needs.verify-staging.outputs.api_image_id }}
       STAGING_CADDY_IMAGE_ID: ${{ needs.verify-staging.outputs.caddy_image_id }}
+      CI_RUN_ID: ${{ needs.verify-staging.outputs.ci_run_id }}
+      CI_RUN_ATTEMPT: ${{ needs.verify-staging.outputs.ci_run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -152,16 +157,6 @@ jobs:
           chmod 600 "$RUNNER_TEMP/greatsell-production-promote"
           printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           ssh-keygen -F "${PROD_DEPLOY_HOST#*@}" -f "$HOME/.ssh/known_hosts" >/dev/null
-      - name: Verify production host holds the exact staged images
-        env:
-          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
-        run: |
-          set -Eeuo pipefail
-          scripts/verify-release-images.sh "$RELEASE_SHA" \
-            --host "$PROD_DEPLOY_HOST" \
-            --api-image-id "$STAGING_API_IMAGE_ID" \
-            --caddy-image-id "$STAGING_CADDY_IMAGE_ID" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
       - name: Preflight production configuration before tagging
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
@@ -174,13 +169,52 @@ jobs:
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
-      - name: Reconfirm promotion target after production preflight
+      - name: Download completed staging CI images
+        uses: actions/download-artifact@v4
+        with:
+          name: release-images-${{ env.RELEASE_SHA }}-${{ env.CI_RUN_ID }}-${{ env.CI_RUN_ATTEMPT }}
+          path: ${{ runner.temp }}/greatsell-release-images
+          run-id: ${{ env.CI_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Verify and load completed staging CI images
+        id: load_ci_images
+        run: |
+          set -Eeuo pipefail
+          scripts/load-verified-release-images.sh "$RELEASE_SHA" \
+            --artifact-dir "$RUNNER_TEMP/greatsell-release-images" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ci-run-id "$CI_RUN_ID" \
+            --ci-run-attempt "$CI_RUN_ATTEMPT" \
+            --expected-api-image-id "$STAGING_API_IMAGE_ID" \
+            --expected-caddy-image-id "$STAGING_CADDY_IMAGE_ID" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Transfer exact completed staging images to production
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+        run: |
+          set -Eeuo pipefail
+          scripts/transfer-production-images.sh "$RELEASE_SHA" \
+            --host "$PROD_DEPLOY_HOST" \
+            --expected-ci-run-id "$CI_RUN_ID" \
+            --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
+      - name: Verify production host holds the exact staged images
+        env:
+          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+        run: |
+          set -Eeuo pipefail
+          scripts/verify-release-images.sh "$RELEASE_SHA" \
+            --host "$PROD_DEPLOY_HOST" \
+            --api-image-id "$STAGING_API_IMAGE_ID" \
+            --caddy-image-id "$STAGING_CADDY_IMAGE_ID" \
+            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
+      - name: Reconfirm promotion target before production tagging
         run: |
           set -Eeuo pipefail
           git fetch origin main --tags --prune
           git switch --force-create main origin/main
           [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]] || {
-            echo "main advanced during production preflight. Stage the new main before promoting it." >&2
+            echo "main advanced during production preparation. Stage the new main before promoting it." >&2
             exit 1
           }
       - name: Create immutable production tag for the staged candidate
@@ -229,3 +263,9 @@ jobs:
           scripts/ensure-staging-gateway.sh \
             --host "$PROD_DEPLOY_HOST" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
+      - name: Remove temporary CI images from release runner
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true
+          docker image rm -f "greatsellai-hr-caddy:$RELEASE_SHA" || true

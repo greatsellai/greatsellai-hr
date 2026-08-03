@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -24,20 +25,33 @@ def test_production_is_a_manual_promotion_of_a_completed_staging_candidate() -> 
     assert "needs: verify-staging" in workflow
     assert "environment:\n      name: staging" in workflow
     assert "environment:\n      name: production" in workflow
+    assert "actions: read" in workflow
     assert "scripts/verify-staging-release.sh" in workflow
+    assert "scripts/load-verified-release-images.sh" in workflow
     assert "scripts/verify-release-images.sh" in workflow
     assert "mapfile -t staging_tags" in workflow
     assert "Current main has multiple production tags; use Production deploy for an existing release." in workflow
     assert "Expected exactly one staging tag for current main" in workflow
 
-    image_identity = workflow.index("Verify production host holds the exact staged images")
     preflight = workflow.index("Preflight production configuration before tagging")
+    download = workflow.index("Download completed staging CI images")
+    verify_and_load = workflow.index("Verify and load completed staging CI images")
+    transfer = workflow.index("Transfer exact completed staging images to production")
+    image_identity = workflow.index("Verify production host holds the exact staged images")
     create_tag = workflow.index("Create immutable production tag for the staged candidate")
     deploy = workflow.index("Deploy tagged release from the exact staged images")
-    assert image_identity < preflight < create_tag < deploy
+    assert preflight < download < verify_and_load < transfer < image_identity < create_tag < deploy
     assert 'scripts/preflight-production-release.sh "$RELEASE_SHA"' in workflow
     assert "--prebuilt-images" in workflow
-    assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' not in workflow
+    assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' in workflow
+    assert 'name: release-images-${{ env.RELEASE_SHA }}-${{ env.CI_RUN_ID }}-${{ env.CI_RUN_ATTEMPT }}' in workflow
+    assert 'run-id: ${{ env.CI_RUN_ID }}' in workflow
+    assert '--expected-api-image-id "$STAGING_API_IMAGE_ID"' in workflow
+    assert '--expected-caddy-image-id "$STAGING_CADDY_IMAGE_ID"' in workflow
+    assert '--expected-ci-run-id "$CI_RUN_ID"' in workflow
+    assert '--expected-ci-run-attempt "$CI_RUN_ATTEMPT"' in workflow
+    assert "ci_run_id: ${{ steps.verified.outputs.ci_run_id }}" in workflow
+    assert "ci_run_attempt: ${{ steps.verified.outputs.ci_run_attempt }}" in workflow
     assert "main advanced after staging verification" in workflow
     assert "scripts/ensure-staging-gateway.sh" in workflow
 
@@ -207,7 +221,7 @@ def test_main_ci_archives_only_labeled_images_that_the_release_workflow_can_tran
     assert "ci_run_attempt=%s" in ci
     assert 'docker image save \\' in ci
     assert "sha256sum \"$archive_name\" > \"$archive_name.sha256\"" in ci
-    assert "retention-days: 7" in ci
+    assert "retention-days: 30" in ci
     assert "compression-level: 0" in ci
     assert 'docker image save "$api_image" "$caddy_image" | gzip -1' in transfer
     assert "StrictHostKeyChecking=yes" in transfer
@@ -220,6 +234,35 @@ def test_main_ci_archives_only_labeled_images_that_the_release_workflow_can_tran
     assert "id: release_runtime_regression" in ci
     assert 'docker image rm -f "greatsellai-hr-api:${{ github.sha }}" || true' in ci
     assert 'docker image rm -f "greatsellai-hr-caddy:${{ github.sha }}" || true' in ci
+
+
+def test_release_image_loader_rechecks_artifact_integrity_and_completed_staging_identity() -> None:
+    loader = (ROOT / "scripts" / "load-verified-release-images.sh").read_text(
+        encoding="utf-8"
+    )
+    staging_verify = (ROOT / "scripts" / "verify-staging-release.sh").read_text(
+        encoding="utf-8"
+    )
+    image_verify = (ROOT / "scripts" / "verify-release-images.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "sha256sum --check" in loader
+    assert "checksum does not name the expected archive exactly once" in loader
+    assert "docker image load --input" in loader
+    assert "org.opencontainers.image.revision" in loader
+    assert "org.opencontainers.image.workflow_run_id" in loader
+    assert "org.opencontainers.image.workflow_run_attempt" in loader
+    assert "--expected-api-image-id" in loader
+    assert "--expected-caddy-image-id" in loader
+    assert "Expected API and Caddy image IDs must be provided together." in loader
+    assert "Loaded API image identity does not match completed staging." in loader
+    assert "ci_run_id=%s" in staging_verify
+    assert "ci_run_attempt=%s" in staging_verify
+    assert "Staging image CI workflow run identities are invalid." in staging_verify
+    assert "Staging image CI workflow run attempts are invalid." in staging_verify
+    assert "docker version --format '{{.Server.Os}}/{{.Server.Arch}}'" in image_verify
+    assert "Promotion target platform must be linux/amd64" in image_verify
 
 
 def test_image_transfer_script_loads_and_rechecks_the_ci_images(tmp_path: Path) -> None:
@@ -304,6 +347,149 @@ exec bash -c "$command"
 
     assert completed.returncode == 0, completed.stderr
     assert "Production images transferred and verified" in completed.stdout
+
+
+def test_release_image_loader_checks_metadata_labels_and_staging_image_ids(
+    tmp_path: Path,
+) -> None:
+    """Exercise the shared artifact verifier without a Docker daemon."""
+
+    if os.name != "posix":
+        pytest.skip("the release-image shell harness is exercised in Linux CI")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is required for the release-image contract")
+
+    release_commit = "b" * 40
+    ci_run_id = "123456790"
+    ci_run_attempt = "3"
+    api_image_id = f"sha256:{'1' * 64}"
+    caddy_image_id = f"sha256:{'2' * 64}"
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    archive_name = f"release-images-{release_commit}-{ci_run_id}-{ci_run_attempt}.tar.gz"
+    archive = artifact_dir / archive_name
+    archive.write_bytes(b"fake docker release image archive\n")
+    (artifact_dir / f"{archive_name}.sha256").write_text(
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive_name}\n",
+        encoding="utf-8",
+    )
+    (artifact_dir / f"{archive_name.removesuffix('.tar.gz')}.metadata").write_text(
+        "\n".join(
+            (
+                "repository=greatsellai/greatsellai-hr",
+                f"release_sha={release_commit}",
+                f"ci_run_id={ci_run_id}",
+                f"ci_run_attempt={ci_run_attempt}",
+                f"archive={archive_name}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "docker").write_text(
+        """#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$1" == "image" && "$2" == "load" ]]; then
+  cat "$4" >/dev/null
+  exit 0
+fi
+if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+  format="$4"
+  image="$5"
+  if [[ "$format" == *".Id"* ]]; then
+    if [[ "$image" == *"api:"* ]]; then
+      printf '%s\\n' "$EXPECTED_API_IMAGE_ID"
+    else
+      printf '%s\\n' "$EXPECTED_CADDY_IMAGE_ID"
+    fi
+  elif [[ "$format" == *"workflow_run_attempt"* ]]; then
+    printf '%s\\n' "$EXPECTED_CI_RUN_ATTEMPT"
+  elif [[ "$format" == *"workflow_run_id"* ]]; then
+    printf '%s\\n' "$EXPECTED_CI_RUN_ID"
+  elif [[ "$format" == *"revision"* ]]; then
+    printf '%s\\n' "$EXPECTED_RELEASE_COMMIT"
+  else
+    exit 1
+  fi
+  exit 0
+fi
+printf 'unexpected docker call: %s\\n' "$*" >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    (fake_bin / "docker").chmod(0o755)
+    github_output = tmp_path / "github-output"
+    github_output.write_text("", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            bash,
+            str(ROOT / "scripts" / "load-verified-release-images.sh"),
+            release_commit,
+            "--artifact-dir",
+            str(artifact_dir),
+            "--repository",
+            "greatsellai/greatsellai-hr",
+            "--ci-run-id",
+            ci_run_id,
+            "--ci-run-attempt",
+            ci_run_attempt,
+            "--expected-api-image-id",
+            api_image_id,
+            "--expected-caddy-image-id",
+            caddy_image_id,
+            "--github-output",
+            str(github_output),
+        ],
+        text=True,
+        capture_output=True,
+        env=os.environ
+        | {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "EXPECTED_RELEASE_COMMIT": release_commit,
+            "EXPECTED_CI_RUN_ID": ci_run_id,
+            "EXPECTED_CI_RUN_ATTEMPT": ci_run_attempt,
+            "EXPECTED_API_IMAGE_ID": api_image_id,
+            "EXPECTED_CADDY_IMAGE_ID": caddy_image_id,
+        },
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "CI-verified release images loaded" in completed.stdout
+    assert github_output.read_text(encoding="utf-8") == (
+        f"api_image_id={api_image_id}\n"
+        f"caddy_image_id={caddy_image_id}\n"
+    )
+
+    incomplete_identity = subprocess.run(
+        [
+            bash,
+            str(ROOT / "scripts" / "load-verified-release-images.sh"),
+            release_commit,
+            "--artifact-dir",
+            str(artifact_dir),
+            "--repository",
+            "greatsellai/greatsellai-hr",
+            "--ci-run-id",
+            ci_run_id,
+            "--ci-run-attempt",
+            ci_run_attempt,
+            "--expected-caddy-image-id",
+            caddy_image_id,
+        ],
+        text=True,
+        capture_output=True,
+        env=os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        check=False,
+    )
+    assert incomplete_identity.returncode != 0
+    assert "Expected API and Caddy image IDs must be provided together." in incomplete_identity.stderr
 
 
 def test_remote_preflight_template_uses_its_stdin_compose_and_removes_it(

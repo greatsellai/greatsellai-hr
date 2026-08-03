@@ -12,9 +12,11 @@ PR 完整 CI
 ```
 
 生产不会因为 `main` 合并自动发布。预发布未完成、冒烟检查失败、`main` 在验收期间前进、镜像
-ID 不一致或生产主机没有预发布已验镜像时，晋级都会失败关闭。
+ID 不一致、CI artifact 不完整或超过保留期时，晋级都会失败关闭。
 
-当前预发布和生产同机，但它们是两个独立 Compose 项目。预发布应用以
+当前预发布和生产可以同机，也可以部署在不同 Docker 主机；它们始终是两个独立 Compose 项目。
+生产晋级会重新下载 staging 已验收的同一 CI artifact 并校验 image ID，因此不依赖两端共享 Docker
+镜像缓存。预发布应用以
 `RESUME_V3_ENVIRONMENT=production` 运行，以覆盖生产专属的 HTTPS、安全、数据生命周期和投递逻辑；隔离由独立项目、数据库、数据卷、网络、代理地址与预发布域名保证：
 
 - production：`resume-screening-v3`、生产 `.env.production`、生产数据卷和 `172.30.0.0/24`；
@@ -56,9 +58,10 @@ Runner 常驻环境或代码。
 `production` 继续保存既有 `PROD_*` secrets/variables。建议为 `production` 配置 Required
 reviewer；这会让 **Production promotion** 在验证完 staging 后暂停，直到负责人批准。
 
-同机的首版要求 `STAGING_DEPLOY_HOST` 与 `PROD_DEPLOY_HOST` 指向同一 Docker 主机。这样生产
-晋级会直接核对该主机已经加载的 staging API/Caddy image ID，而不是重新构建。如果未来拆分为
-两台主机，必须先接入受控 OCI registry/digest 传递，再放宽这个约束。
+`STAGING_DEPLOY_HOST` 与 `PROD_DEPLOY_HOST` 可以指向不同 Docker 主机。生产晋级只接受 staging
+attestation 中的 CI run ID、run attempt 和 API/Caddy image ID；它会下载同一份 Actions artifact，逐项
+校验 checksum、metadata 和 OCI labels 后才传输到生产目标。artifact 保留 30 天；超过窗口必须重新
+通过 main CI 和 staging 验收，绝不能在生产机重新构建镜像。
 
 ## 服务器一次性准备
 
@@ -69,7 +72,7 @@ reviewer；这会让 **Production promotion** 在验证完 staging 后暂停，�
    回调地址，且不得直接引用或挂载 `.env.production`。
 3. 创建 staging history 目录，例如
    `/home/ubuntu/greatsellai-hr-staging-deployments`，仅部署用户可写。
-4. DNS 将 `staging.hr.greatsellai.net` 指向同一服务器。生产 Caddy 的受版本控制配置只声明这个
+4. DNS 将 `staging.hr.greatsellai.net` 指向 staging 所在服务器。当前过渡期仍由旧生产 Caddy 的受版本控制配置只声明这个
    精确子域，绝不接管 `greatsellai.net` 根目录或泛域名。
 
 首次合并本链路后，当前已存在的临时 staging Caddy 路由仍可服务本次 staging。随后第一次成功的
@@ -85,15 +88,16 @@ reviewer；这会让 **Production promotion** 在验证完 staging 后暂停，�
    main 会生成新的 staging 候选；旧候选不能被晋级。
 4. 在 Actions 手动运行 **Production promotion**，从 `main` 输入 `PROMOTE`。工作流会验证当前
    main 的唯一 `stg-*` tag、源码 archive SHA-256、staging release record、运行中容器镜像 ID
-   以及生产主机已加载镜像的 ID；全部一致才创建 `prod-*` 并以 `--prebuilt-images` 部署。
+以及 staging attestation 的 CI identity；工作流会重新下载、校验并传输同一镜像到生产主机，全部一致
+才创建 `prod-*` 并以 `--prebuilt-images` 部署。
 5. 已有 `prod-*` 的重部署和回滚仍只用于恢复，不是绕过 staging 的新代码发布入口。
 
 ## 验收与故障处理
 
 - **Staging release 失败**：不会创建可晋级生产的完成记录。修复 PR 后走新的 main；同一 commit
   可通过手动 `STAGE` 重试，已有同 SHA 的 `stg-*` 不会被移动。
-- **Production promotion 被拒绝**：优先看 staging attestation、`main` 是否已前进、以及两边的
-  image ID 是否一致。不要在生产机上 build 来“补救”，这会破坏同一镜像保证。
+- **Production promotion 被拒绝**：优先看 staging attestation、`main` 是否已前进、artifact 是否仍在
+  30 天保留窗口内，以及两边的 image ID 是否一致。不要在生产机上 build 来“补救”，这会破坏同一镜像保证。
 - **Caddy staging route 不可达**：检查生产 Caddy 使用的版本是否已包含 `deploy/Caddyfile` 中的
   `staging.hr.greatsellai.net` 精确块；不修改根域、DNS 或生产 `.env.production` 来绕过。
 - **仅需要重试生产部署**：选择已有 `prod-*` 使用 **Production deploy**；不要手工伪造

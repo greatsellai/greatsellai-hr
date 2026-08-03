@@ -259,67 +259,19 @@ jobs:
           run-id: ${{ steps.ci_artifact.outputs.run_id }}
           github-token: ${{ github.token }}
       - name: Verify and load CI-verified images
+        id: load_ci_images
         if: steps.ready.outputs.stage == 'true'
         env:
           CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}
           CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}
         run: |
           set -Eeuo pipefail
-          artifact_dir="$RUNNER_TEMP/greatsell-release-images"
-          archive_name="release-images-${RELEASE_SHA}-${CI_RUN_ID}-${CI_RUN_ATTEMPT}.tar.gz"
-          metadata_name="${archive_name%.tar.gz}.metadata"
-          archive="$artifact_dir/$archive_name"
-          checksum="$artifact_dir/$archive_name.sha256"
-          metadata="$artifact_dir/$metadata_name"
-          [[ -f "$archive" && -f "$checksum" && -f "$metadata" ]] || {
-            echo "Verified release image artifact is incomplete." >&2
-            exit 1
-          }
-          (
-            cd "$artifact_dir"
-            sha256sum --check "$archive_name.sha256"
-          )
-          metadata_value() {
-            sed -n "s/^$1=//p" "$metadata"
-          }
-          [[ "$(metadata_value repository)" == "$GITHUB_REPOSITORY" ]] || {
-            echo "Verified release image artifact repository does not match." >&2
-            exit 1
-          }
-          [[ "$(metadata_value release_sha)" == "$RELEASE_SHA" ]] || {
-            echo "Verified release image artifact release SHA does not match." >&2
-            exit 1
-          }
-          [[ "$(metadata_value ci_run_id)" == "$CI_RUN_ID" ]] || {
-            echo "Verified release image artifact CI run ID does not match." >&2
-            exit 1
-          }
-          [[ "$(metadata_value ci_run_attempt)" == "$CI_RUN_ATTEMPT" ]] || {
-            echo "Verified release image artifact CI run attempt does not match." >&2
-            exit 1
-          }
-          [[ "$(metadata_value archive)" == "$archive_name" ]] || {
-            echo "Verified release image artifact archive name does not match." >&2
-            exit 1
-          }
-          docker image load --input "$archive"
-          for image in "greatsellai-hr-api:$RELEASE_SHA" "greatsellai-hr-caddy:$RELEASE_SHA"; do
-            revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
-            run_id="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_id" }}' "$image")"
-            run_attempt="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_attempt" }}' "$image")"
-            [[ "$revision" == "$RELEASE_SHA" ]] || {
-              echo "Loaded image revision does not match the release commit: $image" >&2
-              exit 1
-            }
-            [[ "$run_id" == "$CI_RUN_ID" ]] || {
-              echo "Loaded image CI workflow run ID does not match: $image" >&2
-              exit 1
-            }
-            [[ "$run_attempt" == "$CI_RUN_ATTEMPT" ]] || {
-              echo "Loaded image CI workflow run attempt does not match: $image" >&2
-              exit 1
-            }
-          done
+          scripts/load-verified-release-images.sh "$RELEASE_SHA" \
+            --artifact-dir "$RUNNER_TEMP/greatsell-release-images" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ci-run-id "$CI_RUN_ID" \
+            --ci-run-attempt "$CI_RUN_ATTEMPT" \
+            --github-output "$GITHUB_OUTPUT"
       - name: Transfer CI-verified images to staging
         id: transfer_ci_images
         if: steps.ready.outputs.stage == 'true'

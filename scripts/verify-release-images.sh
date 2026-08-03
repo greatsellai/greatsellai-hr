@@ -61,6 +61,15 @@ release_commit="$1"
 api_expected="$2"
 caddy_expected="$3"
 
+platform="$(sudo -n docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" || {
+  echo "Unable to inspect promotion Docker platform." >&2
+  exit 1
+}
+[[ "$platform" == "linux/amd64" ]] || {
+  echo "Promotion target platform must be linux/amd64; got $platform." >&2
+  exit 1
+}
+
 require_image() {
   local image="$1" expected_id="$2" observed_id revision
   observed_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image")" || {

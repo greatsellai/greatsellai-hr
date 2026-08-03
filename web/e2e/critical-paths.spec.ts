@@ -368,6 +368,13 @@ test.describe("招聘工作台关键路径", () => {
       name: "查看 E2E 推荐候选人 的简历详情",
     });
     await expect(detailsButton).toBeVisible();
+    const candidateRow = page
+      .locator(".library-table tbody tr")
+      .filter({ has: detailsButton });
+    await expect(candidateRow.locator(".candidate-name")).toHaveText("E2E 推荐候选人");
+    await expect(candidateRow.locator(".library-candidate-profile")).toHaveText(
+      /^2026(?:届|年毕业) · 2 年工作经验 · 清华大学 · 本科$/,
+    );
     await detailsButton.focus();
     await page.keyboard.press("Enter");
     const drawer = page.getByRole("dialog", { name: "E2E 推荐候选人 的简历详情" });

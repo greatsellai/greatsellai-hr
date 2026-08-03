@@ -18,6 +18,7 @@ import {
   hasSourceTextQualityIssue,
   hasSupersededReparseVersion,
 } from "../../backoffice/utils/resume-source-quality";
+import { degreeLabels, formatDuration } from "../filter/filter-model";
 import type {
   MailboxConfig,
   ResumeLibraryItem,
@@ -114,6 +115,50 @@ function resumeLibraryScoreNotice(status: string | null): string | null {
     default:
       return "评分待更新";
   }
+}
+
+function graduationProfileLabel(graduationMonth: string | null): string {
+  const match = /^(\d{4})-(?:0[1-9]|1[0-2])$/.exec(
+    graduationMonth?.trim() ?? "",
+  );
+  if (!match) return "毕业时间待核实";
+
+  const graduationYear = Number(match[1]);
+  const currentYear = new Date().getFullYear();
+  if (graduationYear > currentYear) return `${graduationYear}届（在读）`;
+  if (graduationYear === currentYear) return `${graduationYear}届`;
+  return `${graduationYear}年毕业`;
+}
+
+function formalWorkExperienceLabel(months: number): string {
+  const normalizedMonths = Number.isFinite(months)
+    ? Math.max(0, Math.trunc(months))
+    : 0;
+  if (normalizedMonths === 0) return "暂无正式工作经验";
+  return `${formatDuration(normalizedMonths)}工作经验`;
+}
+
+function candidateProfileText(item: ResumeLibraryItem): string {
+  const degree = item.highest_degree;
+  const hasProfileFacts = Boolean(
+    item.graduation_month ||
+      item.education_school?.trim() ||
+      (degree && degree !== "unknown") ||
+      item.employment_months > 0,
+  );
+  if (!hasProfileFacts) {
+    return item.ai_extraction_status === "queued" ||
+      item.ai_extraction_status === "running"
+      ? "候选人信息提取中"
+      : "候选人信息待核实";
+  }
+
+  return [
+    graduationProfileLabel(item.graduation_month),
+    formalWorkExperienceLabel(item.employment_months),
+    item.education_school?.trim() || "学校待核实",
+    degree && degree !== "unknown" ? degreeLabels[degree] : "学历待核实",
+  ].join(" · ");
 }
 
 export function ResumeLibraryPage({
@@ -357,6 +402,7 @@ export function ResumeLibraryPage({
                   const scoreNotice = resumeLibraryScoreNotice(
                     item.score_status,
                   );
+                  const candidateProfile = candidateProfileText(item);
                   const favoriteUpdating =
                     favoriteActionCandidateId === item.candidate_id;
                   return (
@@ -375,6 +421,12 @@ export function ResumeLibraryPage({
                         <div className="candidate-person">
                           <span className="candidate-name">
                             {item.display_name?.trim() || "未命名候选人"}
+                          </span>
+                          <span
+                            className="candidate-meta library-candidate-profile"
+                            title={candidateProfile}
+                          >
+                            {candidateProfile}
                           </span>
                           <button
                             aria-busy={favoriteUpdating}

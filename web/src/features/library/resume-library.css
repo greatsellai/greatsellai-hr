@@ -84,12 +84,12 @@
 }
 
 .backoffice-ui-root .resume-library-page .library-table {
-  min-width: 60rem;
+  min-width: 64rem;
   table-layout: fixed;
 }
 
-.backoffice-ui-root .resume-library-page .library-table th:nth-child(1) { width: 22%; }
-.backoffice-ui-root .resume-library-page .library-table th:nth-child(2) { width: 45%; }
+.backoffice-ui-root .resume-library-page .library-table th:nth-child(1) { width: 31%; }
+.backoffice-ui-root .resume-library-page .library-table th:nth-child(2) { width: 36%; }
 .backoffice-ui-root .resume-library-page .library-table th:nth-child(3) { width: 15%; }
 .backoffice-ui-root .resume-library-page .library-table th:nth-child(4) { width: 12%; }
 .backoffice-ui-root .resume-library-page .library-table th:last-child,
@@ -99,7 +99,19 @@
 }
 
 .backoffice-ui-root .resume-library-page .library-table td {
-  height: 5rem;
+  height: 5.75rem;
+}
+
+.backoffice-ui-root .resume-library-page .library-candidate-profile {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  color: #475467;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .backoffice-ui-root .resume-library-page .library-summary-cell {

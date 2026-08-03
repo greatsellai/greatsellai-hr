@@ -261,6 +261,36 @@
   font-size: 0.8125rem;
 }
 
+.backoffice-ui-root .resume-library-page .library-footer-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.backoffice-ui-root .resume-library-page .library-page-size-control {
+  display: flex;
+  gap: 0.375rem;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.backoffice-ui-root .resume-library-page .library-page-size-control label {
+  color: var(--workspace-text-muted);
+}
+
+.backoffice-ui-root .resume-library-page .library-page-size-control .backoffice-select {
+  width: 5.75rem;
+}
+
+.backoffice-ui-root .resume-library-page .library-page-size-control .backoffice-select.semi-select,
+.backoffice-ui-root .resume-library-page .library-page-size-control .select-field {
+  min-height: 2rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
 @media (max-width: 52rem) {
   .backoffice-ui-root .resume-library-page .page-heading,
   .backoffice-ui-root .resume-library-actions,
@@ -280,5 +310,10 @@
 
   .backoffice-ui-root .resume-library-actions .backoffice-action-button {
     justify-content: center;
+  }
+
+  .backoffice-ui-root .resume-library-page .library-footer-controls {
+    width: 100%;
+    justify-content: space-between;
   }
 }

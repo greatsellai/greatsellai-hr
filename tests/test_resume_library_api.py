@@ -100,6 +100,38 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["score_created_at"] == score.json()["created_at"]
 
 
+def test_resume_library_honors_page_size_and_page_boundaries(ai_client) -> None:
+    _, first_resume_id = _save_ready_resume(
+        ai_client,
+        source_text="教育经历 清华大学 计算机 本科。工作经历 Acme Python Engineer。技能 Python SQL",
+    )
+    _, second_resume_id = _save_ready_resume(
+        ai_client,
+        source_text="教育经历 清华大学 计算机 本科。工作经历 Acme Python Engineer。技能 Python SQL",
+    )
+
+    first_page = ai_client.get("/v1/resume-library?page=1&page_size=1")
+    second_page = ai_client.get("/v1/resume-library?page=2&page_size=1")
+
+    assert first_page.status_code == 200, first_page.text
+    assert second_page.status_code == 200, second_page.text
+    first_payload = first_page.json()
+    second_payload = second_page.json()
+    assert first_payload["total"] == 2
+    assert first_payload["page"] == 1
+    assert first_payload["page_size"] == 1
+    assert second_payload["total"] == 2
+    assert second_payload["page"] == 2
+    assert second_payload["page_size"] == 1
+    assert {
+        first_payload["items"][0]["resume_id"],
+        second_payload["items"][0]["resume_id"],
+    } == {first_resume_id, second_resume_id}
+
+    assert ai_client.get("/v1/resume-library?page_size=0").status_code == 422
+    assert ai_client.get("/v1/resume-library?page_size=101").status_code == 422
+
+
 def test_resume_library_keeps_pending_upload_visible_without_ai_outputs(client) -> None:
     uploaded = client.post(
         "/v1/resumes/upload",

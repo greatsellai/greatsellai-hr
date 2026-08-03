@@ -25,7 +25,11 @@ import type {
 } from "../../types";
 import "./resume-library.css";
 
-const RESUME_LIBRARY_PAGE_SIZE = 50;
+const DEFAULT_RESUME_LIBRARY_PAGE_SIZE = 50;
+const RESUME_LIBRARY_PAGE_SIZE_OPTIONS = [25, 50, 100];
+const RESUME_LIBRARY_PAGE_SIZE_SELECT_OPTIONS = RESUME_LIBRARY_PAGE_SIZE_OPTIONS.map(
+  (pageSize) => ({ label: `${pageSize} 条`, value: String(pageSize) }),
+);
 
 interface ResumeLibraryPageProps {
   formatError: (error: unknown) => string;
@@ -128,6 +132,7 @@ export function ResumeLibraryPage({
   const [mailboxSources, setMailboxSources] = useState<MailboxConfig[]>([]);
   const [sourceMailboxId, setSourceMailboxId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_RESUME_LIBRARY_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [favoriteActionCandidateId, setFavoriteActionCandidateId] = useState<
@@ -142,7 +147,7 @@ export function ResumeLibraryPage({
     try {
       const nextLibrary = await api.listResumeLibrary(
         page,
-        RESUME_LIBRARY_PAGE_SIZE,
+        pageSize,
         sourceMailboxId,
       );
       if (requestId === latestLibraryRequestIdRef.current) {
@@ -157,7 +162,7 @@ export function ResumeLibraryPage({
         setLoading(false);
       }
     }
-  }, [formatError, page, sourceMailboxId]);
+  }, [formatError, page, pageSize, sourceMailboxId]);
 
   useEffect(() => {
     void loadLibrary();
@@ -224,7 +229,7 @@ export function ResumeLibraryPage({
 
   const items = library?.items ?? [];
   const total = library?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / RESUME_LIBRARY_PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const canPageBack = page > 1;
   const canPageForward = page < totalPages;
   const pageOverview = items.reduce(
@@ -240,8 +245,8 @@ export function ResumeLibraryPage({
     },
     { progress: 0, attention: 0, waiting: 0, unscored: 0 },
   );
-  const firstItemIndex = total ? (page - 1) * RESUME_LIBRARY_PAGE_SIZE + 1 : 0;
-  const lastItemIndex = Math.min(page * RESUME_LIBRARY_PAGE_SIZE, total);
+  const firstItemIndex = total ? (page - 1) * pageSize + 1 : 0;
+  const lastItemIndex = Math.min(page * pageSize, total);
   const mailboxOptions = [
     { label: "全部来源", value: "" },
     ...mailboxSources.map((mailbox) => ({
@@ -540,23 +545,47 @@ export function ResumeLibraryPage({
             total ? `显示第 ${firstItemIndex}–${lastItemIndex} 份，共 ${total} 份` : "共 0 份简历"
           )}
         </span>
-        {totalPages > 1 && (
-          <div className="pagination">
-            <BackofficeButton
-              disabled={!canPageBack || loading}
-              onClick={() => setPage((current) => current - 1)}
-            >
-              上一页
-            </BackofficeButton>
-            <span>
-              第 {page} / {totalPages} 页
-            </span>
-            <BackofficeButton
-              disabled={!canPageForward || loading}
-              onClick={() => setPage((current) => current + 1)}
-            >
-              下一页
-            </BackofficeButton>
+        {total > 0 && (
+          <div className="library-footer-controls">
+            <div className="library-page-size-control">
+              <label id="resume-library-page-size-label" htmlFor="resume-library-page-size">
+                每页展示
+              </label>
+              <BackofficeSelect
+                ariaLabelledBy="resume-library-page-size-label"
+                disabled={loading}
+                id="resume-library-page-size"
+                onChange={(value) => {
+                  const nextPageSize = Number(value);
+                  if (!RESUME_LIBRARY_PAGE_SIZE_OPTIONS.includes(nextPageSize)) {
+                    return;
+                  }
+                  setPage(1);
+                  setPageSize(nextPageSize);
+                }}
+                options={RESUME_LIBRARY_PAGE_SIZE_SELECT_OPTIONS}
+                value={String(pageSize)}
+              />
+            </div>
+            {totalPages > 1 && (
+              <div className="pagination">
+                <BackofficeButton
+                  disabled={!canPageBack || loading}
+                  onClick={() => setPage((current) => current - 1)}
+                >
+                  上一页
+                </BackofficeButton>
+                <span>
+                  第 {page} / {totalPages} 页
+                </span>
+                <BackofficeButton
+                  disabled={!canPageForward || loading}
+                  onClick={() => setPage((current) => current + 1)}
+                >
+                  下一页
+                </BackofficeButton>
+              </div>
+            )}
           </div>
         )}
       </footer>

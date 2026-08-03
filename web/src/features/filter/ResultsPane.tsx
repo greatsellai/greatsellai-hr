@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatMaximumRankPercent,
   formatMinimumAcademicScore,
+  formatTenureFilterSummary,
   institutionClassificationLabel,
   institutionClassificationLabels,
   sortInstitutionClassifications,
@@ -349,7 +350,7 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
   if (draft.minEmploymentOrInternshipMonths > 0) {
     add(
       "工作年限",
-      `至少 ${formatDuration(draft.minEmploymentOrInternshipMonths)}`,
+      formatTenureFilterSummary(draft.minEmploymentOrInternshipMonths),
     );
   }
   const academicConditions = [

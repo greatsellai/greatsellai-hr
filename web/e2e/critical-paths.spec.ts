@@ -684,6 +684,13 @@ test.describe("招聘工作台关键路径", () => {
     await expect(tenureRange).toHaveAttribute("min", "0");
     await expect(tenureRange).toHaveAttribute("max", "240");
     await expect(tenureRange).toHaveAttribute("step", "12");
+    await expect(tenureRange).toHaveAttribute("aria-valuetext", "不限");
+    await expect(basicFilters.getByText("20 年及以上", { exact: true })).toBeVisible();
+    await tenureRange.focus();
+    await tenureRange.press("End");
+    await expect(tenureRange).toHaveAttribute("aria-valuetext", "20 年及以上");
+    await tenureRange.press("Home");
+    await expect(tenureRange).toHaveAttribute("aria-valuetext", "不限");
     for (const range of [academicScoreRange, rankPercentRange]) {
       await expect(range).toHaveAttribute("type", "range");
       await expect(range).toHaveAttribute("min", "0");

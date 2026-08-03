@@ -6,6 +6,7 @@ import {
   formatMaximumRankPercent,
   formatMinimumAcademicScore,
   formatMinimumDuration,
+  MAX_TENURE_MONTHS,
   resolvedInstitutionClassificationOptions,
   sortInstitutionClassifications,
   type FilterDraft,
@@ -344,9 +345,12 @@ export function FilterPanel({
               最低工作年限
             </label>
             <input
+              aria-valuetext={formatMinimumDuration(
+                draft.minEmploymentOrInternshipMonths,
+              )}
               className="range-input"
               id="min-experience"
-              max="240"
+              max={MAX_TENURE_MONTHS}
               min="0"
               onChange={(event) =>
                 updateAfterTyping({
@@ -363,7 +367,7 @@ export function FilterPanel({
               <span>
                 {formatMinimumDuration(draft.minEmploymentOrInternshipMonths)}
               </span>
-              <span>20 年</span>
+              <span>20 年及以上</span>
             </div>
           </div>
         </section>

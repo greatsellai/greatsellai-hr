@@ -101,8 +101,13 @@ export const institutionClassificationLabels: Record<
   institutionClassificationOptions.map((option) => [option.value, option.label]),
 ) as Record<InstitutionClassification, string>;
 
+export const MAX_TENURE_MONTHS = 20 * 12;
+
 export function clampMonths(value: number): number {
-  return Math.max(0, Math.min(240, Math.round(value / 12) * 12));
+  return Math.max(
+    0,
+    Math.min(MAX_TENURE_MONTHS, Math.round(value / 12) * 12),
+  );
 }
 
 export function clampPercentage(value: number): number {
@@ -118,7 +123,16 @@ export function formatDuration(months: number): string {
 }
 
 export function formatMinimumDuration(months: number): string {
-  return months <= 0 ? "不限" : formatDuration(months);
+  if (months <= 0) return "不限";
+  if (months >= MAX_TENURE_MONTHS) return "20 年及以上";
+  return formatDuration(months);
+}
+
+/** Copy used after a recruiter has applied the first-pass tenure threshold. */
+export function formatTenureFilterSummary(months: number): string {
+  if (months <= 0) return "不限";
+  if (months >= MAX_TENURE_MONTHS) return "20 年及以上";
+  return `至少 ${formatDuration(months)}`;
 }
 
 export function formatMinimumAcademicScore(percent: number): string {

@@ -9,6 +9,7 @@ import type {
 } from "../../types";
 import {
   experienceTypeOptions,
+  clampMonths,
   clampPercentage,
   institutionClassificationLabels,
   institutionClassificationOptions,
@@ -389,9 +390,11 @@ export function searchRequestToDraft(
       conditionMatchMode: request.condition_match_mode ?? "all",
       // Historical saved filters can have a formal-work threshold. The current
       // first-pass UI deliberately uses one combined tenure threshold instead.
-      minEmploymentOrInternshipMonths: Math.max(
-        request.min_employment_or_internship_months ?? 0,
-        request.min_employment_months ?? 0,
+      minEmploymentOrInternshipMonths: clampMonths(
+        Math.max(
+          request.min_employment_or_internship_months ?? 0,
+          request.min_employment_months ?? 0,
+        ),
       ),
       degrees: savedDegrees.filter((degree) => degree !== "unknown"),
       institutionClassifications: institutionMigration.classifications,

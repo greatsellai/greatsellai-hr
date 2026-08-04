@@ -1187,7 +1187,7 @@ def _mailbox_oauth_cookie_domain_for_start(
     compatibility entry may set a parent-domain cookie only when its host is a
     real parent of the configured callback host. Sibling or unrelated hosts
     must never receive a silent, weak fallback. In particular, the legacy
-    ``greatsellai.net`` entry cannot share a cookie with ``hr.greatsell.cn``.
+    ``greatsellai.net`` entry cannot share a cookie with ``hr.greatsellai.cn``.
     """
 
     expected_origin = _mailbox_oauth_callback_origin(

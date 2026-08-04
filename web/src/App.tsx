@@ -251,11 +251,11 @@ function isRootMarketingHost(hostname: string) {
   return hostname === "greatsellai.net";
 }
 
-const CANONICAL_HR_ORIGIN = "https://hr.greatsell.cn";
+const CANONICAL_HR_ORIGIN = "https://hr.greatsellai.cn";
 
 function isHrApplicationHost(hostname: string) {
   return (
-    hostname === "hr.greatsell.cn" ||
+    hostname === "hr.greatsellai.cn" ||
     hostname === "hr.greatsellai.net" ||
     hostname === "staging.hr.greatsellai.net"
   );

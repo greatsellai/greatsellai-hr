@@ -194,16 +194,16 @@ def test_environment_templates_use_the_cn_canonical_production_origin() -> None:
     )
     development_example = (root / ".env.example").read_text(encoding="utf-8")
 
-    assert "RESUME_V3_DOMAIN=hr.greatsell.cn" in production_example
-    assert "RESUME_V3_PUBLIC_APP_URL=https://hr.greatsell.cn" in production_example
+    assert "RESUME_V3_DOMAIN=hr.greatsellai.cn" in production_example
+    assert "RESUME_V3_PUBLIC_APP_URL=https://hr.greatsellai.cn" in production_example
     for template in (production_example, development_example):
         assert (
             "RESUME_V3_MAILBOX_GOOGLE_OAUTH_REDIRECT_URI="
-            "https://hr.greatsell.cn/v1/mailbox-oauth/callback"
+            "https://hr.greatsellai.cn/v1/mailbox-oauth/callback"
         ) in template
         assert (
             "RESUME_V3_MAILBOX_MICROSOFT_OAUTH_REDIRECT_URI="
-            "https://hr.greatsell.cn/v1/mailbox-oauth/callback"
+            "https://hr.greatsellai.cn/v1/mailbox-oauth/callback"
         ) in template
 
 

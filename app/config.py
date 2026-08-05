@@ -50,9 +50,12 @@ class AppSettings:
     # API and worker engines have separate connection budgets.  A worker
     # supervisor may launch several child processes, so each child defaults to
     # a deliberately small, non-bursting pool rather than multiplying the API
-    # pool across every process.
+    # pool across every process.  The pool must stay >= 2: job match keeps its
+    # business session open while the AI gateway opens a second, durable ledger
+    # session on the same engine, so a single connection stalls every real
+    # (non-cached) JD-match item on a connection-pool wait.
     worker_concurrency: int = 1
-    worker_database_pool_size: int = 1
+    worker_database_pool_size: int = 2
     worker_database_max_overflow: int = 0
     # Minimum duration for the fair workspace lane. Individual queue leases
     # may be longer; workers take the maximum of the two. Mailbox heartbeats

@@ -383,6 +383,7 @@ test.describe("招聘工作台关键路径", () => {
     await page.keyboard.press("Enter");
     const drawer = page.getByRole("dialog", { name: "E2E 推荐候选人 的简历详情" });
     await expect(drawer).toBeVisible();
+    await expect(drawer.getByRole("tab", { name: "应聘记录", exact: true })).toBeVisible();
 
     const summaryTab = drawer.getByRole("tab", { name: "AI 总结" });
     await summaryTab.click();

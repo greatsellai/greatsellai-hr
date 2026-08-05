@@ -47,8 +47,13 @@ test("招聘工作台深链接可刷新，默认入口不会吞掉浏览器返�
   await expect(page).toHaveURL(/#matching$/);
 
   await page.goto("/#workflow?job=missing-job");
-  await expect(page.getByRole("heading", { level: 1, name: "招聘流程", exact: true })).toBeVisible();
-  await expect(page).toHaveURL(/#workflow$/);
+  await expect(page.getByRole("heading", { level: 1, name: "招聘工作台", exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#workbench$/);
+  await expect(page.getByRole("button", { name: "招聘流程", exact: true })).toHaveCount(0);
+
+  await page.goto("/#recruiting");
+  await expect(page.getByRole("heading", { level: 1, name: "招聘工作台", exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/#workbench$/);
 });
 
 test("职位管理将同一岗位的 JD 版本归为一个岗位", async ({ page }) => {

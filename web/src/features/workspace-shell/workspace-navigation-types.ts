@@ -2,7 +2,6 @@ export type WorkspaceNavigationView =
   | "workbench"
   | "agent"
   | "jobs"
-  | "workflow"
   | "library"
   | "favorites"
   | "filter"

@@ -5,6 +5,7 @@ import type {
   WorkspaceView,
 } from "./workspace-navigation-types";
 import {
+  isRemovedRecruitingWorkflowRoute,
   workspaceHashForView,
   workspaceRouteFromHash,
   type WorkspaceRouteParams,
@@ -43,7 +44,6 @@ function sameRouteParams(
   right: WorkspaceRouteParams,
 ): boolean {
   return left.createJob === right.createJob &&
-    left.jobId === right.jobId &&
     left.jobVersionId === right.jobVersionId;
 }
 
@@ -81,7 +81,6 @@ export function useWorkspaceNavigation({
       return route
         ? {
             createJob: route.createJob,
-            jobId: route.jobId,
             jobVersionId: route.jobVersionId,
           }
         : {};
@@ -147,7 +146,6 @@ export function useWorkspaceNavigation({
         setView(route.view);
         setRouteParams({
           createJob: route.createJob,
-          jobId: route.jobId,
           jobVersionId: route.jobVersionId,
         });
         return;
@@ -162,6 +160,9 @@ export function useWorkspaceNavigation({
         // workspace URL, whose canonical screen is the recruitment workbench.
         setView("workbench");
         setRouteParams({});
+        if (isRemovedRecruitingWorkflowRoute(window.location.hash)) {
+          updateHash(workspaceHashForView("workbench"), true);
+        }
         return;
       }
       setSettingsSection(section);

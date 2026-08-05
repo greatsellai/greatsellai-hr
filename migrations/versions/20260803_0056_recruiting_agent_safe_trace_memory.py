@@ -1,7 +1,7 @@
 """Persist bounded recruiter-safe Agent execution summaries.
 
-Revision ID: 20260803_0055
-Revises: 20260803_0054
+Revision ID: 20260803_0056
+Revises: 20260803_0055
 Create Date: 2026-08-03 14:00:00
 
 Only a tool's short server-written label and recruiter-facing summary are
@@ -17,8 +17,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260803_0055"
-down_revision: Union[str, Sequence[str], None] = "20260803_0054"
+revision: str = "20260803_0056"
+down_revision: Union[str, Sequence[str], None] = "20260803_0055"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

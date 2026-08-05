@@ -1634,6 +1634,12 @@ def _normalize_existing_score_template_for_optimization(
             continue
         safe_dimensions.append(dimension)
 
+    # Do not turn a template consisting only of protected or non-job-related
+    # criteria into an invented generic rule.  The recruiter must first
+    # provide at least one usable job-related dimension for the AI to improve.
+    if not safe_dimensions:
+        raise _contract_error("template_optimization_source_has_no_safe_dimensions")
+
     return (
         {"name": name, "description": description, "dimensions": safe_dimensions},
         source_safety_removed,

@@ -6307,18 +6307,19 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except ScoreServiceError as exc:
             session.rollback()
-            response_status = (
-                status.HTTP_503_SERVICE_UNAVAILABLE
-                if str(exc)
-                in {
-                    "deepseek_api_key_not_configured",
-                    "ai_route_not_configured",
-                    "ai_route_not_published",
-                    "ai_route_disabled",
-                }
-                else status.HTTP_409_CONFLICT
-            )
-            raise HTTPException(status_code=response_status, detail=str(exc)) from exc
+            code = str(exc)
+            if code in {
+                "deepseek_api_key_not_configured",
+                "ai_route_not_configured",
+                "ai_route_not_published",
+                "ai_route_disabled",
+            }:
+                response_status = status.HTTP_503_SERVICE_UNAVAILABLE
+            elif code == "score_template_optimization_source_has_no_safe_dimensions":
+                response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+            else:
+                response_status = status.HTTP_409_CONFLICT
+            raise HTTPException(status_code=response_status, detail=code) from exc
         except DeepSeekProviderError as exc:
             session.rollback()
             log_exception_event(

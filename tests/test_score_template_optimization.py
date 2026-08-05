@@ -130,6 +130,43 @@ def test_optimize_template_rejects_unknown_source_without_ai_call(ai_client) -> 
     assert response.json()["detail"] == "score_template_not_found"
 
 
+def test_optimize_template_rejects_an_all_unsafe_source_before_model_call(
+    ai_client,
+    monkeypatch,
+) -> None:
+    unsafe_source = _template_payload("Unsafe-only template")
+    unsafe_source["dimensions"] = [
+        {
+            "label": "Age requirement",
+            "weight": 50,
+            "guidance": "Only consider age.",
+        },
+        {
+            "label": "Gender preference",
+            "weight": 50,
+            "guidance": "Only consider gender.",
+        },
+    ]
+    source = ai_client.post("/v1/score-templates", json=unsafe_source)
+    assert source.status_code == 200, source.text
+
+    def unexpected_model_call(**kwargs: object) -> dict[str, object]:
+        raise AssertionError("an unsafe-only source must not reach the model")
+
+    monkeypatch.setattr(
+        "app.services.deepseek_provider.call_strict_function",
+        unexpected_model_call,
+    )
+    response = ai_client.post(
+        f"/v1/score-templates/{source.json()['template_id']}/optimize"
+    )
+    assert response.status_code == 422, response.text
+    assert (
+        response.json()["detail"]
+        == "score_template_optimization_source_has_no_safe_dimensions"
+    )
+
+
 def test_optimize_template_does_not_cross_workspace_boundary(
     workspace_clients,
     monkeypatch,

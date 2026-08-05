@@ -171,6 +171,37 @@ def test_optimizer_strips_unsafe_source_data_and_uses_strict_function(monkeypatc
     assert '"weight":80' in str(captured["user_prompt"])
 
 
+def test_optimizer_refuses_an_all_unsafe_source_without_calling_the_model(monkeypatch) -> None:
+    source = _existing_template()
+    source["dimensions"] = [
+        {
+            "label": "Age requirement",
+            "weight": 50,
+            "guidance": "Only consider age.",
+        },
+        {
+            "label": "Gender preference",
+            "weight": 50,
+            "guidance": "Only consider gender.",
+        },
+    ]
+
+    def unexpected_model_call(**kwargs: object) -> dict[str, object]:
+        raise AssertionError("an unsafe-only source must not reach the model")
+
+    monkeypatch.setattr(
+        "app.services.deepseek_provider.call_strict_function",
+        unexpected_model_call,
+    )
+    with pytest.raises(DeepSeekProviderError, match="source_has_no_safe_dimensions"):
+        optimize_score_template(
+            api_key="not-used",
+            model="not-used",
+            timeout_seconds=1,
+            existing_template=source,
+        )
+
+
 def test_optimizer_retries_once_for_a_non_chinese_draft(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     invalid = _valid_output()

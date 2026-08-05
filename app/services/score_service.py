@@ -179,6 +179,15 @@ def optimize_existing_score_template(
             )
     except AiGatewayError as exc:
         raise ScoreServiceError(str(exc)) from exc
+    except DeepSeekProviderError as exc:
+        if (
+            str(exc)
+            == "deepseek_contract_template_optimization_source_has_no_safe_dimensions"
+        ):
+            raise ScoreServiceError(
+                "score_template_optimization_source_has_no_safe_dimensions"
+            ) from exc
+        raise
 
     proposed_template = ScoreTemplateCreate.model_validate(
         provider_result["proposed_template"]

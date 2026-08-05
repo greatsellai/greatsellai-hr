@@ -399,7 +399,6 @@ export function LandingPage({
             </div>
             <ul>
               <li><Icon name="check" size={20} /><span><strong>每个结论都能找到依据</strong>可用结论关联简历原文、岗位要求和对应版本，减少“AI 为什么这么说”的疑问。</span></li>
-              <li><Icon name="check" size={20} /><span><strong>不把敏感属性当作岗位条件</strong>不以性别、年龄、地域、婚育等敏感信息做筛选或排序。</span></li>
               <li><Icon name="check" size={20} /><span><strong>系统不替团队作人事决定</strong>不自动淘汰、自动邀约或自动录用，HR 始终是最终决策者。</span></li>
             </ul>
           </div>

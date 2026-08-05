@@ -15,6 +15,14 @@
 `OCR_SPARSE_TEXT_CHARS_PER_PAGE`，该环境变量仍优先于默认值；发布负责人应确认
 其值符合本策略。
 
+## 腾讯 OCR Action
+
+`TENCENT_OCR_API` 控制扫描页和图片简历使用的腾讯 OCR Action。未设置时保持历史
+`GeneralBasicOCR` 行为；需要更高识别精度时，显式设置
+`TENCENT_OCR_API=GeneralAccurateOCR`。生产环境模板已选择高精度版，staging 必须
+复制生产的同一值，以便在发布前验证完全相同的 OCR 路径。两种模式都仅发送进程内
+Base64 图像，不会为原件创建公开 URL。
+
 ## 质量门槛
 
 “需要尝试修复”和“不能用于 AI 结论”是两件事：

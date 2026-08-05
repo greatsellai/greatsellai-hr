@@ -14,6 +14,15 @@ from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
 
+TENCENT_OCR_API_GENERAL_BASIC = "GeneralBasicOCR"
+TENCENT_OCR_API_GENERAL_ACCURATE = "GeneralAccurateOCR"
+TENCENT_OCR_APIS = frozenset(
+    {
+        TENCENT_OCR_API_GENERAL_BASIC,
+        TENCENT_OCR_API_GENERAL_ACCURATE,
+    }
+)
+
 
 def _environment_flag(name: str, *, default: bool) -> bool:
     raw_value = os.getenv(name)
@@ -227,6 +236,9 @@ class AppSettings:
     tencent_secret_key: str | None = field(default=None, repr=False)
     tencent_ocr_region: str = "ap-guangzhou"
     tencent_ocr_timeout_seconds: int = 20
+    # Keep the historic general-print API unless an operator explicitly opts
+    # into Tencent's higher-precision action.
+    tencent_ocr_api: str = TENCENT_OCR_API_GENERAL_BASIC
     ocr_sparse_text_chars_per_page: int = 200
 
     @classmethod
@@ -585,6 +597,9 @@ class AppSettings:
             tencent_ocr_timeout_seconds=int(
                 os.getenv("TENCENT_OCR_TIMEOUT_SECONDS", "20")
             ),
+            tencent_ocr_api=os.getenv(
+                "TENCENT_OCR_API", TENCENT_OCR_API_GENERAL_BASIC
+            ).strip(),
             ocr_sparse_text_chars_per_page=int(
                 os.getenv("OCR_SPARSE_TEXT_CHARS_PER_PAGE", "200")
             ),
@@ -635,6 +650,10 @@ class AppSettings:
             )
         if self.tencent_ocr_timeout_seconds < 1:
             raise ValueError("TENCENT_OCR_TIMEOUT_SECONDS must be at least 1")
+        if self.tencent_ocr_api not in TENCENT_OCR_APIS:
+            raise ValueError(
+                "TENCENT_OCR_API must be GeneralBasicOCR or GeneralAccurateOCR"
+            )
         if self.ocr_sparse_text_chars_per_page < self.min_text_chars_per_page:
             raise ValueError(
                 "OCR_SPARSE_TEXT_CHARS_PER_PAGE must be at least "

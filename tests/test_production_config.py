@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.config import AppSettings
+from app.services.document_extraction_job_service import _tencent_ocr_config
 from app.services.mailbox_import_service import MailboxImportError, _fernet
 
 
@@ -103,6 +104,50 @@ def test_settings_load_generic_provider_credential_map_from_environment(
     assert settings.ai_provider_credentials == {
         "configured-provider-ref": "test-only-provider-value"
     }
+
+
+def test_tencent_ocr_api_defaults_to_basic_and_reads_accurate_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TENCENT_OCR_API", raising=False)
+    assert AppSettings.from_env().tencent_ocr_api == "GeneralBasicOCR"
+
+    monkeypatch.setenv("TENCENT_OCR_API", "GeneralAccurateOCR")
+    assert AppSettings.from_env().tencent_ocr_api == "GeneralAccurateOCR"
+
+
+def test_runtime_rejects_unknown_tencent_ocr_api(tmp_path: Path) -> None:
+    _settings(tmp_path, tencent_ocr_api="GeneralAccurateOCR").validate_runtime()
+
+    with pytest.raises(ValueError, match="TENCENT_OCR_API"):
+        _settings(tmp_path, tencent_ocr_api="GeneralExperimentalOCR").validate_runtime()
+
+
+def test_tencent_ocr_api_reaches_worker_provider_config(tmp_path: Path) -> None:
+    ocr_config = _tencent_ocr_config(
+        _settings(
+            tmp_path,
+            tencent_secret_id="test-secret-id",
+            tencent_secret_key="test-secret-key",
+            tencent_ocr_api="GeneralAccurateOCR",
+        )
+    )
+
+    assert ocr_config is not None
+    assert ocr_config.api == "GeneralAccurateOCR"
+
+
+def test_production_compose_and_templates_expose_tencent_ocr_api_selector() -> None:
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "compose.yml").read_text(encoding="utf-8")
+    production_example = (root / ".env.production.example").read_text(
+        encoding="utf-8"
+    )
+    development_example = (root / ".env.example").read_text(encoding="utf-8")
+
+    assert "TENCENT_OCR_API: ${TENCENT_OCR_API:-GeneralBasicOCR}" in compose
+    assert "TENCENT_OCR_API=GeneralAccurateOCR" in production_example
+    assert "TENCENT_OCR_API=GeneralBasicOCR" in development_example
 
 
 def test_compose_injects_generic_provider_credential_map_into_api_and_worker() -> None:

@@ -52,7 +52,8 @@ python -m app.ai_extraction_worker --once
 - `RESUME_V3_DOCUMENT_MAX_ARCHIVE_UNCOMPRESSED_BYTES`：DOCX/XLSX 解压展开最大字节数，默认 `104857600`。
 - `RESUME_V3_DOCUMENT_MAX_SPREADSHEET_SHEETS`、`RESUME_V3_DOCUMENT_MAX_SPREADSHEET_ROWS_PER_SHEET`、`RESUME_V3_DOCUMENT_MAX_SPREADSHEET_CELLS`：表格资源上限，默认 `20`、`5000`、`50000`。
 - `RESUME_V3_DOCUMENT_OFFICE_TIMEOUT_SECONDS`：Office 转换子进程硬超时，默认 `90` 秒。
-- `TENCENT_OCR_TIMEOUT_SECONDS`：腾讯 OCR 请求超时，默认 `20` 秒；扫描 PDF 的问题页和 PNG/JPG/JPEG 简历统一使用腾讯 `GeneralBasicOCR`。图片上传会先校验腾讯凭据；大图只在受控像素上限内本地压缩到腾讯 Base64 请求大小，超限会以稳定错误码待处理。生产镜像不再内置 Tesseract，也不再支持本地图片 OCR 回退。
+- `TENCENT_OCR_TIMEOUT_SECONDS`：腾讯 OCR 请求超时，默认 `20` 秒。
+- `TENCENT_OCR_API`：腾讯 OCR Action。未设置时保持历史的 `GeneralBasicOCR`；显式设为 `GeneralAccurateOCR` 可使用高精度识别，适合文字较多、版式复杂或难以识别的简历。生产模板显式选择高精度版，staging 必须复制生产的同一选择。两种 Action 都只提交内存中的 Tencent Base64 请求，不发布原件 URL；图片上传会先校验腾讯凭据，大图只在受控像素上限内本地压缩，超限会以稳定错误码待处理。生产镜像不再内置 Tesseract，也不再支持本地图片 OCR 回退。
 
 worker 以数据库租约领取任务，因此重启、重复启动或短暂网络失败不会让两个 worker 同时写入同一份简历；过期租约会被安全回收，已自动启用的新版本不会被旧任务覆盖。所有原文件路径、队列行和写回记录都按已领取的工作区重新绑定；即使数据库存在异常的跨工作区外键引用，worker 也只会终止自己工作区的任务，不会读取另一工作区的简历。
 

@@ -180,6 +180,7 @@ def test_staging_matches_production_for_shared_runtime_integrations() -> None:
         "TENCENT_SECRET_KEY",
         "TENCENT_OCR_REGION",
         "TENCENT_OCR_TIMEOUT_SECONDS",
+        "TENCENT_OCR_API",
         "OCR_SPARSE_TEXT_CHARS_PER_PAGE",
         "RESUME_V3_AI_EXTRACTION_JOB_MAX_ATTEMPTS",
         "RESUME_V3_AI_EXTRACTION_JOB_LEASE_SECONDS",

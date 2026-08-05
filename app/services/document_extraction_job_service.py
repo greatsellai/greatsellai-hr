@@ -920,6 +920,7 @@ def _tencent_ocr_config(settings: AppSettings) -> TencentOcrConfig | None:
         secret_key=settings.tencent_secret_key,
         region=settings.tencent_ocr_region,
         timeout_seconds=settings.tencent_ocr_timeout_seconds,
+        api=settings.tencent_ocr_api,
     )
 
 

@@ -12,12 +12,13 @@ from app.services import tencent_ocr_provider as provider
 from app.services.tencent_ocr_provider import TencentOcrConfig, TencentOcrError
 
 
-def _config() -> TencentOcrConfig:
+def _config(*, api: str = "GeneralBasicOCR") -> TencentOcrConfig:
     return TencentOcrConfig(
         secret_id="test-secret-id",
         secret_key="test-secret-key",
         region="ap-guangzhou",
         timeout_seconds=5,
+        api=api,
     )
 
 
@@ -40,7 +41,7 @@ def _minimal_png(*, width: int = 100, height: int = 100) -> bytes:
     )
 
 
-def test_image_ocr_uses_base64_without_public_image_url(
+def test_image_ocr_uses_legacy_basic_api_by_default_without_public_image_url(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -78,6 +79,47 @@ def test_image_ocr_uses_base64_without_public_image_url(
     assert base64.b64decode(str(payload["ImageBase64"])) == image_bytes
 
 
+def test_image_ocr_uses_explicit_accurate_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "resume.jpg"
+    image_bytes = _minimal_jpeg()
+    image_path.write_bytes(image_bytes)
+    captured: dict[str, object] = {}
+
+    class FakeRequest:
+        def from_json_string(self, value: str) -> None:
+            captured["request"] = json.loads(value)
+
+    class FakeClient:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def GeneralAccurateOCR(self, _request: object) -> object:
+            captured["api"] = "GeneralAccurateOCR"
+            return SimpleNamespace(
+                TextDetections=[SimpleNamespace(DetectedText="Accurate candidate name")]
+            )
+
+        def GeneralBasicOCR(self, _request: object) -> object:
+            raise AssertionError("the explicit accurate API must not call GeneralBasicOCR")
+
+    monkeypatch.setattr(provider.models, "GeneralAccurateOCRRequest", FakeRequest)
+    monkeypatch.setattr(provider.ocr_client, "OcrClient", FakeClient)
+
+    result = provider.extract_image_text(
+        path=image_path,
+        config=_config(api="GeneralAccurateOCR"),
+    )
+
+    assert result == "Accurate candidate name"
+    assert captured["api"] == "GeneralAccurateOCR"
+    payload = captured["request"]
+    assert isinstance(payload, dict)
+    assert base64.b64decode(str(payload["ImageBase64"])) == image_bytes
+
+
 def test_oversized_image_is_reencoded_before_tencent_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -96,7 +138,7 @@ def test_oversized_image_is_reencoded_before_tencent_request(
         return "Recovered text"
 
     monkeypatch.setattr(provider, "_reencode_image_within_ocr_limit", fake_reencode)
-    monkeypatch.setattr(provider, "_extract_general_basic_ocr", fake_request)
+    monkeypatch.setattr(provider, "_extract_tencent_ocr", fake_request)
     monkeypatch.setattr(provider, "_image_dimensions", lambda _bytes: (100, 100))
 
     assert provider.extract_image_text(path=image_path, config=_config()) == "Recovered text"

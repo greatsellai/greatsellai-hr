@@ -15,13 +15,18 @@ from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
 from tencentcloud.ocr.v20181119 import models, ocr_client
 
+from app.config import (
+    TENCENT_OCR_API_GENERAL_ACCURATE,
+    TENCENT_OCR_API_GENERAL_BASIC,
+    TENCENT_OCR_APIS,
+)
 
-# Tencent GeneralBasicOCR accepts an ImageBase64 payload up to 10 MiB.  Base64
-# expands its input by roughly 4/3, so keeping the raw image under 7 MiB leaves
-# protocol headroom without relying on an undocumented server-side rounding
-# rule.  PDF pages retain a lower render budget below because they are created
-# locally from an untrusted PDF and a conservative raster is sufficient for
-# resume text.
+# Tencent GeneralBasicOCR and GeneralAccurateOCR both accept an ImageBase64
+# payload up to 10 MiB. Base64 expands its input by roughly 4/3, so keeping the
+# raw image under 7 MiB leaves protocol headroom without relying on an
+# undocumented server-side rounding rule. PDF pages retain a lower render
+# budget below because they are created locally from an untrusted PDF and a
+# conservative raster is sufficient for resume text.
 _MAX_OCR_IMAGE_BYTES = 7 * 1024 * 1024
 _MAX_RENDERED_PDF_IMAGE_BYTES = 3_500_000
 # A 300 DPI A4 page is below this limit.  Capping it keeps the rare local
@@ -43,6 +48,7 @@ class TencentOcrConfig:
     secret_key: str
     region: str
     timeout_seconds: int
+    api: str = TENCENT_OCR_API_GENERAL_BASIC
 
 
 def extract_pdf_page_text(
@@ -58,7 +64,7 @@ def extract_pdf_page_text(
     """
 
     image_bytes = _render_page_for_ocr(path=path, page_no=page_no)
-    return _extract_general_basic_ocr(image_bytes=image_bytes, config=config)
+    return _extract_tencent_ocr(image_bytes=image_bytes, config=config)
 
 
 def extract_image_text(
@@ -75,10 +81,10 @@ def extract_image_text(
     """
 
     image_bytes = _prepare_image_for_ocr(path=path)
-    return _extract_general_basic_ocr(image_bytes=image_bytes, config=config)
+    return _extract_tencent_ocr(image_bytes=image_bytes, config=config)
 
 
-def _extract_general_basic_ocr(
+def _extract_tencent_ocr(
     *,
     image_bytes: bytes,
     config: TencentOcrConfig,
@@ -87,6 +93,8 @@ def _extract_general_basic_ocr(
         raise TencentOcrError("tencent_ocr_invalid_image")
     if len(image_bytes) > _MAX_OCR_IMAGE_BYTES:
         raise TencentOcrError("tencent_ocr_image_too_large")
+    if config.api not in TENCENT_OCR_APIS:
+        raise TencentOcrError("tencent_ocr_request_invalid")
     try:
         http_profile = HttpProfile()
         http_profile.reqTimeout = config.timeout_seconds
@@ -97,14 +105,22 @@ def _extract_general_basic_ocr(
             config.region,
             client_profile,
         )
-        request = models.GeneralBasicOCRRequest()
+        request = (
+            models.GeneralAccurateOCRRequest()
+            if config.api == TENCENT_OCR_API_GENERAL_ACCURATE
+            else models.GeneralBasicOCRRequest()
+        )
         request.from_json_string(
             json.dumps(
                 {"ImageBase64": base64.b64encode(image_bytes).decode("ascii")},
                 separators=(",", ":"),
             )
         )
-        response = client.GeneralBasicOCR(request)
+        response = (
+            client.GeneralAccurateOCR(request)
+            if config.api == TENCENT_OCR_API_GENERAL_ACCURATE
+            else client.GeneralBasicOCR(request)
+        )
     except TencentCloudSDKException as exc:
         raise TencentOcrError(_provider_error_code(exc)) from exc
     except (OSError, ValueError, RuntimeError) as exc:

@@ -1056,6 +1056,256 @@ test.describe("招聘工作台关键路径", () => {
     }
   });
 
+  test("岗位评估在进行中显示进度并串行轮询状态", async ({ page }) => {
+    const batchId = "e2e-job-match-progress-batch";
+    let shouldComplete = false;
+    let statusRequestCount = 0;
+    let inFlightStatusRequests = 0;
+    let maxInFlightStatusRequests = 0;
+    let itemRequestCount = 0;
+    let releaseSecondStatusRequest: (() => void) | null = null;
+    let markSecondStatusRequest: (() => void) | null = null;
+    const secondStatusRequest = new Promise<void>((resolve) => {
+      markSecondStatusRequest = resolve;
+    });
+
+    await registerAndVerify(page, "job-match-progress-polling");
+    const fixture = await seedWorkspaceFixture(page);
+    const batch = (
+      status: "queued" | "running" | "completed",
+      completedCount: number,
+    ) => ({
+      batch_id: batchId,
+      job_version_id: fixture.job_version_id,
+      status,
+      total_count: 3,
+      completed_count: completedCount,
+      failed_count: 0,
+      requested_at: "2026-08-05T00:00:00Z",
+      started_at: "2026-08-05T00:00:01Z",
+      completed_at: status === "completed" ? "2026-08-05T00:00:06Z" : null,
+      last_error: null,
+    });
+
+    await page.route(
+      new RegExp(`/v1/job-versions/${fixture.job_version_id}/match-all$`),
+      (route) => route.fulfill({ json: batch("queued", 0) }),
+    );
+    await page.route(new RegExp(`/v1/job-match-batches/${batchId}$`), async (route) => {
+      statusRequestCount += 1;
+      inFlightStatusRequests += 1;
+      maxInFlightStatusRequests = Math.max(maxInFlightStatusRequests, inFlightStatusRequests);
+      const requestNumber = statusRequestCount;
+      if (requestNumber === 2) {
+        markSecondStatusRequest?.();
+        await new Promise<void>((resolve) => {
+          releaseSecondStatusRequest = resolve;
+        });
+      }
+      await route.fulfill({
+        json: shouldComplete
+          ? batch("completed", 3)
+          : batch("running", 1),
+      });
+      inFlightStatusRequests -= 1;
+    });
+    await page.route(new RegExp(`/v1/job-match-batches/${batchId}/items$`), (route) => {
+      itemRequestCount += 1;
+      return route.fulfill({ json: [] });
+    });
+
+    await page.reload();
+    await page.getByRole("button", { name: "智能匹配", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "智能匹配", exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "开始岗位评分（全部可匹配简历）" }).click();
+    const progress = page.getByRole("progressbar", { name: "岗位评估进度" });
+    await expect(progress).toBeVisible();
+    await secondStatusRequest;
+    await expect(progress).toHaveAttribute("aria-valuenow", "33");
+
+    try {
+      // A status response held for longer than the 2s polling interval must
+      // not cause a concurrent status request or any item-list refresh.
+      await page.waitForTimeout(2_250);
+      expect(statusRequestCount).toBe(2);
+      expect(maxInFlightStatusRequests).toBe(1);
+      expect(itemRequestCount).toBe(0);
+      shouldComplete = true;
+    } finally {
+      releaseSecondStatusRequest?.();
+    }
+
+    const taskPanel = page.locator(".match-batch-details");
+    await expect(taskPanel.getByText("已完成", { exact: true })).toBeVisible();
+    await expect(progress).toHaveAttribute("aria-valuenow", "100");
+    expect(itemRequestCount).toBe(0);
+
+    const terminalStatusRequestCount = statusRequestCount;
+    await page.waitForTimeout(2_250);
+    expect(statusRequestCount).toBe(terminalStatusRequestCount);
+    expect(itemRequestCount).toBe(0);
+  });
+
+  test("岗位评估终态有失败项时只读取一次失败明细", async ({ page }) => {
+    const batchId = "e2e-job-match-failure-batch";
+    let statusRequestCount = 0;
+    let itemRequestCount = 0;
+
+    await registerAndVerify(page, "job-match-failure-items");
+    const fixture = await seedWorkspaceFixture(page);
+    const batch = {
+      batch_id: batchId,
+      job_version_id: fixture.job_version_id,
+      status: "partial",
+      total_count: 3,
+      completed_count: 2,
+      failed_count: 1,
+      requested_at: "2026-08-05T00:00:00Z",
+      started_at: "2026-08-05T00:00:01Z",
+      completed_at: "2026-08-05T00:00:06Z",
+      last_error: null,
+    };
+
+    await page.route(
+      new RegExp(`/v1/job-versions/${fixture.job_version_id}/match-all$`),
+      (route) => route.fulfill({
+        json: {
+          ...batch,
+          status: "queued",
+          completed_count: 0,
+          failed_count: 0,
+          completed_at: null,
+        },
+      }),
+    );
+    await page.route(new RegExp(`/v1/job-match-batches/${batchId}$`), (route) => {
+      statusRequestCount += 1;
+      return route.fulfill({ json: batch });
+    });
+    await page.route(new RegExp(`/v1/job-match-batches/${batchId}/items$`), (route) => {
+      itemRequestCount += 1;
+      return route.fulfill({
+        json: [
+          {
+            item_id: "e2e-job-match-failed-item",
+            resume_id: fixture.resume_ids[0],
+            candidate_id: "e2e-job-match-failed-candidate",
+            candidate_display_name: "E2E 岗位评估失败候选人",
+            facts_version: 1,
+            status: "failed",
+            attempt_count: 2,
+            last_error: "E2E 模拟岗位评估失败",
+            job_match_id: null,
+            completed_at: "2026-08-05T00:00:06Z",
+            updated_at: "2026-08-05T00:00:06Z",
+          },
+        ],
+      });
+    });
+
+    await page.reload();
+    await page.getByRole("button", { name: "智能匹配", exact: true }).click();
+    await page.getByRole("button", { name: "开始岗位评分（全部可匹配简历）" }).click();
+
+    const taskPanel = page.locator(".match-batch-details");
+    await expect(taskPanel.getByText("E2E 岗位评估失败候选人", { exact: true })).toBeVisible();
+    await expect(taskPanel.getByText("E2E 模拟岗位评估失败", { exact: true })).toBeVisible();
+    expect(statusRequestCount).toBe(1);
+    expect(itemRequestCount).toBe(1);
+
+    await page.waitForTimeout(2_250);
+    expect(statusRequestCount).toBe(1);
+    expect(itemRequestCount).toBe(1);
+  });
+
+  test("岗位评估终态失败明细重试不会重新轮询状态", async ({ page }) => {
+    const batchId = "e2e-job-match-failure-retry-batch";
+    let statusRequestCount = 0;
+    let itemRequestCount = 0;
+
+    await registerAndVerify(page, "job-match-failure-item-retry");
+    const fixture = await seedWorkspaceFixture(page);
+    const batch = {
+      batch_id: batchId,
+      job_version_id: fixture.job_version_id,
+      status: "partial",
+      total_count: 3,
+      completed_count: 2,
+      failed_count: 1,
+      requested_at: "2026-08-05T00:00:00Z",
+      started_at: "2026-08-05T00:00:01Z",
+      completed_at: "2026-08-05T00:00:06Z",
+      last_error: null,
+    };
+
+    await page.route(
+      new RegExp(`/v1/job-versions/${fixture.job_version_id}/match-all$`),
+      (route) => route.fulfill({
+        json: {
+          ...batch,
+          status: "queued",
+          completed_count: 0,
+          failed_count: 0,
+          completed_at: null,
+        },
+      }),
+    );
+    await page.route(new RegExp(`/v1/job-match-batches/${batchId}$`), (route) => {
+      statusRequestCount += 1;
+      return route.fulfill({ json: batch });
+    });
+    await page.route(new RegExp(`/v1/job-match-batches/${batchId}/items$`), (route) => {
+      itemRequestCount += 1;
+      if (itemRequestCount === 1) {
+        return route.fulfill({
+          status: 503,
+          json: { detail: "E2E 模拟失败明细暂不可用" },
+        });
+      }
+      return route.fulfill({
+        json: [
+          {
+            item_id: "e2e-job-match-retried-failed-item",
+            resume_id: fixture.resume_ids[0],
+            candidate_id: "e2e-job-match-retried-failed-candidate",
+            candidate_display_name: "E2E 重试后的岗位评估失败候选人",
+            facts_version: 1,
+            status: "failed",
+            attempt_count: 2,
+            last_error: "E2E 重试后读取到的岗位评估失败",
+            job_match_id: null,
+            completed_at: "2026-08-05T00:00:06Z",
+            updated_at: "2026-08-05T00:00:06Z",
+          },
+        ],
+      });
+    });
+
+    await page.reload();
+    await page.getByRole("button", { name: "智能匹配", exact: true }).click();
+    await page.getByRole("button", { name: "开始岗位评分（全部可匹配简历）" }).click();
+
+    const taskPanel = page.locator(".match-batch-details");
+    await expect(taskPanel.getByText("任务报告了失败项，正在读取具体原因。", { exact: true })).toBeVisible();
+    await page.waitForTimeout(2_250);
+    expect(statusRequestCount).toBe(1);
+    expect(itemRequestCount).toBe(1);
+
+    await expect.poll(() => itemRequestCount, { timeout: 8_000 }).toBe(2);
+    await expect(
+      taskPanel.getByText("E2E 重试后的岗位评估失败候选人", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      taskPanel.getByText("E2E 重试后读取到的岗位评估失败", { exact: true }),
+    ).toBeVisible();
+    expect(statusRequestCount).toBe(1);
+
+    await page.waitForTimeout(2_250);
+    expect(statusRequestCount).toBe(1);
+    expect(itemRequestCount).toBe(2);
+  });
+
   test("模糊匹配展示命中、未满足与待核实条件，切回精确匹配后收起说明列", async ({ page }) => {
     await registerAndVerify(page, "fuzzy-filter-explanations");
     await seedWorkspaceFixture(page);
@@ -2568,6 +2818,44 @@ test.describe("招聘工作台关键路径", () => {
 
     await page.reload();
     await expect(page.getByRole("tab", { name: "收件邮箱", exact: true })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("数据设置深链保留标签语义与任务分区", async ({ page }) => {
+    await registerAndVerify(page, "settings-data-hash");
+    await page.goto("/#settings/data");
+
+    const dataTab = page.getByRole("tab", { name: "候选人数据与保留", exact: true });
+    await expect(page).toHaveURL(/#settings\/data$/);
+    await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(dataTab).toHaveAttribute("aria-selected", "true");
+    await expect(dataTab).toHaveAttribute("id", "settings-tab-data");
+    await expect(dataTab).toHaveAttribute("aria-controls", "settings-panel-data");
+    await expect(page.locator("#settings-panel-data")).toHaveAttribute("role", "tabpanel");
+    await expect(page.locator("#settings-panel-data")).toHaveAttribute("aria-labelledby", "settings-tab-data");
+
+    await expect(page.getByRole("tab", { name: "保留策略", exact: true })).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("tab", { name: "操作与记录", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "可恢复删除", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "资料导出", exact: true })).toBeVisible();
+
+    await page.reload();
+    await expect(dataTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: "保留策略", exact: true })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("候选人数据设置在窄屏保持单列任务流", async ({ page }) => {
+    await registerAndVerify(page, "settings-data-mobile");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#settings/data");
+    await page.getByRole("tab", { name: "操作与记录", exact: true }).click();
+
+    const layout = page.locator(".candidate-data-layout");
+    const trackCount = await layout.evaluate((element) => {
+      const template = getComputedStyle(element).gridTemplateColumns.trim();
+      return template ? template.split(/\s+/).length : 0;
+    });
+    expect(trackCount).toBe(1);
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
   });
 
   test("OAuth 返回失败会保留收件设置定位并清理回调参数", async ({ page }) => {

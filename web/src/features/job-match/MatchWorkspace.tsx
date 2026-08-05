@@ -430,9 +430,9 @@ export function MatchWorkspace({
           <p>
             {isJobManagement
               ? (canGenerateAiJd
-                ? "创建、发布和维护岗位 JD 版本。确认后的版本可用于候选人匹配和招聘流程。"
+                ? "创建、发布和维护岗位 JD 版本。确认后的版本可用于候选人匹配。"
                 : "可直接发布原版 JD；AI 生成 JD 需要开通相应套餐。")
-              : "选择已确认的岗位 JD，查看匹配依据并由招聘人员决定是否加入招聘流程。"}
+              : "选择已确认的岗位 JD，查看候选人匹配依据。"}
           </p>
         </div>
       </header>

@@ -17,7 +17,6 @@ export interface WorkspaceNavigationGroup {
 /** Resource identifiers that are safe to carry in a browser route. */
 export interface WorkspaceRouteParams {
   createJob?: boolean;
-  jobId?: string;
   jobVersionId?: string;
 }
 
@@ -45,7 +44,6 @@ export const workspaceNavigationGroups: WorkspaceNavigationGroup[] = [
     items: [
       { kind: "view", view: "jobs", label: "职位管理", icon: "briefcase" },
       { kind: "view", view: "match", label: "智能匹配", icon: "match" },
-      { kind: "view", view: "workflow", label: "招聘流程", icon: "history" },
     ],
   },
   {
@@ -71,7 +69,6 @@ const hashByView: Record<WorkspaceNavigationView, string> = {
   workbench: "#workbench",
   agent: "#agent",
   jobs: "#jobs",
-  workflow: "#workflow",
   library: "#library",
   favorites: "#favorites",
   filter: "#filter",
@@ -87,8 +84,6 @@ const viewByRoute: Record<string, WorkspaceNavigationView> = {
   "recruiting-agent": "agent",
   jobs: "jobs",
   positions: "jobs",
-  workflow: "workflow",
-  recruiting: "workflow",
   library: "library",
   talent: "library",
   favorites: "favorites",
@@ -108,6 +103,16 @@ function normalizedHashRoute(hash: string): string {
     .toLowerCase();
 }
 
+/**
+ * These hashes belonged to the removed recruitment-process board. Keep this
+ * migration marker so previously shared URLs can be redirected to the
+ * workbench instead of leaving people on a stale hash.
+ */
+export function isRemovedRecruitingWorkflowRoute(hash: string): boolean {
+  const route = normalizedHashRoute(hash);
+  return route === "workflow" || route === "recruiting";
+}
+
 function readRouteParam(params: URLSearchParams, key: string): string | undefined {
   const value = params.get(key)?.trim();
   return value || undefined;
@@ -121,7 +126,6 @@ export function workspaceRouteFromHash(hash: string): WorkspaceRoute | null {
   return {
     view,
     createJob: params.get("new") === "1",
-    jobId: readRouteParam(params, "job"),
     jobVersionId: readRouteParam(params, "jobVersion"),
   };
 }
@@ -136,7 +140,6 @@ export function workspaceHashForView(
 ): string {
   const params = new URLSearchParams();
   if (route.createJob) params.set("new", "1");
-  if (route.jobId) params.set("job", route.jobId);
   if (route.jobVersionId) params.set("jobVersion", route.jobVersionId);
   const query = params.toString();
   return `${hashByView[view]}${query ? `?${query}` : ""}`;

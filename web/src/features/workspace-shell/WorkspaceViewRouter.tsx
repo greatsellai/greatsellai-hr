@@ -14,7 +14,6 @@ import { type useCandidateSearchController } from "../filter/useCandidateSearchC
 import { ScoreWorkspace } from "../scoring/ScoreWorkspace";
 import { MatchWorkspace } from "../job-match/MatchWorkspace";
 import { RecruitingOverview } from "../recruiting/RecruitingOverview";
-import { RecruitingWorkspace } from "../recruiting/RecruitingWorkspace";
 import { UploadPage } from "../upload/UploadPage";
 import { WorkspaceSettingsPage } from "../workspace-settings/WorkspaceSettingsPage";
 import { WorkspaceFeedbackPage } from "../workspace-feedback/WorkspaceFeedbackPage";
@@ -100,11 +99,6 @@ export interface WorkspaceViewRouterProps {
   ) => void;
   onOpenLibraryResume: (item: ResumeLibraryItem) => void;
   onOpenMatchedResume: (match: JobMatch) => void;
-  onOpenRecruitingCandidate: (
-    resumeId: string,
-    candidateId: string,
-    candidateName: string | null,
-  ) => void;
   onOpenRecruitingAgent: () => void;
   onRefineWithAgent: (filter: CandidateSearchRequest, totalCount: number) => void;
   onScoreCreated: () => void;
@@ -133,22 +127,12 @@ export function WorkspaceViewRouter({
   onOpenCandidate,
   onOpenLibraryResume,
   onOpenMatchedResume,
-  onOpenRecruitingCandidate,
   onOpenRecruitingAgent,
   onRefineWithAgent,
   onScoreCreated,
   onTemplateCreated,
   onUploadedResume,
 }: WorkspaceViewRouterProps) {
-  const handleWorkflowJobSelection = useCallback(
-    (jobId: string | null) => {
-      navigation.navigateToView(
-        "workflow",
-        jobId ? { jobId } : {},
-      );
-    },
-    [navigation.navigateToView],
-  );
   const clearJobRoute = useCallback(
     () => navigation.navigateToView("jobs"),
     [navigation.navigateToView],
@@ -157,11 +141,6 @@ export function WorkspaceViewRouter({
     () => navigation.navigateToView("match"),
     [navigation.navigateToView],
   );
-  const clearWorkflowRoute = useCallback(
-    () => navigation.navigateToView("workflow"),
-    [navigation.navigateToView],
-  );
-
   return (
     <>
       <div className="recruiting-agent-view" hidden={view !== "agent"}>
@@ -185,7 +164,6 @@ export function WorkspaceViewRouter({
           onCreateJob={() => navigation.navigateToView("jobs", { createJob: true })}
           onOpenJobs={() => navigation.navigateToView("jobs")}
           onOpenMatching={() => navigation.navigateToView("match")}
-          onOpenWorkflow={(jobId) => navigation.navigateToView("workflow", jobId ? { jobId } : {})}
         />
       )}
       {view === "library" && (
@@ -274,21 +252,6 @@ export function WorkspaceViewRouter({
           )}
           onOpenJobManagement={() => navigation.navigateToView("jobs")}
           onOpenMatchedResume={onOpenMatchedResume}
-        />
-      )}
-      {view === "workflow" && (
-        <RecruitingWorkspace
-          formatError={feedback.formatError}
-          initialJobId={routeParams.jobId}
-          notify={feedback.notify}
-          onCreateJob={() => navigation.navigateToView("jobs")}
-          onInvalidJobSelection={clearWorkflowRoute}
-          onJobSelectionChange={handleWorkflowJobSelection}
-          onOpenCandidate={(application) => onOpenRecruitingCandidate(
-            application.resume_id,
-            application.candidate_id,
-            application.candidate_display_name,
-          )}
         />
       )}
       {view === "settings" && permissions.canManageSettings && (

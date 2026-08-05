@@ -29,7 +29,6 @@ export function RecruitingOverview({
   onCreateJob,
   onOpenJobs,
   onOpenMatching,
-  onOpenWorkflow,
 }: {
   formatError: (error: unknown) => string;
   notify: (kind: ToastKind, message: string) => void;
@@ -37,7 +36,6 @@ export function RecruitingOverview({
   onCreateJob: () => void;
   onOpenJobs: () => void;
   onOpenMatching: () => void;
-  onOpenWorkflow: (jobId?: string) => void;
 }) {
   const [jobs, setJobs] = useState<RecruitingJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,7 +79,7 @@ export function RecruitingOverview({
       <header className="page-heading recruiting-page-heading">
         <div>
           <h1>招聘工作台</h1>
-          <p>从岗位 JD、候选人匹配到人工流程流转，所有操作只基于当前工作区的真实招聘记录。</p>
+          <p>从岗位 JD 到候选人匹配，所有操作只基于当前工作区的真实招聘记录。</p>
         </div>
         <div className="recruiting-overview-heading-actions">
           <button className="button button-ghost" onClick={onOpenAgent} type="button">
@@ -132,7 +130,7 @@ export function RecruitingOverview({
           <div className="empty-state-inner">
             <span className="empty-glyph"><Icon name="briefcase" size={23} /></span>
             <h2>从第一个职位开始</h2>
-            <p>先创建或发布岗位 JD，再为岗位配置流程并从人才库加入候选人。</p>
+            <p>先创建或发布岗位 JD，再从人才库加入候选人。</p>
             <button className="button button-primary" onClick={onCreateJob} type="button">
               <Icon name="plus" size={16} />创建职位 JD
             </button>
@@ -146,9 +144,6 @@ export function RecruitingOverview({
                 <h2>当前岗位</h2>
                 <p>优先显示招聘中和暂停中的岗位。</p>
               </div>
-              <button className="text-button" onClick={() => onOpenWorkflow()} type="button">
-                查看流程 <Icon name="arrow-right" size={15} />
-              </button>
             </div>
             {activeJobs.length ? (
               <div className="table-scroll">
@@ -159,7 +154,6 @@ export function RecruitingOverview({
                       <th scope="col">状态</th>
                       <th scope="col">负责人 / 部门</th>
                       <th scope="col">流程中候选人</th>
-                      <th aria-label="操作" scope="col" />
                     </tr>
                   </thead>
                   <tbody>
@@ -172,11 +166,6 @@ export function RecruitingOverview({
                         <td><span className={`recruiting-status-chip is-${job.recruiting_status}`}>{statusLabel[job.recruiting_status]}</span></td>
                         <td>{jobMeta(job)}</td>
                         <td>{job.active_application_count}</td>
-                        <td>
-                          <button className="text-button" onClick={() => onOpenWorkflow(job.job_id)} type="button">
-                            打开流程
-                          </button>
-                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -204,11 +193,6 @@ export function RecruitingOverview({
             <button className="recruiting-overview-action" onClick={onOpenMatching} type="button">
               <Icon name="match" size={18} />
               <span><strong>查看智能匹配</strong><small>按已确认 JD 审阅候选人依据</small></span>
-              <Icon name="chevron-right" size={16} />
-            </button>
-            <button className="recruiting-overview-action" onClick={() => onOpenWorkflow()} type="button">
-              <Icon name="history" size={18} />
-              <span><strong>推进招聘流程</strong><small>手动流转候选人并查看历史</small></span>
               <Icon name="chevron-right" size={16} />
             </button>
           </aside>

@@ -653,17 +653,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     [openResume],
   );
 
-  const openRecruitingCandidate = useCallback(
-    (resumeId: string, candidateId: string, candidateName: string | null) => {
-      openResume({
-        resumeId,
-        candidateId,
-        candidateName: candidateName?.trim() || "未命名候选人",
-      }, "applications");
-    },
-    [openResume],
-  );
-
   const openAgentResume = useCallback(
     (item: RecruitingAgentCandidate) => {
       openResume({
@@ -841,7 +830,6 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
             onOpenFavoriteResume={openFavoriteResume}
             onOpenLibraryResume={openLibraryResume}
             onOpenMatchedResume={openMatchedResume}
-            onOpenRecruitingCandidate={openRecruitingCandidate}
             onOpenRecruitingAgent={openRecruitingAgent}
             onRefineWithAgent={openAgentWithFilterScope}
             onScoreCreated={handleScoreCreated}

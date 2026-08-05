@@ -46,6 +46,9 @@ import type {
   MailboxConfigCreate,
   MailboxConfigList,
   MailboxConfigPatch,
+  MailboxSourceTagRule,
+  MailboxSourceTagRuleCreate,
+  MailboxSourceTagRulePatch,
   MailboxOAuthStartRequest,
   MailboxOAuthStartResponse,
   MailboxProviderList,
@@ -102,6 +105,9 @@ import type {
   SavedFilterCreate,
   ScoreTemplate,
   ScoreTemplateCreate,
+  SourceTag,
+  SourceTagCreate,
+  SourceTagPatch,
 } from "./types";
 
 export * from "./types";
@@ -423,6 +429,56 @@ export function createApiClient(options: ApiClientOptions = {}) {
         method: "PATCH",
         body: input,
       });
+    },
+
+    listSourceTags(includeDisabled = true): Promise<SourceTag[]> {
+      const query = includeDisabled ? "?include_disabled=true" : "?include_disabled=false";
+      return request<SourceTag[]>(`/source-tags${query}`);
+    },
+
+    createSourceTag(input: SourceTagCreate): Promise<SourceTag> {
+      return request<SourceTag>("/source-tags", { method: "POST", body: input });
+    },
+
+    updateSourceTag(sourceTagId: string, input: SourceTagPatch): Promise<SourceTag> {
+      return request<SourceTag>(`/source-tags/${resourcePath(sourceTagId)}`, {
+        method: "PATCH",
+        body: input,
+      });
+    },
+
+    listMailboxSourceTagRules(mailboxId: string): Promise<MailboxSourceTagRule[]> {
+      return request<MailboxSourceTagRule[]>(
+        `/mailboxes/${resourcePath(mailboxId)}/source-tag-rules`,
+      );
+    },
+
+    createMailboxSourceTagRule(
+      mailboxId: string,
+      input: MailboxSourceTagRuleCreate,
+    ): Promise<MailboxSourceTagRule> {
+      return request<MailboxSourceTagRule>(
+        `/mailboxes/${resourcePath(mailboxId)}/source-tag-rules`,
+        { method: "POST", body: input },
+      );
+    },
+
+    updateMailboxSourceTagRule(
+      mailboxId: string,
+      ruleId: string,
+      input: MailboxSourceTagRulePatch,
+    ): Promise<MailboxSourceTagRule> {
+      return request<MailboxSourceTagRule>(
+        `/mailboxes/${resourcePath(mailboxId)}/source-tag-rules/${resourcePath(ruleId)}`,
+        { method: "PATCH", body: input },
+      );
+    },
+
+    disableMailboxSourceTagRule(mailboxId: string, ruleId: string): Promise<void> {
+      return request<void>(
+        `/mailboxes/${resourcePath(mailboxId)}/source-tag-rules/${resourcePath(ruleId)}`,
+        { method: "DELETE" },
+      );
     },
 
     syncMailbox(mailboxId: string): Promise<MailboxBackgroundJob> {

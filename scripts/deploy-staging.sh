@@ -138,15 +138,15 @@ compose_content() {
 }
 
 compose_has_line() {
-  compose_content "$1" | grep -Fxq -- "$2"
+  grep -Fxq -- "$2" "$1"
 }
 
 compose_contains() {
-  compose_content "$1" | grep -Fq -- "$2"
+  grep -Fq -- "$2" "$1"
 }
 
 compose_matches() {
-  compose_content "$1" | grep -Eq -- "$2"
+  grep -Eq -- "$2" "$1"
 }
 
 record_value() {
@@ -191,24 +191,26 @@ exec 9>"$history_dir/.staging-release.lock"
 flock -n 9 || die "Another staging deployment is already running."
 
 candidate_compose="$(mktemp "/tmp/greatsell-staging-${release_commit}.XXXXXX")"
+normalized_compose="$(mktemp "/tmp/greatsell-staging-normalized-${release_commit}.XXXXXX")"
 rendered_compose="$(mktemp "/tmp/greatsell-staging-rendered-${release_commit}.XXXXXX")"
-trap 'rm -f -- "$candidate_compose" "$rendered_compose"' EXIT
+trap 'rm -f -- "$candidate_compose" "$normalized_compose" "$rendered_compose"' EXIT
 cat > "$candidate_compose"
-compose_has_line "$candidate_compose" 'name: resume-screening-v3-staging' || die "Unexpected staging Compose project name."
-compose_contains "$candidate_compose" 'RESUME_V3_ENVIRONMENT: production' || die "Staging application must run in production mode."
-compose_contains "$candidate_compose" '172.31.0.0/24' || die "Staging proxy subnet is missing."
-compose_contains "$candidate_compose" '172.31.1.0/24' || die "Staging backend subnet is missing."
-compose_contains "$candidate_compose" '"172.17.0.1:18080:80"' || die "Staging private edge binding is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_postgres_data' || die "Staging database volume is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_uploads_data' || die "Staging upload volume is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_caddy_data' || die "Staging Caddy data volume is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_caddy_config' || die "Staging Caddy config volume is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_proxy' || die "Staging proxy network is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_backend' || die "Staging backend network is missing."
-! compose_matches "$candidate_compose" 'resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)' || die "Candidate Compose references a production resource."
-! compose_contains "$candidate_compose" '.env.production' || die "Candidate Compose references a production environment file."
-! compose_matches "$candidate_compose" '(^|[^0-9])80:80([^0-9]|$)|(^|[^0-9])443:443([^0-9]|$)' || die "Candidate Compose publishes a production public port."
-! compose_matches "$candidate_compose" '^[[:space:]]*build:' || die "Staging Compose must only use CI-built images."
+compose_content "$candidate_compose" > "$normalized_compose"
+compose_has_line "$normalized_compose" 'name: resume-screening-v3-staging' || die "Unexpected staging Compose project name."
+compose_contains "$normalized_compose" 'RESUME_V3_ENVIRONMENT: production' || die "Staging application must run in production mode."
+compose_contains "$normalized_compose" '172.31.0.0/24' || die "Staging proxy subnet is missing."
+compose_contains "$normalized_compose" '172.31.1.0/24' || die "Staging backend subnet is missing."
+compose_contains "$normalized_compose" '"172.17.0.1:18080:80"' || die "Staging private edge binding is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_postgres_data' || die "Staging database volume is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_uploads_data' || die "Staging upload volume is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_caddy_data' || die "Staging Caddy data volume is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_caddy_config' || die "Staging Caddy config volume is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_proxy' || die "Staging proxy network is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_backend' || die "Staging backend network is missing."
+! compose_matches "$normalized_compose" 'resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)' || die "Candidate Compose references a production resource."
+! compose_contains "$normalized_compose" '.env.production' || die "Candidate Compose references a production environment file."
+! compose_matches "$normalized_compose" '(^|[^0-9])80:80([^0-9]|$)|(^|[^0-9])443:443([^0-9]|$)' || die "Candidate Compose publishes a production public port."
+! compose_matches "$normalized_compose" '^[[:space:]]*build:' || die "Staging Compose must only use CI-built images."
 
 sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" docker compose \
   --project-directory "$project_dir" \

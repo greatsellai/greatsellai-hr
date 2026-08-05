@@ -567,6 +567,10 @@ bootstrap_import_unlocked() {
   bundle_location="final"
   write_bootstrap_import_marker "$history_dir" "$import_id" "$final_dir" ready
   completed=1
+  # EXIT traps registered inside this function outlive its local variables when
+  # the top-level helper exits normally. All temporary resources are already
+  # removed on the successful path, so disarm it before returning success.
+  trap - EXIT
   printf '%s\n' 'Production bootstrap import completed.'
 }
 
@@ -705,6 +709,9 @@ recover_bootstrap_import_unlocked() {
   fi
   write_bootstrap_import_marker "$history_dir" "$import_id" "$bundle_dir" ready
   restored=1
+  # Match the successful import path: this function's EXIT trap references
+  # locals that disappear once a normal return unwinds the function.
+  trap - EXIT
   printf '%s\n' 'Production bootstrap restore completed.'
 }
 

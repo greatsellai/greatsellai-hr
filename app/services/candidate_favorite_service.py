@@ -22,6 +22,7 @@ from app.schemas import (
     CandidateResumeVersionsResponse,
     FavoriteCandidateItem,
 )
+from app.services.source_tag_service import resume_source_tag_references
 from app.tenant_scope import organization_context_id
 
 
@@ -158,7 +159,11 @@ def favorite_candidate_ids(
     )
 
 
-def _version_previews(candidate: Candidate) -> list[CandidateResumeVersionPreview]:
+def _version_previews(
+    candidate: Candidate,
+    *,
+    source_tags_by_resume: dict[str, list] | None = None,
+) -> list[CandidateResumeVersionPreview]:
     """Return live version metadata in deterministic current-first order."""
 
     resumes = sorted(
@@ -173,6 +178,8 @@ def _version_previews(candidate: Candidate) -> list[CandidateResumeVersionPrevie
             created_at=_isoformat(resume.created_at),
             extraction_status=resume.extraction_status,
             is_active=resume.is_active,
+            source_mailbox_label=resume.source_mailbox_label_snapshot,
+            source_tags=(source_tags_by_resume or {}).get(resume.id, []),
         )
         for resume in resumes
     ]
@@ -192,10 +199,14 @@ def list_candidate_resume_versions(
     )
     if candidate is None:
         raise CandidateFavoriteNotFoundError("candidate_not_found")
+    source_tags_by_resume = resume_source_tag_references(
+        session,
+        resume_ids=[resume.id for resume in candidate.resumes],
+    )
     return CandidateResumeVersionsResponse(
         candidate_id=candidate.id,
         display_name=candidate.display_name,
-        items=_version_previews(candidate),
+        items=_version_previews(candidate, source_tags_by_resume=source_tags_by_resume),
     )
 
 
@@ -227,9 +238,20 @@ def list_candidate_favorites(
         .limit(page_size)
     ).all()
     items: list[FavoriteCandidateItem] = []
+    source_tags_by_resume = resume_source_tag_references(
+        session,
+        resume_ids=[
+            resume.id
+            for favorite in favorites
+            for resume in favorite.candidate.resumes
+        ],
+    )
     for favorite in favorites:
         candidate = favorite.candidate
-        versions = _version_previews(candidate)
+        versions = _version_previews(
+            candidate,
+            source_tags_by_resume=source_tags_by_resume,
+        )
         current_version = next(
             (version for version in versions if version.is_active),
             versions[0] if versions else None,

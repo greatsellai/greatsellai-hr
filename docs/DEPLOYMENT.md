@@ -36,7 +36,7 @@ Compose 将 Caddy 固定在专用 `proxy` 网络的 `172.30.0.2`，API 同时连
 读取其追加的最后一个 `X-Forwarded-For` 值。不要写入 `0.0.0.0/0`、公网 CIDR 或任意
 客户端地址，否则会破坏注册/找回密码限流边界。
 
-浏览器使用同源的 `/v1/*` 请求 API，不需要在生产环境设置前端 API 域名或开放 CORS。HR 主站、登录和工作台均位于 `https://hr.greatsell.cn/`，首次签发 HTTPS 证书前，只需确认该主域的 A/AAAA 记录已指向 HR 服务器，并且云防火墙放行 `80` 与 `443`。
+浏览器使用同源的 `/v1/*` 请求 API，不需要在生产环境设置前端 API 域名或开放 CORS。HR 主站、登录和工作台均位于 `https://hr.greatsellai.cn/`，首次签发 HTTPS 证书前，只需确认该主域的 A/AAAA 记录已指向 HR 服务器，并且云防火墙放行 `80` 与 `443`。
 
 `https://greatsellai.net/` 属于未来官网，HR 部署不得声明、接管或要求该根域指向 HR 服务器。如需保留 `https://greatsellai.net/greatsellhr/` 兼容入口，应由官网自身的边缘代理将该路径转发到 HR 主站，并继续由官网处理根路径和静态资源。
 
@@ -44,9 +44,9 @@ Compose 将 Caddy 固定在专用 `proxy` 网络的 `172.30.0.2`，API 同时连
 
 注册验证和找回密码使用腾讯云 SES API，不使用简历收件邮箱的 IMAP 凭据。切换前先在腾讯云完成发件域/地址验证并创建两份已审核的事务模板：
 
-- 验证和重置模板变量均为：`token`、`expires_minutes`。模板中不得把变量作为整条 URL；必须写死规范入口域名和路由，例如验证模板使用 `https://hr.greatsell.cn/verify-email?token={{token}}`，重置模板使用 `https://hr.greatsell.cn/reset-password?token={{token}}`。该固定域名必须与 `RESUME_V3_PUBLIC_APP_URL` 保持一致。可直接使用仓库的 [验证模板](templates/tencent-ses-email-verification.html) 和 [重置模板](templates/tencent-ses-password-reset.html)。
+- 验证和重置模板变量均为：`token`、`expires_minutes`。模板中不得把变量作为整条 URL；必须写死规范入口域名和路由，例如验证模板使用 `https://hr.greatsellai.cn/verify-email?token={{token}}`，重置模板使用 `https://hr.greatsellai.cn/reset-password?token={{token}}`。该固定域名必须与 `RESUME_V3_PUBLIC_APP_URL` 保持一致。可直接使用仓库的 [验证模板](templates/tencent-ses-email-verification.html) 和 [重置模板](templates/tencent-ses-password-reset.html)。
 
-在服务器已有的、被 Git 忽略的 `.env.production` 中设置 `RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER=tencent_ses`、已验证的 `RESUME_V3_TRANSACTIONAL_EMAIL_FROM`、规范入口 `RESUME_V3_PUBLIC_APP_URL=https://hr.greatsell.cn`、`TENCENT_SECRET_ID`、`TENCENT_SECRET_KEY`、`TENCENT_SES_REGION=ap-guangzhou`、两个模板 ID，以及独立的 `RESUME_V3_EMAIL_CREDENTIALS_KEY`。不要把这些值提交到仓库、写入前端或放进 PR。
+在服务器已有的、被 Git 忽略的 `.env.production` 中设置 `RESUME_V3_TRANSACTIONAL_EMAIL_PROVIDER=tencent_ses`、已验证的 `RESUME_V3_TRANSACTIONAL_EMAIL_FROM`、规范入口 `RESUME_V3_PUBLIC_APP_URL=https://hr.greatsellai.cn`、`TENCENT_SECRET_ID`、`TENCENT_SECRET_KEY`、`TENCENT_SES_REGION=ap-guangzhou`、两个模板 ID，以及独立的 `RESUME_V3_EMAIL_CREDENTIALS_KEY`。不要把这些值提交到仓库、写入前端或放进 PR。
 
 SES 配置由 Compose 的共享应用环境同时交给 API、迁移任务和 worker。发布后，使用一个非生产测试账号分别完成“注册并收取验证邮件”“重发验证邮件”“发起找回密码并收取邮件”三项烟雾验证；失败时保留用户可重试状态，不能通过关闭邮箱验证来绕过问题。
 

@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatMaximumRankPercent,
   formatMinimumAcademicScore,
+  formatTenureFilterSummary,
   institutionClassificationLabel,
   institutionClassificationLabels,
   sortInstitutionClassifications,
@@ -251,6 +252,25 @@ function CandidateSkillHighlights({ item }: { item: CandidateSearchItem }) {
   );
 }
 
+function CandidateSourceTags({ item }: { item: CandidateSearchItem }) {
+  const sourceTags = item.source_tags ?? [];
+  if (!sourceTags.length) return null;
+  const visibleTags = sourceTags.slice(0, 2);
+  const hiddenTagCount = sourceTags.length - visibleTags.length;
+  const accessibleLabel = `投递渠道：${sourceTags
+    .map((tag) => tag.display_name)
+    .join("、")}`;
+
+  return (
+    <div aria-label={accessibleLabel} className="candidate-source-tags" title={accessibleLabel}>
+      {visibleTags.map((tag) => (
+        <span className="tag" key={tag.source_tag_id}>{tag.display_name}</span>
+      ))}
+      {hiddenTagCount > 0 && <span className="candidate-source-tags-more">+{hiddenTagCount}</span>}
+    </div>
+  );
+}
+
 function compactFilterValue(values: readonly string[], limit = 2): string {
   const uniqueValues = [
     ...new Set(values.map((value) => value.trim()).filter(Boolean)),
@@ -349,7 +369,7 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
   if (draft.minEmploymentOrInternshipMonths > 0) {
     add(
       "工作年限",
-      `至少 ${formatDuration(draft.minEmploymentOrInternshipMonths)}`,
+      formatTenureFilterSummary(draft.minEmploymentOrInternshipMonths),
     );
   }
   const academicConditions = [
@@ -379,6 +399,9 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
       "匹配关键词",
       `${keywordModeLabel} · ${compactFilterValue(draft.keywords, 3)}`,
     );
+  }
+  if (draft.sourceTagIds.length) {
+    add("投递渠道", `已选 ${draft.sourceTagIds.length} 个`);
   }
 
   return labels;
@@ -599,29 +622,32 @@ export function ResultsPane({
                         <span className="candidate-name">
                           {item.display_name?.trim() || "未命名候选人"}
                         </span>
-                        <button
-                          aria-busy={favoriteUpdating}
-                          aria-label={
-                            isFavorited
-                              ? `取消收藏 ${item.display_name?.trim() || "未命名候选人"}`
-                              : `收藏 ${item.display_name?.trim() || "未命名候选人"}`
-                          }
-                          aria-pressed={isFavorited}
-                          className={`candidate-favorite-button${isFavorited ? " is-favorited" : ""}`}
-                          disabled={favoriteUpdating}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void toggleFavorite(item);
-                          }}
-                          type="button"
-                        >
-                          {favoriteUpdating ? (
-                            <i className="spinner" />
-                          ) : (
-                            <Icon name="bookmark" size={14} />
-                          )}
-                          {isFavorited ? "已收藏" : "收藏"}
-                        </button>
+                        <div className="candidate-person-actions">
+                          <button
+                            aria-busy={favoriteUpdating}
+                            aria-label={
+                              isFavorited
+                                ? `取消收藏 ${item.display_name?.trim() || "未命名候选人"}`
+                                : `收藏 ${item.display_name?.trim() || "未命名候选人"}`
+                            }
+                            aria-pressed={isFavorited}
+                            className={`candidate-favorite-button${isFavorited ? " is-favorited" : ""}`}
+                            disabled={favoriteUpdating}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void toggleFavorite(item);
+                            }}
+                            type="button"
+                          >
+                            {favoriteUpdating ? (
+                              <i className="spinner" />
+                            ) : (
+                              <Icon name="bookmark" size={14} />
+                            )}
+                            {isFavorited ? "已收藏" : "收藏"}
+                          </button>
+                          <CandidateSourceTags item={item} />
+                        </div>
                       </div>
                     </td>
                     {showFuzzyMatchExplanation && (

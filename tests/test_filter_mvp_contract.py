@@ -165,6 +165,7 @@ def test_ready_new_resume_replaces_prior_active_version_in_search(client) -> Non
             "latest_experience_type": "employment",
             "skill_highlights": ["Python", "SQL"],
             "summary_preview": None,
+            "source_tags": [],
             "score_id": None,
             "score_template_id": None,
             "score_total": None,

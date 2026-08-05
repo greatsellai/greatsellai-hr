@@ -144,7 +144,7 @@ def test_staging_deployment_is_isolated_and_never_uses_production_env_or_builds(
         assert "StrictHostKeyChecking=yes" in script
         assert "compose_content()" in script
         assert "sed -E '/^[[:space:]]*#/d; s/[[:space:]]+#.*$//'" in script
-        assert "! compose_contains \"$candidate_compose\" '.env.production'" in script or "! compose_contains \"$temporary_compose\" '.env.production'" in script
+        assert "! compose_contains \"$normalized_compose\" '.env.production'" in script or "! compose_contains \"$temporary_normalized\" '.env.production'" in script
         assert "realpath -e" in script
         assert "realpath -m" in script
         assert "172.17.0.1:18080:80" in script
@@ -153,6 +153,9 @@ def test_staging_deployment_is_isolated_and_never_uses_production_env_or_builds(
             "resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)"
             in script
         )
+        assert 'compose_content "$1" | grep' not in script
+    assert 'compose_content "$candidate_compose" > "$normalized_compose"' in deploy
+    assert 'compose_content "$temporary_compose" > "$temporary_normalized"' in preflight
     assert "up -d --no-build --remove-orphans" in deploy
     assert "docker compose " in preflight
     assert not re.search(r"docker compose[^\n]*\b(?:up|stop|build|exec)\b", preflight)

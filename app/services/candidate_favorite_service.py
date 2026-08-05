@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Candidate, CandidateFavorite, Resume
+from app.models import Candidate, CandidateFavorite
 from app.schemas import (
     CandidateFavoriteListResponse,
     CandidateFavoriteState,

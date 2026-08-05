@@ -15,7 +15,7 @@ from email.message import Message
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Literal
+from typing import Callable, Iterable, Iterator, Literal
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -32,7 +32,6 @@ from app.models import (
     MailboxConfig,
     MailboxOAuthConnectIntent,
     MailboxOAuthCredential,
-    MailboxSyncFailureAlert,
     Resume,
 )
 from app.schemas import (
@@ -110,10 +109,6 @@ from app.services.candidate_data_lifecycle_service import (
     CandidateDataLifecycleError,
     mailbox_attachment_is_tombstoned,
 )
-
-if TYPE_CHECKING:
-    from app.services.identity_service import AuthPrincipal
-
 
 class MailboxImportError(RuntimeError):
     pass

@@ -16,7 +16,6 @@ import type {
   MailboxRetentionOverview,
   MailboxRetentionPolicy,
   MailboxRetentionPreview,
-  MailboxRetentionRun,
   MailboxRetentionRuns,
   MailboxSourceTagRule,
   SourceTag,

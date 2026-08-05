@@ -1,4 +1,4 @@
-import type { AiExtractionStatus, AiSummaryStatus } from "../../types";
+import type { AiSummaryStatus } from "../../types";
 
 /** Shared polling cadence for workbench surfaces that show AI extraction state. */
 export const AI_STATUS_POLL_INTERVAL_MS = 2_500;

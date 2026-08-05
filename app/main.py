@@ -108,7 +108,6 @@ from app.schemas import (
     MailboxBackgroundJobBatchResponse,
     MailboxBackgroundJobHistoryResponse,
     MailboxBackgroundJobResponse,
-    MailboxImportResponse,
     MailboxImportHistoryResponse,
     MailboxRetentionCleanupRunHistoryResponse,
     MailboxRetentionCleanupRunResponse,
@@ -157,7 +156,6 @@ from app.schemas import (
     JobApplicationListResponse,
     JobApplicationResponse,
     JobApplicationStageTransitionCreate,
-    JobApplicationStageTransitionResponse,
     JobGenerationRequest,
     JobGenerationResponse,
     JobMatchBatchResponse,
@@ -345,7 +343,6 @@ from app.services.resume_service import (
     reparse_active_resume_as_new_version,
     reconcile_legacy_completed_ai_resumes,
     register_upload_idempotency_key,
-    resolve_uploaded_resume_path,
     save_facts,
     save_pdf_resume,
     validate_pdf_resume_upload,
@@ -804,26 +801,6 @@ def _persist_new_candidate_resume(
             return _resume_upload_response(resume)
         finally:
             clear_organization_context(session)
-
-
-def _resume_original_file_path(
-    *,
-    settings: AppSettings,
-    storage_key: str,
-    organization_id: str,
-) -> Path:
-    """Resolve an original strictly inside its owning workspace directory."""
-    try:
-        return resolve_uploaded_resume_path(
-            settings,
-            storage_key=storage_key,
-            organization_id=organization_id,
-        )
-    except ResumeServiceError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="resume_original_file_not_found",
-        ) from exc
 
 
 _WORKSPACE_FEEDBACK_UPLOAD_NAMESPACE = "workspace-feedback"

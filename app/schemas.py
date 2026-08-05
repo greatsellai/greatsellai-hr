@@ -3305,14 +3305,6 @@ class JobGenerationResponse(ApiModel):
         return self
 
 
-class JobResponse(ApiModel):
-    job_id: str
-    title: str
-    jd_text: str
-    requirements: JobRequirements
-    version: int
-
-
 JobRequirementPriority = Literal["must_have", "preferred"]
 JobRequirementCategory = Literal[
     "skill",

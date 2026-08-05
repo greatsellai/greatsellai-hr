@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 from sqlalchemy import func, or_, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import AppSettings
@@ -180,24 +179,6 @@ def _visible_candidate(
     if candidate is None:
         raise CandidateDataLifecycleError("candidate_not_found")
     return candidate
-
-
-def _deleted_candidate_or_error(session: Session, *, candidate_id: str) -> Candidate:
-    candidate = session.scalar(
-        _lifecycle_statement(select(Candidate).where(Candidate.id == candidate_id))
-    )
-    if candidate is None:
-        raise CandidateDataLifecycleError("candidate_not_found")
-    return candidate
-
-
-def _deleted_resume_or_error(session: Session, *, resume_id: str) -> Resume:
-    resume = session.scalar(
-        _lifecycle_statement(select(Resume).where(Resume.id == resume_id))
-    )
-    if resume is None:
-        raise CandidateDataLifecycleError("resume_not_found")
-    return resume
 
 
 def _locked_visible_candidate_resumes(

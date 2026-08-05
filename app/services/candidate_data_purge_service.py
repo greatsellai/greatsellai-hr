@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Iterator
 
 from sqlalchemy import and_, delete, func, or_, select, update

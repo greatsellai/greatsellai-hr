@@ -360,10 +360,6 @@ def extract_pdf_text(
     )
 
 
-def _non_whitespace_char_count(text: str) -> int:
-    return len(NON_WHITESPACE.findall(text))
-
-
 def _assess_text_quality(text: str) -> _TextQuality:
     non_whitespace_chars = 0
     textual_chars = 0

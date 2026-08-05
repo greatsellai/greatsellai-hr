@@ -1120,12 +1120,6 @@ def _source_experience_term_groups(
     return groups
 
 
-def _source_terms_before_experience_markers(source: str) -> list[str]:
-    """Compatibility helper used by focused parser tests and diagnostics."""
-
-    return [term for group in _source_experience_term_groups(source) for term in group.terms]
-
-
 def _requirement_term_spelling(
     term: str,
     requirements: list[object],
@@ -1160,22 +1154,6 @@ def _source_term_display_spelling(
             if isinstance(skill, str) and normalized_key(skill) == normalized_key(term):
                 return skill
     return _requirement_term_spelling(term, requirements)
-
-
-def _term_is_in_source_alternative(source: str, *, term: str) -> bool:
-    """Leave term alternatives untouched until the policy can express OR."""
-
-    for term_start, _ in _source_term_occurrences(source, term):
-        clause_start, clause_end = _source_clause_bounds(source, term_start)
-        for marker_start, _, _ in _marker_hits_in_clause(
-            source,
-            clause_start=clause_start,
-            clause_end=clause_end,
-        ):
-            prefix = source[clause_start:marker_start]
-            if ("或" in prefix or re.search(r"\bor\b", prefix)) and _text_mentions_term(prefix, term):
-                return True
-    return False
 
 
 def _append_explicit_experience_candidate(

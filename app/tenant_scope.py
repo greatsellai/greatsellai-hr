@@ -16,14 +16,10 @@ dependency.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Iterator, TYPE_CHECKING
+from typing import Iterator
 
 from sqlalchemy import event
 from sqlalchemy.orm import Session, with_loader_criteria
-
-if TYPE_CHECKING:
-    from collections.abc import Generator
-
 
 # Keep these stable IDs aligned with the data-only migration.  They are not a
 # credential and let pre-registration records retain a safe, deterministic
@@ -63,21 +59,6 @@ def organization_context_id(session: Session) -> str:
     """Return the current safe workspace, falling back only to archived data."""
 
     return str(session.info.get(_ORGANIZATION_ID_KEY) or LEGACY_ORGANIZATION_ID)
-
-
-def enable_organization_scope_bypass(session: Session) -> None:
-    """Allow a short-lived system-only global worker claim query.
-
-    Callers must immediately restore a concrete scope before loading linked
-    business records or writing user-visible data.  This is intentionally not
-    exposed through the HTTP layer.
-    """
-
-    session.info[_BYPASS_KEY] = True
-
-
-def disable_organization_scope_bypass(session: Session) -> None:
-    session.info.pop(_BYPASS_KEY, None)
 
 
 @contextmanager

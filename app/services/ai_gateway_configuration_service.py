@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
-
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session

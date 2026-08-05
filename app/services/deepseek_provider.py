@@ -24,7 +24,7 @@ from app.schemas import (
 )
 from app.services.institution_service import build_985_211_ai_rulebook
 from app.services.contact_extraction_service import redact_contact_values
-from app.services.normalization import normalized_contains, normalized_key
+from app.services.normalization import normalized_contains
 from app.services.ai_gateway_service import AiGatewayError, active_legacy_payload_executor
 from app.services.trial_quota_service import TRIAL_LLM_CALL_QUOTA_EXHAUSTED_CODE
 
@@ -4203,13 +4203,6 @@ def _experience_term_polarities(text: str, term: str) -> tuple[bool, bool]:
         else:
             affirmative = True
     return affirmative, negated
-
-
-def _term_is_explicitly_negated(text: str, term: str) -> bool:
-    """Whether at least one direct occurrence says the term was not used."""
-
-    _, negated = _experience_term_polarities(text, term)
-    return negated
 
 
 def _experience_policy_evidence_fact_ids(

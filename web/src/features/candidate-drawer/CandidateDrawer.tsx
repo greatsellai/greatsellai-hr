@@ -1,6 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
 import type {
   CandidateResumeVersionPreview,
   FilterOptions,

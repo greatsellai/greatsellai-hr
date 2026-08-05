@@ -156,6 +156,300 @@
   font-variant-numeric: tabular-nums;
 }
 
+.backoffice-ui-root .score-workspace .score-template-draft-notice {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  padding: 0.6875rem 0.75rem;
+  margin: 0 0 var(--space-md);
+  color: var(--red-pressed);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  background: var(--red-tint);
+  border: 1px solid rgb(215 22 24 / 0.24);
+  border-radius: var(--radius-sm);
+}
+
+.backoffice-ui-root .score-workspace .score-template-draft-notice svg {
+  flex: 0 0 auto;
+  margin-top: 0.125rem;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization {
+  display: grid;
+  gap: 0.875rem;
+  padding-top: var(--space-lg);
+  margin-top: var(--space-lg);
+  border-top: 1px solid var(--line);
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-heading,
+.backoffice-ui-root .score-workspace .score-template-optimization-preview-heading {
+  display: flex;
+  gap: var(--space-md);
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-heading h3,
+.backoffice-ui-root .score-workspace .score-template-optimization-preview-heading h4 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.9375rem;
+  font-weight: 720;
+  letter-spacing: -0.015em;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-heading p,
+.backoffice-ui-root .score-workspace .score-template-optimization-preview-heading p {
+  max-width: 65ch;
+  margin: 0.25rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-heading .backoffice-action-button {
+  flex: 0 0 auto;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-selection {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.625rem;
+  align-items: baseline;
+  padding: 0.625rem 0.75rem;
+  margin: 0;
+  background: var(--surface-muted);
+  border-radius: var(--radius-sm);
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-selection span {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-selection strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-status {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-status .spinner {
+  flex: 0 0 auto;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-error {
+  margin: 0;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-preview {
+  display: grid;
+  gap: var(--space-md);
+  padding-top: 0.25rem;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-preview-heading .status-pill {
+  flex: 0 0 auto;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.5rem;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-column {
+  min-width: 0;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-column + .score-template-comparison-column {
+  padding-inline-start: 1.5rem;
+  border-inline-start: 1px solid var(--line);
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-column-heading {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-column-heading span,
+.backoffice-ui-root .score-workspace .score-template-comparison-label {
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-column.is-proposed .score-template-comparison-column-heading span {
+  color: var(--red-pressed);
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-column-heading small {
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-column h5,
+.backoffice-ui-root .score-workspace .score-template-improvement-notes h5 {
+  margin: 0.25rem 0 0;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 720;
+  letter-spacing: -0.01em;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-description {
+  min-height: 2.5rem;
+  margin: 0.25rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-dimensions {
+  margin-top: 0.875rem;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-dimensions ol {
+  display: grid;
+  gap: 0;
+  padding: 0;
+  margin: 0.375rem 0 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-dimensions li {
+  padding: 0.625rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-dimensions li > div {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-dimensions strong {
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 680;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-dimensions li > div span {
+  flex: 0 0 auto;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.backoffice-ui-root .score-workspace .score-template-comparison-dimensions p {
+  margin: 0.25rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.backoffice-ui-root .score-workspace .score-template-improvement-notes {
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--line);
+}
+
+.backoffice-ui-root .score-workspace .score-template-improvement-notes h5 {
+  margin-top: 0;
+}
+
+.backoffice-ui-root .score-workspace .score-template-improvement-notes ul {
+  display: grid;
+  gap: 0.375rem;
+  padding: 0;
+  margin: 0.625rem 0 0;
+  list-style: none;
+}
+
+.backoffice-ui-root .score-workspace .score-template-improvement-notes li,
+.backoffice-ui-root .score-workspace .score-template-improvement-notes p {
+  position: relative;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.backoffice-ui-root .score-workspace .score-template-improvement-notes li {
+  padding-inline-start: 1rem;
+}
+
+.backoffice-ui-root .score-workspace .score-template-improvement-notes li::before {
+  position: absolute;
+  inset-inline-start: 0;
+  color: var(--red-pressed);
+  content: "•";
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-confirmation {
+  display: grid;
+  gap: 0.125rem;
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--line);
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-confirmation > p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.backoffice-ui-root .score-workspace .score-template-optimization-confirmation .review-actions {
+  justify-content: flex-start;
+  padding-top: 0.75rem;
+  border-top: 0;
+}
+
+.backoffice-ui-root .score-workspace .fact-row {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: background-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
+}
+
+.backoffice-ui-root .score-workspace .fact-row:hover:not(:disabled) {
+  background: var(--surface-muted);
+}
+
+.backoffice-ui-root .score-workspace .fact-row.is-selected {
+  background: var(--red-tint);
+  box-shadow: inset 0 0 0 1px rgb(215 22 24 / 0.18);
+}
+
+.backoffice-ui-root .score-workspace .fact-row.is-selected strong {
+  color: var(--red-pressed);
+}
+
+.backoffice-ui-root .score-workspace .fact-row:focus-visible {
+  outline: 0.1875rem solid rgb(215 22 24 / 0.42);
+  outline-offset: 0.125rem;
+}
+
 
 @media (max-width: 47rem) {
 .backoffice-ui-root .score-workspace .score-template-presets {
@@ -182,6 +476,27 @@
     align-self: start;
     justify-self: end;
     margin-bottom: 0;
+  }
+
+  .backoffice-ui-root .score-workspace .score-template-optimization-heading,
+  .backoffice-ui-root .score-workspace .score-template-optimization-preview-heading {
+    flex-direction: column;
+  }
+
+  .backoffice-ui-root .score-workspace .score-template-optimization-heading .backoffice-action-button {
+    width: 100%;
+  }
+
+  .backoffice-ui-root .score-workspace .score-template-optimization-comparison {
+    grid-template-columns: 1fr;
+    gap: var(--space-md);
+  }
+
+  .backoffice-ui-root .score-workspace .score-template-comparison-column + .score-template-comparison-column {
+    padding-top: var(--space-md);
+    padding-inline-start: 0;
+    border-top: 1px solid var(--line);
+    border-inline-start: 0;
   }
 
 }

@@ -65,6 +65,10 @@ _LEGACY_ROUTE_COPY: dict[str, tuple[str, str]] = {
     "resume_extract_core": ("简历核心信息提取", "提取筛选所需的核心字段。"),
     "candidate_name_backfill": ("候选人姓名补全", "基于简历原文补全可核验的姓名。"),
     "resume_score": ("简历评分", "根据岗位要求生成候选人评分。"),
+    "score_template_optimize": (
+        "评分模板优化",
+        "将现有评分模板整理为更清晰、可复核的评分规则草案。",
+    ),
     "resume_summary": ("简历总结", "生成候选人经历与亮点摘要。"),
     "jd_generate": ("JD 生成", "根据岗位需求生成职位描述。"),
     "jd_requirements_extract": ("JD 要求提取", "将职位描述整理为评估要求。"),
@@ -83,6 +87,7 @@ SUPPORTED_AI_FEATURES = frozenset(
         "resume_extract_core",
         "candidate_name_backfill",
         "resume_score",
+        "score_template_optimize",
         "resume_summary",
         "jd_generate",
         "jd_requirements_extract",

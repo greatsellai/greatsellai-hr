@@ -1562,6 +1562,17 @@ export interface ScoreTemplateCreate {
   dimensions: ScoreDimensionCreateInput[];
 }
 
+/**
+ * A read-only AI proposal derived from an existing template. Applying it
+ * always creates a separate template; the source remains unchanged.
+ */
+export interface ScoreTemplateOptimization {
+  source_template_id: string;
+  source_template_version: number;
+  proposed_template: ScoreTemplateCreate;
+  improvement_notes: string[];
+}
+
 export interface ScoreTemplate {
   template_id: string;
   name: string;

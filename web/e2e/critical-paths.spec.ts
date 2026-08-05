@@ -996,6 +996,68 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByLabel("评分维度", { exact: true })).toHaveCount(3);
     await expect(page.getByLabel("权重（%）", { exact: true })).toHaveCount(3);
     await expect(page.getByLabel("AI 评分说明（可选）", { exact: true })).toHaveCount(3);
+    await expect(page.getByRole("heading", { name: "AI 帮我优化", exact: true })).toBeVisible();
+
+    let optimizationRequestCount = 0;
+    await page.route("**/v1/score-templates/*/optimize", async (route) => {
+      optimizationRequestCount += 1;
+      if (optimizationRequestCount === 1) {
+        await route.fulfill({
+          body: JSON.stringify({ detail: "优化服务暂时不可用" }),
+          contentType: "application/json",
+          status: 503,
+        });
+        return;
+      }
+      const templateId = new URL(route.request().url()).pathname.split("/").at(-2);
+      await route.fulfill({
+        body: JSON.stringify({
+          source_template_id: templateId,
+          source_template_version: 1,
+          proposed_template: {
+            name: "E2E 优化后的评分规则",
+            description: "测试 AI 建议可在创建前审阅和调整。",
+            dimensions: [
+              { label: "核心技能证据", weight: 50, guidance: "核验技能和项目记录。" },
+              { label: "职责与成果", weight: 30, guidance: "核验职责范围和可量化结果。" },
+              { label: "基础条件", weight: 20, guidance: "仅核验简历中明确记载的条件。" },
+            ],
+          },
+          improvement_notes: ["提高可验证技能证据的权重", "将笼统经历拆分为职责与成果"],
+        }),
+        contentType: "application/json",
+      });
+    });
+    await page.getByRole("button", { name: "AI 帮我优化", exact: true }).click();
+    await expect(page.locator(".score-template-optimization-error")).toBeVisible();
+    await page.getByRole("button", { name: "AI 帮我优化", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "优化建议对比", exact: true })).toBeVisible();
+    await expect(page.getByText("E2E 优化后的评分规则", { exact: true })).toBeVisible();
+    await expect(page.getByText("提高可验证技能证据的权重", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "确认创建优化模板", exact: true })).toBeVisible();
+    let createOptimizedTemplateRequestCount = 0;
+    await page.route("**/v1/score-templates", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      createOptimizedTemplateRequestCount += 1;
+      if (createOptimizedTemplateRequestCount === 1) {
+        await route.fulfill({
+          body: JSON.stringify({ detail: "暂时无法创建优化后的模板" }),
+          contentType: "application/json",
+          status: 503,
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.getByRole("button", { name: "确认创建优化模板", exact: true }).click();
+    await expect(page.locator(".score-template-optimization-error")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "优化建议对比", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "载入编辑器后调整", exact: true }).click();
+    await expect(page.locator("#template-name")).toHaveValue("E2E 优化后的评分规则");
+    await expect(page.locator(".score-template-draft-notice")).toContainText("不会修改原模板");
     await page.locator("#template-name").fill("E2E 批量评分规则");
     const createTemplateRequest = page.waitForRequest((request) => {
       const { pathname } = new URL(request.url());

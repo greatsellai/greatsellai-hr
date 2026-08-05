@@ -3040,6 +3040,21 @@ class ScoreTemplateResponse(ApiModel):
     dimensions: list[ScoreDimensionInput]
 
 
+class ScoreTemplateOptimizationResponse(ApiModel):
+    """An AI-generated, editable copy of an existing score template.
+
+    The response is deliberately a draft only.  Clients must send
+    ``proposed_template`` through the normal template-creation endpoint after
+    the recruiter has reviewed it, so an AI call can never overwrite an
+    active scoring rule or its historical results.
+    """
+
+    source_template_id: str
+    source_template_version: int
+    proposed_template: ScoreTemplateCreate
+    improvement_notes: list[str] = Field(default_factory=list, max_length=8)
+
+
 class ResumeScoreFactEvidence(ApiModel):
     """A score citation resolved against the immutable fact snapshot.
 

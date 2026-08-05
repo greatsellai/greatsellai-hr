@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { IconAILoading } from "@douyinfe/semi-icons";
 import { api, isApiError } from "../../api";
 import type {
   CandidateSearchItem,
@@ -28,7 +29,11 @@ import {
   AgentMarkdown,
   AgentSearchSummaryPanel,
 } from "./AgentMessagePresentation";
-import { AgentComposer, type AgentReference } from "./AgentComposer";
+import {
+  AgentComposer,
+  type AgentComposerHandle,
+  type AgentReference,
+} from "./AgentComposer";
 import { useRecruitingAgentConversation } from "./useRecruitingAgentConversation";
 import "./recruiting-agent.css";
 
@@ -674,6 +679,7 @@ export function RecruitingAgentPage({
   const [jobVersionId, setJobVersionId] = useState("");
   const [recentTalentProfiles, setRecentTalentProfiles] = useState<TalentSearchProfile[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   const [bindingScopeRequestId, setBindingScopeRequestId] = useState<number | null>(null);
   const [scopeBindingError, setScopeBindingError] = useState<string | null>(null);
   const [referenceError, setReferenceError] = useState<string | null>(null);
@@ -694,7 +700,7 @@ export function RecruitingAgentPage({
     restoreError,
   } = useRecruitingAgentConversation({ storageScope: conversationStorageScope });
   const pageHeadingRef = useRef<HTMLHeadingElement | null>(null);
-  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerInputRef = useRef<AgentComposerHandle | null>(null);
   const restoredTalentProfileKeyRef = useRef<string | null>(null);
   const restoredChatHistoryConversationIdRef = useRef<string | null>(null);
   const autoBoundScopeRequestIdRef = useRef<number | null>(null);
@@ -1354,6 +1360,7 @@ export function RecruitingAgentPage({
       setMessages((current) => current.filter((item) => item.id !== options.retryFailureId));
     }
     setLoading(true);
+    setIsGenerating(true);
     try {
       // The LangGraph Agent decides whether this is a normal workspace
       // question, a new confirmation-first profile, or a refinement of the
@@ -1385,6 +1392,7 @@ export function RecruitingAgentPage({
         },
       ]);
     } finally {
+      setIsGenerating(false);
       setLoading(false);
     }
   };
@@ -1511,10 +1519,8 @@ export function RecruitingAgentPage({
       </div>
       <div className="agent-conversation" aria-live="polite">
         {messages.map((item) => (
-          <article
-            className={`agent-message is-${item.role}${item.failure ? " is-error" : ""}`}
-            key={item.id}
-          >
+          <div className={`agent-message-row is-${item.role}`} key={item.id}>
+            <article className={`agent-message is-${item.role}${item.failure ? " is-error" : ""}`}>
             {item.role === "assistant" ? (
               <AgentMarkdown content={item.content} />
             ) : (
@@ -1604,26 +1610,35 @@ export function RecruitingAgentPage({
                 打开收件邮箱设置
               </button>
             )}
-          </article>
+            </article>
+          </div>
         ))}
-        {loading && (
-          <article className="agent-message is-assistant agent-loading">
-            <div>
-              <i className="spinner" />
-              <span>正在处理请求并调用已授权工具…</span>
-            </div>
-            <small>完成后会显示本轮处理过程，不展示模型内部推理。</small>
-          </article>
+        {isGenerating && (
+          <div className="agent-message-row is-assistant is-loading">
+            <article
+              aria-atomic="true"
+              aria-live="polite"
+              className="agent-message is-assistant agent-loading"
+              data-testid="agent-generating-status"
+              role="status"
+            >
+              <div className="agent-generating-status">
+                <IconAILoading aria-hidden="true" size="large" />
+                <span>AI 正在生成</span>
+              </div>
+            </article>
+          </div>
         )}
       </div>
       <AgentComposer
         availableReferences={availableInputReferences}
         disabled={interactionPending}
+        generating={isGenerating}
         inputRef={composerInputRef}
         onChange={setInput}
         onRemoveReference={(referenceId) => void removeInputReference(referenceId)}
         onSelectReference={(reference) => void applyInputReference(reference)}
-        onSubmit={() => void send(input)}
+        onSubmit={(message) => void send(message)}
         references={activeInputReferences}
         value={input}
       />

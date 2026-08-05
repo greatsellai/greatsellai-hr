@@ -1923,7 +1923,7 @@ test.describe("招聘工作台关键路径", () => {
       cancelable: true,
       isComposing: true,
     });
-    await expect(composer).toHaveValue("第一行");
+    await expect(composer).toHaveText("第一行");
     expect(turnRequests).toHaveLength(0);
 
     // Some Windows IMEs keep the legacy keyCode at 229 for a normal Enter
@@ -1941,12 +1941,12 @@ test.describe("招聘工作台关键路径", () => {
       message: "第一行",
       job_version_id: null,
     });
-    await expect(composer).toHaveValue("");
+    await expect(composer).toHaveText("");
 
     await composer.fill("第一行");
     await composer.press("Shift+Enter");
     await composer.type("第二行");
-    await expect(composer).toHaveValue("第一行\n第二行");
+    await expect(composer).toHaveText("第一行第二行");
     expect(turnRequests).toHaveLength(1);
 
     await composer.press("Enter");
@@ -1955,7 +1955,7 @@ test.describe("招聘工作台关键路径", () => {
       message: "第一行\n第二行",
       job_version_id: null,
     });
-    await expect(composer).toHaveValue("");
+    await expect(composer).toHaveText("");
     await expect(agentPage.getByText("已收到多行请求。")).toHaveCount(2);
     const executionTrace = agentPage.locator(".agent-execution-trace").first();
     await expect(executionTrace).toContainText("本轮处理过程");
@@ -1963,6 +1963,71 @@ test.describe("招聘工作台关键路径", () => {
     await executionTrace.locator("summary").click();
     await expect(executionTrace).toContainText("已完成候选人筛选：找到 2 人");
     await expect(executionTrace).toContainText("不包含模型内部推理");
+  });
+
+  test("招聘助手将 Semi AI 输入框固定在工作区底部，并使用生成状态组件", async ({ page }) => {
+    await registerAndVerify(page, "agent-composer-layout");
+    let releaseTurn: (() => void) | null = null;
+    const pendingTurn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    await page.route("**/v1/recruiting-agent/turns", async (route) => {
+      await pendingTurn;
+      await route.fulfill({
+        json: {
+          conversation_id: "e2e-agent-layout-conversation",
+          context_version: 1,
+          active_context: {
+            candidate_set_source: null,
+            candidate_count: 0,
+            active_job_version_id: null,
+            active_job_title: null,
+            active_talent_profile: null,
+            expires_at: "2026-07-28T10:00:00Z",
+          },
+          message: "已完成。",
+          intent: "help",
+          job_version_id: null,
+          candidates: [],
+          actions: [],
+          tool_trace: [],
+          search_summary: null,
+          batch_id: null,
+        },
+      });
+    });
+
+    await page.getByRole("button", { name: "招聘助手", exact: true }).click();
+    const agentPage = recruitingAgentPage(page);
+    const composer = agentPage.getByTestId("agent-composer");
+    await expect(composer.locator(".agent-ai-chat-input.semi-aiChatInput")).toBeVisible();
+    const positions = await agentPage.evaluate((pageElement) => {
+      const composerElement = pageElement.querySelector<HTMLElement>("[data-testid='agent-composer']");
+      if (!composerElement) throw new Error("Agent composer is missing");
+      const pageBox = pageElement.getBoundingClientRect();
+      const composerBox = composerElement.getBoundingClientRect();
+      return {
+        pageBottom: pageBox.bottom,
+        composerBottom: composerBox.bottom,
+      };
+    });
+    expect(Math.abs(positions.pageBottom - positions.composerBottom)).toBeLessThanOrEqual(1);
+
+    const questionInput = agentPage.getByLabel("向招聘助手提问");
+    await questionInput.fill("请比较候选人");
+    await agentPage.getByRole("button", { name: "发送提问" }).click();
+    const generating = agentPage.getByTestId("agent-generating-status");
+    await expect(generating).toHaveText("AI 正在生成");
+    await expect(generating.locator(".semi-icon")).toBeVisible();
+    await expect(agentPage.locator(".agent-loading")).toHaveCSS("border-top-width", "0px");
+    await expect(composer.locator(".agent-ai-chat-input")).toHaveClass(/is-pending/);
+    await expect(questionInput).toHaveAttribute("aria-disabled", "true");
+    await expect(questionInput).toHaveAttribute("contenteditable", "false");
+    await expect(questionInput).toHaveText("");
+
+    if (!releaseTurn) throw new Error("Agent turn route did not start");
+    releaseTurn();
+    await expect(generating).toHaveCount(0);
   });
 
   test("招聘助手错误说明 AI 服务，并在重发时不重复用户消息", async ({ page }) => {

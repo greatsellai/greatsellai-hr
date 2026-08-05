@@ -229,13 +229,34 @@ def _seed_ready_resume(
                 "evidence_block_ids": ["page-001"],
             },
         ]
+    employment_facts = (
+        [
+            {
+                "experience_type": "employment",
+                "experience_name_raw": "E2E 后端服务研发",
+                "organization_name_raw": "E2E 科技",
+                "title_raw": "后端工程师",
+                "start_month": "2024-07",
+                "end_month": "2026-06",
+                "evidence_block_ids": ["page-001"],
+                "classification_evidence_block_ids": ["page-001"],
+            }
+        ]
+        if sequence == 1
+        else []
+    )
+    employment_source_text = (
+        "工作经历：2024-07 至 2026-06，E2E 后端服务研发，E2E 科技，后端工程师，负责服务端开发与系统设计。\n"
+        if employment_facts
+        else "负责服务端开发与系统设计。"
+    )
     source_text = (
         f"{candidate_name}\n"
         f"{contact_header}"
         "清华大学 计算机科学 本科 2022-09 至 2026-06\n"
         "平均成绩 92 分，GPA 3.8/4.0，排名 5/100。\n"
         "Python 后端经验 分布式系统\n"
-        "负责服务端开发与系统设计。"
+        f"{employment_source_text}"
     )
     resume = Resume(
         candidate_id=candidate.id,
@@ -288,6 +309,7 @@ def _seed_ready_resume(
                             "evidence_block_ids": ["page-001"],
                         }
                     ],
+                    "experiences": employment_facts,
                     "skills": [
                         {
                             "skill_display": "Python",

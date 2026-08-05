@@ -101,7 +101,7 @@ export function LoginPage({
           {loading ? <><i className="spinner" />正在登录</> : "登录工作台"}
         </button>
         <p className="auth-footer-copy">
-          还没有团队工作区？<a href={workspaceHref("/register")}>免费试用 30 天</a>
+          还没有团队工作区？<a href={workspaceHref("/register")}>申请免费试用30天</a>
         </p>
       </form>
     </AuthPageLayout>

@@ -5,7 +5,7 @@ from typing import Final
 from app.services.normalization import normalized_key
 
 
-FILTER_OPTIONS_VERSION: Final = "filter-options.v4.20260721.1"
+FILTER_OPTIONS_VERSION: Final = "filter-options.v5.20260803.1"
 
 DEGREE_OPTIONS: Final = [
     {"value": "doctor", "label": "博士"},
@@ -138,7 +138,10 @@ def language_credential_label(code: str) -> str:
     )
 
 
-def filter_options_payload() -> dict[str, object]:
+def filter_options_payload(
+    *,
+    resume_source_tags: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
     return {
         "schema_version": FILTER_OPTIONS_VERSION,
         "degrees": DEGREE_OPTIONS,
@@ -150,6 +153,10 @@ def filter_options_payload() -> dict[str, object]:
         "award_levels": AWARD_LEVEL_OPTIONS,
         "scholarship_levels": SCHOLARSHIP_LEVEL_OPTIONS,
         "language_credentials": LANGUAGE_CREDENTIAL_OPTIONS,
+        # This list is workspace-owned and intentionally dynamic. The caller
+        # supplies only tags already represented by a resume source projection
+        # so a recruiter's initial filter never offers an empty platform.
+        "resume_source_tags": resume_source_tags or [],
         "graduation_statuses": [
             {"value": "any", "label": "不限"},
             {"value": "fresh", "label": "应届"},

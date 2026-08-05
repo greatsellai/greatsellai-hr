@@ -72,7 +72,12 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
         "ingestion_source_type",
         "source_mailbox_config_id",
         "source_mailbox_label",
+        "source_tags",
         "quality_flags",
+        "graduation_month",
+        "employment_months",
+        "education_school",
+        "highest_degree",
         "summary_preview",
         "summary_created_at",
         "score_total",
@@ -98,7 +103,12 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["ingestion_source_type"] == "manual_upload"
     assert item["source_mailbox_config_id"] is None
     assert item["source_mailbox_label"] is None
+    assert item["source_tags"] == []
     assert item["quality_flags"] == []
+    assert item["graduation_month"] is None
+    assert item["employment_months"] == 0
+    assert item["education_school"] == "清华大学"
+    assert item["highest_degree"] == "bachelor"
     assert item["summary_preview"] == "Backend-oriented candidate."
     assert item["summary_created_at"] == summary.json()["created_at"]
     # All scoring dimensions now use a fixed 100-point scale: 40 * 60% +
@@ -107,6 +117,38 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["score_status"] == "succeeded"
     assert item["score_template_name"] == "Backend Engineer"
     assert item["score_created_at"] == score.json()["created_at"]
+
+
+def test_resume_library_honors_page_size_and_page_boundaries(ai_client) -> None:
+    _, first_resume_id = _save_ready_resume(
+        ai_client,
+        source_text="教育经历 清华大学 计算机 本科。工作经历 Acme Python Engineer。技能 Python SQL",
+    )
+    _, second_resume_id = _save_ready_resume(
+        ai_client,
+        source_text="教育经历 清华大学 计算机 本科。工作经历 Acme Python Engineer。技能 Python SQL",
+    )
+
+    first_page = ai_client.get("/v1/resume-library?page=1&page_size=1")
+    second_page = ai_client.get("/v1/resume-library?page=2&page_size=1")
+
+    assert first_page.status_code == 200, first_page.text
+    assert second_page.status_code == 200, second_page.text
+    first_payload = first_page.json()
+    second_payload = second_page.json()
+    assert first_payload["total"] == 2
+    assert first_payload["page"] == 1
+    assert first_payload["page_size"] == 1
+    assert second_payload["total"] == 2
+    assert second_payload["page"] == 2
+    assert second_payload["page_size"] == 1
+    assert {
+        first_payload["items"][0]["resume_id"],
+        second_payload["items"][0]["resume_id"],
+    } == {first_resume_id, second_resume_id}
+
+    assert ai_client.get("/v1/resume-library?page_size=0").status_code == 422
+    assert ai_client.get("/v1/resume-library?page_size=101").status_code == 422
 
 
 def test_resume_library_keeps_pending_upload_visible_without_ai_outputs(client) -> None:
@@ -264,6 +306,32 @@ def test_resume_library_does_not_guess_an_eta_while_a_retry_is_delayed(client) -
     response = client.get("/v1/resume-library")
     assert response.status_code == 200, response.text
     assert response.json()["items"][0]["analysis_wait_estimate"] is None
+
+
+def test_resume_library_exposes_source_backed_candidate_profile_fields(ai_client) -> None:
+    _, resume_id = _save_ready_resume(
+        ai_client,
+        source_text=(
+            "教育经历 清华大学 计算机 本科。工作经历 "
+            "Acme Python Engineer。技能 Python SQL"
+        ),
+    )
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        resume = session.get(Resume, resume_id)
+        assert resume is not None
+        assert len(resume.educations) == 1
+        resume.educations[0].end_month = "2026-06"
+        resume.employment_months = 30
+        session.commit()
+
+    response = ai_client.get("/v1/resume-library")
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["graduation_month"] == "2026-06"
+    assert item["employment_months"] == 30
+    assert item["education_school"] == "清华大学"
+    assert item["highest_degree"] == "bachelor"
 
 
 def test_resume_library_exposes_source_quality_flags_for_an_active_version(

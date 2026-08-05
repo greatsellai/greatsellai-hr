@@ -51,6 +51,7 @@ from app.models import (
     ResumeScoreBatchItem,
     ResumeSkill,
     ResumeSourceBlock,
+    ResumeSourceTag,
     ResumeSummary,
     ResumeUploadIdempotencyKey,
 )
@@ -645,6 +646,12 @@ def _purge_database_rows(
     session.execute(
         delete(ResumeUploadIdempotencyKey).where(ResumeUploadIdempotencyKey.resume_id.in_(resume_ids))
     )
+    # This compact projection holds optional trace pointers to individual
+    # mailbox attachment events. Candidate lifecycle removal clears the
+    # projection before deleting those immutable event rows, preserving the
+    # composite tenant FKs while letting the later Resume root delete cascade
+    # cleanly through all remaining source-derived state.
+    session.execute(delete(ResumeSourceTag).where(ResumeSourceTag.resume_id.in_(resume_ids)))
 
     if import_ids:
         session.execute(

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Verify the exact staged OCI image identities on a promotion target.
+# Verify CI-attested images on a promotion target without comparing
+# daemon-local image IDs across different Docker implementations.
 set -Eeuo pipefail
 
 usage() {
@@ -8,12 +9,14 @@ Usage: scripts/verify-release-images.sh <commit-sha> [options]
 
 Options:
   --host <ssh-host>         Required production SSH target
-  --api-image-id <sha256>   Required image ID recorded by staging
-  --caddy-image-id <sha256> Required image ID recorded by staging
+  --expected-ci-run-id <id> Required CI workflow run ID attested by staging
+  --expected-ci-run-attempt <number>
+                            Required CI workflow run attempt attested by staging
   --ssh-key <path>          Optional SSH private-key path; never committed
 
 This command does not transfer, build, tag, or deploy images. It fails closed
-unless the promotion target already holds the exact staging-attested images.
+unless the promotion target holds images with the completed staging candidate's
+immutable revision and CI provenance labels.
 EOF
 }
 
@@ -31,14 +34,14 @@ release_commit="${1:-}"
 shift
 
 remote_host=""
-api_image_id=""
-caddy_image_id=""
+expected_ci_run_id=""
+expected_ci_run_attempt=""
 ssh_key=""
 while (($#)); do
   case "$1" in
     --host) remote_host="${2:?--host requires a value}"; shift 2 ;;
-    --api-image-id) api_image_id="${2:?--api-image-id requires a value}"; shift 2 ;;
-    --caddy-image-id) caddy_image_id="${2:?--caddy-image-id requires a value}"; shift 2 ;;
+    --expected-ci-run-id) expected_ci_run_id="${2:?--expected-ci-run-id requires a value}"; shift 2 ;;
+    --expected-ci-run-attempt) expected_ci_run_attempt="${2:?--expected-ci-run-attempt requires a value}"; shift 2 ;;
     --ssh-key) ssh_key="${2:?--ssh-key requires a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
@@ -46,8 +49,8 @@ while (($#)); do
 done
 
 [[ -n "$remote_host" ]] || die "Missing promotion target; pass --host."
-[[ "$api_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid staged API image ID."
-[[ "$caddy_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid staged Caddy image ID."
+[[ "$expected_ci_run_id" =~ ^[0-9]+$ ]] || die "Invalid expected CI workflow run ID."
+[[ "$expected_ci_run_attempt" =~ ^[1-9][0-9]*$ ]] || die "Invalid expected CI workflow run attempt."
 [[ -z "$ssh_key" || -r "$ssh_key" ]] || die "SSH key is not readable."
 
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes)
@@ -58,8 +61,21 @@ fi
 remote_verify_script="$(cat <<'EOF'
 set -Eeuo pipefail
 release_commit="$1"
-api_expected="$2"
-caddy_expected="$3"
+expected_ci_run_id="$2"
+expected_ci_run_attempt="$3"
+
+[[ "$release_commit" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "Invalid promotion release commit." >&2
+  exit 1
+}
+[[ "$expected_ci_run_id" =~ ^[0-9]+$ ]] || {
+  echo "Invalid expected CI workflow run ID." >&2
+  exit 1
+}
+[[ "$expected_ci_run_attempt" =~ ^[1-9][0-9]*$ ]] || {
+  echo "Invalid expected CI workflow run attempt." >&2
+  exit 1
+}
 
 platform="$(sudo -n docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" || {
   echo "Unable to inspect promotion Docker platform." >&2
@@ -71,28 +87,38 @@ platform="$(sudo -n docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" 
 }
 
 require_image() {
-  local image="$1" expected_id="$2" observed_id revision
+  local image="$1" observed_id revision ci_run_id ci_run_attempt
   observed_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image")" || {
     echo "Promotion image is unavailable: $image" >&2
     exit 1
   }
   revision="$(sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
-  [[ "$observed_id" == "$expected_id" ]] || {
-    echo "Promotion image identity does not match completed staging: $image" >&2
+  [[ "$observed_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    echo "Promotion image has an invalid local image ID: $image" >&2
     exit 1
   }
   [[ "$revision" == "$release_commit" ]] || {
     echo "Promotion image revision does not match completed staging: $image" >&2
     exit 1
   }
+  ci_run_id="$(sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_id" }}' "$image")"
+  [[ "$ci_run_id" == "$expected_ci_run_id" ]] || {
+    echo "Promotion image CI workflow run ID does not match completed staging: $image" >&2
+    exit 1
+  }
+  ci_run_attempt="$(sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_attempt" }}' "$image")"
+  [[ "$ci_run_attempt" == "$expected_ci_run_attempt" ]] || {
+    echo "Promotion image CI workflow run attempt does not match completed staging: $image" >&2
+    exit 1
+  }
 }
 
-require_image "greatsellai-hr-api:$release_commit" "$api_expected"
-require_image "greatsellai-hr-caddy:$release_commit" "$caddy_expected"
+require_image "greatsellai-hr-api:$release_commit"
+require_image "greatsellai-hr-caddy:$release_commit"
 EOF
 )"
 
 ssh "${ssh_options[@]}" "$remote_host" \
-  "bash -c $(shell_quote "$remote_verify_script") -- $(shell_quote "$release_commit") $(shell_quote "$api_image_id") $(shell_quote "$caddy_image_id")"
+  "bash -c $(shell_quote "$remote_verify_script") -- $(shell_quote "$release_commit") $(shell_quote "$expected_ci_run_id") $(shell_quote "$expected_ci_run_attempt")"
 
-echo "Promotion target holds the exact completed-staging images for $release_commit."
+echo "Promotion target holds CI-attested images for $release_commit."

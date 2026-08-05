@@ -12,15 +12,19 @@ usage() {
 Usage: scripts/transfer-production-images.sh <commit-sha> --host <ssh-host> [options]
 
 Options:
+  --archive <path>         Required verified CI release-image .tar.gz archive
+  --archive-sha256 <hash>  Required SHA-256 of the exact archive bytes
   --expected-ci-run-id <id>
                        Required successful CI workflow run ID recorded on both images
   --expected-ci-run-attempt <number>
                        Required successful CI workflow run attempt recorded on both images
   --ssh-key <path>     Optional SSH private-key path; never committed
 
-The source runner must already contain the CI-verified API and Caddy images
-tagged with the full commit SHA. The remote host receives the image stream only;
-no production environment file, database, upload, or source file is changed.
+The source runner must already have loaded the CI-verified API and Caddy images
+tagged with the full commit SHA. The remote host receives the exact verified CI
+archive bytes, verifies their SHA-256 before loading, and never receives a
+daemon-specific re-export. No environment file, database, upload, or source
+file is changed.
 EOF
 }
 
@@ -58,12 +62,16 @@ release_commit="${1:-}"
 shift || true
 
 remote_host=""
+archive=""
+archive_sha256=""
 expected_ci_run_id=""
 expected_ci_run_attempt=""
 ssh_key=""
 while (($#)); do
   case "$1" in
     --host) remote_host="${2:?--host requires a value}"; shift 2 ;;
+    --archive) archive="${2:?--archive requires a value}"; shift 2 ;;
+    --archive-sha256) archive_sha256="${2:?--archive-sha256 requires a value}"; shift 2 ;;
     --expected-ci-run-id) expected_ci_run_id="${2:?--expected-ci-run-id requires a value}"; shift 2 ;;
     --expected-ci-run-attempt) expected_ci_run_attempt="${2:?--expected-ci-run-attempt requires a value}"; shift 2 ;;
     --ssh-key) ssh_key="${2:?--ssh-key requires a value}"; shift 2 ;;
@@ -73,9 +81,13 @@ while (($#)); do
 done
 
 [[ -n "$remote_host" ]] || die "Missing deployment target; pass --host."
+[[ -n "$archive" && -f "$archive" && -r "$archive" ]] || die "Missing readable verified CI release-image archive."
+[[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Missing or invalid CI release-image archive checksum."
 [[ "$expected_ci_run_id" =~ ^[0-9]+$ ]] || die "Missing or invalid CI workflow run ID."
 [[ "$expected_ci_run_attempt" =~ ^[1-9][0-9]*$ ]] || die "Missing or invalid CI workflow run attempt."
 [[ -z "$ssh_key" || -r "$ssh_key" ]] || die "SSH key is not readable."
+[[ "$(sha256sum "$archive" | awk '{print $1}')" == "$archive_sha256" ]] || \
+  die "Verified CI release-image archive checksum changed before transfer."
 
 api_image="greatsellai-hr-api:$release_commit"
 caddy_image="greatsellai-hr-caddy:$release_commit"
@@ -107,6 +119,7 @@ set -Eeuo pipefail
 release_commit="$1"
 expected_ci_run_id="$2"
 expected_ci_run_attempt="$3"
+expected_archive_sha256="$4"
 [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]] || {
   echo "Invalid release commit." >&2
   exit 1
@@ -119,11 +132,23 @@ expected_ci_run_attempt="$3"
   echo "Invalid CI workflow run attempt." >&2
   exit 1
 }
+[[ "$expected_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "Invalid CI release-image archive checksum." >&2
+  exit 1
+}
 
 api_image="greatsellai-hr-api:$release_commit"
 caddy_image="greatsellai-hr-caddy:$release_commit"
 
-gzip -dc | sudo -n docker image load
+archive="$(mktemp "/tmp/greatsell-ci-images-${release_commit}.XXXXXX")"
+trap 'rm -f -- "$archive"' EXIT
+cat > "$archive"
+actual_archive_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+[[ "$actual_archive_sha256" == "$expected_archive_sha256" ]] || {
+  echo "Transferred CI release-image archive checksum does not match." >&2
+  exit 1
+}
+gzip -dc "$archive" | sudo -n docker image load
 for image in "$api_image" "$caddy_image"; do
   revision="$(sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" || {
     echo "Transferred image is unavailable: $image" >&2
@@ -146,9 +171,8 @@ for image in "$api_image" "$caddy_image"; do
 done
 EOF
 )"
-remote_command="bash -c $(shell_quote "$remote_loader") -- $(shell_quote "$release_commit") $(shell_quote "$expected_ci_run_id") $(shell_quote "$expected_ci_run_attempt")"
+remote_command="bash -c $(shell_quote "$remote_loader") -- $(shell_quote "$release_commit") $(shell_quote "$expected_ci_run_id") $(shell_quote "$expected_ci_run_attempt") $(shell_quote "$archive_sha256")"
 
-echo "Streaming CI-verified production images for $release_commit to $remote_host."
-docker image save "$api_image" "$caddy_image" | gzip -1 | \
-  ssh "${ssh_options[@]}" "$remote_host" "$remote_command"
-echo "Production images transferred and verified for $release_commit."
+echo "Streaming exact CI-verified release archive for $release_commit to $remote_host."
+cat -- "$archive" | ssh "${ssh_options[@]}" "$remote_host" "$remote_command"
+echo "Exact CI release archive transferred and images verified for $release_commit."

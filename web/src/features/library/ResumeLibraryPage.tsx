@@ -18,6 +18,7 @@ import {
   hasSourceTextQualityIssue,
   hasSupersededReparseVersion,
 } from "../../backoffice/utils/resume-source-quality";
+import { degreeLabels, formatDuration } from "../filter/filter-model";
 import type {
   MailboxConfig,
   ResumeAnalysisWaitEstimate,
@@ -26,7 +27,11 @@ import type {
 } from "../../types";
 import "./resume-library.css";
 
-const RESUME_LIBRARY_PAGE_SIZE = 50;
+const DEFAULT_RESUME_LIBRARY_PAGE_SIZE = 50;
+const RESUME_LIBRARY_PAGE_SIZE_OPTIONS = [25, 50, 100];
+const RESUME_LIBRARY_PAGE_SIZE_SELECT_OPTIONS = RESUME_LIBRARY_PAGE_SIZE_OPTIONS.map(
+  (pageSize) => ({ label: `${pageSize} 条`, value: String(pageSize) }),
+);
 
 interface ResumeLibraryPageProps {
   formatError: (error: unknown) => string;
@@ -298,6 +303,50 @@ function resumeLibraryScoreNotice(status: string | null): string | null {
   }
 }
 
+function graduationProfileLabel(graduationMonth: string | null): string {
+  const match = /^(\d{4})-(?:0[1-9]|1[0-2])$/.exec(
+    graduationMonth?.trim() ?? "",
+  );
+  if (!match) return "毕业时间待核实";
+
+  const graduationYear = Number(match[1]);
+  const currentYear = new Date().getFullYear();
+  if (graduationYear > currentYear) return `${graduationYear}届（在读）`;
+  if (graduationYear === currentYear) return `${graduationYear}届`;
+  return `${graduationYear}年毕业`;
+}
+
+function formalWorkExperienceLabel(months: number): string {
+  const normalizedMonths = Number.isFinite(months)
+    ? Math.max(0, Math.trunc(months))
+    : 0;
+  if (normalizedMonths === 0) return "暂无正式工作经验";
+  return `${formatDuration(normalizedMonths)}工作经验`;
+}
+
+function candidateProfileText(item: ResumeLibraryItem): string {
+  const degree = item.highest_degree;
+  const hasProfileFacts = Boolean(
+    item.graduation_month ||
+      item.education_school?.trim() ||
+      (degree && degree !== "unknown") ||
+      item.employment_months > 0,
+  );
+  if (!hasProfileFacts) {
+    return item.ai_extraction_status === "queued" ||
+      item.ai_extraction_status === "running"
+      ? "候选人信息提取中"
+      : "候选人信息待核实";
+  }
+
+  return [
+    graduationProfileLabel(item.graduation_month),
+    formalWorkExperienceLabel(item.employment_months),
+    item.education_school?.trim() || "学校待核实",
+    degree && degree !== "unknown" ? degreeLabels[degree] : "学历待核实",
+  ].join(" · ");
+}
+
 export function ResumeLibraryPage({
   formatError,
   selectedResumeId,
@@ -310,6 +359,7 @@ export function ResumeLibraryPage({
   const [mailboxSources, setMailboxSources] = useState<MailboxConfig[]>([]);
   const [sourceMailboxId, setSourceMailboxId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_RESUME_LIBRARY_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [analysisActivityTick, setAnalysisActivityTick] = useState(0);
@@ -333,7 +383,7 @@ export function ResumeLibraryPage({
     try {
       const nextLibrary = await api.listResumeLibrary(
         page,
-        RESUME_LIBRARY_PAGE_SIZE,
+        pageSize,
         sourceMailboxId,
       );
       if (requestId === latestLibraryRequestIdRef.current) {
@@ -348,7 +398,7 @@ export function ResumeLibraryPage({
         setLoading(false);
       }
     }
-  }, [formatError, page, sourceMailboxId]);
+  }, [formatError, page, pageSize, sourceMailboxId]);
 
   useEffect(() => {
     void loadLibrary();
@@ -431,7 +481,7 @@ export function ResumeLibraryPage({
 
   const items = library?.items ?? [];
   const total = library?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / RESUME_LIBRARY_PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const canPageBack = page > 1;
   const canPageForward = page < totalPages;
   const pageOverview = items.reduce(
@@ -447,8 +497,8 @@ export function ResumeLibraryPage({
     },
     { progress: 0, attention: 0, waiting: 0, unscored: 0 },
   );
-  const firstItemIndex = total ? (page - 1) * RESUME_LIBRARY_PAGE_SIZE + 1 : 0;
-  const lastItemIndex = Math.min(page * RESUME_LIBRARY_PAGE_SIZE, total);
+  const firstItemIndex = total ? (page - 1) * pageSize + 1 : 0;
+  const lastItemIndex = Math.min(page * pageSize, total);
   const mailboxOptions = [
     { label: "全部来源", value: "" },
     ...mailboxSources.map((mailbox) => ({
@@ -564,6 +614,7 @@ export function ResumeLibraryPage({
                   const scoreNotice = resumeLibraryScoreNotice(
                     item.score_status,
                   );
+                  const candidateProfile = candidateProfileText(item);
                   const favoriteUpdating =
                     favoriteActionCandidateId === item.candidate_id;
                   return (
@@ -582,6 +633,12 @@ export function ResumeLibraryPage({
                         <div className="candidate-person">
                           <span className="candidate-name">
                             {item.display_name?.trim() || "未命名候选人"}
+                          </span>
+                          <span
+                            className="candidate-meta library-candidate-profile"
+                            title={candidateProfile}
+                          >
+                            {candidateProfile}
                           </span>
                           <button
                             aria-busy={favoriteUpdating}
@@ -632,10 +689,28 @@ export function ResumeLibraryPage({
                               </span>
                             </div>
                           ) : null}
-                          {item.source_mailbox_label && (
-                            <span className="candidate-meta library-source-label">
-                              邮箱 · {item.source_mailbox_label}
-                            </span>
+                          {(item.source_mailbox_label || item.source_tags.length > 0) && (
+                            <div className="library-source-provenance">
+                              {item.source_mailbox_label && (
+                                <span className="candidate-meta library-source-label">
+                                  收件通道 · {item.source_mailbox_label}
+                                </span>
+                              )}
+                              {item.source_tags.length > 0 && (
+                                <div
+                                  aria-label={`投递渠道：${item.source_tags.map((tag) => tag.display_name).join("、")}`}
+                                  className="library-source-tags"
+                                  title={`投递渠道：${item.source_tags.map((tag) => tag.display_name).join("、")}`}
+                                >
+                                  {item.source_tags.slice(0, 2).map((tag) => (
+                                    <span className="tag" key={tag.source_tag_id}>{tag.display_name}</span>
+                                  ))}
+                                  {item.source_tags.length > 2 && (
+                                    <span className="library-source-tags-more">+{item.source_tags.length - 2}</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                           )}
                         </div>
                       </td>
@@ -757,23 +832,47 @@ export function ResumeLibraryPage({
             total ? `显示第 ${firstItemIndex}–${lastItemIndex} 份，共 ${total} 份` : "共 0 份简历"
           )}
         </span>
-        {totalPages > 1 && (
-          <div className="pagination">
-            <BackofficeButton
-              disabled={!canPageBack || loading}
-              onClick={() => setPage((current) => current - 1)}
-            >
-              上一页
-            </BackofficeButton>
-            <span>
-              第 {page} / {totalPages} 页
-            </span>
-            <BackofficeButton
-              disabled={!canPageForward || loading}
-              onClick={() => setPage((current) => current + 1)}
-            >
-              下一页
-            </BackofficeButton>
+        {total > 0 && (
+          <div className="library-footer-controls">
+            <div className="library-page-size-control">
+              <label id="resume-library-page-size-label" htmlFor="resume-library-page-size">
+                每页展示
+              </label>
+              <BackofficeSelect
+                ariaLabelledBy="resume-library-page-size-label"
+                disabled={loading}
+                id="resume-library-page-size"
+                onChange={(value) => {
+                  const nextPageSize = Number(value);
+                  if (!RESUME_LIBRARY_PAGE_SIZE_OPTIONS.includes(nextPageSize)) {
+                    return;
+                  }
+                  setPage(1);
+                  setPageSize(nextPageSize);
+                }}
+                options={RESUME_LIBRARY_PAGE_SIZE_SELECT_OPTIONS}
+                value={String(pageSize)}
+              />
+            </div>
+            {totalPages > 1 && (
+              <div className="pagination">
+                <BackofficeButton
+                  disabled={!canPageBack || loading}
+                  onClick={() => setPage((current) => current - 1)}
+                >
+                  上一页
+                </BackofficeButton>
+                <span>
+                  第 {page} / {totalPages} 页
+                </span>
+                <BackofficeButton
+                  disabled={!canPageForward || loading}
+                  onClick={() => setPage((current) => current + 1)}
+                >
+                  下一页
+                </BackofficeButton>
+              </div>
+            )}
           </div>
         )}
       </footer>

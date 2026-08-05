@@ -10,6 +10,8 @@ from app.models import (
     ResumeDocumentExtractionJob,
     ResumeFactSnapshot,
     ResumeSourceBlock,
+    ResumeSourceTag,
+    SourceTag,
 )
 from app.schemas import ResumeFactsSubmission
 from app.services import ai_extraction_job_service as job_service
@@ -485,6 +487,124 @@ def test_reparse_clone_auto_activates_only_after_new_grounded_ai_facts(
     assert replacement.json()["extraction_status"] == "ready"
     assert replacement.json()["ai_extraction_status"] == "completed"
     assert "source_text_unreliable" not in replacement.json()["quality_flags"]
+
+
+def test_active_source_reparse_keeps_submission_source_after_auto_activation(
+    ai_client,
+    monkeypatch,
+) -> None:
+    """A repaired email resume must remain visible through its source tag."""
+
+    source_resume_id = _ready_source_resume(ai_client)
+    database = ai_client.app.state.database
+    with database.session_factory() as session:
+        source = session.get(Resume, source_resume_id)
+        assert source is not None
+        source.ingestion_source_type = "mailbox_attachment"
+        source.source_mailbox_label_snapshot = "Recruiting inbox"
+        source_tag = SourceTag(
+            organization_id=source.organization_id,
+            display_name="Platform X",
+            name_key="platform-x",
+            sort_order=10,
+        )
+        session.add(source_tag)
+        session.flush()
+        session.add(
+            ResumeSourceTag(
+                organization_id=source.organization_id,
+                resume_id=source.id,
+                source_tag_id=source_tag.id,
+                tag_name_snapshot=source_tag.display_name,
+                source_count=3,
+            )
+        )
+        session.commit()
+        source_tag_id = source_tag.id
+
+    school = load_registry().institutions[0].canonical_name
+    recovered_text = f"Education {school} Computer Science Skills Python SQL."
+    monkeypatch.setattr(
+        document_extraction_job_service,
+        "extract_document_text",
+        lambda *args, **kwargs: PdfExtractionResult(
+            source_page_count=1,
+            parsed_page_count=1,
+            pages=[
+                ExtractedPage(
+                    page_no=1,
+                    text=recovered_text,
+                    non_whitespace_chars=len(recovered_text.replace(" ", "")),
+                )
+            ],
+            raw_text=recovered_text,
+            quality_flags=[],
+            parser_version="pymupdf-test",
+        ),
+    )
+    created = ai_client.post(f"/v1/resumes/{source_resume_id}/reparse-source")
+    assert created.status_code == 200, created.text
+    replacement_id = created.json()["resume_id"]
+
+    assert document_extraction_job_service.run_document_extraction_worker_once(
+        database,
+        settings=ai_client.app.state.settings,
+        worker_id="source-reparse-source-tags-document-worker",
+    )
+
+    def fake_extract(**kwargs: object) -> ResumeFactsSubmission:
+        return ResumeFactsSubmission.model_validate(
+            {
+                "education": [
+                    {
+                        "school_name_raw": school,
+                        "degree": "bachelor",
+                        "major_raw": "Computer Science",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+                "skills": [
+                    {"skill_display": "Python", "evidence_block_ids": ["page-001"]}
+                ],
+            }
+        )
+
+    monkeypatch.setattr(job_service, "extract_resume_facts", fake_extract)
+    assert job_service.run_ai_extraction_worker_once(
+        database,
+        settings=ai_client.app.state.settings,
+        worker_id="source-reparse-source-tags-ai-worker",
+    )
+
+    replacement = ai_client.get(f"/v1/resumes/{replacement_id}")
+    assert replacement.status_code == 200, replacement.text
+    assert replacement.json()["is_active"] is True
+    assert replacement.json()["source_mailbox_label"] == "Recruiting inbox"
+    assert replacement.json()["source_tags"] == [
+        {"source_tag_id": source_tag_id, "display_name": "Platform X"}
+    ]
+    with database.session_factory() as session:
+        clone = session.get(Resume, replacement_id)
+        copied_source_tag = session.scalar(
+            select(ResumeSourceTag).where(ResumeSourceTag.resume_id == replacement_id)
+        )
+    assert clone is not None
+    assert clone.ingestion_source_type == "mailbox_attachment"
+    assert clone.source_mailbox_label_snapshot == "Recruiting inbox"
+    assert copied_source_tag is not None
+    assert copied_source_tag.source_tag_id == source_tag_id
+    assert copied_source_tag.source_count == 3
+    # The original mail event remains tied to the historic source version so
+    # deleting that archived version cannot be blocked by this repair clone.
+    assert copied_source_tag.first_import_id is None
+    assert copied_source_tag.last_import_id is None
+
+    filtered = ai_client.post(
+        "/v1/candidates/search",
+        json={"limit": 20, "source_tag_ids_any_of": [source_tag_id]},
+    )
+    assert filtered.status_code == 200, filtered.text
+    assert {item["resume_id"] for item in filtered.json()["items"]} == {replacement_id}
 
 
 def test_active_source_reparse_rejects_second_pending_clone(

@@ -28,6 +28,7 @@ from app.models import (
     ResumeAiExtractionJob,
     ResumeEducation,
     ResumeScore,
+    ResumeSourceTag,
     ResumeSourceBlock,
     ResumeSummary,
     RecruitingAgentConversation,
@@ -898,6 +899,206 @@ def test_workspace_scopes_jd_score_summary_tasks_and_mailbox_configuration(
     assert foreign_task_history.status_code == 404, foreign_task_history.text
     assert a_task_history.status_code == 200, a_task_history.text
     assert task_id not in {item["job_id"] for item in a_task_history.json()["items"]}
+
+
+def test_source_tags_and_mailbox_rules_are_workspace_scoped_and_searches_or_selected_tags(
+    workspace_clients: tuple[TestClient, TestClient],
+) -> None:
+    """A source tag ID is never a cross-workspace search or rule handle."""
+
+    client_a, client_b = workspace_clients
+    session_a = _register_and_login(
+        client_a,
+        organization_name="Source tag Alpha",
+        full_name="Alpha Admin",
+        email="source-tag-alpha@example.test",
+        password="tenant-test-password-a",
+    )
+    session_b = _register_and_login(
+        client_b,
+        organization_name="Source tag Beta",
+        full_name="Beta Admin",
+        email="source-tag-beta@example.test",
+        password="tenant-test-password-b",
+    )
+    organization_a_id = str(session_a["organization"]["organization_id"])
+    organization_b_id = str(session_b["organization"]["organization_id"])
+
+    def create_tag(client: TestClient, display_name: str) -> dict[str, object]:
+        response = client.post(
+            "/v1/source-tags",
+            json={"display_name": display_name, "sort_order": 10},
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    alpha_tag = create_tag(client_a, "Alpha source")
+    beta_tag = create_tag(client_a, "Beta source")
+    other_tag = create_tag(client_a, "Other source")
+    foreign_tag = create_tag(client_b, "Foreign source")
+
+    # The source-tag catalogue is scoped before it reaches the browser.
+    tags_visible_to_b = client_b.get("/v1/source-tags")
+    assert tags_visible_to_b.status_code == 200, tags_visible_to_b.text
+    assert {item["source_tag_id"] for item in tags_visible_to_b.json()} == {
+        foreign_tag["source_tag_id"]
+    }
+    foreign_tag_edit = client_b.patch(
+        f"/v1/source-tags/{alpha_tag['source_tag_id']}",
+        json={"display_name": "attempted foreign edit"},
+    )
+    assert foreign_tag_edit.status_code == 404, foreign_tag_edit.text
+    assert foreign_tag_edit.json()["detail"] == "source_tag_not_found"
+
+    def seed_mailbox(
+        client: TestClient,
+        *,
+        organization_id: str,
+        suffix: str,
+    ) -> str:
+        with client.app.state.database.session_factory() as database_session:
+            set_organization_context(database_session, organization_id)
+            mailbox = MailboxConfig(
+                imap_host="imap.example.test",
+                imap_port=993,
+                email_address=f"{suffix}@example.test",
+                mailbox="INBOX",
+                encrypted_password="fixture-ciphertext",
+                enabled=True,
+            )
+            database_session.add(mailbox)
+            database_session.commit()
+            return mailbox.id
+
+    mailbox_a_id = seed_mailbox(
+        client_a,
+        organization_id=organization_a_id,
+        suffix="source-tags-alpha",
+    )
+    mailbox_b_id = seed_mailbox(
+        client_b,
+        organization_id=organization_b_id,
+        suffix="source-tags-beta",
+    )
+    rule_a = client_a.post(
+        f"/v1/mailboxes/{mailbox_a_id}/source-tag-rules",
+        json={
+            "source_tag_id": alpha_tag["source_tag_id"],
+            "match_kind": "sender_domain",
+            "match_value": "alpha-source.test",
+        },
+    )
+    assert rule_a.status_code == 201, rule_a.text
+
+    foreign_rule_list = client_b.get(
+        f"/v1/mailboxes/{mailbox_a_id}/source-tag-rules"
+    )
+    foreign_rule_assignment = client_b.post(
+        f"/v1/mailboxes/{mailbox_b_id}/source-tag-rules",
+        json={
+            "source_tag_id": alpha_tag["source_tag_id"],
+            "match_kind": "sender_domain",
+            "match_value": "attempted-foreign-source.test",
+        },
+    )
+    assert foreign_rule_list.status_code == 404, foreign_rule_list.text
+    assert foreign_rule_list.json()["detail"] == "mailbox_config_not_found"
+    assert foreign_rule_assignment.status_code == 404, foreign_rule_assignment.text
+    assert foreign_rule_assignment.json()["detail"] == "source_tag_not_found"
+
+    def seed_search_resume(*, tag: dict[str, object], ordinal: int) -> str:
+        with client_a.app.state.database.session_factory() as database_session:
+            set_organization_context(database_session, organization_a_id)
+            candidate = Candidate(display_name=f"Source tag candidate {ordinal}")
+            database_session.add(candidate)
+            database_session.flush()
+            resume = Resume(
+                candidate_id=candidate.id,
+                original_filename=f"source-tag-{ordinal}.pdf",
+                storage_key=f"source-tag-{ordinal}.pdf",
+                sha256=(str(ordinal) * 64)[:64],
+                source_page_count=1,
+                parsed_page_count=1,
+                extraction_status="ready",
+                quality_flags=[],
+                parser_version="tenant-test-fixture",
+                raw_text="Synthetic source-tag search fixture",
+                is_active=True,
+            )
+            database_session.add(resume)
+            database_session.flush()
+            database_session.add(
+                ResumeSourceTag(
+                    resume_id=resume.id,
+                    source_tag_id=str(tag["source_tag_id"]),
+                    tag_name_snapshot=str(tag["display_name"]),
+                    source_count=0,
+                )
+            )
+            database_session.commit()
+            return resume.id
+
+    alpha_resume_id = seed_search_resume(tag=alpha_tag, ordinal=1)
+    beta_resume_id = seed_search_resume(tag=beta_tag, ordinal=2)
+    other_resume_id = seed_search_resume(tag=other_tag, ordinal=3)
+
+    # Multiple selected channels are a fixed OR: candidates from either
+    # selected platform appear, while unrelated platforms do not.
+    selected = client_a.post(
+        "/v1/candidates/search",
+        json={
+            "limit": 20,
+            # Source selection remains an ANDed scope even when factual
+            # screen conditions use the fuzzy/any branch. Within the selected
+            # sources the two tags still mean either platform.
+            "condition_match_mode": "any",
+            "source_tag_ids_any_of": [
+                alpha_tag["source_tag_id"],
+                beta_tag["source_tag_id"],
+            ],
+        },
+    )
+    assert selected.status_code == 200, selected.text
+    selected_items = {
+        item["resume_id"]: item for item in selected.json()["items"]
+    }
+    selected_resume_ids = set(selected_items)
+    assert {alpha_resume_id, beta_resume_id}.issubset(selected_resume_ids)
+    assert other_resume_id not in selected_resume_ids
+    assert {
+        item["source_tag_id"] for item in selected_items[alpha_resume_id]["source_tags"]
+    } == {alpha_tag["source_tag_id"]}
+    assert {
+        item["source_tag_id"] for item in selected_items[beta_resume_id]["source_tags"]
+    } == {beta_tag["source_tag_id"]}
+
+    filter_options_a = client_a.get("/v1/filter-options")
+    filter_options_b = client_b.get("/v1/filter-options")
+    assert filter_options_a.status_code == 200, filter_options_a.text
+    assert filter_options_b.status_code == 200, filter_options_b.text
+    assert {
+        option["value"] for option in filter_options_a.json()["resume_source_tags"]
+    } == {
+        alpha_tag["source_tag_id"],
+        beta_tag["source_tag_id"],
+        other_tag["source_tag_id"],
+    }
+    assert filter_options_b.json()["resume_source_tags"] == []
+
+    # A tag that exists in another workspace is indistinguishable from a
+    # random opaque ID. This prevents search from becoming a tenant probe.
+    foreign_search = client_b.post(
+        "/v1/candidates/search",
+        json={"limit": 20, "source_tag_ids_any_of": [alpha_tag["source_tag_id"]]},
+    )
+    missing_search = client_b.post(
+        "/v1/candidates/search",
+        json={"limit": 20, "source_tag_ids_any_of": ["missing-source-tag"]},
+    )
+    assert foreign_search.status_code == missing_search.status_code == 404
+    assert foreign_search.json()["detail"] == missing_search.json()["detail"] == (
+        "source_tag_not_found"
+    )
 
 
 def test_identical_mailbox_attachment_is_not_deduplicated_across_workspaces(

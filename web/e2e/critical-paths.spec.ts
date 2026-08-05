@@ -368,6 +368,13 @@ test.describe("招聘工作台关键路径", () => {
       name: "查看 E2E 推荐候选人 的简历详情",
     });
     await expect(detailsButton).toBeVisible();
+    const candidateRow = page
+      .locator(".library-table tbody tr")
+      .filter({ has: detailsButton });
+    await expect(candidateRow.locator(".candidate-name")).toHaveText("E2E 推荐候选人");
+    await expect(candidateRow.locator(".library-candidate-profile")).toHaveText(
+      /^2026(?:届|年毕业) · 2 年工作经验 · 清华大学 · 本科$/,
+    );
     await detailsButton.focus();
     await page.keyboard.press("Enter");
     const drawer = page.getByRole("dialog", { name: "E2E 推荐候选人 的简历详情" });
@@ -644,6 +651,62 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("dialog", { name: "E2E 推荐候选人 的简历详情" })).toBeVisible();
   });
 
+  test("简历库可切换每页展示条数，并从第一页重新加载", async ({ page }) => {
+    await registerAndVerify(page, "resume-library-page-size");
+    await seedWorkspaceFixture(page);
+
+    await page.route("**/v1/resume-library**", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as Record<string, unknown>;
+      const requestUrl = new URL(route.request().url());
+      const requestedPage = Number(requestUrl.searchParams.get("page") ?? "1");
+      const requestedPageSize = Number(requestUrl.searchParams.get("page_size") ?? "50");
+      await route.fulfill({
+        response,
+        json: {
+          ...payload,
+          page: requestedPage,
+          page_size: requestedPageSize,
+          total: 120,
+        },
+      });
+    });
+
+    await page.reload();
+    await page.getByRole("button", { name: "人才库", exact: true }).click();
+    await expect(page.getByText("显示第 1–50 份，共 120 份", { exact: true })).toBeVisible();
+    await expect(page.getByText("第 1 / 3 页", { exact: true })).toBeVisible();
+
+    const pageTwoRequest = page.waitForRequest((request) => {
+      const requestUrl = new URL(request.url());
+      return requestUrl.pathname === "/v1/resume-library" &&
+        requestUrl.searchParams.get("page") === "2" &&
+        requestUrl.searchParams.get("page_size") === "50";
+    });
+    await page.getByRole("button", { name: "下一页", exact: true }).click();
+    await pageTwoRequest;
+    await expect(page.getByText("显示第 51–100 份，共 120 份", { exact: true })).toBeVisible();
+    await expect(page.getByText("第 2 / 3 页", { exact: true })).toBeVisible();
+
+    const pageSizeControl = page.locator("#resume-library-page-size");
+    await expect(pageSizeControl).toBeVisible();
+    const pageOneHundredRequest = page.waitForRequest((request) => {
+      const requestUrl = new URL(request.url());
+      return requestUrl.pathname === "/v1/resume-library" &&
+        requestUrl.searchParams.get("page") === "1" &&
+        requestUrl.searchParams.get("page_size") === "100";
+    });
+    if (await pageSizeControl.evaluate((element) => element.tagName === "SELECT")) {
+      await pageSizeControl.selectOption("100");
+    } else {
+      await pageSizeControl.click();
+      await page.getByRole("option").filter({ hasText: "100 条" }).click();
+    }
+    await pageOneHundredRequest;
+    await expect(page.getByText("显示第 1–100 份，共 120 份", { exact: true })).toBeVisible();
+    await expect(page.getByText("第 1 / 2 页", { exact: true })).toBeVisible();
+  });
+
   test("岗位原样发布只提交原始输入，不调用 AI", async ({ page }) => {
     await registerAndVerify(page, "publish-original-job");
     await page.getByRole("button", { name: "职位管理", exact: true }).click();
@@ -736,6 +799,13 @@ test.describe("招聘工作台关键路径", () => {
     await expect(tenureRange).toHaveAttribute("min", "0");
     await expect(tenureRange).toHaveAttribute("max", "240");
     await expect(tenureRange).toHaveAttribute("step", "12");
+    await expect(tenureRange).toHaveAttribute("aria-valuetext", "不限");
+    await expect(basicFilters.getByText("20 年及以上", { exact: true })).toBeVisible();
+    await tenureRange.focus();
+    await tenureRange.press("End");
+    await expect(tenureRange).toHaveAttribute("aria-valuetext", "20 年及以上");
+    await tenureRange.press("Home");
+    await expect(tenureRange).toHaveAttribute("aria-valuetext", "不限");
     for (const range of [academicScoreRange, rankPercentRange]) {
       await expect(range).toHaveAttribute("type", "range");
       await expect(range).toHaveAttribute("min", "0");

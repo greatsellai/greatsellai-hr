@@ -10,4 +10,4 @@
 - `token`：一次性令牌，只能放在固定链接的查询参数值中；
 - `expires_minutes`：链接有效分钟数。
 
-不要使用 `{{verify_url}}`、`{{reset_url}}` 或 `href="{{...}}"`。腾讯云需要在模板里看到固定的跳转域名和路径；生产配置中的 `RESUME_V3_PUBLIC_APP_URL` 必须与模板中的 `https://hr.greatsell.cn` 一致。
+不要使用 `{{verify_url}}`、`{{reset_url}}` 或 `href="{{...}}"`。腾讯云需要在模板里看到固定的跳转域名和路径；生产配置中的 `RESUME_V3_PUBLIC_APP_URL` 必须与模板中的 `https://hr.greatsellai.cn` 一致。

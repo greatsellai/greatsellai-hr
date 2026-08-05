@@ -94,15 +94,15 @@ compose_content() {
 }
 
 compose_has_line() {
-  compose_content "$1" | grep -Fxq -- "$2"
+  grep -Fxq -- "$2" "$1"
 }
 
 compose_contains() {
-  compose_content "$1" | grep -Fq -- "$2"
+  grep -Fq -- "$2" "$1"
 }
 
 compose_matches() {
-  compose_content "$1" | grep -Eq -- "$2"
+  grep -Eq -- "$2" "$1"
 }
 
 umask 077
@@ -134,24 +134,26 @@ fi
 command -v flock >/dev/null
 sudo -n docker compose version >/dev/null
 temporary_compose="$(mktemp "/tmp/greatsell-staging-preflight-${release_commit}.XXXXXX")"
+temporary_normalized="$(mktemp "/tmp/greatsell-staging-normalized-${release_commit}.XXXXXX")"
 temporary_rendered="$(mktemp "/tmp/greatsell-staging-rendered-${release_commit}.XXXXXX")"
-trap 'rm -f -- "$temporary_compose" "$temporary_rendered"' EXIT
+trap 'rm -f -- "$temporary_compose" "$temporary_normalized" "$temporary_rendered"' EXIT
 cat > "$temporary_compose"
-compose_has_line "$temporary_compose" 'name: resume-screening-v3-staging'
-compose_contains "$temporary_compose" 'RESUME_V3_ENVIRONMENT: production'
-compose_contains "$temporary_compose" '172.31.0.0/24'
-compose_contains "$temporary_compose" '172.31.1.0/24'
-compose_contains "$temporary_compose" '"172.17.0.1:18080:80"'
-compose_contains "$temporary_compose" 'resume-screening-v3-staging_postgres_data'
-compose_contains "$temporary_compose" 'resume-screening-v3-staging_uploads_data'
-compose_contains "$temporary_compose" 'resume-screening-v3-staging_caddy_data'
-compose_contains "$temporary_compose" 'resume-screening-v3-staging_caddy_config'
-compose_contains "$temporary_compose" 'resume-screening-v3-staging_proxy'
-compose_contains "$temporary_compose" 'resume-screening-v3-staging_backend'
-! compose_matches "$temporary_compose" 'resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)'
-! compose_contains "$temporary_compose" '.env.production'
-! compose_matches "$temporary_compose" '(^|[^0-9])80:80([^0-9]|$)|(^|[^0-9])443:443([^0-9]|$)'
-! compose_matches "$temporary_compose" '^[[:space:]]*build:'
+compose_content "$temporary_compose" > "$temporary_normalized"
+compose_has_line "$temporary_normalized" 'name: resume-screening-v3-staging'
+compose_contains "$temporary_normalized" 'RESUME_V3_ENVIRONMENT: production'
+compose_contains "$temporary_normalized" '172.31.0.0/24'
+compose_contains "$temporary_normalized" '172.31.1.0/24'
+compose_contains "$temporary_normalized" '"172.17.0.1:18080:80"'
+compose_contains "$temporary_normalized" 'resume-screening-v3-staging_postgres_data'
+compose_contains "$temporary_normalized" 'resume-screening-v3-staging_uploads_data'
+compose_contains "$temporary_normalized" 'resume-screening-v3-staging_caddy_data'
+compose_contains "$temporary_normalized" 'resume-screening-v3-staging_caddy_config'
+compose_contains "$temporary_normalized" 'resume-screening-v3-staging_proxy'
+compose_contains "$temporary_normalized" 'resume-screening-v3-staging_backend'
+! compose_matches "$temporary_normalized" 'resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)'
+! compose_contains "$temporary_normalized" '.env.production'
+! compose_matches "$temporary_normalized" '(^|[^0-9])80:80([^0-9]|$)|(^|[^0-9])443:443([^0-9]|$)'
+! compose_matches "$temporary_normalized" '^[[:space:]]*build:'
 sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" docker compose \
   --project-directory "$project_dir" \
   -f "$temporary_compose" \

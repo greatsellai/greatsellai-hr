@@ -23,12 +23,16 @@ from app.models import (
     CandidateDataDeletionBatch,
     CandidateDataPurgeJob,
     CandidateNameExtractionJob,
+    EmailAttachmentImport,
+    MailboxConfig,
     Resume,
     ResumeAiExtractionJob,
     ResumeDocumentExtractionJob,
     ResumeFactSnapshot,
     ResumeSourceBlock,
+    ResumeSourceTag,
     ResumeSummary,
+    SourceTag,
     utcnow,
 )
 from app.services import candidate_data_purge_service
@@ -215,6 +219,40 @@ def test_due_purge_removes_original_before_dependencies_and_roots(
                 max_attempts=3,
             )
         )
+        mailbox = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="purge-mailbox@example.test",
+            mailbox="INBOX",
+            enabled=True,
+        )
+        session.add(mailbox)
+        session.flush()
+        mail_import = EmailAttachmentImport(
+            mailbox_config_id=mailbox.id,
+            message_uid="purge-source-tag-message",
+            attachment_filename="purge-source-tag.pdf",
+            attachment_sha256="b" * 64,
+            resume_id=resume_id,
+            status="imported",
+        )
+        source_tag = SourceTag(
+            display_name="Purge platform",
+            name_key="purge platform",
+            enabled=True,
+        )
+        session.add_all((mail_import, source_tag))
+        session.flush()
+        session.add(
+            ResumeSourceTag(
+                resume_id=resume_id,
+                source_tag_id=source_tag.id,
+                tag_name_snapshot=source_tag.display_name,
+                first_import_id=mail_import.id,
+                last_import_id=mail_import.id,
+                source_count=1,
+            )
+        )
         session.commit()
     deletion_batch_id = _delete_candidate(client, candidate_id=candidate_id)
     _force_purge_due(client, deletion_batch_id=deletion_batch_id)
@@ -239,6 +277,13 @@ def test_due_purge_removes_original_before_dependencies_and_roots(
     assert not original_path.exists()
 
     with database.session_factory() as session:
+        purge_job = session.scalar(
+            select(CandidateDataPurgeJob).where(
+                CandidateDataPurgeJob.deletion_batch_id == deletion_batch_id
+            )
+        )
+        assert purge_job is not None
+        assert purge_job.status == "completed", purge_job.last_error
         assert session.scalar(
             select(Resume)
             .where(Resume.id == resume_id)
@@ -277,6 +322,16 @@ def test_due_purge_removes_original_before_dependencies_and_roots(
         assert session.scalar(
             select(func.count(ResumeSummary.id)).where(
                 ResumeSummary.resume_id == resume_id
+            )
+        ) == 0
+        assert session.scalar(
+            select(func.count(EmailAttachmentImport.id)).where(
+                EmailAttachmentImport.resume_id == resume_id
+            )
+        ) == 0
+        assert session.scalar(
+            select(func.count(ResumeSourceTag.id)).where(
+                ResumeSourceTag.resume_id == resume_id
             )
         ) == 0
         batch = session.scalar(

@@ -14,8 +14,10 @@ from app.models import (
     CandidateFavorite,
     CandidateNameExtractionJob,
     DocumentExtractionOcrDailyMetric,
+    EmailAttachmentImportTag,
     MailboxConfig,
     MailboxOAuthConnectIntent,
+    MailboxSourceTagRule,
     JobApplication,
     JobApplicationStageTransition,
     RecruitingWorkflow,
@@ -26,18 +28,20 @@ from app.models import (
     RecruitingAgentConversation,
     RecruitingAgentConversationTurn,
     ResumeSummaryJob,
+    ResumeSourceTag,
     RuntimeWorkerHeartbeat,
     TalentSearchRun,
     WorkspaceBackgroundLane,
     WorkspaceFeedbackImageAttachment,
     WorkspaceFeedbackSubmission,
+    SourceTag,
 )
 
 
 def test_alembic_history_has_one_canonical_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert script.get_heads() == ["20260803_0054"]
+    assert script.get_heads() == ["20260803_0055"]
 
 
 def test_migration_revision_identifiers_are_unique() -> None:
@@ -149,6 +153,21 @@ def test_document_ocr_aggregate_ddl_identifiers_fit_postgresql() -> None:
     CreateTable(DocumentExtractionOcrDailyMetric.__table__).compile(dialect=dialect)
     for index in DocumentExtractionOcrDailyMetric.__table__.indexes:
         CreateIndex(index).compile(dialect=dialect)
+
+
+def test_resume_source_tag_ddl_identifiers_fit_postgresql() -> None:
+    """Mailbox source labels must keep their tenant FKs portable to production."""
+
+    dialect = postgresql.dialect()
+    for table in (
+        SourceTag.__table__,
+        MailboxSourceTagRule.__table__,
+        EmailAttachmentImportTag.__table__,
+        ResumeSourceTag.__table__,
+    ):
+        CreateTable(table).compile(dialect=dialect)
+        for index in table.indexes:
+            CreateIndex(index).compile(dialect=dialect)
 
 
 def test_recruiting_core_engine_ddl_identifiers_fit_postgresql() -> None:

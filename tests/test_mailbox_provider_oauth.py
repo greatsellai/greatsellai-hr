@@ -1341,12 +1341,12 @@ def test_oauth_legacy_net_entry_cannot_start_for_cn_canonical_callback(
         database_url="sqlite://",
         allow_unauthenticated=True,
         min_text_chars_per_page=20,
-        public_app_url="https://hr.greatsell.cn",
+        public_app_url="https://hr.greatsellai.cn",
         mailbox_imap_allowed_hosts=("imap.gmail.com",),
         mailbox_google_oauth_client_id="google-client-id-for-cn-domain-test",
         mailbox_google_oauth_client_secret="google-client-secret-for-cn-domain-test",
         mailbox_google_oauth_redirect_uri=(
-            "https://hr.greatsell.cn/v1/mailbox-oauth/callback"
+            "https://hr.greatsellai.cn/v1/mailbox-oauth/callback"
         ),
     )
     app = create_app(settings)

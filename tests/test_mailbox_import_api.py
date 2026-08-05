@@ -14,11 +14,14 @@ from app.models import (
     Candidate,
     EmailAttachmentImport,
     EmailAttachmentImportAttempt,
+    EmailAttachmentImportTag,
     MailboxAttachmentContentIdentity,
     MailboxConfig,
     Resume,
+    ResumeSourceTag,
 )
 from app.services import mailbox_import_service
+from app.services.source_tag_service import match_mailbox_source_tags
 
 
 class StatusOnlyImap:
@@ -656,6 +659,293 @@ def test_forwarded_identical_attachment_creates_one_resume_and_two_audit_records
     history = client.get("/v1/mailbox/imports")
     assert history.status_code == 200, history.text
     assert {item["status"] for item in history.json()["items"]} == {"imported", "duplicate"}
+
+
+def test_forwarded_identical_attachment_keeps_each_platform_tag_on_the_shared_resume(
+    client,
+    monkeypatch,
+) -> None:
+    """Deduplication must collapse bytes, never the channels that delivered them."""
+
+    attachment = b"%PDF-1.7 tagged forwarded attachment"
+
+    def raw_message(*, message_id: str, sender: str, filename: str) -> bytes:
+        message = EmailMessage()
+        message["Message-ID"] = message_id
+        message["From"] = sender
+        message["Subject"] = "Candidate resume"
+        message.set_content("Resume attached")
+        message.add_attachment(
+            attachment,
+            maintype="application",
+            subtype="pdf",
+            filename=filename,
+        )
+        return message.as_bytes()
+
+    messages = {
+        b"42": raw_message(
+            message_id="<platform-a@example.test>",
+            sender="Platform A <noreply@platform-a.test>",
+            filename="platform-a.pdf",
+        ),
+        b"43": raw_message(
+            message_id="<platform-b@example.test>",
+            sender="Platform B <noreply@platform-b.test>",
+            filename="platform-b.pdf",
+        ),
+    }
+
+    class TaggedForwardedImap:
+        status_calls = 0
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def login(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"logged in"]
+
+        def status(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            self.__class__.status_calls += 1
+            uidnext = 42 if self.__class__.status_calls == 1 else 44
+            return "OK", [f"INBOX (UIDVALIDITY 9 UIDNEXT {uidnext})".encode()]
+
+        def select(self, *args, **kwargs) -> tuple[str, list[bytes]]:
+            return "OK", [b"2"]
+
+        def uid(self, command: str, *args):
+            if command == "search":
+                return "OK", [b"42 43"]
+            if command == "fetch":
+                return "OK", [(b"RFC822", messages[args[0]])]
+            raise AssertionError(f"unexpected IMAP command: {command}")
+
+        def logout(self) -> tuple[str, list[bytes]]:
+            return "BYE", [b"logged out"]
+
+    monkeypatch.setattr(mailbox_import_service.imaplib, "IMAP4_SSL", TaggedForwardedImap)
+    save_calls: list[bytes] = []
+    monkeypatch.setattr(
+        mailbox_import_service,
+        "save_pdf_resume",
+        _successful_mailbox_save(save_calls),
+    )
+
+    saved = client.put(
+        "/v1/mailbox/config",
+        json={
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "email_address": "recruiting@example.test",
+            "mailbox": "INBOX",
+            "password": "test-authorization-code",
+            "enabled": True,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    mailbox_id = saved.json()["mailbox_id"]
+
+    platform_a = client.post(
+        "/v1/source-tags",
+        json={"display_name": "Platform A", "sort_order": 10},
+    )
+    platform_b = client.post(
+        "/v1/source-tags",
+        json={"display_name": "Platform B", "sort_order": 20},
+    )
+    assert platform_a.status_code == 201, platform_a.text
+    assert platform_b.status_code == 201, platform_b.text
+    platform_a_id = platform_a.json()["source_tag_id"]
+    platform_b_id = platform_b.json()["source_tag_id"]
+
+    for source_tag_id, sender_domain in (
+        (platform_a_id, "platform-a.test"),
+        (platform_b_id, "platform-b.test"),
+    ):
+        rule = client.post(
+            f"/v1/mailboxes/{mailbox_id}/source-tag-rules",
+            json={
+                "source_tag_id": source_tag_id,
+                "match_kind": "sender_domain",
+                "match_value": sender_domain,
+                "priority": 10,
+                "enabled": True,
+            },
+        )
+        assert rule.status_code == 201, rule.text
+
+    with client.app.state.database.session_factory() as session:
+        result = mailbox_import_service.sync_mailbox(
+            session,
+            settings=client.app.state.settings,
+        )
+        imports = session.scalars(
+            select(EmailAttachmentImport).order_by(EmailAttachmentImport.message_uid)
+        ).all()
+        event_tags = session.scalars(
+            select(EmailAttachmentImportTag).order_by(
+                EmailAttachmentImportTag.email_attachment_import_id,
+                EmailAttachmentImportTag.source_tag_id,
+            )
+        ).all()
+        projections = session.scalars(
+            select(ResumeSourceTag).order_by(ResumeSourceTag.source_tag_id)
+        ).all()
+
+    assert result.imported_count == 1
+    assert result.duplicate_count == 1
+    assert save_calls == [attachment]
+    assert len(imports) == 2
+    assert len({item.resume_id for item in imports}) == 1
+    event_tag_ids_by_import = {
+        import_id: {
+            item.source_tag_id
+            for item in event_tags
+            if item.email_attachment_import_id == import_id
+        }
+        for import_id in (imports[0].id, imports[1].id)
+    }
+    assert event_tag_ids_by_import == {
+        imports[0].id: {platform_a_id},
+        imports[1].id: {platform_b_id},
+    }
+    assert {
+        (item.resume_id, item.source_tag_id, item.source_count) for item in projections
+    } == {
+        (imports[0].resume_id, platform_a_id, 1),
+        (imports[0].resume_id, platform_b_id, 1),
+    }
+
+    history = client.get("/v1/mailbox/imports")
+    assert history.status_code == 200, history.text
+    history_tags = {
+        item["attachment_filename"]: {
+            tag["source_tag_id"] for tag in item["source_tags"]
+        }
+        for item in history.json()["items"]
+    }
+    assert history_tags == {
+        "platform-a.pdf": {platform_a_id},
+        "platform-b.pdf": {platform_b_id},
+    }
+
+
+def test_builtin_platform_source_tag_is_created_from_transient_sender_metadata(
+    client,
+) -> None:
+    """Reviewed platform domains work without requiring a user-created rule."""
+
+    message = EmailMessage()
+    message["From"] = "BOSS <noreply@zhipin.com>"
+    message["Subject"] = "候选人投递"
+
+    with client.app.state.database.session_factory() as session:
+        config = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="recruiting@example.test",
+            mailbox="INBOX",
+            enabled=True,
+        )
+        session.add(config)
+        session.flush()
+        matches = match_mailbox_source_tags(session, config=config, message=message)
+        session.commit()
+
+    assert [(match.display_name_snapshot, match.assignment_kind) for match in matches] == [
+        ("BOSS直聘", "builtin"),
+    ]
+    source_tags = client.get("/v1/source-tags")
+    assert source_tags.status_code == 200, source_tags.text
+    assert [item["display_name"] for item in source_tags.json()] == ["BOSS直聘"]
+
+
+def test_readding_a_stopped_source_tag_rule_reenables_its_auditable_rule(
+    client,
+) -> None:
+    """A stopped rule must be reusable without deleting its history."""
+
+    with client.app.state.database.session_factory() as session:
+        mailbox = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="reopen-rule@example.test",
+            mailbox="INBOX",
+            enabled=True,
+        )
+        session.add(mailbox)
+        session.commit()
+        mailbox_id = mailbox.id
+
+    tag = client.post("/v1/source-tags", json={"display_name": "员工内推"})
+    assert tag.status_code == 201, tag.text
+    payload = {
+        "source_tag_id": tag.json()["source_tag_id"],
+        "match_kind": "sender_domain",
+        "match_value": "referral.example.test",
+        "priority": 100,
+        "enabled": True,
+    }
+    created = client.post(f"/v1/mailboxes/{mailbox_id}/source-tag-rules", json=payload)
+    assert created.status_code == 201, created.text
+    rule_id = created.json()["rule_id"]
+
+    stopped = client.delete(f"/v1/mailboxes/{mailbox_id}/source-tag-rules/{rule_id}")
+    assert stopped.status_code == 204, stopped.text
+
+    restored = client.post(f"/v1/mailboxes/{mailbox_id}/source-tag-rules", json=payload)
+    assert restored.status_code == 201, restored.text
+    assert restored.json()["rule_id"] == rule_id
+    assert restored.json()["enabled"] is True
+
+
+def test_lower_numbered_source_tag_rule_wins_when_multiple_rules_match_one_tag(
+    client,
+) -> None:
+    """Rule priority is ascending: 10 must beat 100 for the same channel."""
+
+    with client.app.state.database.session_factory() as session:
+        mailbox = MailboxConfig(
+            imap_host="imap.example.test",
+            imap_port=993,
+            email_address="priority-rule@example.test",
+            mailbox="INBOX",
+            enabled=True,
+        )
+        session.add(mailbox)
+        session.commit()
+        mailbox_id = mailbox.id
+
+    tag = client.post("/v1/source-tags", json={"display_name": "Priority source"})
+    assert tag.status_code == 201, tag.text
+    rules: list[dict[str, object]] = []
+    for match_value, priority in (("priority.example.test", 10), ("resume", 100)):
+        created = client.post(
+            f"/v1/mailboxes/{mailbox_id}/source-tag-rules",
+            json={
+                "source_tag_id": tag.json()["source_tag_id"],
+                "match_kind": (
+                    "sender_domain" if priority == 10 else "subject_keyword"
+                ),
+                "match_value": match_value,
+                "priority": priority,
+                "enabled": True,
+            },
+        )
+        assert created.status_code == 201, created.text
+        rules.append(created.json())
+
+    message = EmailMessage()
+    message["From"] = "Platform <noreply@priority.example.test>"
+    message["Subject"] = "Candidate resume"
+    with client.app.state.database.session_factory() as session:
+        mailbox = session.get(MailboxConfig, mailbox_id)
+        assert mailbox is not None
+        matches = match_mailbox_source_tags(session, config=mailbox, message=message)
+
+    assert [(match.assignment_kind, match.matched_rule_id) for match in matches] == [
+        ("mailbox_rule", rules[0]["rule_id"])
+    ]
 
 
 def test_same_filename_with_different_attachment_bytes_imports_two_resumes(

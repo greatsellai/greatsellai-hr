@@ -4,7 +4,7 @@ import { accountMenuTrigger, registerAndVerify } from "./helpers";
 
 const ICP_FILING_NUMBER = "粤ICP备2026106428号";
 const ICP_FILING_URL = "https://beian.miit.gov.cn/";
-const HR_CANONICAL_URL = "https://hr.greatsell.cn/";
+const HR_CANONICAL_URL = "https://hr.greatsellai.cn/";
 
 function json(route: Route, body: unknown) {
   return route.fulfill({

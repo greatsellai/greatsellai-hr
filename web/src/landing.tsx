@@ -199,7 +199,7 @@ export function LandingPage({
   registerHref: string;
 }) {
   useEffect(() => {
-    const canonical = "https://hr.greatsell.cn/";
+    const canonical = "https://hr.greatsellai.cn/";
     const description = "大卖智聘帮助 HR 自动收集简历、快速筛选、统一评分并查看 JD 匹配依据，让招聘团队更快作出下一步判断。";
     document.title = "大卖智聘｜AI 简历筛选与招聘决策工作台｜大卖数智";
     setMeta('meta[name="description"]', description);

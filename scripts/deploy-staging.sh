@@ -16,6 +16,12 @@ Options:
   --project-dir <path>      Required isolated staging directory (or RESUME_V3_REMOTE_DIR)
   --history-dir <path>      Required staging release-history directory (or RESUME_V3_DEPLOY_HISTORY_DIR)
   --public-url <url>        Required staging public URL for post-deploy smoke checks
+  --ci-image-archive-sha256 <hash>
+                            Required SHA-256 of the verified CI image archive
+  --api-image-config-digest <sha256>
+                            Required portable API image config identity
+  --caddy-image-config-digest <sha256>
+                            Required portable Caddy image config identity
   --ssh-key <path>          Optional SSH private-key path; never committed
 
 Only pushed stg-YYYYMMDD-<commit-sha> tags that exactly match current
@@ -46,6 +52,9 @@ remote_host="${RESUME_V3_DEPLOY_HOST:-}"
 project_dir="${RESUME_V3_REMOTE_DIR:-}"
 history_dir="${RESUME_V3_DEPLOY_HISTORY_DIR:-}"
 public_url="${RESUME_V3_STAGING_PUBLIC_URL:-}"
+ci_image_archive_sha256=""
+api_image_config_digest=""
+caddy_image_config_digest=""
 ssh_key="${RESUME_V3_SSH_KEY:-}"
 
 while (($#)); do
@@ -54,6 +63,9 @@ while (($#)); do
     --project-dir) project_dir="${2:?--project-dir requires a value}"; shift 2 ;;
     --history-dir) history_dir="${2:?--history-dir requires a value}"; shift 2 ;;
     --public-url) public_url="${2:?--public-url requires a value}"; shift 2 ;;
+    --ci-image-archive-sha256) ci_image_archive_sha256="${2:?--ci-image-archive-sha256 requires a value}"; shift 2 ;;
+    --api-image-config-digest) api_image_config_digest="${2:?--api-image-config-digest requires a value}"; shift 2 ;;
+    --caddy-image-config-digest) caddy_image_config_digest="${2:?--caddy-image-config-digest requires a value}"; shift 2 ;;
     --ssh-key) ssh_key="${2:?--ssh-key requires a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
@@ -65,6 +77,9 @@ done
 [[ -n "$project_dir" ]] || die "Missing project directory; pass --project-dir or set RESUME_V3_REMOTE_DIR."
 [[ -n "$history_dir" ]] || die "Missing history directory; pass --history-dir or set RESUME_V3_DEPLOY_HISTORY_DIR."
 [[ -n "$public_url" ]] || die "Missing public staging URL; pass --public-url or set RESUME_V3_STAGING_PUBLIC_URL."
+[[ "$ci_image_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Missing or invalid verified CI image archive checksum."
+[[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing or invalid API image config digest."
+[[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing or invalid Caddy image config digest."
 [[ "$project_dir" == /home/ubuntu/* && "$project_dir" == *staging* && "$project_dir" != /home/ubuntu/ ]] || \
   die "Refusing unsafe staging project directory: $project_dir"
 [[ "$history_dir" == /home/ubuntu/* && "$history_dir" == *staging* && "$history_dir" != /home/ubuntu/ ]] || \
@@ -106,6 +121,9 @@ history_dir="$2"
 tag="$3"
 release_commit="$4"
 archive_sha256="$5"
+ci_image_archive_sha256="$6"
+api_image_config_digest="$7"
+caddy_image_config_digest="$8"
 
 die() {
   echo "Staging deployment error: $*" >&2
@@ -120,15 +138,15 @@ compose_content() {
 }
 
 compose_has_line() {
-  compose_content "$1" | grep -Fxq -- "$2"
+  grep -Fxq -- "$2" "$1"
 }
 
 compose_contains() {
-  compose_content "$1" | grep -Fq -- "$2"
+  grep -Fq -- "$2" "$1"
 }
 
 compose_matches() {
-  compose_content "$1" | grep -Eq -- "$2"
+  grep -Eq -- "$2" "$1"
 }
 
 record_value() {
@@ -148,6 +166,9 @@ require_image() {
 [[ "$tag" =~ ^stg-[0-9]{8}-[0-9a-f]{7,40}$ ]] || die "Invalid staging tag."
 [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]] || die "Invalid staging commit."
 [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Invalid staging archive checksum."
+[[ "$ci_image_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Invalid CI image archive checksum."
+[[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid API image config digest."
+[[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid Caddy image config digest."
 command -v realpath >/dev/null
 canonical_project_dir="$(realpath -e -- "$project_dir")"
 canonical_history_dir="$(realpath -m -- "$history_dir")"
@@ -170,24 +191,26 @@ exec 9>"$history_dir/.staging-release.lock"
 flock -n 9 || die "Another staging deployment is already running."
 
 candidate_compose="$(mktemp "/tmp/greatsell-staging-${release_commit}.XXXXXX")"
+normalized_compose="$(mktemp "/tmp/greatsell-staging-normalized-${release_commit}.XXXXXX")"
 rendered_compose="$(mktemp "/tmp/greatsell-staging-rendered-${release_commit}.XXXXXX")"
-trap 'rm -f -- "$candidate_compose" "$rendered_compose"' EXIT
+trap 'rm -f -- "$candidate_compose" "$normalized_compose" "$rendered_compose"' EXIT
 cat > "$candidate_compose"
-compose_has_line "$candidate_compose" 'name: resume-screening-v3-staging' || die "Unexpected staging Compose project name."
-compose_contains "$candidate_compose" 'RESUME_V3_ENVIRONMENT: production' || die "Staging application must run in production mode."
-compose_contains "$candidate_compose" '172.31.0.0/24' || die "Staging proxy subnet is missing."
-compose_contains "$candidate_compose" '172.31.1.0/24' || die "Staging backend subnet is missing."
-compose_contains "$candidate_compose" '"172.17.0.1:18080:80"' || die "Staging private edge binding is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_postgres_data' || die "Staging database volume is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_uploads_data' || die "Staging upload volume is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_caddy_data' || die "Staging Caddy data volume is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_caddy_config' || die "Staging Caddy config volume is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_proxy' || die "Staging proxy network is missing."
-compose_contains "$candidate_compose" 'resume-screening-v3-staging_backend' || die "Staging backend network is missing."
-! compose_matches "$candidate_compose" 'resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)' || die "Candidate Compose references a production resource."
-! compose_contains "$candidate_compose" '.env.production' || die "Candidate Compose references a production environment file."
-! compose_matches "$candidate_compose" '(^|[^0-9])80:80([^0-9]|$)|(^|[^0-9])443:443([^0-9]|$)' || die "Candidate Compose publishes a production public port."
-! compose_matches "$candidate_compose" '^[[:space:]]*build:' || die "Staging Compose must only use CI-built images."
+compose_content "$candidate_compose" > "$normalized_compose"
+compose_has_line "$normalized_compose" 'name: resume-screening-v3-staging' || die "Unexpected staging Compose project name."
+compose_contains "$normalized_compose" 'RESUME_V3_ENVIRONMENT: production' || die "Staging application must run in production mode."
+compose_contains "$normalized_compose" '172.31.0.0/24' || die "Staging proxy subnet is missing."
+compose_contains "$normalized_compose" '172.31.1.0/24' || die "Staging backend subnet is missing."
+compose_contains "$normalized_compose" '"172.17.0.1:18080:80"' || die "Staging private edge binding is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_postgres_data' || die "Staging database volume is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_uploads_data' || die "Staging upload volume is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_caddy_data' || die "Staging Caddy data volume is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_caddy_config' || die "Staging Caddy config volume is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_proxy' || die "Staging proxy network is missing."
+compose_contains "$normalized_compose" 'resume-screening-v3-staging_backend' || die "Staging backend network is missing."
+! compose_matches "$normalized_compose" 'resume-screening-v3_(postgres_data|uploads_data|caddy_data|caddy_config|proxy|backend)' || die "Candidate Compose references a production resource."
+! compose_contains "$normalized_compose" '.env.production' || die "Candidate Compose references a production environment file."
+! compose_matches "$normalized_compose" '(^|[^0-9])80:80([^0-9]|$)|(^|[^0-9])443:443([^0-9]|$)' || die "Candidate Compose publishes a production public port."
+! compose_matches "$normalized_compose" '^[[:space:]]*build:' || die "Staging Compose must only use CI-built images."
 
 sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" docker compose \
   --project-directory "$project_dir" \
@@ -207,12 +230,6 @@ grep -Fq 'subnet: 172.31.1.0/24' "$rendered_compose" || die "Rendered Compose lo
 ! grep -Eq 'published: "(80|443)"' "$rendered_compose" || die "Rendered Compose publishes a production public port."
 
 previous_record="$history_dir/current-release.env"
-expected_api_id=""
-expected_caddy_id=""
-if [[ -f "$previous_record" ]]; then
-  expected_api_id="$(record_value "$previous_record" api_image_id)"
-  expected_caddy_id="$(record_value "$previous_record" caddy_image_id)"
-fi
 api_image="greatsellai-hr-api:$release_commit"
 caddy_image="greatsellai-hr-caddy:$release_commit"
 api_image_id="$(require_image "$api_image" "")"
@@ -253,6 +270,9 @@ state=deployed
 tag=$tag
 commit=$release_commit
 archive_sha256=$archive_sha256
+ci_image_archive_sha256=$ci_image_archive_sha256
+api_image_config_digest=$api_image_config_digest
+caddy_image_config_digest=$caddy_image_config_digest
 api_image_id=$api_image_id
 caddy_image_id=$caddy_image_id
 private_api_health_check=pass
@@ -266,7 +286,7 @@ EOF
 )"
 
 git show "$tag:deploy/compose.staging.yml" | ssh "${ssh_options[@]}" "$remote_host" \
-  "bash -c $(shell_quote "$remote_deploy_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256")"
+  "bash -c $(shell_quote "$remote_deploy_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256") $(shell_quote "$ci_image_archive_sha256") $(shell_quote "$api_image_config_digest") $(shell_quote "$caddy_image_config_digest")"
 
 "$repo_root/scripts/smoke-test-staging.sh" "$public_url"
 

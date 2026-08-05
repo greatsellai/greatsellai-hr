@@ -46,7 +46,7 @@ def test_staging_workflow_only_accepts_a_successful_main_ci_or_confirmed_main_di
     assert "|| 'ubuntu-latest'" in workflow
 
 
-def test_staging_preflights_tags_transfers_deploys_and_smokes_in_order() -> None:
+def test_staging_preflights_tags_pulls_tcr_images_deploys_and_smokes_in_order() -> None:
     workflow = (ROOT / ".github" / "workflows" / "staging-release.yml").read_text(
         encoding="utf-8"
     )
@@ -54,16 +54,15 @@ def test_staging_preflights_tags_transfers_deploys_and_smokes_in_order() -> None
     preflight = workflow.index("Preflight staging configuration before tagging")
     tag = workflow.index("Create immutable staging tag")
     artifact = workflow.index("Resolve CI image artifact")
-    download = workflow.index("Download CI-verified images")
-    verify_and_load = workflow.index("Verify and load CI-verified images")
-    transfer = workflow.index("Transfer CI-verified images to staging")
+    download = workflow.index("Download CI-verified TCR metadata")
+    verify_metadata = workflow.index("Verify CI-verified TCR metadata")
+    pull = workflow.index("Pull exact CI-verified TCR images to staging")
     deploy = workflow.index("Deploy immutable candidate and run public smoke checks")
-    cleanup = workflow.index("Remove CI images after successful staging deployment")
-    assert preflight < tag < artifact < download < verify_and_load < transfer < deploy < cleanup
+    assert preflight < tag < artifact < download < verify_metadata < pull < deploy
     assert 'scripts/preflight-staging-release.sh "$RELEASE_SHA"' in workflow
     assert 'scripts/create-staging-tag.sh "$tag"' in workflow
     assert "Current main has multiple staging tags; refusing ambiguous promotion lineage." in workflow
-    assert 'scripts/transfer-production-images.sh "$RELEASE_SHA"' in workflow
+    assert 'scripts/transfer-production-images.sh' not in workflow
     assert '--expected-ci-run-id "$CI_RUN_ID"' in workflow
     assert '--expected-ci-run-attempt "$CI_RUN_ATTEMPT"' in workflow
     assert "actions/download-artifact@v4" in workflow
@@ -71,24 +70,28 @@ def test_staging_preflights_tags_transfers_deploys_and_smokes_in_order() -> None
     assert "run-id: ${{ steps.ci_artifact.outputs.run_id }}" in workflow
     assert "github-token: ${{ github.token }}" in workflow
     assert 'echo "run_attempt=$ci_run_attempt" >> "$GITHUB_OUTPUT"' in workflow
-    assert 'echo "name=release-images-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" >> "$GITHUB_OUTPUT"' in workflow
-    assert 'scripts/load-verified-release-images.sh "$RELEASE_SHA"' in workflow
-    assert '--artifact-dir "$RUNNER_TEMP/greatsell-release-images"' in workflow
+    assert 'echo "name=release-image-metadata-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" >> "$GITHUB_OUTPUT"' in workflow
+    assert 'scripts/verify-tcr-release-metadata.sh "$RELEASE_SHA"' in workflow
+    assert '--artifact-dir "$RUNNER_TEMP/greatsell-release-image-metadata"' in workflow
     assert '--repository "$GITHUB_REPOSITORY"' in workflow
     assert '--ci-run-id "$CI_RUN_ID"' in workflow
     assert '--ci-run-attempt "$CI_RUN_ATTEMPT"' in workflow
     assert '--github-output "$GITHUB_OUTPUT"' in workflow
     assert "CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}" in workflow
     assert "CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}" in workflow
-    assert 'id: transfer_ci_images' in workflow
+    assert 'id: verify_tcr_metadata' in workflow
+    assert 'id: pull_tcr_images' in workflow
     assert 'id: deploy_staging' in workflow
-    assert "steps.deploy_staging.outcome == 'success'" in workflow
-    assert "steps.target.outputs.stage == 'false'" in workflow
-    assert "steps.ready.outputs.stage == 'false'" in workflow
+    assert "steps.ready.outputs.stage == 'true'" in workflow
     assert "scripts/ensure-staging-gateway.sh" not in workflow
     assert 'scripts/deploy-staging.sh "$STAGING_TAG"' in workflow
-    assert 'docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true' in workflow
-    assert 'docker image rm -f "greatsellai-hr-caddy:$RELEASE_SHA" || true' in workflow
+    assert 'scripts/pull-tcr-release-images.sh "$RELEASE_SHA"' in workflow
+    assert 'TCR_USERNAME: ${{ secrets.TCR_USERNAME }}' in workflow
+    assert 'TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}' in workflow
+    assert '--password-stdin' in workflow
+    assert '--image-metadata-sha256 "${{ steps.verify_tcr_metadata.outputs.image_metadata_sha256 }}"' in workflow
+    assert '--api-registry-image "${{ steps.verify_tcr_metadata.outputs.api_registry_image }}"' in workflow
+    assert '--caddy-registry-image "${{ steps.verify_tcr_metadata.outputs.caddy_registry_image }}"' in workflow
 
 
 def test_staging_deployment_is_isolated_and_never_uses_production_env_or_builds() -> None:
@@ -269,13 +272,16 @@ def test_stage_attestation_requires_a_public_smoke_pass_and_portable_image_ident
     smoke = (ROOT / "scripts" / "smoke-test-staging.sh").read_text(encoding="utf-8")
 
     assert "archive_sha256=$archive_sha256" in deploy
-    assert "ci_image_archive_sha256=$ci_image_archive_sha256" in deploy
+    assert "image_metadata_sha256=$image_metadata_sha256" in deploy
+    assert "api_registry_image=$api_registry_image" in deploy
+    assert "caddy_registry_image=$caddy_registry_image" in deploy
     assert "api_image_config_digest=$api_image_config_digest" in deploy
     assert "caddy_image_config_digest=$caddy_image_config_digest" in deploy
-    assert ' --archive "$RUNNER_TEMP/greatsell-release-images/release-images-$RELEASE_SHA-$CI_RUN_ID-$CI_RUN_ATTEMPT.tar.gz"' in workflow
-    assert '--archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}"' in workflow
-    assert '--api-image-config-digest "${{ steps.load_ci_images.outputs.api_image_config_digest }}"' in workflow
-    assert '--caddy-image-config-digest "${{ steps.load_ci_images.outputs.caddy_image_config_digest }}"' in workflow
+    assert 'scripts/verify-tcr-release-metadata.sh' in workflow
+    assert 'scripts/pull-tcr-release-images.sh' in workflow
+    assert '--image-metadata-sha256 "${{ steps.verify_tcr_metadata.outputs.image_metadata_sha256 }}"' in workflow
+    assert '--api-image-config-digest "${{ steps.verify_tcr_metadata.outputs.api_image_config_digest }}"' in workflow
+    assert '--caddy-image-config-digest "${{ steps.verify_tcr_metadata.outputs.caddy_image_config_digest }}"' in workflow
     assert "public_smoke_check=pending" in deploy
     assert '"$repo_root/scripts/smoke-test-staging.sh" "$public_url"' in deploy
     assert "public_smoke_check=pass" in deploy
@@ -289,7 +295,9 @@ def test_stage_attestation_requires_a_public_smoke_pass_and_portable_image_ident
     assert "Staging image CI workflow run attempts are invalid." in verify
     assert "printf 'ci_run_id=%s\\n'" in verify
     assert "printf 'ci_run_attempt=%s\\n'" in verify
-    assert "printf 'ci_image_archive_sha256=%s\\n'" in verify
+    assert "printf 'image_metadata_sha256=%s\\n'" in verify
+    assert "printf 'api_registry_image=%s\\n'" in verify
+    assert "printf 'caddy_registry_image=%s\\n'" in verify
     assert "printf 'api_image_config_digest=%s\\n'" in verify
     assert "printf 'caddy_image_config_digest=%s\\n'" in verify
     assert "Promotion image identity does not match completed staging" not in image_verify

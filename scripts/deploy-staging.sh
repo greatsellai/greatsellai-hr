@@ -16,8 +16,12 @@ Options:
   --project-dir <path>      Required isolated staging directory (or RESUME_V3_REMOTE_DIR)
   --history-dir <path>      Required staging release-history directory (or RESUME_V3_DEPLOY_HISTORY_DIR)
   --public-url <url>        Required staging public URL for post-deploy smoke checks
-  --ci-image-archive-sha256 <hash>
-                            Required SHA-256 of the verified CI image archive
+  --image-metadata-sha256 <hash>
+                            Required SHA-256 of verified CI TCR metadata
+  --api-registry-image <repo@digest>
+                            Required immutable API registry manifest reference
+  --caddy-registry-image <repo@digest>
+                            Required immutable Caddy registry manifest reference
   --api-image-config-digest <sha256>
                             Required portable API image config identity
   --caddy-image-config-digest <sha256>
@@ -25,8 +29,9 @@ Options:
   --ssh-key <path>          Optional SSH private-key path; never committed
 
 Only pushed stg-YYYYMMDD-<commit-sha> tags that exactly match current
-origin/main are accepted. API and Caddy images must already have been
-transferred from CI and are never built on the server.
+origin/main are accepted. API and Caddy images must already have been pulled
+from their CI-attested immutable TCR manifest references and are never built
+on the server.
 EOF
 }
 
@@ -37,6 +42,14 @@ die() {
 
 shell_quote() {
   printf '%q' "$1"
+}
+
+require_registry_image() {
+  local image="$1" digest
+  [[ "$image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || \
+    die "Invalid immutable TCR registry image reference."
+  digest="${image##*@}"
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid immutable TCR registry image digest."
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -52,7 +65,9 @@ remote_host="${RESUME_V3_DEPLOY_HOST:-}"
 project_dir="${RESUME_V3_REMOTE_DIR:-}"
 history_dir="${RESUME_V3_DEPLOY_HISTORY_DIR:-}"
 public_url="${RESUME_V3_STAGING_PUBLIC_URL:-}"
-ci_image_archive_sha256=""
+image_metadata_sha256=""
+api_registry_image=""
+caddy_registry_image=""
 api_image_config_digest=""
 caddy_image_config_digest=""
 ssh_key="${RESUME_V3_SSH_KEY:-}"
@@ -63,7 +78,9 @@ while (($#)); do
     --project-dir) project_dir="${2:?--project-dir requires a value}"; shift 2 ;;
     --history-dir) history_dir="${2:?--history-dir requires a value}"; shift 2 ;;
     --public-url) public_url="${2:?--public-url requires a value}"; shift 2 ;;
-    --ci-image-archive-sha256) ci_image_archive_sha256="${2:?--ci-image-archive-sha256 requires a value}"; shift 2 ;;
+    --image-metadata-sha256) image_metadata_sha256="${2:?--image-metadata-sha256 requires a value}"; shift 2 ;;
+    --api-registry-image) api_registry_image="${2:?--api-registry-image requires a value}"; shift 2 ;;
+    --caddy-registry-image) caddy_registry_image="${2:?--caddy-registry-image requires a value}"; shift 2 ;;
     --api-image-config-digest) api_image_config_digest="${2:?--api-image-config-digest requires a value}"; shift 2 ;;
     --caddy-image-config-digest) caddy_image_config_digest="${2:?--caddy-image-config-digest requires a value}"; shift 2 ;;
     --ssh-key) ssh_key="${2:?--ssh-key requires a value}"; shift 2 ;;
@@ -77,7 +94,10 @@ done
 [[ -n "$project_dir" ]] || die "Missing project directory; pass --project-dir or set RESUME_V3_REMOTE_DIR."
 [[ -n "$history_dir" ]] || die "Missing history directory; pass --history-dir or set RESUME_V3_DEPLOY_HISTORY_DIR."
 [[ -n "$public_url" ]] || die "Missing public staging URL; pass --public-url or set RESUME_V3_STAGING_PUBLIC_URL."
-[[ "$ci_image_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Missing or invalid verified CI image archive checksum."
+[[ "$image_metadata_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Missing or invalid verified CI image metadata checksum."
+require_registry_image "$api_registry_image"
+require_registry_image "$caddy_registry_image"
+[[ "$api_registry_image" != "$caddy_registry_image" ]] || die "API and Caddy registry image references must differ."
 [[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing or invalid API image config digest."
 [[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing or invalid Caddy image config digest."
 [[ "$project_dir" == /home/ubuntu/* && "$project_dir" == *staging* && "$project_dir" != /home/ubuntu/ ]] || \
@@ -121,9 +141,11 @@ history_dir="$2"
 tag="$3"
 release_commit="$4"
 archive_sha256="$5"
-ci_image_archive_sha256="$6"
-api_image_config_digest="$7"
-caddy_image_config_digest="$8"
+image_metadata_sha256="$6"
+api_registry_image="$7"
+caddy_registry_image="$8"
+api_image_config_digest="$9"
+caddy_image_config_digest="${10}"
 
 die() {
   echo "Staging deployment error: $*" >&2
@@ -154,19 +176,25 @@ record_value() {
 }
 
 require_image() {
-  local image="$1" expected_id actual_id revision
-  expected_id="$2"
+  local image="$1" expected_config_digest="$2" expected_registry_image="$3" actual_id revision repo_digest found=0
   actual_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image")" || die "Required CI image is unavailable: $image"
   revision="$(sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
   [[ "$revision" == "$release_commit" ]] || die "CI image revision does not match staging commit: $image"
-  [[ -z "$expected_id" || "$actual_id" == "$expected_id" ]] || die "CI image identity changed unexpectedly: $image"
+  [[ "$actual_id" == "$expected_config_digest" ]] || die "CI image config identity differs from CI TCR metadata: $image"
+  while IFS= read -r repo_digest; do
+    [[ "$repo_digest" == "$expected_registry_image" ]] && found=1
+  done < <(sudo -n docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image")
+  [[ "$found" == "1" ]] || die "CI image is not associated with its immutable TCR manifest: $image"
   printf '%s' "$actual_id"
 }
 
 [[ "$tag" =~ ^stg-[0-9]{8}-[0-9a-f]{7,40}$ ]] || die "Invalid staging tag."
 [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]] || die "Invalid staging commit."
 [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Invalid staging archive checksum."
-[[ "$ci_image_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Invalid CI image archive checksum."
+[[ "$image_metadata_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Invalid CI image metadata checksum."
+[[ "$api_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Invalid API TCR registry image."
+[[ "$caddy_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Invalid Caddy TCR registry image."
+[[ "$api_registry_image" != "$caddy_registry_image" ]] || die "API and Caddy TCR registry image references must differ."
 [[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid API image config digest."
 [[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid Caddy image config digest."
 command -v realpath >/dev/null
@@ -232,8 +260,8 @@ grep -Fq 'subnet: 172.31.1.0/24' "$rendered_compose" || die "Rendered Compose lo
 previous_record="$history_dir/current-release.env"
 api_image="greatsellai-hr-api:$release_commit"
 caddy_image="greatsellai-hr-caddy:$release_commit"
-api_image_id="$(require_image "$api_image" "")"
-caddy_image_id="$(require_image "$caddy_image" "")"
+api_image_id="$(require_image "$api_image" "$api_image_config_digest" "$api_registry_image")"
+caddy_image_id="$(require_image "$caddy_image" "$caddy_image_config_digest" "$caddy_registry_image")"
 
 # This is the only mutable application file in the staging project directory.
 # It is sourced from the immutable stg tag, never from production source.
@@ -270,7 +298,9 @@ state=deployed
 tag=$tag
 commit=$release_commit
 archive_sha256=$archive_sha256
-ci_image_archive_sha256=$ci_image_archive_sha256
+image_metadata_sha256=$image_metadata_sha256
+api_registry_image=$api_registry_image
+caddy_registry_image=$caddy_registry_image
 api_image_config_digest=$api_image_config_digest
 caddy_image_config_digest=$caddy_image_config_digest
 api_image_id=$api_image_id
@@ -286,7 +316,7 @@ EOF
 )"
 
 git show "$tag:deploy/compose.staging.yml" | ssh "${ssh_options[@]}" "$remote_host" \
-  "bash -c $(shell_quote "$remote_deploy_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256") $(shell_quote "$ci_image_archive_sha256") $(shell_quote "$api_image_config_digest") $(shell_quote "$caddy_image_config_digest")"
+  "bash -c $(shell_quote "$remote_deploy_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256") $(shell_quote "$image_metadata_sha256") $(shell_quote "$api_registry_image") $(shell_quote "$caddy_registry_image") $(shell_quote "$api_image_config_digest") $(shell_quote "$caddy_image_config_digest")"
 
 "$repo_root/scripts/smoke-test-staging.sh" "$public_url"
 

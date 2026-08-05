@@ -1,5 +1,9 @@
 # GitHub Actions CI/CD
 
+## 当前镜像交接（TCR）
+
+发布镜像现在由成功的 `main` CI 推送至腾讯云 TCR；Actions artifact 只保存经过校验的小型 metadata，staging 和 production 均按 metadata 中不可变的 `repo@sha256:<manifest>` 直接拉取。它们不会下载或通过 SSH 转发 Docker 镜像归档。TCR 的仓库级变量、Secrets 和排障说明见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本节优先于本文中任何历史的 archive/镜像传输描述。
+
 ## Runner 路由与镜像交接
 
 仓库为私有时，测试工作流通过标签 `self-hosted`、`Linux`、`X64` 和 `greatsell-ci` 路由到

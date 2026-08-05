@@ -157,11 +157,10 @@ jobs:
 
   production-images:
     name: Production image builds
-    # Exact-SHA release images are published as a short-lived CI artifact for
-    # staging. Building them for a PR or a manual CI run can create an artifact
-    # with a different workflow provenance, then make a staging retry fail
-    # closed. Release images therefore originate only from a verified merged
-    # main push in both public and private repository modes.
+    # Exact-SHA release images are pushed to TCR and accompanied by a small
+    # digest metadata artifact. Building them for a PR or a manual CI run can
+    # create different provenance, so release images originate only from a
+    # verified merged main push in both public and private repository modes.
     needs: [main-release-provenance]
     if: >-
       always() &&
@@ -234,38 +233,47 @@ jobs:
         run: >-
           python scripts/run_release_regression.py --all
           --image "greatsellai-hr-api:${{ github.sha }}"
-      - name: Archive CI-verified release images
+      - name: Log in to Tencent Container Registry
+        env:
+          TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
         run: |
           set -Eeuo pipefail
-          artifact_dir="$RUNNER_TEMP/greatsell-release-images"
-          archive_name="release-images-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
-          metadata_name="${archive_name%.tar.gz}.metadata"
-          install -d "$artifact_dir"
-          docker image save \
-            "greatsellai-hr-api:${GITHUB_SHA}" \
-            "greatsellai-hr-caddy:${GITHUB_SHA}" \
-            | gzip -1 > "$artifact_dir/$archive_name"
-          (
-            cd "$artifact_dir"
-            sha256sum "$archive_name" > "$archive_name.sha256"
-            printf 'repository=%s\nrelease_sha=%s\nci_run_id=%s\nci_run_attempt=%s\narchive=%s\n' \
-              "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$archive_name" \
-              > "$metadata_name"
-          )
-      - name: Upload CI-verified release images
+          : "${TCR_REGISTRY:?Missing repository variable TCR_REGISTRY}"
+          : "${TCR_USERNAME:?Missing repository secret TCR_USERNAME}"
+          : "${TCR_PASSWORD:?Missing repository secret TCR_PASSWORD}"
+          printf '%s\n' "$TCR_PASSWORD" | docker login "$TCR_REGISTRY" \
+            --username "$TCR_USERNAME" --password-stdin >/dev/null
+      - name: Publish immutable CI images to TCR
+        env:
+          TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
+          TCR_NAMESPACE: ${{ vars.TCR_NAMESPACE }}
+        run: |
+          set -Eeuo pipefail
+          : "${TCR_REGISTRY:?Missing repository variable TCR_REGISTRY}"
+          : "${TCR_NAMESPACE:?Missing repository variable TCR_NAMESPACE}"
+          scripts/publish-tcr-release-images.sh "$GITHUB_SHA" \
+            --registry "$TCR_REGISTRY" \
+            --namespace "$TCR_NAMESPACE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ci-run-id "$GITHUB_RUN_ID" \
+            --ci-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --artifact-dir "$RUNNER_TEMP/greatsell-release-image-metadata"
+      - name: Upload CI-verified TCR metadata
         uses: actions/upload-artifact@v4
         with:
-          name: release-images-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/greatsell-release-images/
+          name: release-image-metadata-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/greatsell-release-image-metadata/
           if-no-files-found: error
-          # Production promotion may wait for a human approval after staging.
-          # Keep the attested artifact long enough to cross that approval
-          # window; when it expires, the commit must be re-staged instead of
-          # being rebuilt on a deployment host.
+          # Keep the immutable digest handoff through the approval window. If
+          # it expires, the commit must be re-staged instead of rebuilt on a
+          # deployment host.
           retention-days: 30
-          compression-level: 0
       - name: Remove temporary release regression resources
         if: always()
+        env:
+          TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
         run: |
           filter='label=com.greatsell.release-regression=true'
           docker ps -aq --filter "$filter" | xargs -r docker rm -f || true
@@ -274,3 +282,6 @@ jobs:
           docker image ls -q --filter "$filter" | sort -u | xargs -r docker image rm || true
           docker image rm -f "greatsellai-hr-api:${{ github.sha }}" || true
           docker image rm -f "greatsellai-hr-caddy:${{ github.sha }}" || true
+          if [[ -n "${TCR_REGISTRY:-}" ]]; then
+            docker logout "$TCR_REGISTRY" || true
+          fi

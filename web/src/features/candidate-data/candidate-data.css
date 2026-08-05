@@ -7,11 +7,68 @@
   justify-content: flex-end;
 }
 
+.backoffice-ui-root .candidate-data-page .candidate-data-task-navigation {
+  min-width: 0;
+  margin: 0 0 var(--space-md);
+}
+
+.backoffice-ui-root .candidate-data-page .candidate-data-task-navigation-list {
+  display: flex;
+  max-width: 100%;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.backoffice-ui-root .candidate-data-page .candidate-data-task-navigation-item {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-height: 2.5rem;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  font-weight: 680;
+  white-space: nowrap;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-sm) - 0.125rem);
+}
+
+.backoffice-ui-root .candidate-data-page .candidate-data-task-navigation-item:hover {
+  color: var(--ink);
+  background: rgb(255 255 255 / 0.68);
+}
+
+.backoffice-ui-root .candidate-data-page .candidate-data-task-navigation-item.is-active {
+  color: var(--ink);
+  background: var(--red-tint);
+  border-color: rgb(215 22 24 / 0.28);
+}
+
+.backoffice-ui-root .candidate-data-page .candidate-data-task-navigation-item svg {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+}
+
+.backoffice-ui-root .candidate-data-page .candidate-data-task-navigation-item.is-active svg {
+  color: var(--red);
+}
+
 .backoffice-ui-root .candidate-data-page .candidate-data-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(18rem, 22rem);
   gap: var(--space-xl);
   align-items: start;
+}
+
+.backoffice-ui-root .candidate-data-page.is-embedded .candidate-data-layout.is-retention-view {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .backoffice-ui-root .candidate-data-page .candidate-data-main-column,
@@ -188,4 +245,21 @@
 .backoffice-ui-root .candidate-data-page .candidate-data-empty strong {
   color: var(--ink-soft);
   font-size: 0.875rem;
+}
+
+@media (max-width: 64rem) {
+  .backoffice-ui-root .candidate-data-page .candidate-data-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 40rem) {
+  .backoffice-ui-root .candidate-data-page .candidate-data-task-navigation-item {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
+  .backoffice-ui-root .candidate-data-page .candidate-data-retention-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

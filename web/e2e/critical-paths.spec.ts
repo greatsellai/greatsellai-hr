@@ -2570,6 +2570,44 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.getByRole("tab", { name: "收件邮箱", exact: true })).toHaveAttribute("aria-selected", "true");
   });
 
+  test("数据设置深链保留标签语义与任务分区", async ({ page }) => {
+    await registerAndVerify(page, "settings-data-hash");
+    await page.goto("/#settings/data");
+
+    const dataTab = page.getByRole("tab", { name: "候选人数据与保留", exact: true });
+    await expect(page).toHaveURL(/#settings\/data$/);
+    await expect(page.getByRole("button", { name: "设置", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(dataTab).toHaveAttribute("aria-selected", "true");
+    await expect(dataTab).toHaveAttribute("id", "settings-tab-data");
+    await expect(dataTab).toHaveAttribute("aria-controls", "settings-panel-data");
+    await expect(page.locator("#settings-panel-data")).toHaveAttribute("role", "tabpanel");
+    await expect(page.locator("#settings-panel-data")).toHaveAttribute("aria-labelledby", "settings-tab-data");
+
+    await expect(page.getByRole("tab", { name: "保留策略", exact: true })).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("tab", { name: "操作与记录", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "可恢复删除", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "资料导出", exact: true })).toBeVisible();
+
+    await page.reload();
+    await expect(dataTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: "保留策略", exact: true })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("候选人数据设置在窄屏保持单列任务流", async ({ page }) => {
+    await registerAndVerify(page, "settings-data-mobile");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#settings/data");
+    await page.getByRole("tab", { name: "操作与记录", exact: true }).click();
+
+    const layout = page.locator(".candidate-data-layout");
+    const trackCount = await layout.evaluate((element) => {
+      const template = getComputedStyle(element).gridTemplateColumns.trim();
+      return template ? template.split(/\s+/).length : 0;
+    });
+    expect(trackCount).toBe(1);
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
+  });
+
   test("OAuth 返回失败会保留收件设置定位并清理回调参数", async ({ page }) => {
     await registerAndVerify(page, "mailbox-oauth-return");
     await page.goto("/?mailbox_oauth=failed&mailbox_provider=gmail_oauth#settings/mailbox");

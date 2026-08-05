@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "../../api";
 import type {
   CandidateDataAuditEvent,
@@ -16,6 +16,16 @@ import { formatLibraryDate } from "../../backoffice/utils/formatters";
 import "./candidate-data.css";
 
 type ToastKind = "success" | "error";
+type CandidateDataEmbeddedSection = "retention" | "activity";
+
+const candidateDataEmbeddedSections: Array<{
+  id: CandidateDataEmbeddedSection;
+  label: string;
+  icon: "gear" | "history";
+}> = [
+  { id: "retention", label: "保留策略", icon: "gear" },
+  { id: "activity", label: "操作与记录", icon: "history" },
+];
 
 const candidateDataDeletionReasonOptions: Array<{
   value: CandidateDataDeletionReason;
@@ -110,6 +120,8 @@ export function CandidateDataLifecyclePage({
   const [restoringBatchId, setRestoringBatchId] = useState<string | null>(null);
   const [cancellingExportId, setCancellingExportId] = useState<string | null>(null);
   const [downloadingExportId, setDownloadingExportId] = useState<string | null>(null);
+  const [embeddedSection, setEmbeddedSection] = useState<CandidateDataEmbeddedSection>("retention");
+  const embeddedTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const load = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
@@ -272,6 +284,37 @@ export function CandidateDataLifecyclePage({
     }
   };
 
+  const handleEmbeddedTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    currentIndex: number,
+  ) => {
+    let nextIndex = currentIndex;
+
+    switch (event.key) {
+      case "ArrowRight":
+      case "ArrowDown":
+        nextIndex = (currentIndex + 1) % candidateDataEmbeddedSections.length;
+        break;
+      case "ArrowLeft":
+      case "ArrowUp":
+        nextIndex = (currentIndex - 1 + candidateDataEmbeddedSections.length)
+          % candidateDataEmbeddedSections.length;
+        break;
+      case "Home":
+        nextIndex = 0;
+        break;
+      case "End":
+        nextIndex = candidateDataEmbeddedSections.length - 1;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    setEmbeddedSection(candidateDataEmbeddedSections[nextIndex].id);
+    embeddedTabRefs.current[nextIndex]?.focus();
+  };
+
   if (loading && !policy) {
     return <div className={pageClassName}><TableSkeleton /></div>;
   }
@@ -281,7 +324,11 @@ export function CandidateDataLifecyclePage({
       <header className="page-heading">
         <div>
           {embedded ? <h2>候选人数据与保留</h2> : <h1>数据保留与恢复</h1>}
-          <p>在工作区内管理候选人资料的保留期限、可恢复删除、导出文件和原件访问记录。所有清理操作先进入恢复期，不会直接做出招聘结论。</p>
+          <p>
+            {embedded
+              ? "先设置候选人资料的保留策略；可在“操作与记录”中处理可恢复删除、导出和审计记录。"
+              : "在工作区内管理候选人资料的保留期限、可恢复删除、导出文件和原件访问记录。所有清理操作先进入恢复期，不会直接做出招聘结论。"}
+          </p>
         </div>
         <div className="candidate-data-page-actions">
           <button className="button" disabled={refreshing} onClick={() => void load(false)} type="button">
@@ -293,9 +340,43 @@ export function CandidateDataLifecyclePage({
 
       {error && <p className="library-error" role="status">{error}</p>}
 
-      <div className="candidate-data-layout">
+      {embedded && (
+        <nav aria-label="候选人数据管理" className="candidate-data-task-navigation">
+          <div aria-orientation="horizontal" className="candidate-data-task-navigation-list" role="tablist">
+            {candidateDataEmbeddedSections.map((section, index) => {
+              const selected = section.id === embeddedSection;
+              return (
+                <button
+                  aria-controls="candidate-data-task-content"
+                  aria-selected={selected}
+                  className={`candidate-data-task-navigation-item${selected ? " is-active" : ""}`}
+                  id={`candidate-data-tab-${section.id}`}
+                  key={section.id}
+                  onClick={() => setEmbeddedSection(section.id)}
+                  onKeyDown={(event) => handleEmbeddedTabKeyDown(event, index)}
+                  ref={(element) => { embeddedTabRefs.current[index] = element; }}
+                  role="tab"
+                  tabIndex={selected ? 0 : -1}
+                  type="button"
+                >
+                  <Icon name={section.icon} size={16} />
+                  <span>{section.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      )}
+
+      <div
+        aria-labelledby={embedded ? `candidate-data-tab-${embeddedSection}` : undefined}
+        className={`candidate-data-layout${embedded ? ` is-${embeddedSection}-view` : ""}`}
+        id={embedded ? "candidate-data-task-content" : undefined}
+        role={embedded ? "tabpanel" : undefined}
+        tabIndex={embedded ? -1 : undefined}
+      >
         <div className="candidate-data-main-column">
-          <section className="panel candidate-data-retention-panel">
+          <section className="panel candidate-data-retention-panel" hidden={embedded && embeddedSection !== "retention"}>
             <div className="panel-heading">
               <div>
                 <h2>候选人资料保留策略</h2>
@@ -350,7 +431,7 @@ export function CandidateDataLifecyclePage({
             </div>
           </section>
 
-          <section className="panel candidate-data-recovery-panel">
+          <section className="panel candidate-data-recovery-panel" hidden={embedded && embeddedSection !== "activity"}>
             <div className="panel-heading">
               <div>
                 <h2>可恢复删除</h2>
@@ -385,7 +466,7 @@ export function CandidateDataLifecyclePage({
             ) : <CandidateDataEmptyState title="没有可恢复删除记录" description="从候选人抽屉删除资料后，恢复期限内的批次会显示在这里。" />}
           </section>
 
-          <section className="panel candidate-data-export-panel">
+          <section className="panel candidate-data-export-panel" hidden={embedded && embeddedSection !== "activity"}>
             <div className="panel-heading">
               <div>
                 <h2>资料导出</h2>
@@ -417,7 +498,7 @@ export function CandidateDataLifecyclePage({
           </section>
         </div>
 
-        <aside className="candidate-data-side-column">
+        <aside className="candidate-data-side-column" hidden={embedded && embeddedSection !== "activity"}>
           <section className="panel candidate-data-audit-panel">
             <div className="panel-heading">
               <div>

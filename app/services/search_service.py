@@ -4,7 +4,7 @@ import base64
 import binascii
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -83,6 +83,8 @@ _DISPLAY_FIELD_ORDER = (
     "graduation",
     "employment_months",
     "employment_or_internship_months",
+    "gender",
+    "age",
     "school",
     "major",
     "academic_performance",
@@ -474,6 +476,46 @@ def _matches_graduation_status(resume: Resume, request: CandidateSearchRequest) 
             <= request.fresh_graduate_end_month
         )
     return bool(education.end_month < request.fresh_graduate_start_month)
+
+
+_GENDER_LABELS: dict[str, str] = {"male": "男", "female": "女"}
+
+
+def _candidate_age(birth_date: date | None) -> int | None:
+    """Whole years between a birth date and today, or None when unknown."""
+    if birth_date is None:
+        return None
+    today = date.today()
+    age = today.year - birth_date.year
+    if (today.month, today.day) < (birth_date.month, birth_date.day):
+        age -= 1
+    return age
+
+
+def _matches_age_range(resume: Resume, request: CandidateSearchRequest) -> bool:
+    """Exact mode: an explicit age bound is a hard condition.
+
+    A resume without a stated birth date cannot confirm the range and therefore
+    does not match, mirroring the ``is_985_211`` unknown-handling policy.
+    """
+    if request.age_min is None and request.age_max is None:
+        return True
+    age = _candidate_age(resume.birth_date)
+    if age is None:
+        return False
+    if request.age_min is not None and age < request.age_min:
+        return False
+    if request.age_max is not None and age > request.age_max:
+        return False
+    return True
+
+
+def _age_filter_label(request: CandidateSearchRequest) -> str:
+    if request.age_min is not None and request.age_max is not None:
+        return f"年龄：{request.age_min}-{request.age_max} 岁"
+    if request.age_min is not None:
+        return f"年龄：≥ {request.age_min} 岁"
+    return f"年龄：≤ {request.age_max} 岁"
 
 
 def _matches_language_filter(
@@ -1120,6 +1162,86 @@ def _fuzzy_filter_evaluations(
                         if resume.is_985_211
                         else "已核验为非 985/211 院校。"
                     ),
+                    fact_type="aggregate",
+                )
+            )
+
+    if request.gender_in:
+        gender_label = "性别：" + _filter_value_labels(
+            request.gender_in,
+            _GENDER_LABELS,
+        )
+        if resume.gender in request.gender_in:
+            evaluations.append(
+                _evaluation(
+                    filter_key="gender_in",
+                    label=gender_label,
+                    status="matched",
+                    detail="性别已核验。",
+                    fact_type="aggregate",
+                )
+            )
+        elif not resume.gender:
+            evaluations.append(
+                _evaluation(
+                    filter_key="gender_in",
+                    label=gender_label,
+                    status="unknown",
+                    detail="简历未写明性别，无法确认是否满足。",
+                    fact_type="aggregate",
+                )
+            )
+        else:
+            evaluations.append(
+                _evaluation(
+                    filter_key="gender_in",
+                    label=gender_label,
+                    status="unmet",
+                    detail="简历写明性别与所选条件不符。",
+                    fact_type="aggregate",
+                )
+            )
+
+    if request.age_min is not None or request.age_max is not None:
+        age = _candidate_age(resume.birth_date)
+        age_label = _age_filter_label(request)
+        if age is None:
+            evaluations.append(
+                _evaluation(
+                    filter_key="age",
+                    label=age_label,
+                    status="unknown",
+                    detail="简历未写明出生日期，无法确认年龄是否满足。",
+                    fact_type="aggregate",
+                )
+            )
+        elif request.age_min is not None and age < request.age_min:
+            evaluations.append(
+                _evaluation(
+                    filter_key="age",
+                    label=age_label,
+                    status="unmet",
+                    detail=f"当前年龄 {age} 岁，低于最低年龄要求。",
+                    fact_type="aggregate",
+                )
+            )
+        elif request.age_max is not None and age > request.age_max:
+            evaluations.append(
+                _evaluation(
+                    filter_key="age",
+                    label=age_label,
+                    status="unmet",
+                    detail=f"当前年龄 {age} 岁，超过最高年龄要求。",
+                    fact_type="aggregate",
+                )
+            )
+        else:
+            evaluations.append(
+                _evaluation(
+                    filter_key="age",
+                    label=age_label,
+                    status="matched",
+                    detail=f"当前年龄 {age} 岁。",
                     fact_type="aggregate",
                 )
             )
@@ -2126,6 +2248,21 @@ def _fuzzy_display_fields(
             values=[str(resume.employment_or_internship_months)],
             evidence_block_ids=[],
         )
+    if request.gender_in:
+        _add_display_field(
+            fields,
+            key="gender",
+            values=[resume.gender] if resume.gender else [],
+            evidence_block_ids=[],
+        )
+    if request.age_min is not None or request.age_max is not None:
+        age = _candidate_age(resume.birth_date)
+        _add_display_field(
+            fields,
+            key="age",
+            values=[str(age)] if age is not None else [],
+            evidence_block_ids=[],
+        )
     if request.education_any_of:
         _add_display_field(
             fields,
@@ -2527,6 +2664,8 @@ def search_candidates(
             Resume.employment_or_internship_months
             >= request.min_employment_or_internship_months
         )
+    if request.gender_in:
+        statement = statement.where(Resume.gender.in_(request.gender_in))
     # Filtering already evaluates the candidate facts in Python so that one
     # education/experience record must satisfy a compound condition.  Keep the
     # cursor out of the SQL statement, then apply it after the same score-first
@@ -2547,6 +2686,9 @@ def search_candidates(
         display_field_values: dict[str, _DisplayFieldValues] = {}
 
         if not _matches_graduation_status(resume, request):
+            continue
+
+        if not _matches_age_range(resume, request):
             continue
 
         if request.highest_degree_in:
@@ -2652,6 +2794,34 @@ def search_candidates(
                 display_field_values,
                 key="employment_or_internship_months",
                 values=[str(resume.employment_or_internship_months)],
+                evidence_block_ids=[],
+            )
+
+        if request.gender_in:
+            matched_filters.append("gender_in")
+            if resume.gender:
+                matched_evidence.append(
+                    CandidateSearchMatch(
+                        filter_key="gender_in",
+                        label=_GENDER_LABELS.get(resume.gender, resume.gender),
+                        fact_type="aggregate",
+                        evidence_block_ids=[],
+                    )
+                )
+            _add_display_field(
+                display_field_values,
+                key="gender",
+                values=[resume.gender] if resume.gender else [],
+                evidence_block_ids=[],
+            )
+
+        if request.age_min is not None or request.age_max is not None:
+            matched_filters.append("age")
+            age = _candidate_age(resume.birth_date)
+            _add_display_field(
+                display_field_values,
+                key="age",
+                values=[str(age)] if age is not None else [],
                 evidence_block_ids=[],
             )
 

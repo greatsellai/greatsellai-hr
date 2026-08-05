@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+from datetime import date
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -1043,6 +1045,10 @@ def _canonical_fact_payload(
                 "employment_or_internship_months": (
                     resume.employment_or_internship_months
                 ),
+                "gender": resume.gender,
+                "birth_date": (
+                    resume.birth_date.isoformat() if resume.birth_date else None
+                ),
             },
             "source_block_ids": sorted_source_block_ids,
         },
@@ -1116,6 +1122,81 @@ def _assert_numeric_value_grounded(
         raise FactValidationError(f"{label}_not_grounded_in_evidence")
 
 
+# Demographic normalization. A resume may spell gender and birth date in a few
+# common Chinese or English forms; the normalized values back the recruiter
+# screening index while the raw, evidence-grounded text stays in the facts.
+_GENDER_NORMALIZATION: dict[str, str] = {
+    "male": "male",
+    "m": "male",
+    "男": "male",
+    "female": "female",
+    "f": "female",
+    "女": "female",
+}
+_BIRTH_DATE_PARSE = re.compile(
+    r"^\s*(\d{4})\s*[年/.\-]\s*(\d{1,2})\s*月?\s*(?:[日/.\-]\s*(\d{1,2})\s*日?)?\s*$"
+)
+_ENGLISH_MONTHS: dict[str, int] = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12, "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
+    "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_ENGLISH_BIRTH_DATE = re.compile(
+    r"^\s*(?:(?P<day>\d{1,2})(?:st|nd|rd|th)?\s+)?"
+    r"(?P<month>[A-Za-z]{3,9})\.?\s+(?P<year>\d{4})\s*$"
+)
+_ENGLISH_MONTH_DAY_YEAR = re.compile(
+    r"^\s*(?P<month>[A-Za-z]{3,9})\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s+"
+    r"(?P<year>\d{4})\s*$"
+)
+
+
+def _normalize_gender(raw: str | None) -> str | None:
+    """Map an evidence-grounded gender line to ``male``/``female`` or None."""
+    if not raw:
+        return None
+    key = raw.strip().lower()
+    return _GENDER_NORMALIZATION.get(key)
+
+
+def _normalize_birth_date(raw: str | None) -> date | None:
+    """Parse a source-written birth date to a normalized calendar date."""
+    if not raw:
+        return None
+    text = raw.strip()
+    match = _BIRTH_DATE_PARSE.match(text)
+    year: int | None = None
+    month: int | None = None
+    day = 1
+    if match:
+        year = int(match.group(1))
+        month = int(match.group(2))
+        day = int(match.group(3) or 1)
+    else:
+        match = _ENGLISH_BIRTH_DATE.match(text)
+        if match:
+            month = _ENGLISH_MONTHS.get(match.group("month").lower())
+            year = int(match.group("year"))
+            day = int(match.group("day") or 1)
+        else:
+            match = _ENGLISH_MONTH_DAY_YEAR.match(text)
+            if match:
+                month = _ENGLISH_MONTHS.get(match.group("month").lower())
+                year = int(match.group("year"))
+                day = int(match.group("day"))
+    if not year or not month:
+        return None
+    # A calendar check rejects impossible dates; a broad sanity window rejects
+    # garbage years without ever disallowing a legitimate candidate.
+    if year < 1930 or year > date.today().year:
+        return None
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
 def prepare_ai_draft_facts(
     session: Session,
     *,
@@ -1133,6 +1214,10 @@ def prepare_ai_draft_facts(
         "schema_version": facts.schema_version,
         "candidate_name_raw": None,
         "candidate_name_evidence_block_ids": [],
+        "gender_raw": None,
+        "gender_evidence_block_ids": [],
+        "birth_date_raw": None,
+        "birth_date_evidence_block_ids": [],
         "education": [],
         "experiences": [],
         "skills": [],
@@ -1173,6 +1258,32 @@ def prepare_ai_draft_facts(
             payload["candidate_name_evidence_block_ids"] = (
                 facts.candidate_name_evidence_block_ids
             )
+
+    for evidence_field, raw_field in (
+        ("gender_evidence_block_ids", "gender_raw"),
+        ("birth_date_evidence_block_ids", "birth_date_raw"),
+    ):
+        raw_value = getattr(facts, raw_field)
+        if not raw_value:
+            continue
+        try:
+            demographic_source_text = _source_text_by_ids(
+                session,
+                resume_id=resume_id,
+                block_ids=getattr(facts, evidence_field),
+            )
+            _assert_raw_value_grounded(
+                value=raw_value,
+                source_text=demographic_source_text,
+                label=raw_field,
+            )
+        except FactValidationError:
+            # Like a bad identity result, an ungrounded demographic must never
+            # block the otherwise grounded resume from entering the library.
+            partial = True
+        else:
+            payload[raw_field] = raw_value
+            payload[evidence_field] = getattr(facts, evidence_field)
 
     for education in facts.education:
         try:
@@ -1398,6 +1509,25 @@ def _replace_facts(
         )
         if not candidate.display_name or not candidate.display_name.strip():
             candidate.display_name = facts.candidate_name_raw.strip()
+
+    if force_pending_review:
+        for raw_field, evidence_field in (
+            ("gender_raw", "gender_evidence_block_ids"),
+            ("birth_date_raw", "birth_date_evidence_block_ids"),
+        ):
+            raw_value = getattr(facts, raw_field)
+            if not raw_value:
+                continue
+            demographic_source_text = _source_text_by_ids(
+                session,
+                resume_id=resume.id,
+                block_ids=getattr(facts, evidence_field),
+            )
+            _assert_raw_value_grounded(
+                value=raw_value,
+                source_text=demographic_source_text,
+                label=raw_field,
+            )
 
     session.execute(delete(ResumeEducation).where(ResumeEducation.resume_id == resume.id))
     session.execute(delete(ResumeExperience).where(ResumeExperience.resume_id == resume.id))
@@ -1830,6 +1960,13 @@ def _replace_facts(
     resume.employment_or_internship_months = merged_month_count(
         employment_or_internship_intervals
     )
+    # Demographics are only ever written from a stated value. An enrichment
+    # merge that re-stated no gender/birth date must not wipe what an earlier
+    # extraction already grounded, and a fresh resume row simply stays null.
+    if facts.gender_raw:
+        resume.gender = _normalize_gender(facts.gender_raw)
+    if facts.birth_date_raw:
+        resume.birth_date = _normalize_birth_date(facts.birth_date_raw)
     resume.facts_version += 1
 
     if resume.extraction_status == "failed":
@@ -2109,6 +2246,10 @@ def merge_filter_v2_enrichment(
     return ResumeFactsSubmission.model_validate(
         {
             "schema_version": "resume_facts.v2",
+            "gender_raw": enrichment.gender_raw,
+            "gender_evidence_block_ids": enrichment.gender_evidence_block_ids or [],
+            "birth_date_raw": enrichment.birth_date_raw,
+            "birth_date_evidence_block_ids": enrichment.birth_date_evidence_block_ids or [],
             "education": education,
             "experiences": experiences,
             "skills": skills,

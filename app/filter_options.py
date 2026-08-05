@@ -5,7 +5,12 @@ from typing import Final
 from app.services.normalization import normalized_key
 
 
-FILTER_OPTIONS_VERSION: Final = "filter-options.v5.20260803.1"
+FILTER_OPTIONS_VERSION: Final = "filter-options.v5.20260805.1"
+
+GENDER_OPTIONS: Final = [
+    {"value": "male", "label": "男"},
+    {"value": "female", "label": "女"},
+]
 
 DEGREE_OPTIONS: Final = [
     {"value": "doctor", "label": "博士"},
@@ -148,6 +153,7 @@ def filter_options_payload(
         "institution_classifications": INSTITUTION_CLASSIFICATION_OPTIONS,
         "institution_tiers": INSTITUTION_TIER_OPTIONS,
         "experience_types": EXPERIENCE_TYPE_OPTIONS,
+        "genders": GENDER_OPTIONS,
         "skill_categories": SKILL_CATEGORY_OPTIONS,
         "leadership_contexts": LEADERSHIP_CONTEXT_OPTIONS,
         "award_levels": AWARD_LEVEL_OPTIONS,

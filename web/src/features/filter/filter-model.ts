@@ -3,6 +3,7 @@ import type {
   DegreeLevel,
   ExperienceType,
   FilterOptions,
+  Gender,
   InstitutionClassification,
   LanguageCredentialCode,
   LeadershipContext,
@@ -54,6 +55,11 @@ export interface FilterDraft {
   leadershipRoles: string[];
   /** Email-platform scope. Selected channels always use OR semantics. */
   sourceTagIds: string[];
+  /** Demographic scope. Selected genders always use OR semantics. */
+  genders: Gender[];
+  /** Age window in whole years; 0 means "no bound" for either end. */
+  minAge: number;
+  maxAge: number;
   keywords: string[];
   keywordsMode: KeywordMode;
 }
@@ -73,6 +79,11 @@ export const experienceTypeOptions: Array<{
   { value: "entrepreneurship", label: "创业" },
   { value: "training", label: "培训" },
 ];
+
+export const genderLabels: Record<Gender, string> = {
+  male: "男",
+  female: "女",
+};
 
 export const degreeLabels: Record<DegreeLevel, string> = {
   unknown: "未知",
@@ -138,7 +149,34 @@ export function formatTenureFilterSummary(months: number): string {
 }
 
 export function formatMinimumAcademicScore(percent: number): string {
-  return percent <= 0 ? "不限" : `不低于 ${percent} 分`;
+  return percent <= 0 ? "不限" : `不低于 ${percent}%`;
+}
+
+export const MAX_AGE = 65;
+
+export function clampAge(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(MAX_AGE, Math.round(value)));
+}
+
+export function normalizeAgeBounds(
+  minAge: number,
+  maxAge: number,
+): { minAge: number; maxAge: number } {
+  const min = clampAge(minAge);
+  const max = clampAge(maxAge);
+  if (min > 0 && max > 0 && max < min) {
+    return { minAge: max, maxAge: min };
+  }
+  return { minAge: min, maxAge: max };
+}
+
+export function formatMinimumAge(age: number): string {
+  return age <= 0 ? "不限" : `不低于 ${age} 岁`;
+}
+
+export function formatMaximumAge(age: number): string {
+  return age <= 0 ? "不限" : `不高于 ${age} 岁`;
 }
 
 export function formatMaximumRankPercent(percent: number): string {

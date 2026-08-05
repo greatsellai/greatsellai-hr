@@ -41,7 +41,7 @@ _ENGLISH_RECRUITER_PROSE_WORD = re.compile(
     r"explicitly|listed|available|information|not|no|missing|confirm|verify)\b"
 )
 LABELED_PERSONAL_LINE = re.compile(
-    r"(?im)^\s*(?:姓名|电话|手机|手机号|邮箱|地址|住址|出生年月|出生日期|性别)\s*[:：].*$"
+    r"(?im)^\s*(?:姓名|电话|手机|手机号|邮箱|地址|住址|出生年月|出生日期|生日|性别)\s*[:：].*$"
 )
 _EXPERIENCE_TERM_SEPARATOR_PATTERN = re.compile(
     r"[\s\-‐‑‒–—―_·・,，.。()（）\[\]【】{}]+"
@@ -642,6 +642,46 @@ _TRAILING_LABELED_PERSONAL_VALUE = re.compile(
 _LABELED_ENGLISH_PERSONAL_LINE = re.compile(
     r"(?im)^\s*(?:name|phone|mobile|email|address|gender|date\s+of\s+birth)\s*:\s*.*$"
 )
+_GENDER_LABEL_LINE = re.compile(r"(?i)^\s*(?:性别|gender|sex)\s*[:：]")
+_GENDER_LABEL_VALUE_LINE = re.compile(
+    r"(?i)^\s*(?:性别|gender|sex)\s*[:：]\s*(?P<value>.*)$"
+)
+_BIRTH_LABEL_LINE = re.compile(
+    r"(?i)^\s*(?:出生日期|出生年月|生日|"
+    r"birth\s*date|date\s+of\s+birth|birthday)\s*[:：]"
+)
+_BIRTH_LABEL_VALUE_LINE = re.compile(
+    r"(?i)^\s*(?:出生日期|出生年月|生日|"
+    r"birth\s*date|date\s+of\s+birth|birthday)\s*[:：]\s*(?P<value>.*)$"
+)
+
+
+def _retained_demographic_line(line: str) -> str:
+    """Return only the explicit gender and birth-date portions of a personal line.
+
+    Mirrors the candidate-name retention: a labeled personal line is kept only
+    when it actually carries a gender or birth value, and every other trailing
+    labeled personal value on the same line is trimmed away.
+    """
+
+    retained: list[str] = []
+    for label_line, value_line, label in (
+        (_GENDER_LABEL_LINE, _GENDER_LABEL_VALUE_LINE, "性别"),
+        (_BIRTH_LABEL_LINE, _BIRTH_LABEL_VALUE_LINE, "出生日期"),
+    ):
+        if not label_line.match(line):
+            continue
+        match = value_line.match(line)
+        if match is None:
+            continue
+        value = match.group("value")
+        trailing = _TRAILING_LABELED_PERSONAL_VALUE.search(value)
+        if trailing is not None:
+            value = value[: trailing.start()]
+        value = value.strip()
+        if value:
+            retained.append(f"{label}: {value}")
+    return " · ".join(retained) if retained else ""
 
 
 def _retained_candidate_name_line(line: str) -> str | None:
@@ -667,16 +707,23 @@ def redact_nonessential_personal_data(
     text: str,
     *,
     retain_candidate_name: bool = False,
+    retain_gender_and_birth: bool = False,
 ) -> str:
     def replace_labeled_personal_line(match: re.Match[str]) -> str:
-        if retain_candidate_name and _CANDIDATE_NAME_LABEL_LINE.match(match.group(0)):
-            retained = _retained_candidate_name_line(match.group(0))
-            if retained is not None:
-                return retained
+        line = match.group(0)
+        retained: list[str] = []
+        if retain_candidate_name and _CANDIDATE_NAME_LABEL_LINE.match(line):
+            name_retained = _retained_candidate_name_line(line)
+            if name_retained is not None:
+                retained.append(name_retained)
+        if retain_gender_and_birth:
+            demographic_retained = _retained_demographic_line(line)
+            if demographic_retained:
+                retained.append(demographic_retained)
         # Removing the whole explicitly personal line is stronger than a
         # semantic placeholder: model input cannot infer or repeat what kind
         # of personal field was present.
-        return ""
+        return " · ".join(retained) if retained else ""
 
     redacted = LABELED_PERSONAL_LINE.sub(replace_labeled_personal_line, text)
     redacted = _LABELED_ENGLISH_PERSONAL_LINE.sub(
@@ -1001,6 +1048,22 @@ def resume_facts_tool_schema() -> dict[str, Any]:
                 "items": evidence,
                 "maxItems": 2,
             },
+            "gender_raw": {
+                "anyOf": [{"type": "string", "maxLength": 16}, {"type": "null"}]
+            },
+            "gender_evidence_block_ids": {
+                "type": "array",
+                "items": evidence,
+                "maxItems": 2,
+            },
+            "birth_date_raw": {
+                "anyOf": [{"type": "string", "maxLength": 32}, {"type": "null"}]
+            },
+            "birth_date_evidence_block_ids": {
+                "type": "array",
+                "items": evidence,
+                "maxItems": 2,
+            },
             "education": {"type": "array", "items": education, "maxItems": 8},
             "experiences": {"type": "array", "items": experience, "maxItems": 20},
             "skills": {"type": "array", "items": skill, "maxItems": 50},
@@ -1011,6 +1074,10 @@ def resume_facts_tool_schema() -> dict[str, Any]:
             "schema_version",
             "candidate_name_raw",
             "candidate_name_evidence_block_ids",
+            "gender_raw",
+            "gender_evidence_block_ids",
+            "birth_date_raw",
+            "birth_date_evidence_block_ids",
             "education",
             "experiences",
             "skills",
@@ -1129,6 +1196,22 @@ def resume_core_facts_tool_schema() -> dict[str, Any]:
                 "items": evidence,
                 "maxItems": 2,
             },
+            "gender_raw": {
+                "anyOf": [{"type": "string", "maxLength": 16}, {"type": "null"}]
+            },
+            "gender_evidence_block_ids": {
+                "type": "array",
+                "items": evidence,
+                "maxItems": 2,
+            },
+            "birth_date_raw": {
+                "anyOf": [{"type": "string", "maxLength": 32}, {"type": "null"}]
+            },
+            "birth_date_evidence_block_ids": {
+                "type": "array",
+                "items": evidence,
+                "maxItems": 2,
+            },
             # This is an availability fallback, not a full archive. Keeping
             # the response bounded avoids another malformed/truncated tool
             # argument on unusually dense resumes.
@@ -1140,6 +1223,10 @@ def resume_core_facts_tool_schema() -> dict[str, Any]:
             "schema_version",
             "candidate_name_raw",
             "candidate_name_evidence_block_ids",
+            "gender_raw",
+            "gender_evidence_block_ids",
+            "birth_date_raw",
+            "birth_date_evidence_block_ids",
             "education",
             "experiences",
             "skills",
@@ -1629,6 +1716,7 @@ def render_evidence_blocks(
     *,
     max_chars: int = 36000,
     retain_candidate_name: bool = False,
+    retain_gender_and_birth: bool = False,
 ) -> str:
     rows: list[str] = []
     used = 0
@@ -1638,6 +1726,7 @@ def render_evidence_blocks(
             f"{redact_nonessential_personal_data(
                 block.text,
                 retain_candidate_name=retain_candidate_name,
+                retain_gender_and_birth=retain_gender_and_birth,
             )}"
         )
         if used + len(row) > max_chars:
@@ -1657,10 +1746,16 @@ def extract_resume_facts(
     blocks: list[EvidenceBlock],
     retry_reason: str | None = None,
 ) -> ResumeFactsSubmission:
-    # Candidate identity is the narrow exception to normal redaction: only
-    # an explicit resume-owner name can be retained, while phone/email/address
-    # and other personal lines remain masked before the provider call.
-    source = render_evidence_blocks(blocks, retain_candidate_name=True)
+    # Candidate identity is the narrow exception to normal redaction: an
+    # explicit resume-owner name, gender, and date of birth can be retained
+    # (the demographics feed the recruiter screening index), while
+    # phone/email/address and other personal lines remain masked before the
+    # provider call.
+    source = render_evidence_blocks(
+        blocks,
+        retain_candidate_name=True,
+        retain_gender_and_birth=True,
+    )
     institution_rulebook = build_985_211_ai_rulebook()
     correction = (
         " This is a retry after the previous function arguments failed validation. "
@@ -1691,7 +1786,9 @@ def extract_resume_facts(
                     "the page evidence that contains it. Never use a filename, email, "
                     "employer, referee, team member, author, or any inferred identity. "
                     "If ownership is unclear, return null and an empty evidence list. "
-                    "Do not output phones, emails, addresses, photos, or other personal data."
+                    "gender_raw and birth_date_raw may be set only from an explicitly "
+                    "written labeled line; never infer a gender or a birth date. "
+                    "Do not output phones, emails, addresses, or photos."
                     + correction
                 ),
             },
@@ -1703,6 +1800,11 @@ def extract_resume_facts(
                     "evidence blocks. candidate_name_raw must be the exact name text only "
                     "(without a `姓名`/`Name` label), and candidate_name_evidence_block_ids "
                     "must be empty exactly when candidate_name_raw is null. "
+                    "Set gender_raw to the exact written value on an explicit 性别/Gender "
+                    "line (for example 男 or Male), and birth_date_raw to the exact written "
+                    "date on an explicit 出生日期/出生年月/生日/Date of Birth line (for example "
+                    "1995年6月 or 1995-06-15). Leave gender_raw and birth_date_raw null with "
+                    "empty evidence when the resume does not explicitly state them. "
                     "Every item must select evidence blocks containing its values. "
                     "Return evidence IDs as plain strings such as `page-001`, never as "
                     "objects. "
@@ -1906,7 +2008,11 @@ def extract_resume_core_facts(
     matching and normal source-grounding still run on save.
     """
 
-    source = render_evidence_blocks(blocks, retain_candidate_name=True)
+    source = render_evidence_blocks(
+        blocks,
+        retain_candidate_name=True,
+        retain_gender_and_birth=True,
+    )
     parsed = call_strict_function(
         api_key=api_key,
         model=model,
@@ -1921,15 +2027,22 @@ def extract_resume_core_facts(
             "labeled name, together with the page evidence that contains it. Never use "
             "a filename, email, employer, referee, team member, author, or inferred "
             "identity. If ownership is unclear, return null with an empty evidence list. "
+            "gender_raw and birth_date_raw may be set only from an explicitly written "
+            "labeled line; never infer a gender or a birth date. "
             "Do not output 985/211 judgment, roster identifier, detailed responsibility "
-            "list, phones, emails, addresses, photos, or other personal data."
+            "list, phones, emails, addresses, or photos."
         ),
         user_prompt=(
-            "Extract the candidate name, education, experience, and skills needed to "
-            "screen this resume. candidate_name_raw must be the exact written name only "
+            "Extract the candidate name, gender, date of birth, education, experience, "
+            "and skills needed to screen this resume. candidate_name_raw must be the "
+            "exact written name only "
             "without a label, title, or job-seeking intention; "
             "candidate_name_evidence_block_ids must be empty exactly when "
-            "candidate_name_raw is null. Return at most 4 education items, 8 experience "
+            "candidate_name_raw is null. Set gender_raw to the exact value on an explicit "
+            "性别/Gender line (for example 男 or Male) and birth_date_raw to the exact "
+            "written date on an explicit 出生日期/出生年月/生日/Date of Birth line; leave both "
+            "null with empty evidence when the resume does not explicitly state them. "
+            "Return at most 4 education items, 8 experience "
             "items, and 16 skills, prioritizing the most recent or most substantive "
             "explicit entries. Every fact must cite the page IDs containing it; return page IDs "
             "as plain strings such as `page-001`. Copy raw fields character-for-character "

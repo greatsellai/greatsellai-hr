@@ -9,7 +9,10 @@ import {
   formatDuration,
   formatMaximumRankPercent,
   formatMinimumAcademicScore,
+  formatMinimumAge,
+  formatMaximumAge,
   formatTenureFilterSummary,
+  genderLabels,
   institutionClassificationLabel,
   institutionClassificationLabels,
   sortInstitutionClassifications,
@@ -22,6 +25,7 @@ import type {
   CandidateSearchItem,
   CandidateSearchResponse,
   DegreeLevel,
+  Gender,
   InstitutionClassification,
   ScoreTemplate,
 } from "../../types";
@@ -61,6 +65,12 @@ function activeResultDisplayColumns(draft: FilterDraft): ResultDisplayColumn[] {
   if (draft.minEmploymentOrInternshipMonths > 0) {
     add("employment_or_internship_months", "工作年限");
   }
+  if (draft.genders.length) {
+    add("gender", "性别");
+  }
+  if (draft.minAge > 0 || draft.maxAge > 0) {
+    add("age", "年龄");
+  }
   if (draft.minAcademicScorePercent > 0 || draft.maxRankPercent > 0) {
     add("academic_performance", "学业表现");
   }
@@ -97,6 +107,13 @@ function resultDisplayValueLabel(
   ) {
     const months = Number(normalized);
     return Number.isFinite(months) ? formatDuration(months) : normalized;
+  }
+  if (key === "gender") {
+    return genderLabels[normalized as Gender] ?? normalized;
+  }
+  if (key === "age") {
+    const age = Number(normalized);
+    return Number.isFinite(age) ? `${age} 岁` : normalized;
   }
   return normalized;
 }
@@ -371,6 +388,21 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
       "工作年限",
       formatTenureFilterSummary(draft.minEmploymentOrInternshipMonths),
     );
+  }
+  if (draft.genders.length) {
+    add(
+      "性别",
+      compactFilterValue(
+        draft.genders.map((gender) => genderLabels[gender]),
+      ),
+    );
+  }
+  const ageConditions = [
+    draft.minAge > 0 ? formatMinimumAge(draft.minAge) : null,
+    draft.maxAge > 0 ? formatMaximumAge(draft.maxAge) : null,
+  ].filter((value): value is string => Boolean(value));
+  if (ageConditions.length) {
+    add("年龄", ageConditions.join(" · "));
   }
   const academicConditions = [
     draft.minAcademicScorePercent > 0

@@ -422,6 +422,103 @@ def test_academic_score_threshold_matches_average_or_normalized_gpa(client) -> N
     assert invalid_threshold.status_code == 422, invalid_threshold.text
 
 
+def _save_resume_with_demographics(client) -> str:
+    candidate_id = create_candidate(client)
+    resume_id = upload_text_resume(client, candidate_id)
+    replace_page_evidence(
+        client,
+        resume_id,
+        "教育经历 北京大学 计算机 本科 2022-09 至 2026-06。"
+        "性别：男 出生年月：1995年6月。",
+    )
+    response = client.put(
+        f"/v1/resumes/{resume_id}/facts",
+        json={
+            "facts": {
+                "schema_version": "resume_facts.v2",
+                "gender_raw": "男",
+                "gender_evidence_block_ids": ["page-001"],
+                "birth_date_raw": "1995年6月",
+                "birth_date_evidence_block_ids": ["page-001"],
+                "education": [
+                    {
+                        "school_name_raw": "北京大学",
+                        "degree": "bachelor",
+                        "major_raw": "计算机",
+                        "start_month": "2022-09",
+                        "end_month": "2026-06",
+                        "evidence_block_ids": ["page-001"],
+                    }
+                ],
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    return resume_id
+
+
+def test_gender_and_age_filters_match_extracted_demographics(client) -> None:
+    resume_id = _save_resume_with_demographics(client)
+
+    matched_gender = client.post(
+        "/v1/candidates/search",
+        json={"gender_in": ["male"]},
+    )
+    assert matched_gender.status_code == 200, matched_gender.text
+    assert [item["resume_id"] for item in matched_gender.json()["items"]] == [
+        resume_id
+    ]
+    display_fields = {
+        field["key"]: field["values"]
+        for field in matched_gender.json()["items"][0]["display_fields"]
+    }
+    assert display_fields["gender"] == ["male"]
+
+    rejected_gender = client.post(
+        "/v1/candidates/search",
+        json={"gender_in": ["female"]},
+    )
+    assert rejected_gender.status_code == 200, rejected_gender.text
+    assert rejected_gender.json()["items"] == []
+
+    born_year = 1995
+    born_month = 6
+    today = __import__("datetime").date.today()
+    age = today.year - born_year
+    if (today.month, today.day) < (born_month, 1):
+        age -= 1
+
+    in_range = client.post(
+        "/v1/candidates/search",
+        json={"age_min": max(16, age - 5), "age_max": age + 5},
+    )
+    assert in_range.status_code == 200, in_range.text
+    assert [item["resume_id"] for item in in_range.json()["items"]] == [resume_id]
+    age_fields = {
+        field["key"]: field["values"]
+        for field in in_range.json()["items"][0]["display_fields"]
+    }
+    assert age_fields["age"] == [str(age)]
+
+    out_of_range = client.post(
+        "/v1/candidates/search",
+        json={"age_min": age + 10},
+    )
+    assert out_of_range.status_code == 200, out_of_range.text
+    assert out_of_range.json()["items"] == []
+
+    fuzzy = client.post(
+        "/v1/candidates/search",
+        json={
+            "condition_match_mode": "any",
+            "gender_in": ["female"],
+            "age_min": age + 10,
+        },
+    )
+    assert fuzzy.status_code == 200, fuzzy.text
+    assert [item["resume_id"] for item in fuzzy.json()["items"]] == []
+
+
 def test_previous_graduate_filter_uses_the_window_start_as_its_boundary(client) -> None:
     resume_id = _save_v2_resume(client)
 

@@ -15,6 +15,7 @@ import type {
 import { Icon, type IconName } from "../../icons";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
 import { BackofficeSelect } from "../../backoffice/ui/BackofficeSelect";
+import { useJobMatchBatchPolling } from "./useJobMatchBatchPolling";
 import "./job-match.css";
 
 type ToastKind = "success" | "error";
@@ -347,35 +348,11 @@ export function MatchWorkspace({
       setLoading(false);
     }
   };
-  useEffect(() => {
-    if (!matchBatch) return;
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const [next, items] = await Promise.all([
-          api.getJobMatchBatch(matchBatch.batch_id),
-          api.listJobMatchBatchItems(matchBatch.batch_id),
-        ]);
-        if (!cancelled) {
-          setMatchBatch(next);
-          setBatchItems(items);
-        }
-      } catch {
-        // Keep the last durable status visible; the next manual action can retry.
-      }
-    };
-    void refresh();
-    if (["completed", "partial"].includes(matchBatch.status)) {
-      return () => {
-        cancelled = true;
-      };
-    }
-    const timer = window.setInterval(() => void refresh(), 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [matchBatch?.batch_id, matchBatch?.status]);
+  useJobMatchBatchPolling({
+    batchId: matchBatch?.batch_id,
+    onBatch: setMatchBatch,
+    onItems: setBatchItems,
+  });
   useEffect(() => {
     let cancelled = false;
     void api
@@ -1034,22 +1011,52 @@ function MatchBatchDetails({
   items: JobMatchBatchItem[];
 }) {
   const failed = items.filter((item) => item.status === "failed");
-  const inProgress = items.filter(
-    (item) => item.status === "queued" || item.status === "running",
+  const settledCount = Math.min(
+    batch.total_count,
+    batch.completed_count + batch.failed_count,
   );
+  const inProgressCount = Math.max(0, batch.total_count - settledCount);
+  const progressPercent = batch.total_count
+    ? Math.round((settledCount / batch.total_count) * 100)
+    : 100;
+  const progressText = batch.total_count
+    ? `已处理 ${settledCount} / ${batch.total_count}${inProgressCount ? `，剩余 ${inProgressCount} 份` : ""}`
+    : "没有符合条件的简历，无需处理";
+  const batchStatus = batch.status === "partial"
+    ? { label: "部分完成", tone: "is-warning" }
+    : batch.status === "completed"
+      ? { label: "已完成", tone: "is-success" }
+      : batch.status === "queued"
+        ? { label: "排队中", tone: "is-progress" }
+        : { label: "运行中", tone: "is-progress" };
   return (
     <section className="panel match-batch-details">
       <div className="panel-heading">
         <div>
           <h2>岗位评估任务</h2>
-          <p>
-            {batch.completed_count + batch.failed_count} / {batch.total_count} 已结束
-            {inProgress.length ? `，仍有 ${inProgress.length} 份在队列中` : ""}。
-          </p>
+          <p>{progressText}</p>
         </div>
-        <span className={`status-pill${batch.failed_count ? " is-warning" : ""}`}>
-          {batch.status === "partial" ? "部分完成" : batch.status === "completed" ? "已完成" : "运行中"}
-        </span>
+        <span className={`status-pill ${batchStatus.tone}`}>{batchStatus.label}</span>
+      </div>
+      <div className="match-batch-progress">
+        <div className="match-batch-progress-heading">
+          <span>处理进度</span>
+          <strong aria-live="polite">{progressPercent}%</strong>
+        </div>
+        <div
+          aria-label="岗位评估进度"
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={progressPercent}
+          aria-valuetext={progressText}
+          className="match-batch-progress-track"
+          role="progressbar"
+        >
+          <span
+            className="match-batch-progress-value"
+            style={{ "--match-batch-progress": `${progressPercent}%` } as CSSProperties}
+          />
+        </div>
       </div>
       {failed.length ? (
         <div className="table-scroll">

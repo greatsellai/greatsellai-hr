@@ -51,6 +51,28 @@ def test_candidate_name_can_be_retained_without_exposing_contact_data() -> None:
     assert "person@example.com" not in rendered
 
 
+def test_gender_and_birth_can_be_retained_without_exposing_contact_data() -> None:
+    rendered = redact_nonessential_personal_data(
+        "\u6027\u522b\uff1a\u7537\n\u51fa\u751f\u5e74\u6708\uff1a1995\u5e746\u6708\n\u7535\u8bdd\uff1a13800138000\n\u90ae\u7bb1\uff1aperson@example.com",
+        retain_gender_and_birth=True,
+    )
+
+    assert "\u6027\u522b: \u7537" in rendered
+    assert "\u51fa\u751f\u65e5\u671f: 1995\u5e746\u6708" in rendered
+    assert "13800138000" not in rendered
+    assert "person@example.com" not in rendered
+
+
+def test_gender_and_birth_are_redacted_unless_retention_is_requested() -> None:
+    rendered = redact_nonessential_personal_data(
+        "\u6027\u522b\uff1a\u5973 \u51fa\u751f\u5e74\u6708\uff1a1998-03-12\n\u6280\u80fd\uff1aPython"
+    )
+
+    assert "\u5973" not in rendered
+    assert "1998" not in rendered
+    assert "Python" in rendered
+
+
 def test_model_evidence_rendering_never_includes_local_contact_values() -> None:
     rendered = render_evidence_blocks(
         [
@@ -182,6 +204,10 @@ def test_core_fact_tool_schema_keeps_identity_and_omits_enrichment_fields() -> N
         "schema_version",
         "candidate_name_raw",
         "candidate_name_evidence_block_ids",
+        "gender_raw",
+        "gender_evidence_block_ids",
+        "birth_date_raw",
+        "birth_date_evidence_block_ids",
         "education",
         "experiences",
         "skills",
@@ -199,6 +225,12 @@ def test_core_fact_tool_schema_keeps_identity_and_omits_enrichment_fields() -> N
     }
     assert "candidate_name_raw" in schema["required"]
     assert "candidate_name_evidence_block_ids" in schema["required"]
+    assert schema["properties"]["gender_raw"]["anyOf"][0]["maxLength"] == 16
+    assert schema["properties"]["birth_date_raw"]["anyOf"][0]["maxLength"] == 32
+    assert "gender_raw" in schema["required"]
+    assert "gender_evidence_block_ids" in schema["required"]
+    assert "birth_date_raw" in schema["required"]
+    assert "birth_date_evidence_block_ids" in schema["required"]
     education = schema["properties"]["education"]["items"]
     experience = schema["properties"]["experiences"]["items"]
     assert "ai_985_211_judgment" not in education["properties"]

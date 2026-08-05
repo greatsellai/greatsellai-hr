@@ -1403,6 +1403,17 @@ export interface TalentSearchRun {
   active_context?: RecruitingAgentActiveContext | null;
 }
 
+export interface ResumeAnalysisWaitEstimate {
+  target: "analysis" | "candidate_name";
+  /** Optional so a web release remains readable during a rolling API deploy. */
+  phase?: "source_reading" | "resume_analysis" | "name_completion";
+  /** Optional so a web release remains readable during a rolling API deploy. */
+  state?: "queued" | "running";
+  estimated_min_seconds: number;
+  estimated_max_seconds: number;
+  confidence: "observed" | "baseline";
+}
+
 export interface ResumeLibraryItem {
   resume_id: string;
   candidate_id: string;
@@ -1416,6 +1427,8 @@ export interface ResumeLibraryItem {
   ai_extraction_error: string | null;
   candidate_name_extraction_status?: CandidateNameExtractionStatus | null;
   candidate_name_extraction_error?: string | null;
+  /** Optional while API and web releases roll independently. */
+  analysis_wait_estimate?: ResumeAnalysisWaitEstimate | null;
   ai_summary_status: AiSummaryStatus;
   ai_summary_error: string | null;
   is_active: boolean;

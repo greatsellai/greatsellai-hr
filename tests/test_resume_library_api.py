@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import select
 
-from app.models import Resume, ResumeAiExtractionJob
+from app.models import (
+    CandidateNameExtractionJob,
+    Resume,
+    ResumeAiExtractionJob,
+    ResumeDocumentExtractionJob,
+)
 from app.services.resume_service import reconcile_legacy_completed_ai_resumes
 from test_filter_mvp_contract import _save_ready_resume
 from test_score_service import _fake_score_provider, _template_payload
@@ -58,6 +65,7 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
         "ai_extraction_error",
         "candidate_name_extraction_status",
         "candidate_name_extraction_error",
+        "analysis_wait_estimate",
         "ai_summary_status",
         "ai_summary_error",
         "is_active",
@@ -88,6 +96,7 @@ def test_resume_library_returns_current_ai_summary_preview_and_score(
     assert item["ai_extraction_error"] is None
     assert item["candidate_name_extraction_status"] == "succeeded"
     assert item["candidate_name_extraction_error"] is None
+    assert item["analysis_wait_estimate"] is None
     assert item["ai_summary_status"] == "succeeded"
     assert item["ai_summary_error"] is None
     assert item["is_active"] is True
@@ -165,6 +174,138 @@ def test_resume_library_keeps_pending_upload_visible_without_ai_outputs(client) 
     assert item["is_active"] is False
     assert item["summary_preview"] is None
     assert item["score_total"] is None
+    assert item["analysis_wait_estimate"] is not None
+    assert item["analysis_wait_estimate"]["target"] == "analysis"
+    assert item["analysis_wait_estimate"]["phase"] == "source_reading"
+    assert item["analysis_wait_estimate"]["state"] == "queued"
+    assert item["analysis_wait_estimate"]["confidence"] == "baseline"
+
+
+def test_resume_library_estimates_pending_candidate_name_without_exposing_queue_details(
+    ai_client,
+) -> None:
+    _, resume_id = _save_ready_resume(
+        ai_client,
+        source_text=(
+            "教育经历 清华大学 计算机 本科。工作经历 "
+            "Acme Python Engineer。技能 Python SQL"
+        ),
+    )
+    database = ai_client.app.state.database
+    now = datetime.now(timezone.utc)
+    with database.session_factory() as session:
+        resume = session.get(Resume, resume_id)
+        assert resume is not None and resume.candidate is not None
+        resume.candidate.display_name = None
+        ai_job = session.scalar(
+            select(ResumeAiExtractionJob).where(
+                ResumeAiExtractionJob.resume_id == resume.id
+            )
+        )
+        assert ai_job is not None
+        ai_job.status = "completed"
+        ai_job.started_at = now
+        ai_job.completed_at = now
+        session.add(
+            CandidateNameExtractionJob(
+                organization_id=resume.organization_id,
+                resume_id=resume.id,
+                status="queued",
+                requested_at=now,
+                next_attempt_at=now,
+            )
+        )
+        session.commit()
+
+    response = ai_client.get("/v1/resume-library")
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    estimate = item["analysis_wait_estimate"]
+    assert item["display_name"] is None
+    assert item["candidate_name_extraction_status"] == "queued"
+    assert estimate is not None
+    assert estimate["target"] == "candidate_name"
+    assert estimate["phase"] == "name_completion"
+    assert estimate["state"] == "queued"
+    assert estimate["estimated_min_seconds"] > 0
+    assert estimate["estimated_max_seconds"] >= estimate["estimated_min_seconds"]
+    assert estimate["confidence"] == "baseline"
+    assert "queue" not in estimate
+    assert "worker" not in estimate
+
+
+def test_resume_library_exposes_the_running_rich_analysis_phase(client) -> None:
+    uploaded = client.post(
+        "/v1/resumes/upload",
+        files={
+            "file": (
+                "running-analysis.pdf",
+                b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<<>>\n%%EOF",
+                "application/pdf",
+            )
+        },
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    now = datetime.now(timezone.utc)
+    database = client.app.state.database
+    with database.session_factory() as session:
+        resume = session.get(Resume, uploaded.json()["resume_id"])
+        assert resume is not None
+        document_job = session.scalar(
+            select(ResumeDocumentExtractionJob).where(
+                ResumeDocumentExtractionJob.resume_id == resume.id
+            )
+        )
+        assert document_job is not None
+        document_job.status = "completed"
+        document_job.started_at = now
+        document_job.completed_at = now
+        session.add(
+            ResumeAiExtractionJob(
+                organization_id=resume.organization_id,
+                resume_id=resume.id,
+                status="running",
+                requested_at=now,
+                started_at=now,
+            )
+        )
+        session.commit()
+
+    response = client.get("/v1/resume-library")
+    assert response.status_code == 200, response.text
+    estimate = response.json()["items"][0]["analysis_wait_estimate"]
+    assert estimate is not None
+    assert estimate["target"] == "analysis"
+    assert estimate["phase"] == "resume_analysis"
+    assert estimate["state"] == "running"
+
+
+def test_resume_library_does_not_guess_an_eta_while_a_retry_is_delayed(client) -> None:
+    uploaded = client.post(
+        "/v1/resumes/upload",
+        files={
+            "file": (
+                "retry-later.pdf",
+                b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<<>>\n%%EOF",
+                "application/pdf",
+            )
+        },
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    database = client.app.state.database
+    with database.session_factory() as session:
+        job = session.scalar(
+            select(ResumeDocumentExtractionJob).where(
+                ResumeDocumentExtractionJob.resume_id == uploaded.json()["resume_id"]
+            )
+        )
+        assert job is not None
+        job.next_attempt_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        session.commit()
+
+    response = client.get("/v1/resume-library")
+    assert response.status_code == 200, response.text
+    assert response.json()["items"][0]["analysis_wait_estimate"] is None
 
 
 def test_resume_library_exposes_source_backed_candidate_profile_fields(ai_client) -> None:

@@ -21,6 +21,7 @@ import {
 import { degreeLabels, formatDuration } from "../filter/filter-model";
 import type {
   MailboxConfig,
+  ResumeAnalysisWaitEstimate,
   ResumeLibraryItem,
   ResumeLibraryResponse,
 } from "../../types";
@@ -42,6 +43,111 @@ interface ResumeLibraryPageProps {
   onFavoriteChanged?: () => void;
 }
 
+type AnalysisPhase = "source_reading" | "resume_analysis" | "name_completion";
+type AnalysisWaitState = "queued" | "running";
+
+const ANALYSIS_ACTIVITY_ROTATE_INTERVAL_MS = 2_800;
+
+const ANALYSIS_PHASE_DETAILS: Record<
+  AnalysisPhase,
+  {
+    step: string;
+    label: string;
+    waitingLabel: string;
+    runningLabel: string;
+    queuedActivity: string;
+    runningActivities: readonly string[];
+  }
+> = {
+  source_reading: {
+    step: "第 1 步 / 3",
+    label: "读取简历原件",
+    waitingLabel: "等待读取原件",
+    runningLabel: "AI 正在读取原件",
+    queuedActivity: "已进入队列，准备读取简历原件",
+    runningActivities: [
+      "正在读取简历原件",
+      "正在识别文本与版式",
+      "正在整理可读内容",
+    ],
+  },
+  resume_analysis: {
+    step: "第 2 步 / 3",
+    label: "提取简历信息",
+    waitingLabel: "等待 AI 分析",
+    runningLabel: "AI 正在提取信息",
+    queuedActivity: "已进入队列，准备提取简历信息",
+    runningActivities: [
+      "正在提取姓名",
+      "正在提取项目经历",
+      "正在提取教育与学历",
+      "正在提取应届信息",
+      "正在提取工作经历",
+      "正在提取核心技能",
+    ],
+  },
+  name_completion: {
+    step: "第 3 步 / 3",
+    label: "补全候选人姓名",
+    waitingLabel: "等待补全姓名",
+    runningLabel: "AI 正在补全姓名",
+    queuedActivity: "已进入队列，准备补全候选人姓名",
+    runningActivities: [
+      "正在提取姓名",
+      "正在核对简历原文",
+      "正在补全候选人姓名",
+    ],
+  },
+};
+
+function analysisPhase(
+  estimate: ResumeAnalysisWaitEstimate,
+): AnalysisPhase {
+  if (estimate.phase) return estimate.phase;
+  return estimate.target === "candidate_name"
+    ? "name_completion"
+    : "resume_analysis";
+}
+
+function analysisWaitState(
+  estimate: ResumeAnalysisWaitEstimate,
+): AnalysisWaitState {
+  return estimate.state === "running" ? "running" : "queued";
+}
+
+function analysisPhaseDetails(estimate: ResumeAnalysisWaitEstimate) {
+  return ANALYSIS_PHASE_DETAILS[analysisPhase(estimate)];
+}
+
+function stableTextOffset(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+function analysisActivityCopy(
+  estimate: ResumeAnalysisWaitEstimate,
+  resumeId: string,
+  activityTick: number,
+): string {
+  const details = analysisPhaseDetails(estimate);
+  if (analysisWaitState(estimate) !== "running") {
+    return details.queuedActivity;
+  }
+  const messages = details.runningActivities;
+  return messages[(stableTextOffset(resumeId) + activityTick) % messages.length];
+}
+
+function analysisActivityAriaLabel(estimate: ResumeAnalysisWaitEstimate): string {
+  const details = analysisPhaseDetails(estimate);
+  const state = analysisWaitState(estimate) === "running"
+    ? details.runningLabel
+    : details.waitingLabel;
+  return `${details.step}，${state}。${waitEstimateLabel(estimate)}`;
+}
+
 function resumeLibraryStatus(item: ResumeLibraryItem): {
   label: string;
   tone: "ready" | "progress" | "attention" | "waiting";
@@ -51,6 +157,12 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
   }
   if (hasSupersededReparseVersion(item.quality_flags)) {
     return { label: "当前版本已更新", tone: "attention" };
+  }
+  if (item.analysis_wait_estimate) {
+    const details = analysisPhaseDetails(item.analysis_wait_estimate);
+    return analysisWaitState(item.analysis_wait_estimate) === "running"
+      ? { label: details.runningLabel, tone: "progress" }
+      : { label: details.waitingLabel, tone: "waiting" };
   }
   if (item.ai_extraction_status === "running") {
     return { label: "AI 提取中", tone: "progress" };
@@ -75,6 +187,18 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
   if (item.ai_extraction_status === "unavailable") {
     return { label: "等待 AI 服务", tone: "attention" };
   }
+  if (
+    !item.display_name?.trim() &&
+    item.candidate_name_extraction_status === "running"
+  ) {
+    return { label: "AI 正在识别姓名", tone: "progress" };
+  }
+  if (
+    !item.display_name?.trim() &&
+    item.candidate_name_extraction_status === "queued"
+  ) {
+    return { label: "等待识别姓名", tone: "waiting" };
+  }
   if (item.is_active && item.extraction_status === "ready") {
     if (aiSummaryIsInProgress(item.ai_summary_status)) {
       return { label: "AI 总结生成中", tone: "progress" };
@@ -88,6 +212,64 @@ function resumeLibraryStatus(item: ResumeLibraryItem): {
     return { label: "已启用", tone: "ready" };
   }
   return { label: "等待启用", tone: "waiting" };
+}
+
+function waitEstimateLabel(estimate: ResumeAnalysisWaitEstimate): string {
+  const minimum = Math.max(0, estimate.estimated_min_seconds);
+  const maximum = Math.max(minimum, estimate.estimated_max_seconds);
+  if (maximum < 60) return "预计少于 1 分钟";
+  const minimumMinutes = Math.max(1, Math.floor(minimum / 60));
+  const maximumMinutes = Math.max(minimumMinutes, Math.ceil(maximum / 60));
+  if (minimumMinutes === maximumMinutes) {
+    return `预计约 ${maximumMinutes} 分钟`;
+  }
+  return `预计 ${minimumMinutes}–${maximumMinutes} 分钟`;
+}
+
+function waitEstimateHint(estimate: ResumeAnalysisWaitEstimate): string {
+  const target = estimate.target === "candidate_name" ? "姓名识别" : "简历分析";
+  const basis = estimate.confidence === "observed"
+    ? "根据当前工作区队列和近期同类任务耗时估算。"
+    : "当前工作区历史样本较少，先按安全范围估算。";
+  return `${target}${basis}时间会随队列刷新。`;
+}
+
+function AnalysisActivity({
+  estimate,
+  resumeId,
+  activityTick,
+}: {
+  estimate: ResumeAnalysisWaitEstimate;
+  resumeId: string;
+  activityTick: number;
+}) {
+  const details = analysisPhaseDetails(estimate);
+  const state = analysisWaitState(estimate);
+  const activity = analysisActivityCopy(estimate, resumeId, activityTick);
+
+  return (
+    <span
+      aria-label={analysisActivityAriaLabel(estimate)}
+      className={`library-ai-activity is-${state}`}
+      role="status"
+      title={`${analysisActivityAriaLabel(estimate)} ${waitEstimateHint(estimate)}`}
+    >
+      <span aria-hidden="true" className="library-ai-orb">
+        <span className="library-ai-orb-label">AI</span>
+      </span>
+      <span aria-hidden="true" className="library-ai-activity-copy">
+        <span className="library-ai-activity-phase">
+          {details.step} · {details.label}
+        </span>
+        <span className="library-ai-activity-detail">
+          {activity}
+        </span>
+        <span className="library-ai-activity-eta">
+          {waitEstimateLabel(estimate)}
+        </span>
+      </span>
+    </span>
+  );
 }
 
 function summaryStatusLabel(item: ResumeLibraryItem): string {
@@ -180,10 +362,19 @@ export function ResumeLibraryPage({
   const [pageSize, setPageSize] = useState(DEFAULT_RESUME_LIBRARY_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [analysisActivityTick, setAnalysisActivityTick] = useState(0);
+  const [reduceMotion, setReduceMotion] = useState(false);
   const [favoriteActionCandidateId, setFavoriteActionCandidateId] = useState<
     string | null
   >(null);
   const latestLibraryRequestIdRef = useRef(0);
+  const hasRunningAnalysis = Boolean(
+    library?.items.some(
+      (item) =>
+        item.analysis_wait_estimate &&
+        analysisWaitState(item.analysis_wait_estimate) === "running",
+    ),
+  );
 
   const loadLibrary = useCallback(async () => {
     const requestId = ++latestLibraryRequestIdRef.current;
@@ -214,6 +405,14 @@ export function ResumeLibraryPage({
   }, [loadLibrary, refreshToken]);
 
   useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const syncPreference = () => setReduceMotion(media.matches);
+    syncPreference();
+    media.addEventListener("change", syncPreference);
+    return () => media.removeEventListener("change", syncPreference);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     void api.listMailboxConfigs(true)
       .then((response) => {
@@ -240,6 +439,14 @@ export function ResumeLibraryPage({
     }, AI_STATUS_POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [library, loadLibrary]);
+
+  useEffect(() => {
+    if (reduceMotion || !hasRunningAnalysis) return undefined;
+    const interval = window.setInterval(() => {
+      setAnalysisActivityTick((current) => current + 1);
+    }, ANALYSIS_ACTIVITY_ROTATE_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [hasRunningAnalysis, reduceMotion]);
 
   const toggleFavorite = useCallback(
     async (item: ResumeLibraryItem) => {
@@ -456,22 +663,32 @@ export function ResumeLibraryPage({
                             )}
                             {item.is_favorited ? "已收藏" : "收藏"}
                           </button>
-                          {status.tone !== "ready" && (
-                            <span
-                              className={`library-status is-${status.tone}`}
-                              title={
-                                sourceTextIssue
-                                  ? `${RESUME_EXTRACTION_FAILED_LABEL}。请重新解析原件后重试。`
-                                  : supersededReparse
-                                    ? "候选人已有更新版本，此解析版本不会被启用。"
-                                    : resumeExtractionStatusMessage(
-                                      item.ai_extraction_error,
-                                    )
-                              }
-                            >
-                              {status.label}
-                            </span>
-                          )}
+                          {item.analysis_wait_estimate &&
+                          !sourceTextIssue &&
+                          !supersededReparse ? (
+                            <AnalysisActivity
+                              activityTick={analysisActivityTick}
+                              estimate={item.analysis_wait_estimate}
+                              resumeId={item.resume_id}
+                            />
+                          ) : status.tone !== "ready" ? (
+                            <div className="library-processing-meta">
+                              <span
+                                className={`library-status is-${status.tone}`}
+                                title={
+                                  sourceTextIssue
+                                    ? `${RESUME_EXTRACTION_FAILED_LABEL}。请重新解析原件后重试。`
+                                    : supersededReparse
+                                      ? "候选人已有更新版本，此解析版本不会被启用。"
+                                      : resumeExtractionStatusMessage(
+                                        item.ai_extraction_error,
+                                      )
+                                }
+                              >
+                                {status.label}
+                              </span>
+                            </div>
+                          ) : null}
                           {(item.source_mailbox_label || item.source_tags.length > 0) && (
                             <div className="library-source-provenance">
                               {item.source_mailbox_label && (

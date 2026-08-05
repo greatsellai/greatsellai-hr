@@ -7,11 +7,18 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import Resume, ResumeEducation, ResumeScore, ResumeSummary
-from app.schemas import ResumeLibraryItem, ResumeLibraryResponse
+from app.schemas import (
+    ResumeAnalysisWaitEstimate as ResumeAnalysisWaitEstimateResponse,
+    ResumeLibraryItem,
+    ResumeLibraryResponse,
+)
 from app.services.ai_extraction_job_service import ai_extraction_state
 from app.services.candidate_favorite_service import favorite_candidate_ids
 from app.services.candidate_name_job_service import candidate_name_extraction_state
 from app.services.normalization import DEGREE_RANK
+from app.services.resume_analysis_wait_estimate_service import (
+    estimate_pending_resume_analysis_waits,
+)
 from app.services.resume_summary_job_service import summary_generation_state
 from app.services.source_tag_service import resume_source_tag_references
 
@@ -160,6 +167,10 @@ def list_resume_library(
         if viewer_user_id is not None
         else set()
     )
+    wait_estimates = estimate_pending_resume_analysis_waits(
+        session,
+        resumes=resumes,
+    )
     items: list[ResumeLibraryItem] = []
     for resume in resumes:
         highest_education = _highest_education(resume)
@@ -170,6 +181,7 @@ def list_resume_library(
             resume
         )
         summary_status, summary_error = summary_generation_state(resume)
+        wait_estimate = wait_estimates.get(resume.id)
         items.append(
             ResumeLibraryItem(
                 resume_id=resume.id,
@@ -183,6 +195,18 @@ def list_resume_library(
                 ai_extraction_error=ai_error,
                 candidate_name_extraction_status=candidate_name_status,
                 candidate_name_extraction_error=candidate_name_error,
+                analysis_wait_estimate=(
+                    ResumeAnalysisWaitEstimateResponse(
+                        target=wait_estimate.target,
+                        phase=wait_estimate.phase,
+                        state=wait_estimate.state,
+                        estimated_min_seconds=wait_estimate.estimated_min_seconds,
+                        estimated_max_seconds=wait_estimate.estimated_max_seconds,
+                        confidence=wait_estimate.confidence,
+                    )
+                    if wait_estimate is not None
+                    else None
+                ),
                 ai_summary_status=summary_status,
                 ai_summary_error=summary_error,
                 is_active=resume.is_active,

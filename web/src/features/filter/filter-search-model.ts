@@ -60,7 +60,7 @@ const defaultFilterDraft: FilterDraft = {
   leadershipContexts: [],
   leadershipRoles: [],
   sourceTagIds: [],
-  genders: [],
+  gender: "any",
   minAge: 0,
   maxAge: 0,
   keywords: [],
@@ -288,8 +288,8 @@ export function draftToSearchRequest(
   if (draft.sourceTagIds.length) {
     request.source_tag_ids_any_of = draft.sourceTagIds;
   }
-  if (draft.genders.length) {
-    request.gender_in = draft.genders;
+  if (draft.gender !== "any") {
+    request.gender_in = [draft.gender];
   }
   if (draft.minAge > 0 || draft.maxAge > 0) {
     if (draft.minAge > 0) request.age_min = draft.minAge;
@@ -433,9 +433,9 @@ export function searchRequestToDraft(
       ),
       maxRankPercent: clampPercentage(savedEducation?.max_rank_percent ?? 0),
       sourceTagIds: [...new Set(request.source_tag_ids_any_of ?? [])],
-      genders: (request.gender_in ?? []).filter(
-        (gender): gender is Gender => gender === "male" || gender === "female",
-      ),
+      gender: (request.gender_in ?? []).find(
+        (gender) => gender === "male" || gender === "female",
+      ) ?? "any",
       ...normalizeAgeBounds(request.age_min ?? 0, request.age_max ?? 0),
       keywords: [...new Set(savedKeywords)],
       keywordsMode: keywordMode,

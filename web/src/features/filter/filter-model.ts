@@ -13,6 +13,8 @@ import type {
 
 export type MatchMode = "all" | "any";
 export type KeywordMode = "broad" | "precise";
+/** Single-select gender scope for the screening panel. */
+export type GenderFilter = "any" | Gender;
 
 /**
  * The editable state for the candidate filtering workbench.  The search
@@ -55,8 +57,8 @@ export interface FilterDraft {
   leadershipRoles: string[];
   /** Email-platform scope. Selected channels always use OR semantics. */
   sourceTagIds: string[];
-  /** Demographic scope. Selected genders always use OR semantics. */
-  genders: Gender[];
+  /** Single-select demographic scope: "any" or one concrete gender. */
+  gender: GenderFilter;
   /** Age window in whole years; 0 means "no bound" for either end. */
   minAge: number;
   maxAge: number;

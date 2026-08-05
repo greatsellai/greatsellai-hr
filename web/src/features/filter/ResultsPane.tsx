@@ -65,7 +65,7 @@ function activeResultDisplayColumns(draft: FilterDraft): ResultDisplayColumn[] {
   if (draft.minEmploymentOrInternshipMonths > 0) {
     add("employment_or_internship_months", "工作年限");
   }
-  if (draft.genders.length) {
+  if (draft.gender !== "any") {
     add("gender", "性别");
   }
   if (draft.minAge > 0 || draft.maxAge > 0) {
@@ -389,13 +389,8 @@ function appliedFilterLabels(draft: FilterDraft): string[] {
       formatTenureFilterSummary(draft.minEmploymentOrInternshipMonths),
     );
   }
-  if (draft.genders.length) {
-    add(
-      "性别",
-      compactFilterValue(
-        draft.genders.map((gender) => genderLabels[gender]),
-      ),
-    );
+  if (draft.gender !== "any") {
+    add("性别", genderLabels[draft.gender]);
   }
   const ageConditions = [
     draft.minAge > 0 ? formatMinimumAge(draft.minAge) : null,

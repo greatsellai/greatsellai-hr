@@ -245,28 +245,34 @@ export function FilterPanel({
           </div>
           <div className="field-stack">
             <span className="field-label">性别</span>
-            <div aria-label="性别条件" className="choice-grid" role="group">
+            <div
+              aria-label="性别条件"
+              className="choice-grid"
+              role="radiogroup"
+            >
+              <label className="choice-row">
+                <input
+                  checked={draft.gender === "any"}
+                  name="gender-filter"
+                  onChange={() => update({ gender: "any" })}
+                  type="radio"
+                />
+                不限
+              </label>
               {genderOptions.map((option) => (
                 <label className="choice-row" key={option.value}>
                   <input
-                    checked={draft.genders.includes(option.value)}
-                    onChange={() =>
-                      update({
-                        genders: draft.genders.includes(option.value)
-                          ? draft.genders.filter(
-                              (value) => value !== option.value,
-                            )
-                          : [...draft.genders, option.value],
-                      })
-                    }
-                    type="checkbox"
+                    checked={draft.gender === option.value}
+                    name="gender-filter"
+                    onChange={() => update({ gender: option.value })}
+                    type="radio"
                   />
                   {option.label}
                 </label>
               ))}
             </div>
             <p className="filter-field-note">
-              多选时命中任一性别即可；简历未写明性别时无法命中。
+              单选；选择某一性别后仅命中写明该性别的简历，未写明性别时无法命中。
             </p>
           </div>
           <div className="field-stack">

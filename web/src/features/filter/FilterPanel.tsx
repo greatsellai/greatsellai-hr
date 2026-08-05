@@ -3,9 +3,13 @@ import { Icon } from "../../icons";
 import {
   clampPercentage,
   clampMonths,
+  clampAge,
   formatMaximumRankPercent,
   formatMinimumAcademicScore,
+  formatMinimumAge,
+  formatMaximumAge,
   formatMinimumDuration,
+  MAX_AGE,
   MAX_TENURE_MONTHS,
   resolvedInstitutionClassificationOptions,
   sortInstitutionClassifications,
@@ -35,6 +39,7 @@ export function FilterPanel({
     filterOptions,
   );
   const sourceTagOptions = filterOptions.resume_source_tags ?? [];
+  const genderOptions = filterOptions.genders ?? [];
 
   const update = (patch: Partial<FilterDraft>) =>
     onDraftChange({ ...draft, ...patch });
@@ -94,6 +99,20 @@ export function FilterPanel({
           ? endMonth
           : draft.freshGraduateStartMonth,
       freshGraduateEndMonth: endMonth,
+    });
+  };
+
+  const updateMinAge = (minAge: number) => {
+    updateAfterTyping({
+      minAge,
+      maxAge: draft.maxAge > 0 && draft.maxAge < minAge ? minAge : draft.maxAge,
+    });
+  };
+
+  const updateMaxAge = (maxAge: number) => {
+    updateAfterTyping({
+      minAge: draft.minAge > 0 && draft.minAge > maxAge ? maxAge : draft.minAge,
+      maxAge,
     });
   };
 
@@ -222,6 +241,85 @@ export function FilterPanel({
 
         <section className="filter-section">
           <div className="filter-section-heading">
+            <h3>基本资料</h3>
+          </div>
+          <div className="field-stack">
+            <span className="field-label">性别</span>
+            <div aria-label="性别条件" className="choice-grid" role="group">
+              {genderOptions.map((option) => (
+                <label className="choice-row" key={option.value}>
+                  <input
+                    checked={draft.genders.includes(option.value)}
+                    onChange={() =>
+                      update({
+                        genders: draft.genders.includes(option.value)
+                          ? draft.genders.filter(
+                              (value) => value !== option.value,
+                            )
+                          : [...draft.genders, option.value],
+                      })
+                    }
+                    type="checkbox"
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+            <p className="filter-field-note">
+              多选时命中任一性别即可；简历未写明性别时无法命中。
+            </p>
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="min-age">
+              最低年龄
+            </label>
+            <input
+              aria-valuetext={formatMinimumAge(draft.minAge)}
+              className="range-input"
+              id="min-age"
+              max={MAX_AGE}
+              min="0"
+              onChange={(event) =>
+                updateMinAge(clampAge(Number(event.target.value)))
+              }
+              step="1"
+              type="range"
+              value={draft.minAge}
+            />
+            <div className="range-values" aria-live="polite">
+              <span>{formatMinimumAge(draft.minAge)}</span>
+              <span>{MAX_AGE} 岁</span>
+            </div>
+          </div>
+          <div className="field-stack">
+            <label className="field-label" htmlFor="max-age">
+              最高年龄
+            </label>
+            <input
+              aria-valuetext={formatMaximumAge(draft.maxAge)}
+              className="range-input"
+              id="max-age"
+              max={MAX_AGE}
+              min="0"
+              onChange={(event) =>
+                updateMaxAge(clampAge(Number(event.target.value)))
+              }
+              step="1"
+              type="range"
+              value={draft.maxAge}
+            />
+            <div className="range-values" aria-live="polite">
+              <span>{formatMaximumAge(draft.maxAge)}</span>
+              <span>{MAX_AGE} 岁</span>
+            </div>
+          </div>
+          <p className="filter-field-note">
+            年龄按简历写明的出生日期计算；仅设置一端时另一端不限。两端均为 0 时不筛选年龄。
+          </p>
+        </section>
+
+        <section className="filter-section">
+          <div className="filter-section-heading">
             <h3>学业表现</h3>
           </div>
           <div className="field-stack">
@@ -250,7 +348,7 @@ export function FilterPanel({
             />
             <div className="range-values" aria-live="polite">
               <span>{formatMinimumAcademicScore(draft.minAcademicScorePercent)}</span>
-              <span>100 分</span>
+              <span>100%</span>
             </div>
             <p className="filter-field-note" id="min-academic-score-note">
               平均分或标准化 GPA 达到门槛即可命中，仅使用简历原文明确写出的分数。

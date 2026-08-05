@@ -894,7 +894,7 @@ test.describe("招聘工作台关键路径", () => {
     await expect(appliedFilterBar).toContainText("最高学历：本科");
     await expect(appliedFilterBar).toContainText("工作年限：至少 4 年");
     await expect(appliedFilterBar).toContainText(
-      "学业表现：不低于 90 分 · 排名前 100%（仅有排名记录）",
+      "学业表现：不低于 90% · 排名前 100%（仅有排名记录）",
     );
     await expect(appliedFilterBar).toContainText("毕业状态：应届（2026-01 至 2026-12）");
     await expect(appliedFilterBar).toContainText("匹配关键词：任一命中 · Python");

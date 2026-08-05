@@ -1108,6 +1108,7 @@ export type LanguageCredentialCode =
   | "tem4" | "tem8" | "bec" | "toeic" | "custom";
 
 export type PresenceStatus = "any" | "present" | "unknown";
+export type Gender = "male" | "female";
 export type LeadershipContext = "class" | "student_org" | "club" | "project_team" | "company";
 export type AwardLevel = "national" | "provincial" | "school" | "department" | "other";
 export type ScholarshipLevel = AwardLevel | "enterprise";
@@ -1135,6 +1136,7 @@ export interface FilterOptions {
   /** Legacy data kept for historical filter compatibility only. */
   institution_tiers: Array<FilterOption<InstitutionTier>>;
   experience_types: Array<FilterOption<ExperienceType>>;
+  genders: Array<FilterOption<Gender>>;
   skill_categories: Array<FilterOption<string>>;
   leadership_contexts: Array<FilterOption<LeadershipContext>>;
   award_levels: Array<FilterOption<AwardLevel>>;
@@ -1160,6 +1162,11 @@ export interface CandidateSearchRequest {
   fresh_graduate_end_month?: string | null;
   min_employment_months?: number | null;
   min_employment_or_internship_months?: number | null;
+  /** Any selected gender (OR). */
+  gender_in?: Gender[];
+  /** Inclusive age bounds computed from an extracted birth date. */
+  age_min?: number | null;
+  age_max?: number | null;
   education_any_of?: EducationFilter[];
   experience_any_of?: ExperienceFilter[];
   /** Every selected experience category must have evidence on the resume. */
@@ -1212,6 +1219,8 @@ export type CandidateSearchDisplayFieldKey =
   | "graduation"
   | "employment_months"
   | "employment_or_internship_months"
+  | "gender"
+  | "age"
   | "school"
   | "major"
   | "academic_performance"

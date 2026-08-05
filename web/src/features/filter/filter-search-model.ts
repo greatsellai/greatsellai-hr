@@ -4,6 +4,7 @@ import type {
   DegreeLevel,
   EducationFilter,
   FilterOptions,
+  Gender,
   InstitutionClassification,
   InstitutionTier,
 } from "../../types";
@@ -11,6 +12,7 @@ import {
   experienceTypeOptions,
   clampMonths,
   clampPercentage,
+  normalizeAgeBounds,
   institutionClassificationLabels,
   institutionClassificationOptions,
   sortInstitutionClassifications,
@@ -58,6 +60,9 @@ const defaultFilterDraft: FilterDraft = {
   leadershipContexts: [],
   leadershipRoles: [],
   sourceTagIds: [],
+  genders: [],
+  minAge: 0,
+  maxAge: 0,
   keywords: [],
   keywordsMode: "broad",
 };
@@ -87,6 +92,11 @@ const degreeOptions: Array<{ value: DegreeLevel; label: string }> = [
   { value: "associate", label: "大专" },
   { value: "high_school", label: "高中" },
   { value: "vocational_or_below", label: "中专/职高及以下" },
+];
+
+const genderOptions: Array<{ value: Gender; label: string }> = [
+  { value: "male", label: "男" },
+  { value: "female", label: "女" },
 ];
 
 const legacyInstitutionTierLabels: Record<InstitutionTier, string> = {
@@ -126,6 +136,7 @@ export const fallbackFilterOptions: FilterOptions = {
   institution_classifications: institutionClassificationOptions,
   institution_tiers: [],
   experience_types: experienceTypeOptions,
+  genders: genderOptions,
   skill_categories: [
     { value: "software", label: "编程与开发" },
     { value: "data_ai", label: "数据与 AI" },
@@ -277,6 +288,13 @@ export function draftToSearchRequest(
   if (draft.sourceTagIds.length) {
     request.source_tag_ids_any_of = draft.sourceTagIds;
   }
+  if (draft.genders.length) {
+    request.gender_in = draft.genders;
+  }
+  if (draft.minAge > 0 || draft.maxAge > 0) {
+    if (draft.minAge > 0) request.age_min = draft.minAge;
+    if (draft.maxAge > 0) request.age_max = draft.maxAge;
+  }
   if (scoreTemplateId) request.score_template_id = scoreTemplateId;
   return request;
 }
@@ -415,6 +433,10 @@ export function searchRequestToDraft(
       ),
       maxRankPercent: clampPercentage(savedEducation?.max_rank_percent ?? 0),
       sourceTagIds: [...new Set(request.source_tag_ids_any_of ?? [])],
+      genders: (request.gender_in ?? []).filter(
+        (gender): gender is Gender => gender === "male" || gender === "female",
+      ),
+      ...normalizeAgeBounds(request.age_min ?? 0, request.age_max ?? 0),
       keywords: [...new Set(savedKeywords)],
       keywordsMode: keywordMode,
     },

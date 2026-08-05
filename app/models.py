@@ -1013,6 +1013,11 @@ class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
     highest_degree: Mapped[str | None] = mapped_column(String(32), index=True)
     employment_months: Mapped[int] = mapped_column(Integer, default=0, index=True)
     employment_or_internship_months: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    # Demographics for recruiter screening. ``gender`` is a normalized
+    # ``male``/``female`` (or null when a resume never states it) and
+    # ``birth_date`` is the normalized calendar date used to compute age.
+    gender: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    birth_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     facts_version: Mapped[int] = mapped_column(Integer, default=0)
     raw_text: Mapped[str | None] = mapped_column(Text)
     # Contacts derive locally from saved source blocks. They intentionally stay

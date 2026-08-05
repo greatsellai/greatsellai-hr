@@ -218,11 +218,18 @@ export function AgentComposer({
       }
     };
     const reposition = () => positionMenu();
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeMenu(true);
+    };
     document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape, true);
     window.addEventListener("resize", reposition);
     window.addEventListener("scroll", reposition, true);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape, true);
       window.removeEventListener("resize", reposition);
       window.removeEventListener("scroll", reposition, true);
     };

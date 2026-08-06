@@ -23,7 +23,7 @@ test("招聘工作台深链接可刷新，默认入口不会吞掉浏览器返�
   const recruitingNavigation = page.getByRole("region", { name: "招聘运营", exact: true });
   const recruitingItems = recruitingNavigation.getByRole("button");
   await expect(recruitingItems).toHaveCount(4);
-  for (const [index, label] of ["职位管理", "人才库", "智能匹配", "条件筛选"].entries()) {
+  for (const [index, label] of ["职位管理", "简历库", "智能匹配", "条件筛选"].entries()) {
     await expect(recruitingItems.nth(index)).toHaveAttribute("aria-label", label);
   }
   await expect(recruitingNavigation.getByRole("button", { name: "招聘流程", exact: true })).toHaveCount(0);

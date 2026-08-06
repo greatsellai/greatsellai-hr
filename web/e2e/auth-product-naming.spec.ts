@@ -22,7 +22,7 @@ test.describe("认证产品命名", () => {
     await expect(page.getByRole("heading", { name: "登录大卖智聘" })).toBeVisible();
     await expect(
       page.getByText(
-        "进入只属于你所在团队的招聘工作区。候选人、岗位、评分和原始文件按工作区分别管理。",
+        "进入只属于你所在团队的招聘工作区。候选人、岗位、评分和原文件按工作区分别管理。",
         { exact: true },
       ),
     ).toBeVisible();
@@ -36,7 +36,7 @@ test.describe("认证产品命名", () => {
     await expect(brandLink).toHaveAttribute("href", "/");
     await expect(brandLink.getByRole("img")).toHaveAttribute("alt", "大卖数智 GreatSell AI");
 
-    const trialLink = page.getByRole("link", { name: "申请免费试用30天", exact: true });
+    const trialLink = page.getByRole("link", { name: "申请免费试用 30 天", exact: true });
     await expect(trialLink).toHaveAttribute("href", "/register");
     await expect(page.getByRole("link", { name: "免费试用 30 天", exact: true })).toHaveCount(0);
 
@@ -55,7 +55,7 @@ test.describe("认证产品命名", () => {
 
       await expect(page.getByRole("heading", { name: "登录大卖智聘" })).toBeVisible();
       await expect(page.getByRole("button", { name: "登录工作台" })).toBeVisible();
-      await expect(page.getByRole("link", { name: "申请免费试用30天", exact: true })).toBeVisible();
+      await expect(page.getByRole("link", { name: "申请免费试用 30 天", exact: true })).toBeVisible();
       await expect(page).toHaveTitle("登录大卖智聘｜大卖数智");
       await expect
         .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))

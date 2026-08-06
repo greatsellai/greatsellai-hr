@@ -148,7 +148,7 @@ def test_humanize_legacy_ai_labels_migration_updates_only_legacy_defaults(
         "根据岗位要求生成候选人评分。",
     )
     assert route_rows["recruiting_agent_turn"] == (
-        "招聘助手对话",
-        "为招聘助手生成下一轮回复。",
+        "招聘 Agent 对话",
+        "为招聘 Agent 生成下一轮回复。",
     )
     assert route_rows["jd_match"] == ("自定义岗位匹配", "保留的操作员说明")

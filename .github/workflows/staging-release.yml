@@ -26,7 +26,7 @@ jobs:
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     # This lock starts only when the deployment job runs. An unapproved
     # production Environment must not block newer main commits from staging.
     concurrency:
@@ -221,92 +221,53 @@ jobs:
             scripts/create-staging-tag.sh "$tag"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Resolve CI image artifact
-        id: ci_artifact
+      - name: Build API production image
         if: steps.ready.outputs.stage == 'true'
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
-          WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-          MANUAL_CI_RUN_ID: ${{ steps.manual_ci.outputs.ci_run_id }}
-          MANUAL_CI_RUN_ATTEMPT: ${{ steps.manual_ci.outputs.ci_run_attempt }}
+          RELEASE_SHA: ${{ env.RELEASE_SHA }}
         run: |
           set -Eeuo pipefail
-          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
-            ci_run_id="$WORKFLOW_RUN_ID"
-            ci_run_attempt="$WORKFLOW_RUN_ATTEMPT"
-          else
-            ci_run_id="$MANUAL_CI_RUN_ID"
-            ci_run_attempt="$MANUAL_CI_RUN_ATTEMPT"
-          fi
-          [[ "$ci_run_id" =~ ^[0-9]+$ ]] || {
-            echo "Missing CI workflow run identity." >&2
-            exit 1
-          }
-          [[ "$ci_run_attempt" =~ ^[1-9][0-9]*$ ]] || {
-            echo "Missing CI workflow run attempt." >&2
-            exit 1
-          }
-          echo "run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
-          echo "run_attempt=$ci_run_attempt" >> "$GITHUB_OUTPUT"
-          echo "name=release-image-metadata-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" >> "$GITHUB_OUTPUT"
-      - name: Download CI-verified TCR metadata
-        if: steps.ready.outputs.stage == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ steps.ci_artifact.outputs.name }}
-          path: ${{ runner.temp }}/greatsell-release-image-metadata
-          run-id: ${{ steps.ci_artifact.outputs.run_id }}
-          github-token: ${{ github.token }}
-      - name: Verify CI-verified TCR metadata
-        id: verify_tcr_metadata
+          # Direct US-hosted delivery: build the exact commit images here and
+          # stream them to the US staging host, avoiding the cross-border China
+          # TCR round-trip. Domestic mirrors keep base/pip/npm fetches fast.
+          docker build --build-arg DEBIAN_MIRROR=mirrors.cloud.tencent.com \
+            --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple \
+            --label "org.opencontainers.image.revision=$RELEASE_SHA" \
+            --tag "greatsellai-hr-api:$RELEASE_SHA" .
+      - name: Build Caddy production image
         if: steps.ready.outputs.stage == 'true'
         env:
-          CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}
-          CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}
-          TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
-          TCR_NAMESPACE: ${{ vars.TCR_NAMESPACE }}
+          RELEASE_SHA: ${{ env.RELEASE_SHA }}
         run: |
           set -Eeuo pipefail
-          : "${TCR_REGISTRY:?Missing repository variable TCR_REGISTRY}"
-          : "${TCR_NAMESPACE:?Missing repository variable TCR_NAMESPACE}"
-          scripts/verify-tcr-release-metadata.sh "$RELEASE_SHA" \
-            --artifact-dir "$RUNNER_TEMP/greatsell-release-image-metadata" \
-            --repository "$GITHUB_REPOSITORY" \
-            --ci-run-id "$CI_RUN_ID" \
-            --ci-run-attempt "$CI_RUN_ATTEMPT" \
-            --registry "$TCR_REGISTRY" \
-            --namespace "$TCR_NAMESPACE" \
-            --github-output "$GITHUB_OUTPUT"
-      - name: Pull exact CI-verified TCR images to staging
-        id: pull_tcr_images
+          docker build --build-arg NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/ \
+            --file deploy/Caddy.Dockerfile \
+            --label "org.opencontainers.image.revision=$RELEASE_SHA" \
+            --tag "greatsellai-hr-caddy:$RELEASE_SHA" .
+      - name: Transfer API image to staging
         if: steps.ready.outputs.stage == 'true'
         env:
           STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
-          CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}
-          CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}
-          TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
-          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
-          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+          RELEASE_SHA: ${{ env.RELEASE_SHA }}
         run: |
           set -Eeuo pipefail
-          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Missing CI workflow run identity." >&2; exit 1; }
-          [[ "$CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "Missing CI workflow run attempt." >&2; exit 1; }
-          : "${TCR_REGISTRY:?Missing repository variable TCR_REGISTRY}"
-          : "${TCR_USERNAME:?Missing repository secret TCR_USERNAME}"
-          : "${TCR_PASSWORD:?Missing repository secret TCR_PASSWORD}"
-          printf '%s\n' "$TCR_PASSWORD" | scripts/pull-tcr-release-images.sh "$RELEASE_SHA" \
-            --host "$STAGING_DEPLOY_HOST" \
-            --registry "$TCR_REGISTRY" \
-            --username "$TCR_USERNAME" \
-            --api-registry-image "${{ steps.verify_tcr_metadata.outputs.api_registry_image }}" \
-            --caddy-registry-image "${{ steps.verify_tcr_metadata.outputs.caddy_registry_image }}" \
-            --api-image-config-digest "${{ steps.verify_tcr_metadata.outputs.api_image_config_digest }}" \
-            --caddy-image-config-digest "${{ steps.verify_tcr_metadata.outputs.caddy_image_config_digest }}" \
-            --expected-ci-run-id "$CI_RUN_ID" \
-            --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
-            --password-stdin \
-            --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
+          docker save "greatsellai-hr-api:$RELEASE_SHA" \
+            | gzip -1 \
+            | ssh -i "$RUNNER_TEMP/greatsell-staging-deploy" \
+              -o StrictHostKeyChecking=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=20 \
+              "$STAGING_DEPLOY_HOST" "sudo -n docker load"
+      - name: Transfer Caddy image to staging
+        if: steps.ready.outputs.stage == 'true'
+        env:
+          STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
+          RELEASE_SHA: ${{ env.RELEASE_SHA }}
+        run: |
+          set -Eeuo pipefail
+          docker save "greatsellai-hr-caddy:$RELEASE_SHA" \
+            | gzip -1 \
+            | ssh -i "$RUNNER_TEMP/greatsell-staging-deploy" \
+              -o StrictHostKeyChecking=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=20 \
+              "$STAGING_DEPLOY_HOST" "sudo -n docker load"
       - name: Deploy immutable candidate and run public smoke checks
         id: deploy_staging
         if: steps.ready.outputs.stage == 'true'
@@ -319,14 +280,36 @@ jobs:
         run: |
           set -Eeuo pipefail
           : "${STAGING_PUBLIC_URL:?Missing staging variable STAGING_PUBLIC_URL}"
+          # Direct delivery verifies the repository tag, revision label, and
+          # image ID instead of a CI TCR manifest identity.
           scripts/deploy-staging.sh "$STAGING_TAG" \
             --host "$STAGING_DEPLOY_HOST" \
             --project-dir "$STAGING_PROJECT_DIR" \
             --history-dir "$STAGING_HISTORY_DIR" \
             --public-url "$STAGING_PUBLIC_URL" \
-            --image-metadata-sha256 "${{ steps.verify_tcr_metadata.outputs.image_metadata_sha256 }}" \
-            --api-registry-image "${{ steps.verify_tcr_metadata.outputs.api_registry_image }}" \
-            --caddy-registry-image "${{ steps.verify_tcr_metadata.outputs.caddy_registry_image }}" \
-            --api-image-config-digest "${{ steps.verify_tcr_metadata.outputs.api_image_config_digest }}" \
-            --caddy-image-config-digest "${{ steps.verify_tcr_metadata.outputs.caddy_image_config_digest }}" \
+            --delivery direct \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
+      - name: Remove superseded staging images
+        if: steps.ready.outputs.stage == 'true'
+        env:
+          STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
+          RELEASE_SHA: ${{ env.RELEASE_SHA }}
+        run: |
+          set -Eeuo pipefail
+          ssh -i "$RUNNER_TEMP/greatsell-staging-deploy" -o StrictHostKeyChecking=yes \
+            "RELEASE_SHA=$RELEASE_SHA bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+          # Keep only the newly deployed SHA images so staging never holds two
+          # generations of app images at once. A rollback can re-pull from TCR
+          # or re-run a direct deployment.
+          sudo -n docker image ls --format '{{.Repository}}:{{.Tag}}' \
+            | grep -E '^greatsellai-hr-(api|caddy):' \
+            | grep -v ":${RELEASE_SHA}$" \
+            | while read -r img; do
+                echo "removing $img"
+                sudo -n docker image rm "$img" || echo "  (skipping $img)"
+              done
+          echo "--- remaining greatsellai images ---"
+          sudo -n docker image ls --format '{{.Repository}}:{{.Tag}}' \
+            | grep -E '^greatsellai-hr-(api|caddy):' || echo "none"
+          REMOTE

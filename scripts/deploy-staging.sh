@@ -26,12 +26,19 @@ Options:
                             Required portable API image config identity
   --caddy-image-config-digest <sha256>
                             Required portable Caddy image config identity
+  --delivery <mode>         Image delivery mode: "tcr" (default, CI-attested
+                            immutable TCR manifest references) or "direct"
+                            (images were built on the release runner and
+                            streamed to the staging host over SSH, so only the
+                            repository tag, revision label, and image ID are
+                            verified instead of a TCR manifest identity)
   --ssh-key <path>          Optional SSH private-key path; never committed
 
 Only pushed stg-YYYYMMDD-<commit-sha> tags that exactly match current
 origin/main are accepted. API and Caddy images must already have been pulled
-from their CI-attested immutable TCR manifest references and are never built
-on the server.
+from their CI-attested immutable TCR manifest references (tcr delivery) or
+transferred from the release runner (direct delivery) and are never built on
+the server.
 EOF
 }
 
@@ -70,6 +77,7 @@ api_registry_image=""
 caddy_registry_image=""
 api_image_config_digest=""
 caddy_image_config_digest=""
+delivery="tcr"
 ssh_key="${RESUME_V3_SSH_KEY:-}"
 
 while (($#)); do
@@ -83,6 +91,7 @@ while (($#)); do
     --caddy-registry-image) caddy_registry_image="${2:?--caddy-registry-image requires a value}"; shift 2 ;;
     --api-image-config-digest) api_image_config_digest="${2:?--api-image-config-digest requires a value}"; shift 2 ;;
     --caddy-image-config-digest) caddy_image_config_digest="${2:?--caddy-image-config-digest requires a value}"; shift 2 ;;
+    --delivery) delivery="${2:?--delivery requires a value}"; shift 2 ;;
     --ssh-key) ssh_key="${2:?--ssh-key requires a value}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
@@ -94,12 +103,21 @@ done
 [[ -n "$project_dir" ]] || die "Missing project directory; pass --project-dir or set RESUME_V3_REMOTE_DIR."
 [[ -n "$history_dir" ]] || die "Missing history directory; pass --history-dir or set RESUME_V3_DEPLOY_HISTORY_DIR."
 [[ -n "$public_url" ]] || die "Missing public staging URL; pass --public-url or set RESUME_V3_STAGING_PUBLIC_URL."
-[[ "$image_metadata_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Missing or invalid verified CI image metadata checksum."
-require_registry_image "$api_registry_image"
-require_registry_image "$caddy_registry_image"
-[[ "$api_registry_image" != "$caddy_registry_image" ]] || die "API and Caddy registry image references must differ."
-[[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing or invalid API image config digest."
-[[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing or invalid Caddy image config digest."
+[[ "$delivery" == "tcr" || "$delivery" == "direct" ]] || die "Invalid image delivery mode: $delivery"
+if [[ "$delivery" == "direct" ]]; then
+  # Direct-delivery images are built on the release runner and streamed to the
+  # staging host, so they carry no CI TCR metadata identity. Refuse any stray
+  # TCR metadata arguments so a direct call cannot silently skip attestation.
+  [[ -z "$image_metadata_sha256" && -z "$api_registry_image" && -z "$caddy_registry_image" && -z "$api_image_config_digest" && -z "$caddy_image_config_digest" ]] || \
+    die "--delivery direct does not accept TCR metadata arguments."
+else
+  [[ "$image_metadata_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Missing or invalid verified CI image metadata checksum."
+  require_registry_image "$api_registry_image"
+  require_registry_image "$caddy_registry_image"
+  [[ "$api_registry_image" != "$caddy_registry_image" ]] || die "API and Caddy registry image references must differ."
+  [[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing or invalid API image config digest."
+  [[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing or invalid Caddy image config digest."
+fi
 [[ "$project_dir" == /home/ubuntu/* && "$project_dir" == *staging* && "$project_dir" != /home/ubuntu/ ]] || \
   die "Refusing unsafe staging project directory: $project_dir"
 [[ "$history_dir" == /home/ubuntu/* && "$history_dir" == *staging* && "$history_dir" != /home/ubuntu/ ]] || \
@@ -146,6 +164,7 @@ api_registry_image="$7"
 caddy_registry_image="$8"
 api_image_config_digest="$9"
 caddy_image_config_digest="${10}"
+delivery="${11}"
 
 die() {
   echo "Staging deployment error: $*" >&2
@@ -180,6 +199,12 @@ require_image() {
   actual_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image")" || die "Required CI image is unavailable: $image"
   revision="$(sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
   [[ "$revision" == "$release_commit" ]] || die "CI image revision does not match staging commit: $image"
+  if [[ "$delivery" == "direct" ]]; then
+    # Direct-delivery images are transferred from the release runner; their
+    # repository tag, revision label, and content ID are the attestation.
+    printf '%s' "$actual_id"
+    return 0
+  fi
   [[ "$actual_id" == "$expected_config_digest" ]] || die "CI image config identity differs from CI TCR metadata: $image"
   while IFS= read -r repo_digest; do
     [[ "$repo_digest" == "$expected_registry_image" ]] && found=1
@@ -191,12 +216,17 @@ require_image() {
 [[ "$tag" =~ ^stg-[0-9]{8}-[0-9a-f]{7,40}$ ]] || die "Invalid staging tag."
 [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]] || die "Invalid staging commit."
 [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Invalid staging archive checksum."
-[[ "$image_metadata_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Invalid CI image metadata checksum."
-[[ "$api_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Invalid API TCR registry image."
-[[ "$caddy_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Invalid Caddy TCR registry image."
-[[ "$api_registry_image" != "$caddy_registry_image" ]] || die "API and Caddy TCR registry image references must differ."
-[[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid API image config digest."
-[[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid Caddy image config digest."
+if [[ "$delivery" == "direct" ]]; then
+  [[ -z "$image_metadata_sha256" && -z "$api_registry_image" && -z "$caddy_registry_image" && -z "$api_image_config_digest" && -z "$caddy_image_config_digest" ]] || \
+    die "Direct staging delivery must not carry TCR metadata arguments."
+else
+  [[ "$image_metadata_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Invalid CI image metadata checksum."
+  [[ "$api_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Invalid API TCR registry image."
+  [[ "$caddy_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Invalid Caddy TCR registry image."
+  [[ "$api_registry_image" != "$caddy_registry_image" ]] || die "API and Caddy TCR registry image references must differ."
+  [[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid API image config digest."
+  [[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid Caddy image config digest."
+fi
 command -v realpath >/dev/null
 canonical_project_dir="$(realpath -e -- "$project_dir")"
 canonical_history_dir="$(realpath -m -- "$history_dir")"
@@ -293,7 +323,22 @@ done
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 temporary_record="$history_dir/.current-staging-release.$$.tmp"
-cat > "$temporary_record" <<EOF_RECORD
+if [[ "$delivery" == "direct" ]]; then
+  cat > "$temporary_record" <<EOF_RECORD
+state=deployed
+tag=$tag
+commit=$release_commit
+archive_sha256=$archive_sha256
+image_delivery=direct
+api_image_id=$api_image_id
+caddy_image_id=$caddy_image_id
+private_api_health_check=pass
+private_edge_health_check=pass
+public_smoke_check=pending
+deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF_RECORD
+else
+  cat > "$temporary_record" <<EOF_RECORD
 state=deployed
 tag=$tag
 commit=$release_commit
@@ -310,13 +355,14 @@ private_edge_health_check=pass
 public_smoke_check=pending
 deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF_RECORD
+fi
 mv -f "$temporary_record" "$previous_record"
 printf 'Staging runtime deployed: %s (%s)\n' "$tag" "$release_commit"
 EOF
 )"
 
 git show "$tag:deploy/compose.staging.yml" | ssh "${ssh_options[@]}" "$remote_host" \
-  "bash -c $(shell_quote "$remote_deploy_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256") $(shell_quote "$image_metadata_sha256") $(shell_quote "$api_registry_image") $(shell_quote "$caddy_registry_image") $(shell_quote "$api_image_config_digest") $(shell_quote "$caddy_image_config_digest")"
+  "bash -c $(shell_quote "$remote_deploy_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256") $(shell_quote "$image_metadata_sha256") $(shell_quote "$api_registry_image") $(shell_quote "$caddy_registry_image") $(shell_quote "$api_image_config_digest") $(shell_quote "$caddy_image_config_digest") $(shell_quote "$delivery")"
 
 "$repo_root/scripts/smoke-test-staging.sh" "$public_url"
 

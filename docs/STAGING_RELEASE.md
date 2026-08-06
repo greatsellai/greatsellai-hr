@@ -1,6 +1,9 @@
 # 预发布与生产晋级
 
-> 当前流程使用腾讯云 TCR：CI 只交接小型 metadata，staging 与 production 按不可变 manifest digest 拉取同一镜像，不传输 Docker archive。配置见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本说明优先于下文的历史 artifact/传输措辞。
+> 当前流程：staging 在美国发布 Runner 上直接构建该 commit 的镜像并经 SSH 流式传输到 staging 主机
+> （不经中国 TCR）；生产晋级仍从 `main` CI 的腾讯云 TCR metadata 按不可变 manifest digest 拉取
+> 同一镜像，不传输 Docker archive。配置见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本说明
+> 优先于下文的历史 artifact/传输措辞。
 
 ## 发布链路
 
@@ -17,7 +20,8 @@ PR 完整 CI
 ID 不一致、CI artifact 不完整或超过保留期时，晋级都会失败关闭。
 
 当前预发布和生产可以同机，也可以部署在不同 Docker 主机；它们始终是两个独立 Compose 项目。
-生产晋级会重新下载 staging 已验收的同一 CI artifact 并校验 image ID，因此不依赖两端共享 Docker
+生产晋级会从 `main` CI 的 TCR metadata 重新拉取 staging 已验收的同一镜像并校验 image ID，
+因此不依赖两端共享 Docker
 镜像缓存。预发布应用以
 `RESUME_V3_ENVIRONMENT=production` 运行，以覆盖生产专属的 HTTPS、安全、数据生命周期和投递逻辑；隔离由独立项目、数据库、数据卷、网络、代理地址与预发布域名保证：
 

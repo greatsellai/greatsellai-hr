@@ -297,7 +297,7 @@ def test_main_ci_publishes_labeled_images_to_tcr_and_hands_off_small_metadata() 
     assert "TCR release metadata artifact is incomplete." in metadata
 
 
-def test_staging_and_production_pull_the_same_digest_pinned_tcr_images() -> None:
+def test_production_pulls_digest_pinned_tcr_images_while_staging_streams_direct() -> None:
     staging = (ROOT / ".github" / "workflows" / "staging-release.yml").read_text(
         encoding="utf-8"
     )
@@ -312,19 +312,32 @@ def test_staging_and_production_pull_the_same_digest_pinned_tcr_images() -> None
         encoding="utf-8"
     )
 
-    for workflow in (staging, production):
-        assert "scripts/pull-tcr-release-images.sh" in workflow
-        assert "TCR_USERNAME:" in workflow
-        assert "TCR_PASSWORD:" in workflow
-        assert "--api-registry-image" in workflow
-        assert "--caddy-registry-image" in workflow
-        assert "--password-stdin" in workflow
-        assert "transfer-production-images.sh" not in workflow
-        assert "load-verified-release-images.sh" not in workflow
-        assert "release-images-" not in workflow
+    # Production still consumes the digest-pinned CI/TCR image handoff.
+    assert "scripts/pull-tcr-release-images.sh" in production
+    assert "TCR_USERNAME:" in production
+    assert "TCR_PASSWORD:" in production
+    assert "--api-registry-image" in production
+    assert "--caddy-registry-image" in production
+    assert "--password-stdin" in production
+    assert "transfer-production-images.sh" not in production
+    assert "load-verified-release-images.sh" not in production
+    assert "release-images-" not in production
 
-    assert "release-image-metadata-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" in staging
-    assert "scripts/verify-tcr-release-metadata.sh" in staging
+    # Staging builds the exact commit images on the US release runner and
+    # streams them straight to the US staging host; it must never touch TCR
+    # credentials or the CI metadata artifact handoff.
+    assert "scripts/pull-tcr-release-images.sh" not in staging
+    assert "scripts/verify-tcr-release-metadata.sh" not in staging
+    assert "TCR_USERNAME" not in staging
+    assert "TCR_PASSWORD" not in staging
+    assert "--password-stdin" not in staging
+    assert "actions/download-artifact@v4" not in staging
+    assert "release-image-metadata-" not in staging
+    assert "transfer-production-images.sh" not in staging
+    assert "load-verified-release-images.sh" not in staging
+    assert "--delivery direct" in staging
+    assert "sudo -n docker load" in staging
+
     assert "image_metadata_sha256" in staging_verify
     assert "api_registry_image" in staging_verify
     assert "caddy_registry_image" in staging_verify

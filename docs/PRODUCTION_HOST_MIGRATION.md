@@ -14,7 +14,7 @@
 按顺序合入并验证以下 PR：
 
 1. 规范生产入口为 `hr.greatsellai.cn`；
-2. 经 CI artifact 校验后把已验收的 staging 镜像传到独立生产主机；
+2. 生产晋级从 CI artifact 校验后经 TCR 拉取已验收镜像，部署到独立生产主机；
 3. 本 PR：新生产 Caddy 不再声明 staging 路由，生产工作流不再写旧 staging 网关，且旧路由
    的历史 Caddy tag 无法在新生产主机激活。
 

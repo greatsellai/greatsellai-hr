@@ -1,8 +1,8 @@
 # GitHub Actions CI/CD
 
-## 当前镜像交接（TCR）
+## 镜像交接
 
-发布镜像现在由成功的 `main` CI 推送至腾讯云 TCR；Actions artifact 只保存经过校验的小型 metadata，staging 和 production 均按 metadata 中不可变的 `repo@sha256:<manifest>` 直接拉取。它们不会下载或通过 SSH 转发 Docker 镜像归档。TCR 的仓库级变量、Secrets 和排障说明见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本节优先于本文中任何历史的 archive/镜像传输描述。
+生产发布镜像由成功的 `main` CI 推送至腾讯云 TCR；Actions artifact 只保存经过校验的小型 metadata，production 按 metadata 中不可变的 `repo@sha256:<manifest>` 直接拉取。staging 不走 TCR：它在 GitHub-hosted 发布 Runner 上直接构建该 commit 的 API/Caddy 镜像，并通过 SSH 流式传输到 staging 主机，避免镜像跨境往返。TCR 的仓库级变量、Secrets 和排障说明见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本节优先于本文中任何历史的 archive/镜像传输描述。
 
 ## Runner 路由与镜像交接
 
@@ -20,11 +20,11 @@ build args 让基础镜像、apt 与包索引拉取保持快速，首次向 TCR 
 重试和 55 分钟超时吸收。
 
 仓库为公开时，PR 检查、`main` 溯源与镜像构建、staging 及生产发布编排均使用标准
-GitHub-hosted Ubuntu Runner。成功的 `main` CI 会把两份带 commit SHA、CI run ID 与 run attempt
-标签的镜像，以及 checksum 和 metadata 打包为短期 Actions artifact；**Staging release** 只从触发
-它的那次成功 CI 下载该 artifact，校验 checksum、commit、run ID 与 run attempt 后才加载并传输到
-staging。镜像不再依赖某台本机 Runner 的 Docker 缓存跨工作流保留。artifact 交接保持相同的
-完整性校验。
+GitHub-hosted Ubuntu Runner。`main` CI 会把带 commit SHA、CI run ID 与 run attempt 标签的
+API/Caddy 镜像以及 checksum 和 metadata 打包为短期 Actions artifact，供生产晋级使用；staging
+不再触碰该 artifact 或 TCR——它在发布 Runner 上用腾讯镜像 build args 直接构建该 commit 的镜像，
+校验 revision label 与 image ID 后经 SSH 流式传输到 staging 主机，部署成功后立即删除 staging
+上旧的 app 镜像，只保留新 SHA 一套。镜像不再依赖某台本机 Runner 的 Docker 缓存跨工作流保留。
 
 这只是工作流的默认路由，不是公开仓库的自托管 Runner 安全边界。公开前必须将该仓库的
 repo-level 自托管 Runner 解绑，或将其迁入只允许受保护 `main` 发布工作流的私有部署中继/
@@ -44,11 +44,13 @@ repo-level 自托管 Runner 解绑，或将其迁入只允许受保护 `main` �
 由负责人输入 `PROMOTE` 晋级生产。
 
 成功的 `main` CI 会将已完成运行时回归的 API 与 Caddy 镜像以完整 commit SHA、OCI revision
-label、CI run ID 和 run attempt 标记后归档 30 天。**Staging release** 只下载并校验该 CI 的精确 artifact，再使用这些
-镜像部署隔离的 staging；它通过后记录 source archive SHA-256、API/Caddy image ID、CI run ID 与健康检查。
-**Production promotion** 只接受当前 `main` 的已完成 `stg-*` 候选：它重新下载同一 CI run 的 artifact，复核
-checksum、metadata、镜像 label 和 staging 已验收的 image ID，再把该镜像传到目标生产主机，以
-`--prebuilt-images` 部署。生产机不重新构建镜像，也不再要求与 staging 位于同一台 Docker 主机。详细操作见
+label、CI run ID 和 run attempt 标记后推送至 TCR，并把 metadata 归档 30 天。**Staging release**
+在发布 Runner 上构建同一 commit 的镜像，直接流式传输到隔离 staging，校验 revision label 与
+image ID 后部署并跑公网 smoke；它通过后记录 source archive SHA-256、API/Caddy image ID、
+`image_delivery=direct` 与健康检查。**Production promotion** 只接受当前 `main` 的已完成 `stg-*`
+候选：它重新下载同一 CI run 的 TCR metadata artifact，复核 checksum、metadata、镜像 label 和
+staging 已验收的 image ID，再从 TCR 拉取该镜像传到目标生产主机，以 `--prebuilt-images` 部署。
+生产机不重新构建镜像，也不再要求与 staging 位于同一台 Docker 主机。详细操作见
 [预发布与生产晋级](STAGING_RELEASE.md)。
 
 ## 已提供的工作流
@@ -59,9 +61,10 @@ checksum、metadata、镜像 label 和 staging 已验收的 image ID，再把该
   构建、Compose 校验和该精确镜像的完整运行时回归。
 - **Staging release**：监听本仓库 `main` 上成功的 CI `push` 运行。它只接受当前 main，先用
   该提交的 `deploy/compose.staging.yml` 与服务器既有 `.env.staging` 做只读预检，再创建或复用
-  不可变 `stg-YYYYMMDD-<commit>` 标签，传输 CI 已验证镜像、部署隔离 staging 并跑公网 smoke。
-  `main` 在预检期间前进时会安全跳过旧候选；staging 成功后 Runner 清理临时镜像，已验收 artifact
-  仍保留 30 天，供人工批准后的生产晋级重新下载。
+  不可变 `stg-YYYYMMDD-<commit>` 标签，在美国发布 Runner 上构建该 commit 的 API/Caddy 镜像、
+  经 SSH 直接流式传输到 staging 主机（不经中国 TCR），部署隔离 staging 并跑公网 smoke。
+  部署成功后立即删除 staging 上旧的 app 镜像，只保留新 SHA 一套。`main` 在预检期间前进时会
+  安全跳过旧候选；生产晋级仍从 `main` CI 的 TCR metadata artifact 重新拉取。
 - **Production promotion**：只能从 `main` 手动运行并输入 `PROMOTE`。它先验证当前 main 对应的
   唯一 `stg-*` tag、source archive SHA-256、staging release record、staging 运行中容器与生产
   主机的 API/Caddy image ID；生产目标在校验前会从记录的同一 CI run 下载并验证 artifact，再加载和
@@ -181,7 +184,7 @@ staging 或 production。
 
 ## 安全与边界
 
-- 公开仓库中，默认 PR、`main` 发布预检和发布编排均必须保持 GitHub-hosted；生产镜像 job 只接受 `main` 的 `push`，staging 只能下载同一成功 CI run 的精确 artifact。在公开前还必须解绑 repo-level 自托管 Runner 或使用受限私有
+- 公开仓库中，默认 PR、`main` 发布预检和发布编排均必须保持 GitHub-hosted；生产镜像 job 只接受 `main` 的 `push`，staging 直接构建并流式传输镜像（不经 TCR）。在公开前还必须解绑 repo-level 自托管 Runner 或使用受限私有
   部署中继，因为外部 fork 可以在自己的分支改写 workflow，YAML 条件本身不是 Runner 隔离。
 - CI 不读取生产 Environment 的 SSH 密钥或变量。
 - 自动 staging 只接受本仓库的成功 `main` 推送 CI；PR CI、手动 CI、取消或失败的 CI 都不能

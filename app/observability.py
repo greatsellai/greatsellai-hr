@@ -31,6 +31,7 @@ REQUEST_ID_HEADER = "X-Request-ID"
 _REQUEST_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 _EVENT_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_STEP_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _METHOD_PATTERN = re.compile(r"^[A-Z]{1,16}$")
 _PATH_PATTERN = re.compile(r"^/[A-Za-z0-9_./{}:-]{0,255}$")
 
@@ -48,6 +49,11 @@ SAFE_LOG_FIELDS = frozenset(
         "user_id",
         "job_id",
         "ai_run_id",
+        "batch_id",
+        "item_id",
+        "resume_id",
+        "job_kind",
+        "step",
         "error_code",
         "error_type",
         "attempt",
@@ -152,6 +158,12 @@ def _safe_attempt(value: object) -> int | None:
     return None
 
 
+def _safe_step(value: object) -> str | None:
+    if not isinstance(value, str) or not _STEP_PATTERN.fullmatch(value):
+        return None
+    return value
+
+
 def _safe_field(field_name: str, value: object) -> object | None:
     if field_name == "request_id":
         return validate_request_id(value)
@@ -165,11 +177,17 @@ def _safe_field(field_name: str, value: object) -> object | None:
         return _safe_duration_ms(value)
     if field_name == "attempt":
         return _safe_attempt(value)
+    if field_name == "step":
+        return _safe_step(value)
     if field_name in {
         "workspace_id",
         "user_id",
         "job_id",
         "ai_run_id",
+        "batch_id",
+        "item_id",
+        "resume_id",
+        "job_kind",
         "error_code",
         "error_type",
         "provider_request_id",

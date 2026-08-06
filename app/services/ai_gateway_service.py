@@ -217,6 +217,12 @@ def ai_gateway_execution(
     """
 
     organization_id = organization_context_id(source_session)
+    _log_gateway_event(
+        "ai_gateway_execution_start",
+        workspace_id=organization_id,
+        job_kind=spec.feature,
+    )
+    execution_started = time.perf_counter()
     ledger_session = _new_ledger_session(source_session, organization_id)
     handle: _ExecutionHandle | None = None
     token = None
@@ -238,6 +244,12 @@ def ai_gateway_execution(
             _CURRENT_LEGACY_PAYLOAD_EXECUTOR.reset(token)
         clear_organization_context(ledger_session)
         ledger_session.close()
+        _log_gateway_event(
+            "ai_gateway_execution_completed",
+            workspace_id=organization_id,
+            job_kind=spec.feature,
+            duration_ms=int((time.perf_counter() - execution_started) * 1000),
+        )
 
 
 def resolve_active_route_policy_version_id(
@@ -263,6 +275,19 @@ def resolve_active_route_policy_version_id(
     return version.id
 
 
+def _log_gateway_event(event: str, **fields: object) -> None:
+    """Emit a safe, structured AI-gateway event for operational tracing."""
+
+    try:
+        from app.observability import configure_observability_logging, log_event
+    except ModuleNotFoundError as exc:
+        if exc.name == "app.observability":
+            return
+        raise
+    configure_observability_logging()
+    log_event(event, **fields)
+
+
 def _new_ledger_session(source_session: Session, organization_id: str) -> Session:
     factory = sessionmaker(
         bind=source_session.get_bind(),
@@ -272,6 +297,21 @@ def _new_ledger_session(source_session: Session, organization_id: str) -> Sessio
     )
     session = factory()
     set_organization_context(session, organization_id)
+    # Eagerly bind a connection so a pool-exhaustion wait is observable in
+    # structured logs instead of surfacing as an unexplained stall. Emit a
+    # start marker before acquisition; if the pool cannot spare a connection
+    # the done marker never arrives and the logs pinpoint the wait.
+    _log_gateway_event(
+        "ai_gateway_ledger_acquire_start",
+        workspace_id=organization_id,
+    )
+    acquire_started = time.perf_counter()
+    session.connection()
+    _log_gateway_event(
+        "ai_gateway_ledger_acquire_done",
+        workspace_id=organization_id,
+        duration_ms=int((time.perf_counter() - acquire_started) * 1000),
+    )
     return session
 
 

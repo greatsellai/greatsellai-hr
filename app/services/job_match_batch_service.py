@@ -59,6 +59,24 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _log_task_event(event: str, **fields: object) -> None:
+    """Emit a safe, structured JD-match worker event for operational tracing.
+
+    Uses the same strict observability allowlist as API events; unknown or
+    sensitive fields are discarded. The worker process configures the isolated
+    JSON handler once; the setup is idempotent.
+    """
+
+    try:
+        from app.observability import configure_observability_logging, log_event
+    except ModuleNotFoundError as exc:
+        if exc.name == "app.observability":
+            return
+        raise
+    configure_observability_logging()
+    log_event(event, **fields)
+
+
 @contextmanager
 def _organization_session(session: Session, organization_id: str) -> Iterator[None]:
     """Bind all post-claim JD-match work to the item workspace."""
@@ -533,10 +551,28 @@ def _recover_expired_items(session: Session, *, now: datetime) -> None:
                 item.status = ITEM_FAILED
                 item.completed_at = now
                 item.last_error = "job_match_worker_lease_expired"
+                _log_task_event(
+                    "job_match_item_recovered_failed",
+                    batch_id=batch.id,
+                    item_id=item.id,
+                    workspace_id=organization_id,
+                    resume_id=item.resume_id,
+                    attempt=item.attempt_count,
+                    error_code="job_match_worker_lease_expired",
+                )
             else:
                 item.status = ITEM_QUEUED
                 item.next_attempt_at = now
                 item.last_error = "job_match_worker_lease_expired"
+                _log_task_event(
+                    "job_match_item_recovered_requeued",
+                    batch_id=batch.id,
+                    item_id=item.id,
+                    workspace_id=organization_id,
+                    resume_id=item.resume_id,
+                    attempt=item.attempt_count,
+                    error_code="job_match_worker_lease_expired",
+                )
             item.lease_owner = None
             item.lease_expires_at = None
             _refresh_batch_progress(session, batch=batch, now=now)
@@ -708,6 +744,14 @@ def _claim_next_item(
                 batch.lease_owner = worker_id
                 batch.lease_expires_at = item.lease_expires_at
                 session.commit()
+                _log_task_event(
+                    "job_match_item_claimed",
+                    batch_id=batch.id,
+                    item_id=item.id,
+                    workspace_id=organization_id,
+                    resume_id=item.resume_id,
+                    attempt=item.attempt_count,
+                )
                 return ClaimedJobMatchBatchItem(
                     item_id=item.id,
                     organization_id=organization_id,
@@ -797,7 +841,24 @@ def _process_claimed_item(
                 )
                 if cached_match is not None:
                     match_id = cached_match.id
+                    _log_task_event(
+                        "job_match_item_cache_hit",
+                        batch_id=claimed.batch_id,
+                        item_id=item.id,
+                        workspace_id=claimed.organization_id,
+                        resume_id=item.resume_id,
+                        attempt=item.attempt_count,
+                    )
                 else:
+                    ai_started = _utcnow()
+                    _log_task_event(
+                        "job_match_item_ai_call",
+                        batch_id=claimed.batch_id,
+                        item_id=item.id,
+                        workspace_id=claimed.organization_id,
+                        resume_id=item.resume_id,
+                        attempt=item.attempt_count,
+                    )
                     matched = run_job_match(
                         session,
                         resume_id=item.resume_id,
@@ -809,6 +870,15 @@ def _process_claimed_item(
                         allow_internal_job=True,
                     )
                     match_id = matched.match_id
+                    _log_task_event(
+                        "job_match_item_ai_completed",
+                        batch_id=claimed.batch_id,
+                        item_id=item.id,
+                        workspace_id=claimed.organization_id,
+                        resume_id=item.resume_id,
+                        attempt=item.attempt_count,
+                        duration_ms=int((_utcnow() - ai_started).total_seconds() * 1000),
+                    )
                 _require_unchanged_resume_snapshot(
                     session,
                     resume_id=item.resume_id,
@@ -937,6 +1007,14 @@ def _finish_item_success(
     item.next_attempt_at = None
     item.last_error = None
     item.completed_at = now
+    _log_task_event(
+        "job_match_item_completed",
+        batch_id=item.batch.id if item.batch else None,
+        item_id=item.id,
+        workspace_id=item.organization_id,
+        resume_id=item.resume_id,
+        attempt=item.attempt_count,
+    )
     _refresh_batch_progress(session, batch=item.batch, now=now)
 
 
@@ -969,10 +1047,28 @@ def _finish_item_failure(
                 item.status = ITEM_QUEUED
                 item.next_attempt_at = now + timedelta(seconds=min(60, 2 ** (item.attempt_count - 1)))
                 item.completed_at = None
+                _log_task_event(
+                    "job_match_item_requeued",
+                    batch_id=batch.id,
+                    item_id=item.id,
+                    workspace_id=organization_id,
+                    resume_id=item.resume_id,
+                    attempt=item.attempt_count,
+                    error_code="job_match_retryable",
+                )
             else:
                 item.status = ITEM_FAILED
                 item.next_attempt_at = None
                 item.completed_at = now
+                _log_task_event(
+                    "job_match_item_failed",
+                    batch_id=batch.id,
+                    item_id=item.id,
+                    workspace_id=organization_id,
+                    resume_id=item.resume_id,
+                    attempt=item.attempt_count,
+                    error_code="job_match_failed",
+                )
             item.lease_owner = None
             item.lease_expires_at = None
             item.last_error = error[:2000]

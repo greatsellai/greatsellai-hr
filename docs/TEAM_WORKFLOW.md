@@ -166,7 +166,7 @@ UTF-8 门禁会拒绝乱码和连续 `??` 占位符；创建后应立即读取�
 gh pr checks <PR-number> --watch
 ```
 
-至少确认 UTF-8、后端测试、PostgreSQL 邮箱并发、Web build/Playwright、生产镜像构建全部
+至少确认 UTF-8、后端测试、PostgreSQL 邮箱并发、Web build/Playwright 全部
 成功。任何失败都先定位、修复、重新测试，不得带红合并。
 
 没有当前任务的明确合并授权时，Agent 只创建 PR 并回报链接；获得授权后才可合并。合并前

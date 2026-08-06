@@ -151,7 +151,7 @@ def test_server_preflight_is_read_only_and_uses_candidate_compose() -> None:
     assert "alembic" not in script
 
 
-def test_main_release_uses_verified_pull_request_provenance_instead_of_repeating_full_ci() -> None:
+def test_main_release_uses_verified_pull_request_provenance_for_staging() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     text_encoding = (ROOT / ".github" / "workflows" / "text-encoding.yml").read_text(
         encoding="utf-8"
@@ -161,18 +161,20 @@ def test_main_release_uses_verified_pull_request_provenance_instead_of_repeating
     assert "main-release-provenance:" in ci
     assert "name: Main release provenance" in ci
     assert "python scripts/verify_main_release_provenance.py" in ci
-    assert "needs: [main-release-provenance]" in ci
-    assert "needs.main-release-provenance.result == 'success'" in ci
     assert "actions: read" in ci
     assert "checks: read" in ci
     assert "pull-requests: read" in ci
-    assert ci.count("python scripts/run_release_regression.py --all") == 1
+    # Main CI no longer builds or publishes images: staging builds its own and
+    # production is not released from this repository right now.
+    assert "needs: [main-release-provenance]" not in ci
+    assert "needs.main-release-provenance.result" not in ci
+    assert ci.count("python scripts/run_release_regression.py --all") == 0
     assert "--documents" not in ci
     assert 'python scripts/check_text_encoding.py --github-event "$GITHUB_EVENT_PATH"' in text_encoding
     assert "  push:" not in text_encoding
 
 
-def test_public_repository_routes_ci_and_release_jobs_to_hosted_runners() -> None:
+def test_public_repository_routes_ci_jobs_to_hosted_runners() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     encoding = (ROOT / ".github" / "workflows" / "text-encoding.yml").read_text(
         encoding="utf-8"
@@ -183,22 +185,12 @@ def test_public_repository_routes_ci_and_release_jobs_to_hosted_runners() -> Non
         "fromJSON('[\"self-hosted\", \"Linux\", \"X64\", \"greatsell-ci\"]') "
         "|| 'ubuntu-latest'"
     )
+    # Provenance plus the three PR test jobs all route through the selector.
     assert ci.count(runner_selector) == 4
     assert runner_selector in encoding
-
-    production_images = ci.split("  production-images:", maxsplit=1)[1]
-    assert "needs.main-release-provenance.result == 'success'" in production_images
-    assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in production_images
-    # Production images always build on GitHub-hosted runners. The repo has a
-    # single self-hosted runner; when it wedges at job teardown it blocks every
-    # deploy (staging requires a successful main CI for the exact commit), so
-    # the release-image build must not depend on that runner in any mode.
-    assert "runs-on: ubuntu-latest" in production_images
-    assert "self-hosted" not in production_images
-    assert "pull_request" not in production_images
-    assert "--build-arg DEBIAN_MIRROR=mirrors.cloud.tencent.com" in production_images
-    assert "--build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple" in production_images
-    assert "--build-arg NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/" in production_images
+    # The release-image build was removed from main CI; no hosted build job
+    # should remain behind.
+    assert "production-images" not in ci
 
 
 def test_public_repository_routes_all_release_orchestration_to_hosted_runners() -> None:
@@ -256,7 +248,7 @@ def test_cross_host_production_edge_never_claims_the_legacy_staging_gateway() ->
         assert "Preserve the staging gateway" not in workflow
 
 
-def test_main_ci_publishes_labeled_images_to_tcr_and_hands_off_small_metadata() -> None:
+def test_main_ci_no_longer_builds_or_publishes_tcr_images() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     publish = (ROOT / "scripts" / "publish-tcr-release-images.sh").read_text(
         encoding="utf-8"
@@ -265,20 +257,19 @@ def test_main_ci_publishes_labeled_images_to_tcr_and_hands_off_small_metadata() 
         encoding="utf-8"
     )
 
-    assert '--tag "greatsellai-hr-api:' in ci
-    assert '--tag "greatsellai-hr-caddy:' in ci
-    assert "org.opencontainers.image.revision=" in ci
-    assert "org.opencontainers.image.workflow_run_id=" in ci
-    assert "org.opencontainers.image.workflow_run_attempt=" in ci
-    assert "org.opencontainers.image.source=https://github.com/" in ci
-    assert '--image "greatsellai-hr-api:' in ci
-    assert "Publish immutable CI images to TCR" in ci
-    assert "scripts/write-docker-registry-auth.sh" in ci
-    assert 'DOCKER_CONFIG="$docker_config" scripts/publish-tcr-release-images.sh' in ci
+    # Staging builds and streams its own exact images, and production is not
+    # released from this repository right now, so main CI no longer builds or
+    # pushes TCR images. The publish/verify scripts stay as the future
+    # production image path.
+    assert "--tag \"greatsellai-hr-api:" not in ci
+    assert "--tag \"greatsellai-hr-caddy:" not in ci
+    assert "org.opencontainers.image.revision=" not in ci
+    assert "Publish immutable CI images to TCR" not in ci
+    assert "scripts/write-docker-registry-auth.sh" not in ci
+    assert "scripts/publish-tcr-release-images.sh" not in ci
+    assert "release-image-metadata-" not in ci
+    assert "TCR_REGISTRY" not in ci
     assert "docker login" not in ci
-    assert "--password-stdin" in ci
-    assert "scripts/publish-tcr-release-images.sh" in ci
-    assert "release-image-metadata-" in ci
     assert "docker image save" not in ci
     assert "transfer-production-images.sh" not in ci
     assert "load-verified-release-images.sh" not in ci

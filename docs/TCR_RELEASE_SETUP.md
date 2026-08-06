@@ -1,6 +1,10 @@
 # TCR 发布镜像配置
 
-自动发布不再把数百 MB 的 Docker 镜像作为 GitHub Actions artifact 下载并经 SSH 转发。`main` CI 将 API 和 Caddy 镜像推送到腾讯云 TCR，预发布和生产只按不可变 `repo@sha256:<manifest>` 拉取同一份镜像。
+这套 TCR 配置是生产镜像交接用的。当前 `main` CI 已停止向 TCR 推送镜像，staging 改为在美国发布
+Runner 直接构建并流式传输镜像（不经 TCR）；生产晋级链随之暂停（会失败关闭，不会误发）。以下配置
+与流程保留，供将来重新接入生产镜像来源时使用。历史上它把 API/Caddy 镜像推送到腾讯云 TCR，让
+预发布和生产按不可变 `repo@sha256:<manifest>` 拉取同一份镜像，不再把数百 MB 的 Docker 镜像作为
+GitHub Actions artifact 下载并经 SSH 转发。
 
 ## 一次性配置
 
@@ -20,7 +24,10 @@
 
 这些是 TCR Docker 登录凭据，不是腾讯云 API 的 SecretId/SecretKey。不要把它们提交到仓库、写进服务器 `.env.production` 或贴进 Actions 日志。
 
-## 发布时发生的事
+## 发布时发生的事（历史流程，当前暂停）
+
+当前 `main` CI 已停止自动推送 TCR 镜像，staging 改用 direct 构建 + 流式传输，生产晋级链暂停。
+恢复生产镜像来源时需重新接入以下链路：
 
 1. `main` CI 构建并完成运行时回归后，使用唯一的 `ci-<sha>-<run>-<attempt>` 标签推送两个镜像到 TCR。
 2. CI 解析每个镜像的 manifest digest，并只保存很小的 metadata artifact（提交、CI run、OCI label、manifest digest、config digest 和校验和）。

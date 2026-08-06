@@ -2,7 +2,13 @@
 
 ## 镜像交接
 
-生产发布镜像由成功的 `main` CI 推送至腾讯云 TCR；Actions artifact 只保存经过校验的小型 metadata，production 按 metadata 中不可变的 `repo@sha256:<manifest>` 直接拉取。staging 不走 TCR：它在 GitHub-hosted 发布 Runner 上直接构建该 commit 的 API/Caddy 镜像，并通过 SSH 流式传输到 staging 主机，避免镜像跨境往返。TCR 的仓库级变量、Secrets 和排障说明见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本节优先于本文中任何历史的 archive/镜像传输描述。
+`main` CI 不再构建或推送发布镜像。staging 的镜像由 GitHub-hosted 发布 Runner 直接构建该
+commit 的 API/Caddy 镜像，校验 `org.opencontainers.image.revision` label 与 image ID 后经 SSH
+流式传输到 staging 主机（`docker save | gzip | ssh docker load`），全程不过境、不碰中国 TCR。
+生产晋级链当前暂停：`main` CI 不再向腾讯云 TCR 推送镜像，且 staging 的 direct 记录缺 TCR
+字段会让 `verify-staging-release.sh` fail-closed，因此生产工作流不会误发。将来重新接入生产
+镜像方案时再恢复镜像来源。TCR 的仓库级变量、Secrets 和排障说明仍见
+[TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本节优先于本文中任何历史的 archive/镜像传输描述。
 
 ## Runner 路由与镜像交接
 
@@ -12,64 +18,59 @@
 Docker、Docker Compose、Python 3.12、Node 22、Chromium 运行依赖和对 GitHub Actions 的
 网络访问；`postgres-mailbox-race` 和 Playwright 会直接使用其 Docker daemon。
 
-`production-images` job 一律在 GitHub-hosted Ubuntu Runner 上构建并发布生产镜像，不依赖任何
-自托管 Runner。这是有意的取舍：本仓库只有一台自托管 Runner，一旦它卡在 job 收尾阶段，唯一的
-Runner 会被占用且无法处理取消请求，`main` CI 排队、后续 staging 发布全被阻塞。迁移到
-GitHub-hosted 后，即使自托管 Runner 离线或卡死也不会阻塞发布；`docker build` 的腾讯镜像
-build args 让基础镜像、apt 与包索引拉取保持快速，首次向 TCR 推送大层跨越边境的耗时由构建
-重试和 55 分钟超时吸收。
+历史上 `production-images` job 在 GitHub-hosted Runner 上构建并推送到中国 TCR，再让 staging 和
+生产各自拉取。该 job 已随本迁移移除：`main` CI 不再跨境构建或推送镜像。staging 的镜像构建
+仍然只在 GitHub-hosted 发布 Runner 上进行，不依赖自托管 Runner；`docker build` 的腾讯镜像
+build args 让基础镜像、apt 与包索引拉取保持快速。自托管 Runner 即使离线或卡死也不会阻塞
+staging 发布。
 
-仓库为公开时，PR 检查、`main` 溯源与镜像构建、staging 及生产发布编排均使用标准
-GitHub-hosted Ubuntu Runner。`main` CI 会把带 commit SHA、CI run ID 与 run attempt 标签的
-API/Caddy 镜像以及 checksum 和 metadata 打包为短期 Actions artifact，供生产晋级使用；staging
-不再触碰该 artifact 或 TCR——它在发布 Runner 上用腾讯镜像 build args 直接构建该 commit 的镜像，
-校验 revision label 与 image ID 后经 SSH 流式传输到 staging 主机，部署成功后立即删除 staging
-上旧的 app 镜像，只保留新 SHA 一套。镜像不再依赖某台本机 Runner 的 Docker 缓存跨工作流保留。
+仓库为公开时，PR 检查、`main` 溯源、staging 发布编排均使用标准 GitHub-hosted Ubuntu Runner。
+`main` CI 在合并后只执行 `main-release-provenance` 校验（验证该 commit 确实来自全绿 PR），
+不再构建或推送任何镜像。staging 在发布 Runner 上用腾讯镜像 build args 直接构建该 commit 的
+API/Caddy 镜像，校验 revision label 与 image ID 后经 SSH 流式传输到 staging 主机，部署成功后
+立即删除 staging 上旧的 app 镜像，只保留新 SHA 一套。镜像不再依赖某台本机 Runner 的 Docker
+缓存跨工作流保留。
 
 这只是工作流的默认路由，不是公开仓库的自托管 Runner 安全边界。公开前必须将该仓库的
 repo-level 自托管 Runner 解绑，或将其迁入只允许受保护 `main` 发布工作流的私有部署中继/
 组织 Runner group；外部 fork 可以提交修改过的 workflow，不能仅依赖本文件中的 `if` 或
 `runs-on` 约束来保护本机。公开仓库使用 GitHub-hosted CI 期间，现有自托管 Runner 的安装、
-标签和私有仓库测试工作流可以保留，转回私有后再重新绑定即可恢复测试链路；生产镜像构建
-始终使用 GitHub-hosted。
+标签和私有仓库测试工作流可以保留，转回私有后再重新绑定即可恢复测试链路；发布镜像构建
+（staging）始终使用 GitHub-hosted。
 
-私有仓库的 Runner 离线时，测试工作流会排队而非自动回退到 GitHub 托管 Runner；生产镜像构建与
-发布不受影响。生产工作流仍仅从受保护的
+私有仓库的 Runner 离线时，测试工作流会排队而非自动回退到 GitHub 托管 Runner；staging 发布
+仍走 GitHub-hosted 发布 Runner，不受影响。生产工作流仍仅从受保护的
 `main` 或 `prod-*` 进入 `production` Environment，并只在该 Environment 中读取部署密钥与
 变量；不要把这些值加入 Runner 配置、仓库变量或源码。
 
-本仓库的自动化分为三层：每个 PR 的完整持续集成（CI）、成功 `main` 的自动预发布（staging），
-以及人工确认的生产晋级（production promotion）。合并 `main` **不会**自动连接生产环境；只有
-该次 `main` 提交完成精确 SHA 镜像构建、预发布配置预检、隔离环境部署和公网 smoke 后，才可以
-由负责人输入 `PROMOTE` 晋级生产。
+本仓库的自动化分为两层：每个 PR 的完整持续集成（CI）和成功 `main` 的自动预发布（staging）。
+合并 `main` **不会**自动连接生产环境。生产晋级链（production promotion）当前暂停，因为
+`main` CI 已停止向 TCR 推送镜像，且 staging 的 direct 记录会使生产晋级校验 fail-closed。
 
-成功的 `main` CI 会将已完成运行时回归的 API 与 Caddy 镜像以完整 commit SHA、OCI revision
-label、CI run ID 和 run attempt 标记后推送至 TCR，并把 metadata 归档 30 天。**Staging release**
-在发布 Runner 上构建同一 commit 的镜像，直接流式传输到隔离 staging，校验 revision label 与
-image ID 后部署并跑公网 smoke；它通过后记录 source archive SHA-256、API/Caddy image ID、
-`image_delivery=direct` 与健康检查。**Production promotion** 只接受当前 `main` 的已完成 `stg-*`
-候选：它重新下载同一 CI run 的 TCR metadata artifact，复核 checksum、metadata、镜像 label 和
-staging 已验收的 image ID，再从 TCR 拉取该镜像传到目标生产主机，以 `--prebuilt-images` 部署。
-生产机不重新构建镜像，也不再要求与 staging 位于同一台 Docker 主机。详细操作见
-[预发布与生产晋级](STAGING_RELEASE.md)。
+`main` CI 在合并后只做 `main-release-provenance` 校验。**Staging release** 在发布 Runner 上
+构建该 commit 的 API/Caddy 镜像，直接流式传输到隔离 staging，校验 revision label 与 image ID
+后部署并跑公网 smoke；它通过后记录 source archive SHA-256、API/Caddy image ID、
+`image_delivery=direct` 与健康检查。**Production promotion** 仍只接受当前 `main` 的已完成
+`stg-*` 候选，但它依赖的 TCR 镜像与 staging attestation 目前都不可得，因此会失败关闭而不会
+误发；将来重新接入生产镜像来源后再恢复。详细操作见 [预发布与生产晋级](STAGING_RELEASE.md)。
 
 ## 已提供的工作流
 
 - **Continuous integration**：在向 `main` 提交 PR、合并到 `main` 或手动触发时运行。
   PR/手动运行执行 Python 3.12 全量测试、PostgreSQL 邮箱附件去重并发回归、Node 22.12
-  前端生产构建、生产镜像构建与完整运行时回归；`main` 运行则只做已绿 PR 溯源、精确镜像
-  构建、Compose 校验和该精确镜像的完整运行时回归。
+  前端生产构建和 Playwright 关键路径；`main` 运行只做已绿 PR 溯源（`main-release-provenance`），
+  不再构建或推送镜像。
 - **Staging release**：监听本仓库 `main` 上成功的 CI `push` 运行。它只接受当前 main，先用
   该提交的 `deploy/compose.staging.yml` 与服务器既有 `.env.staging` 做只读预检，再创建或复用
   不可变 `stg-YYYYMMDD-<commit>` 标签，在美国发布 Runner 上构建该 commit 的 API/Caddy 镜像、
   经 SSH 直接流式传输到 staging 主机（不经中国 TCR），部署隔离 staging 并跑公网 smoke。
   部署成功后立即删除 staging 上旧的 app 镜像，只保留新 SHA 一套。`main` 在预检期间前进时会
-  安全跳过旧候选；生产晋级仍从 `main` CI 的 TCR metadata artifact 重新拉取。
+  安全跳过旧候选。
 - **Production promotion**：只能从 `main` 手动运行并输入 `PROMOTE`。它先验证当前 main 对应的
-  唯一 `stg-*` tag、source archive SHA-256、staging release record、staging 运行中容器与生产
-  主机的 API/Caddy image ID；生产目标在校验前会从记录的同一 CI run 下载并验证 artifact，再加载和
-  传输镜像。任何不一致都会失败。之后才做生产 `.env.production` 只读预检、创建 `prod-*` 并以同一
-  预构建镜像部署。它没有 `workflow_run` 自动生产入口。
+  唯一 `stg-*` tag、source archive SHA-256、staging release record 与 API/Caddy image ID。
+  **当前暂停**：它依赖从 `main` CI 归档的 TCR metadata artifact 与 staging attestation 的 TCR
+  字段，两者现在都不可得，因此会在校验阶段失败关闭，不会误发生产。将来重新接入生产镜像来源
+  后再恢复该流程。
 - **Production deploy**：只用于手动重部署已有 `prod-*` 标签，必须输入 `DEPLOY`；不再
   监听任意标签推送，避免受保护流程外的标签绕过预检。它同样要求服务器已保有经 staging
   验证的预构建镜像；镜像缺失时快速失败，绝不在生产机重建一个“看起来相同”的镜像。迁移到新的生产
@@ -134,14 +135,14 @@ staging 已验收的 image ID，再从 TCR 拉取该镜像传到目标生产主�
 ## 日常发布流程
 
 1. PR 合并到 `main`。
-2. `main` 的来源证明、镜像构建与运行时回归全部变绿。
-3. **Staging release** 自动完成 staging 预检、不可变 `stg-*` 标签、隔离部署和公网 smoke；
-   只有 staging 的完成记录、source checksum 与 API/Caddy image ID 均一致时，候选才可晋级。
-4. 负责人从 `main` 手动运行 **Production promotion** 并输入 `PROMOTE`。工作流只部署刚才
-   验过的同一镜像，创建 `prod-*` 后执行生产备份、迁移、启动和健康验证。
-5. 若已创建生产标签的部署因 GitHub runner 中断而未完成，可在 **Production deploy** 中输入同一个
+2. `main` 的来源证明（`main-release-provenance`）变绿，随后 **Staging release** 自动完成 staging
+   预检、不可变 `stg-*` 标签、隔离部署和公网 smoke；只有 staging 的完成记录、source checksum 与
+   API/Caddy image ID 均一致时，候选才可晋级。
+3. （当前暂停）负责人从 `main` 手动运行 **Production promotion** 并输入 `PROMOTE`。恢复生产镜像
+   来源后，工作流只部署刚才验过的同一镜像，创建 `prod-*` 后执行生产备份、迁移、启动和健康验证。
+4. 若已创建生产标签的部署因 GitHub runner 中断而未完成，可在 **Production deploy** 中输入同一个
    已创建的标签与确认词 `DEPLOY` 重试；不会创建第二个版本。
-6. 如需回滚，在 **Production rollback** 中指定一个已发布的 `prod-*` 标签，并输入
+5. 如需回滚，在 **Production rollback** 中指定一个已发布的 `prod-*` 标签，并输入
    `ROLLBACK`。数据库与原文件恢复不属于自动回滚范围，必须基于同一 backup ID 的成对
    备份、兼容性评审和显式 `restore-production-backup.sh --confirm-restore` 单独决策。
 
@@ -158,13 +159,13 @@ git push --force-with-lease
 
 然后等待该更新后提交的完整 PR CI 与文本完整性检查重新成功，再进行下一次合并。
 这保证发布候选的代码树正是经过验证的代码树；若跳过这一步，`Main release provenance`
-会在镜像构建、标签和服务器连接之前失败关闭。
+会在 staging 构建镜像和部署之前失败关闭。
 
 ### `Main release provenance` 失败后的纠正流程
 
 这不是可以通过“重跑 main CI”或手动触发 staging 绕过的失败。失败意味着该次合并结果
-没有一组与当前 `main` 基线对应的完整 PR 验证证据；在此之前不会构建发布镜像，也不会连接
-staging 或 production。
+没有一组与当前 `main` 基线对应的完整 PR 验证证据；在此之前不会构建 staging 镜像，也不会连接
+staging。
 
 1. 保留失败提交作为审计记录，不重写或直接推送 `main`。
 2. 从当前 `origin/main` 新建或更新一个只包含待发布改动的 PR；若原 PR 已被合并，可用一个
@@ -184,7 +185,7 @@ staging 或 production。
 
 ## 安全与边界
 
-- 公开仓库中，默认 PR、`main` 发布预检和发布编排均必须保持 GitHub-hosted；生产镜像 job 只接受 `main` 的 `push`，staging 直接构建并流式传输镜像（不经 TCR）。在公开前还必须解绑 repo-level 自托管 Runner 或使用受限私有
+- 公开仓库中，默认 PR、`main` 发布预检和发布编排均必须保持 GitHub-hosted；`main` CI 不再构建或推送镜像，staging 直接构建并流式传输镜像（不经 TCR）。在公开前还必须解绑 repo-level 自托管 Runner 或使用受限私有
   部署中继，因为外部 fork 可以在自己的分支改写 workflow，YAML 条件本身不是 Runner 隔离。
 - CI 不读取生产 Environment 的 SSH 密钥或变量。
 - 自动 staging 只接受本仓库的成功 `main` 推送 CI；PR CI、手动 CI、取消或失败的 CI 都不能
@@ -199,17 +200,30 @@ staging 或 production。
 详细的服务器发布与恢复行为见 [DEPLOYMENT.md](DEPLOYMENT.md)，团队协作和标签规则见
 [TEAM_WORKFLOW.md](TEAM_WORKFLOW.md)。
 
-## CI 分层策略（PR 全量、main 发布预检）
+## CI 分层策略（PR 全量、main 溯源）
 
 为避免同一变更在 PR 与 `main` 上重复执行耗时的完整回归，自动化按提交阶段分层：
 
-- **PR CI** 是完整的源代码质量门：后端全量 pytest、PostgreSQL 邮箱并发回归、前端构建和 Playwright 关键路径、完整生产镜像运行时回归都在 PR 上执行。
-- **main CI** 不重复执行 pytest、PostgreSQL 邮箱并发回归或 Playwright。它先校验当前 `main` 提交确实来自一个已完成全部 PR 检查的合并请求，并校验两者的 Git tree 一致；随后只为该精确 SHA 构建 API/Caddy 镜像、校验 Compose，并对这个将被部署的 API 镜像执行完整 `--all` 运行时回归（包含文档提取及 PostgreSQL 迁移、备份/恢复和 lease recovery）。
-- **Staging release** 只监听成功的 `main` CI。主分支直接推送、缺少全绿 PR、PR 与合并结果代码树不一致，或对应 PR 的文本完整性工作流失败时，镜像构建会在预发布前失败，不能触发部署；生产还需要人工 `PROMOTE` 和完整 staging attestation。
+- **PR CI** 是完整的源代码质量门：后端全量 pytest、PostgreSQL 邮箱并发回归、前端构建和
+  Playwright 关键路径都在 PR 上执行。镜像构建不在 PR 上重复执行。
+- **main CI** 不重复执行 pytest、PostgreSQL 邮箱并发回归或 Playwright。它只校验当前 `main`
+  提交确实来自一个已完成全部 PR 检查的合并请求，并校验两者的 Git tree 一致；不再构建或推送
+  镜像。镜像由 **Staging release** 在发布 Runner 上按精确 SHA 构建。
+- **Staging release** 只监听成功的 `main` CI。主分支直接推送、缺少全绿 PR、PR 与合并结果
+  代码树不一致，或对应 PR 的文本完整性工作流失败时，`main-release-provenance` 会失败关闭，
+  staging 不会构建或部署。
 
-`Text encoding integrity` 只在 PR（及手动运行）中执行，避免 `main` 发布预检重复占用 Runner；其成功结果由 `scripts/verify_main_release_provenance.py` 在 `main` 发布预检中校验。
+`Text encoding integrity` 只在 PR（及手动运行）中执行，避免 `main` 溯源重复占用 Runner；其成功
+结果由 `scripts/verify_main_release_provenance.py` 在 `main` 溯源中校验。
 
-这套设计不依赖私有仓库的 GitHub 分支保护功能：即使有人错误地直接推送 `main`，自动发布也会被代码级溯源门阻止。为保持溯源确定性，团队默认使用 **Squash merge**；溯源门也接受 GitHub 普通 merge commit，但只能是严格的 `parents = [PR base SHA, PR head SHA]`，且最终 Git tree 必须与已验证 PR head 完全一致。普通 merge 因基线落后或冲突处理导致代码树变化时仍会失败关闭；多提交的 GitHub rebase merge 也不在当前门禁支持范围内。无论采用哪种允许的合并方式，合并前都必须将 PR 更新或 rebase 到最新 `main`，并等待该基线上的完整 PR 检查全部成功；若在检查未结束或基线落后时合并，`main` 发布预检会拒绝，且需要先修正 PR 后重新走合并流程。团队仍应坚持只经 PR 合并，且不应绕过已存在的审核和测试流程。代码级门禁可防止普通误操作，但不能替代未来可用的仓库/组织级写入权限控制。
+这套设计不依赖私有仓库的 GitHub 分支保护功能：即使有人错误地直接推送 `main`，staging 也会被
+代码级溯源门阻止。为保持溯源确定性，团队默认使用 **Squash merge**；溯源门也接受 GitHub 普通
+merge commit，但只能是严格的 `parents = [PR base SHA, PR head SHA]`，且最终 Git tree 必须与
+已验证 PR head 完全一致。普通 merge 因基线落后或冲突处理导致代码树变化时仍会失败关闭；多提交的
+GitHub rebase merge 也不在当前门禁支持范围内。无论采用哪种允许的合并方式，合并前都必须将 PR
+更新或 rebase 到最新 `main`，并等待该基线上的完整 PR 检查全部成功；若在检查未结束或基线落后时
+合并，`main` 溯源会拒绝，且需要先修正 PR 后重新走合并流程。团队仍应坚持只经 PR 合并，且不应绕过
+已存在的审核和测试流程。代码级门禁可防止普通误操作，但不能替代未来可用的仓库/组织级写入权限控制。
 
 ## Release regression gates
 
@@ -226,11 +240,12 @@ On the trusted self-hosted runner, Playwright's Linux system dependencies are
 provisioned once during runner setup. CI downloads Chromium for each checked
 out workspace but does not invoke `apt` on every PR.
 
-The existing **Production image builds** check reuses the exact application
-image it just built to run `scripts/run_release_regression.py --all`. The
-runtime gate exercises real LibreOffice and document extraction for all
-supported formats, verifies the Tencent image-OCR request contract without a
-paid cloud credential, and confirms Tesseract is absent from the production
-image. It then runs temporary PostgreSQL migration,
-backup/restore, and worker-lease recovery checks. It creates no production
-connection, volume, port, environment file, candidate file, or credential.
+The release runtime regression harness (`scripts/run_release_regression.py --all`)
+exercises real LibreOffice and document extraction for all supported formats,
+verifies the Tencent image-OCR request contract without a paid cloud credential,
+confirms Tesseract is absent from the production image, and runs temporary
+PostgreSQL migration, backup/restore, and worker-lease recovery checks. It is
+no longer wired into main CI (the image-building job was removed); it is kept
+as the runtime gate for the future production image path and can be run against
+a locally built image. It creates no production connection, volume, port,
+environment file, candidate file, or credential.

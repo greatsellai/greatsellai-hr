@@ -1,27 +1,29 @@
 # 预发布与生产晋级
 
 > 当前流程：staging 在美国发布 Runner 上直接构建该 commit 的镜像并经 SSH 流式传输到 staging 主机
-> （不经中国 TCR）；生产晋级仍从 `main` CI 的腾讯云 TCR metadata 按不可变 manifest digest 拉取
-> 同一镜像，不传输 Docker archive。配置见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本说明
-> 优先于下文的历史 artifact/传输措辞。
+> （不经中国 TCR），部署成功后只保留新 SHA 一套镜像。`main` CI 已停止向腾讯云 TCR 推送镜像，
+> 生产晋级链当前暂停（其依赖的 TCR 镜像与 staging attestation 的 TCR 字段都不可得，会失败关闭而
+> 不会误发）；将来重新接入生产镜像来源后再恢复。TCR 配置见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。
+> 本说明优先于下文的历史 artifact/传输措辞。
 
 ## 发布链路
 
 ```text
 PR 完整 CI
   → 合并 main
-  → main CI 构建完整 SHA 的 API / Caddy 镜像
-  → 自动部署 staging 并执行公网 smoke
-  → 人工运行 Production promotion（输入 PROMOTE）
+  → main CI 验证来源（main-release-provenance）
+  → 自动构建 API / Caddy 镜像并流式传输到 staging，部署并执行公网 smoke
+  → 人工运行 Production promotion（输入 PROMOTE，当前暂停）
   → 同一 SHA、同一 API/Caddy image ID 部署 production
 ```
 
-生产不会因为 `main` 合并自动发布。预发布未完成、冒烟检查失败、`main` 在验收期间前进、镜像
-ID 不一致、CI artifact 不完整或超过保留期时，晋级都会失败关闭。
+生产不会因为 `main` 合并自动发布。当前生产晋级链暂停：`main` CI 不再推送 TCR 镜像，且 staging
+的 direct 记录缺 TCR 字段，`verify-staging-release.sh` 会失败关闭，因此不会误发生产。预发布未
+完成、冒烟检查失败、`main` 在验收期间前进、镜像 ID 不一致时 staging 也会失败关闭。
 
 当前预发布和生产可以同机，也可以部署在不同 Docker 主机；它们始终是两个独立 Compose 项目。
-生产晋级会从 `main` CI 的 TCR metadata 重新拉取 staging 已验收的同一镜像并校验 image ID，
-因此不依赖两端共享 Docker
+生产晋级（恢复后）会从 `main` CI 的 TCR metadata 重新拉取 staging 已验收的同一镜像并校验
+image ID，因此不依赖两端共享 Docker
 镜像缓存。预发布应用以
 `RESUME_V3_ENVIRONMENT=production` 运行，以覆盖生产专属的 HTTPS、安全、数据生命周期和投递逻辑；隔离由独立项目、数据库、数据卷、网络、代理地址与预发布域名保证：
 
@@ -65,9 +67,9 @@ Runner 常驻环境或代码。
 **Production promotion** 在验证完 staging 后暂停，直到负责人批准。
 
 `STAGING_DEPLOY_HOST` 与 `PROD_DEPLOY_HOST` 可以指向不同 Docker 主机。生产晋级只接受 staging
-attestation 中的 CI run ID、run attempt 和 API/Caddy image ID；它会下载同一份 Actions artifact，逐项
-校验 checksum、metadata 和 OCI labels 后才传输到生产目标。artifact 保留 30 天；超过窗口必须重新
-通过 main CI 和 staging 验收，绝不能在生产机重新构建镜像。
+attestation 中的 API/Caddy image ID；它依赖从 `main` CI 归档的 TCR metadata artifact 与 staging
+attestation 的 TCR 字段，两者当前都不可得，因此**生产晋级当前暂停、会失败关闭**。将来重新接入
+生产镜像来源后再恢复，且绝不能在生产机重新构建镜像。
 
 ## 服务器一次性准备
 
@@ -89,8 +91,8 @@ attestation 中的 CI run ID、run attempt 和 API/Caddy image ID；它会下载
 
 1. 合并经过 CI 的 PR 到 `main`。
 2. 等待 **Staging release** 自动运行；它会先做只读 Compose 预检，创建或复用 `stg-*` 标签，
-   传输 main CI 已构建的镜像，部署 staging，并检查：`/health`、匿名 session、匿名原文件
-   访问拒绝和 `/login` 页面。
+   构建该 commit 的 API/Caddy 镜像并经 SSH 流式传输到 staging，部署后检查：`/health`、匿名
+   session、匿名原文件访问拒绝和 `/login` 页面。
 3. 在 `https://staging.hr.greatsellai.net/login` 做业务验收。若 `main` 在验收期间前进，新的
    main 会生成新的 staging 候选；旧候选不能被晋级。
 4. 在 Actions 手动运行 **Production promotion**，从 `main` 输入 `PROMOTE`。工作流会验证当前
@@ -103,8 +105,9 @@ attestation 中的 CI run ID、run attempt 和 API/Caddy image ID；它会下载
 
 - **Staging release 失败**：不会创建可晋级生产的完成记录。修复 PR 后走新的 main；同一 commit
   可通过手动 `STAGE` 重试，已有同 SHA 的 `stg-*` 不会被移动。
-- **Production promotion 被拒绝**：优先看 staging attestation、`main` 是否已前进、artifact 是否仍在
-  30 天保留窗口内，以及两边的 image ID 是否一致。不要在生产机上 build 来“补救”，这会破坏同一镜像保证。
+- **Production promotion**：当前暂停（`main` CI 不再推 TCR、staging 为 direct 记录），会失败关闭。
+  不要在生产机上 build 来“补救”，这会破坏同一镜像保证。恢复前需先接入新的生产镜像来源并适配
+  staging attestation。
 - **Staging 不可达**：检查旧 staging 主机上原有的 Caddy 容器和 `172.17.0.1:18080` 私有
   监听是否仍在运行。新生产 Caddy 故意不包含 staging 路由；不要把 staging 域名、DNS 或
   旧机 Caddy 改到新生产主机来“修复”。

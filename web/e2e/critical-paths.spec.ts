@@ -1084,12 +1084,12 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.locator("#main-content").getByText("当前候选人", { exact: true })).toHaveCount(0);
     await expect(page.locator("#main-content").getByRole("button", { name: "运行岗位匹配" })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "候选人评估结果" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "推荐候选人" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "待核实候选人" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "明确不匹配" })).toBeVisible();
     await expect(page.getByText("E2E 推荐候选人", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("E2E 待核实候选人", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("E2E 不匹配候选人", { exact: true }).first()).toBeVisible();
+    await expect(page.locator(".match-lane-tag.is-recommended").first()).toBeVisible();
+    await expect(page.locator(".match-lane-tag.is-pending").first()).toBeVisible();
+    await expect(page.locator(".match-lane-tag.is-unmet").first()).toBeVisible();
 
     const forbiddenCandidateRequests: string[] = [];
     const observeCandidateRequests = (request: import("@playwright/test").Request) => {

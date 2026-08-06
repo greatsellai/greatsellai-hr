@@ -12,7 +12,7 @@ import type {
   JobRequirements,
   JobVersion,
 } from "../../types";
-import { Icon, type IconName } from "../../icons";
+import { Icon } from "../../icons";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
 import { BackofficeProgress } from "../../backoffice/ui/BackofficeProgress";
 import { BackofficeSelect } from "../../backoffice/ui/BackofficeSelect";
@@ -1087,6 +1087,18 @@ function MatchBatchDetails({
   );
 }
 
+const matchLaneLabel: Record<MatchLane, string> = {
+  recommended: "推荐",
+  pending: "待核实",
+  unmet: "不匹配",
+};
+
+const matchLaneOrder: Record<MatchLane, number> = {
+  recommended: 0,
+  pending: 1,
+  unmet: 2,
+};
+
 function MatchLeaderboard({
   matches,
   loading,
@@ -1096,58 +1108,20 @@ function MatchLeaderboard({
   loading: boolean;
   onOpenResume: (match: JobMatch) => void;
 }) {
-  const [collapsedLanes, setCollapsedLanes] = useState<Record<MatchLane, boolean>>({
-    recommended: false,
-    pending: false,
-    unmet: false,
-  });
   const latestByResume = new Map<string, JobMatch>();
   const newestFirst = [...matches].sort(compareMatchesByNewest);
   for (const match of newestFirst) {
     if (!latestByResume.has(match.resume_id)) latestByResume.set(match.resume_id, match);
   }
   const ranked = [...latestByResume.values()].sort((left, right) => {
+    const laneDifference = matchLaneOrder[matchLane(left)] - matchLaneOrder[matchLane(right)];
+    if (laneDifference) return laneDifference;
     const scoreDifference = matchScore(right) - matchScore(left);
     if (scoreDifference) return scoreDifference;
     const confidenceDifference = matchConfidence(right) - matchConfidence(left);
     if (confidenceDifference) return confidenceDifference;
     return compareMatchesByNewest(left, right);
   });
-  const lanes: Record<MatchLane, JobMatch[]> = {
-    recommended: [],
-    pending: [],
-    unmet: [],
-  };
-  for (const item of ranked) lanes[matchLane(item)].push(item);
-  const laneDefinitions: Array<{
-    key: MatchLane;
-    title: string;
-    description: string;
-    empty: string;
-    icon: IconName;
-  }> = [
-    {
-      key: "recommended",
-      title: "推荐候选人",
-      description: "可信度 ≥ 60%，硬条件已通过或不适用",
-      empty: "暂无满足推荐条件的候选人。",
-      icon: "check",
-    },
-    {
-      key: "pending",
-      title: "待核实候选人",
-      description: "关键项待核实，或匹配可信度不足 60%",
-      empty: "暂无需要补充核实的候选人。",
-      icon: "match",
-    },
-    {
-      key: "unmet",
-      title: "明确不匹配",
-      description: "至少一项硬条件已有明确不满足的证据",
-      empty: "暂无明确不满足硬条件的候选人。",
-      icon: "close",
-    },
-  ];
   return (
     <section className="panel match-leaderboard">
       <div className="panel-heading">
@@ -1161,96 +1135,24 @@ function MatchLeaderboard({
         <div
           aria-busy="true"
           aria-label="正在加载候选人匹配结果"
-          className="match-lanes match-lanes-loading"
+          className="match-candidate-list match-results-loading"
         >
-          {laneDefinitions.map((lane) => (
-            <div className="match-lane" key={lane.key}>
-              <div className="match-lane-heading">
-                <div className="match-lane-title">
-                  <span className="skeleton match-lane-icon-skeleton" />
-                  <div>
-                    <div className="skeleton match-lane-title-skeleton" />
-                    <div className="skeleton match-lane-description-skeleton" />
-                  </div>
-                </div>
-              </div>
-              <div className="match-lane-skeleton-list">
-                <span className="skeleton" />
-                <span className="skeleton" />
-                <span className="skeleton" />
-              </div>
-            </div>
-          ))}
+          <span className="skeleton match-results-loading-card" />
+          <span className="skeleton match-results-loading-card" />
+          <span className="skeleton match-results-loading-card" />
         </div>
       ) : ranked.length ? (
-        <div className="match-lanes">
-          {laneDefinitions.map((lane) => {
-            const items = lanes[lane.key];
-            const isCollapsed = collapsedLanes[lane.key];
-            const laneContentId = `match-lane-${lane.key}-content`;
-            return (
-              <section
-                aria-labelledby={`match-lane-${lane.key}-heading`}
-                className={`match-lane is-${lane.key}`}
-                key={lane.key}
-              >
-                <div className="match-lane-heading">
-                  <div className="match-lane-title">
-                    <span className="match-lane-icon">
-                      <Icon name={lane.icon} size={16} />
-                    </span>
-                    <div>
-                      <h3 id={`match-lane-${lane.key}-heading`}>{lane.title}</h3>
-                      <p>{lane.description}</p>
-                    </div>
-                  </div>
-                  <div className="match-lane-actions">
-                    <span aria-label={`${lane.title} ${items.length} 份`} className="match-lane-count">
-                      {items.length}
-                    </span>
-                    <button
-                      aria-controls={laneContentId}
-                      aria-expanded={!isCollapsed}
-                      className="text-button match-lane-collapse"
-                      onClick={() =>
-                        setCollapsedLanes((current) => ({
-                          ...current,
-                          [lane.key]: !current[lane.key],
-                        }))
-                      }
-                      type="button"
-                    >
-                      <span>{isCollapsed ? "展开" : "收起"}</span>
-                      <Icon name="chevron-down" size={14} />
-                    </button>
-                  </div>
-                </div>
-                {!isCollapsed && (
-                  <div
-                    aria-live="polite"
-                    className="match-lane-content"
-                    id={laneContentId}
-                  >
-                    {items.length ? (
-                      <ol className="match-candidate-list">
-                        {items.map((item) => (
-                          <li key={item.match_id}>
-                            <MatchLaneCandidate
-                              match={item}
-                              onOpenResume={onOpenResume}
-                            />
-                          </li>
-                        ))}
-                      </ol>
-                    ) : (
-                      <p className="match-lane-empty">{lane.empty}</p>
-                    )}
-                  </div>
-                )}
-              </section>
-            );
-          })}
-        </div>
+        <ol className="match-candidate-list">
+          {ranked.map((item) => (
+            <li key={item.match_id}>
+              <MatchLaneCandidate
+                lane={matchLane(item)}
+                match={item}
+                onOpenResume={onOpenResume}
+              />
+            </li>
+          ))}
+        </ol>
       ) : (
         <div className="empty-state match-empty-state">
           <div className="empty-state-inner">
@@ -1266,9 +1168,11 @@ function MatchLeaderboard({
 
 function MatchLaneCandidate({
   match,
+  lane,
   onOpenResume,
 }: {
   match: JobMatch;
+  lane: MatchLane;
   onOpenResume: (match: JobMatch) => void;
 }) {
   const jdMatchScore = matchScore(match);
@@ -1290,9 +1194,12 @@ function MatchLaneCandidate({
           <strong>{match.candidate_display_name?.trim() || "未命名候选人"}</strong>
           <small>简历事实 v{match.facts_version}</small>
         </div>
-        <span className={`match-hard-status is-${hardStatus}`}>
-          {hardRequirementLabel[hardStatus] ?? "待确认"}
-        </span>
+        <div className="match-candidate-badges">
+          <span className={`match-lane-tag is-${lane}`}>{matchLaneLabel[lane]}</span>
+          <span className={`match-hard-status is-${hardStatus}`}>
+            {hardRequirementLabel[hardStatus] ?? "待确认"}
+          </span>
+        </div>
       </div>
       <dl className="match-candidate-metrics">
         <div>

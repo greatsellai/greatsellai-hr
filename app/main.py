@@ -207,6 +207,7 @@ from app.schemas import (
     SavedFilterCreate,
     SavedFilterResponse,
     ScoreTemplateCreate,
+    ScoreTemplateOptimizationResponse,
     ScoreTemplateResponse,
     SourceTagCreate,
     SourceTagPatch,
@@ -407,6 +408,7 @@ from app.services.score_service import (
     get_resume_score,
     list_score_templates,
     list_resume_scores,
+    optimize_existing_score_template,
     override_score_dimension,
     run_resume_score,
 )
@@ -6282,6 +6284,54 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         session: Session = Depends(get_session),
     ) -> list[ScoreTemplateResponse]:
         return list_score_templates(session)
+
+    @app.post(
+        "/v1/score-templates/{template_id}/optimize",
+        response_model=ScoreTemplateOptimizationResponse,
+        dependencies=[Depends(require_single_admin)],
+    )
+    def post_optimize_score_template(
+        template_id: str,
+        session: Session = Depends(get_session),
+    ) -> ScoreTemplateOptimizationResponse:
+        """Return an AI-improved template draft without overwriting the source."""
+
+        try:
+            return optimize_existing_score_template(
+                session,
+                template_id=template_id,
+                settings=settings,
+            )
+        except ScoreTemplateNotFoundError as exc:
+            session.rollback()
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ScoreServiceError as exc:
+            session.rollback()
+            code = str(exc)
+            if code in {
+                "deepseek_api_key_not_configured",
+                "ai_route_not_configured",
+                "ai_route_not_published",
+                "ai_route_disabled",
+            }:
+                response_status = status.HTTP_503_SERVICE_UNAVAILABLE
+            elif code == "score_template_optimization_source_has_no_safe_dimensions":
+                response_status = status.HTTP_422_UNPROCESSABLE_CONTENT
+            else:
+                response_status = status.HTTP_409_CONFLICT
+            raise HTTPException(status_code=response_status, detail=code) from exc
+        except DeepSeekProviderError as exc:
+            session.rollback()
+            log_exception_event(
+                "score_template_optimization_provider_failed",
+                level=logging.WARNING,
+                error_code="score_template_optimization_provider_failed",
+                exception=exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="score_template_optimization_provider_failed",
+            ) from exc
 
     @app.post(
         "/v1/score-templates/{template_id}/score-all",

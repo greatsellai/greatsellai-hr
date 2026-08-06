@@ -107,6 +107,7 @@ import type {
   SavedFilterCreate,
   ScoreTemplate,
   ScoreTemplateCreate,
+  ScoreTemplateOptimization,
   SourceTag,
   SourceTagCreate,
   SourceTagPatch,
@@ -973,6 +974,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
     createScoreTemplate(input: ScoreTemplateCreate): Promise<ScoreTemplate> {
       return request<ScoreTemplate>("/score-templates", { method: "POST", body: input });
+    },
+
+    optimizeScoreTemplate(templateId: string): Promise<ScoreTemplateOptimization> {
+      return request<ScoreTemplateOptimization>(
+        `/score-templates/${resourcePath(templateId)}/optimize`,
+        { method: "POST" },
+      );
     },
 
     createScore(resumeId: string, input: ResumeScoreCreate): Promise<ResumeScore> {

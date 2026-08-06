@@ -40,19 +40,19 @@ export const workspaceNavigationGroups: WorkspaceNavigationGroup[] = [
   },
   {
     id: "recruiting",
-    label: "招聘",
+    label: "招聘运营",
     items: [
       { kind: "view", view: "jobs", label: "职位管理", icon: "briefcase" },
+      { kind: "view", view: "library", label: "人才库", icon: "folder" },
       { kind: "view", view: "match", label: "智能匹配", icon: "match" },
+      { kind: "view", view: "filter", label: "条件筛选", icon: "filter" },
     ],
   },
   {
     id: "talent",
     label: "人才",
     items: [
-      { kind: "view", view: "library", label: "人才库", icon: "folder" },
       { kind: "view", view: "favorites", label: "我的收藏", icon: "bookmark" },
-      { kind: "view", view: "filter", label: "条件筛选", icon: "filter" },
       { kind: "view", view: "upload", label: "上传简历", icon: "upload" },
     ],
   },

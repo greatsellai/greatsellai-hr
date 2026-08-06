@@ -221,6 +221,10 @@ function humanizeError(error: unknown): string {
         "匹配关键词不能包含年龄、性别或其他受保护个人属性。请改为岗位技能、经历或项目关键词。",
       ...mailboxImportErrorMessages,
       score_template_not_found: "评分模板不存在，请重新选择。",
+      score_template_optimization_source_has_no_safe_dimensions:
+        "该模板没有可供 AI 优化的岗位相关评分维度。请先移除年龄、性别等不应参与评分的条件，再手动补充至少一项岗位相关标准。",
+      score_template_optimization_provider_failed:
+        "AI 暂时无法生成评分模板优化建议，请稍后重试。",
       resume_score_batch_not_found: "评分任务不存在或已不可访问。",
       job_version_not_found: "岗位版本不存在，请重新创建。",
       jd_generation_response_truncated:

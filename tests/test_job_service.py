@@ -612,8 +612,8 @@ def test_snapshot_match_persists_evidence_and_unknown_hard_requirement(
     assert matched.facts_version == 1
     assert matched.total_score == 50.0
     assert matched.evidence_coverage == 65.0
-    assert matched.hard_requirement_status == "information_insufficient"
-    assert matched.must_have_passed is None
+    assert matched.hard_requirement_status == "unmet"
+    assert matched.must_have_passed is False
     assert matched.status == "needs_review"
     assert [
         (
@@ -714,8 +714,8 @@ def test_job_api_extract_confirm_and_snapshot_match(ai_client, monkeypatch) -> N
     )
     assert matched.status_code == 200, matched.text
     match_payload = matched.json()
-    assert match_payload["hard_requirement_status"] == "information_insufficient"
-    assert match_payload["must_have_passed"] is None
+    assert match_payload["hard_requirement_status"] == "unmet"
+    assert match_payload["must_have_passed"] is False
     assert match_payload["requirement_results"][0]["fact_ids"] == ["skill-001"]
 
     fetched = ai_client.get(f"/v1/job-matches/{match_payload['match_id']}")

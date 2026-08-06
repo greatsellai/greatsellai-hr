@@ -760,7 +760,7 @@ export function MatchWorkspace({
               </div>
             </section>
           )}
-          {jobCanMatch && jobVersion && (
+          {isMatching && jobCanMatch && jobVersion && (
             <section className="panel">
               <div className="panel-heading">
                 <div>
@@ -785,6 +785,26 @@ export function MatchWorkspace({
                   </div>
                 ))}
               </div>
+              <div className="requirement-actions match-run-actions">
+                <button
+                  className="button button-primary"
+                  disabled={!jobCanMatch || loading}
+                  onClick={() => void runAllMatches()}
+                  type="button"
+                >
+                  {loading ? (
+                    <>
+                      <i className="spinner" />
+                      正在创建评估任务…
+                    </>
+                  ) : (
+                    <>
+                      <Icon name="match" size={16} />
+                      开始岗位评分（全部可匹配简历）
+                    </>
+                  )}
+                </button>
+              </div>
             </section>
           )}
           {isMatching && matchBatch && (
@@ -798,59 +818,6 @@ export function MatchWorkspace({
             />
           )}
         </div>
-        {isMatching && (
-          <aside className="panel">
-            <div className="panel-heading">
-              <div>
-                <h2>岗位评估</h2>
-                <p>
-                  {jobIsOriginal
-                    ? "原版发布未生成匹配条件，因此不会调用 AI 匹配。"
-                    : "根据当前 JD，对全部可匹配简历生成匹配度、可信度与待核实项。"}
-                </p>
-              </div>
-            </div>
-            <div className="fact-list">
-              <div className="fact-row">
-                <strong>当前岗位</strong>
-                <span>
-                  {jobIsEnabled && jobVersion
-                    ? `${jobVersion.title} · v${jobVersion.version} · ${jobIsOriginal ? "原版已发布" : "已启用"}`
-                    : "尚未启用"}
-                </span>
-              </div>
-            </div>
-            {matchBatch && (
-              <div className="fact-row">
-                <strong>AI 批量进度</strong>
-                <span>
-                  {matchBatch.completed_count + matchBatch.failed_count} / {matchBatch.total_count}
-                  {matchBatch.failed_count ? ` · 失败 ${matchBatch.failed_count}` : ""}
-                </span>
-              </div>
-            )}
-            <div className="review-actions">
-              <button
-                className="button button-primary"
-                disabled={!jobCanMatch || loading}
-                onClick={() => void runAllMatches()}
-                type="button"
-              >
-                {loading ? (
-                  <>
-                    <i className="spinner" />
-                    正在创建评估任务…
-                  </>
-                ) : (
-                  <>
-                    <Icon name="match" size={16} />
-                    开始岗位评分（全部可匹配简历）
-                  </>
-                )}
-              </button>
-            </div>
-          </aside>
-        )}
       </div>
     </div>
   );
@@ -871,17 +838,10 @@ function clampMatchPercent(value: number): number {
 }
 
 /**
- * A completed match may have been created before the server returned the
- * evidence-normalized score. Keep old results readable while never presenting
- * their legacy, coverage-weighted total as a JD match percentage.
+ * The server derives the match degree as the weighted total over ALL JD
+ * requirements (max 100). For a match created before that was true, fall
+ * back to the raw weighted total rather than re-normalizing by coverage.
  */
-function matchConfidence(match: JobMatch): number {
-  const value = match.match_confidence ?? match.evidence_coverage ?? 0;
-  return typeof value === "number" && Number.isFinite(value)
-    ? clampMatchPercent(value)
-    : 0;
-}
-
 function matchScore(match: JobMatch): number {
   if (
     typeof match.match_score === "number" &&
@@ -889,10 +849,11 @@ function matchScore(match: JobMatch): number {
   ) {
     return clampMatchPercent(match.match_score);
   }
-
-  const confidence = matchConfidence(match);
-  if (!confidence || !Number.isFinite(match.total_score)) return 0;
-  return clampMatchPercent((match.total_score / confidence) * 100);
+  return clampMatchPercent(
+    typeof match.total_score === "number" && Number.isFinite(match.total_score)
+      ? match.total_score
+      : 0,
+  );
 }
 
 function matchLane(match: JobMatch): MatchLane {
@@ -906,9 +867,8 @@ function matchLane(match: JobMatch): MatchLane {
 
   if (match.hard_requirement_status === "unmet") return "unmet";
   if (
-    matchConfidence(match) >= 60 &&
-    (match.hard_requirement_status === "pass" ||
-      match.hard_requirement_status === "not_applicable")
+    match.hard_requirement_status === "pass" ||
+    match.hard_requirement_status === "not_applicable"
   ) {
     return "recommended";
   }
@@ -927,7 +887,6 @@ function compareMatchesByNewest(left: JobMatch, right: JobMatch): number {
 
 function MatchResult({ match }: { match: JobMatch }) {
   const jdMatchScore = matchScore(match);
-  const confidence = matchConfidence(match);
   const hardStatus = match.hard_requirement_status ?? "unknown";
   const scoreStyle = {
     "--score": jdMatchScore,
@@ -946,7 +905,7 @@ function MatchResult({ match }: { match: JobMatch }) {
       <div className="score-result match-result-layout">
         <div className="match-result-score-panel">
           <div
-            aria-label={`JD 匹配度 ${jdMatchScore.toFixed(1)}%，匹配可信度 ${confidence.toFixed(1)}%`}
+            aria-label={`JD 匹配度 ${jdMatchScore.toFixed(1)}%`}
             className="score-number"
             data-value={`${jdMatchScore.toFixed(1)}%`}
             style={scoreStyle}
@@ -954,10 +913,6 @@ function MatchResult({ match }: { match: JobMatch }) {
             <span>{jdMatchScore.toFixed(1)}%</span>
           </div>
           <p className="match-result-score-label">JD 匹配度</p>
-          <div className="match-result-confidence">
-            <span>匹配可信度</span>
-            <strong>{confidence.toFixed(1)}%</strong>
-          </div>
           <span className={`match-hard-status is-${hardStatus}`}>
             {hardRequirementLabel[hardStatus] ?? "待确认"}
           </span>
@@ -972,7 +927,7 @@ function MatchResult({ match }: { match: JobMatch }) {
                     ? "部分满足"
                     : item.outcome === "not_met"
                       ? "未满足"
-                      : "待确认"}
+                      : "未提及"}
               </span>
               <p>
                 <b>{item.requirement_text}</b>
@@ -1118,8 +1073,8 @@ function MatchLeaderboard({
     if (laneDifference) return laneDifference;
     const scoreDifference = matchScore(right) - matchScore(left);
     if (scoreDifference) return scoreDifference;
-    const confidenceDifference = matchConfidence(right) - matchConfidence(left);
-    if (confidenceDifference) return confidenceDifference;
+    const coverageDifference = (right.evidence_coverage ?? 0) - (left.evidence_coverage ?? 0);
+    if (coverageDifference) return coverageDifference;
     return compareMatchesByNewest(left, right);
   });
   return (
@@ -1127,7 +1082,7 @@ function MatchLeaderboard({
       <div className="panel-heading">
         <div>
           <h2>候选人评估结果</h2>
-          <p>JD 匹配度仅按已确认信息计算，匹配可信度表示可验证条件的覆盖程度。</p>
+          <p>匹配度按 JD 全部要求加权计算（硬条件权重更高）；简历未提及的要求按未满足计。</p>
         </div>
         <span className="status-pill">{ranked.length} 份已完成</span>
       </div>
@@ -1135,24 +1090,38 @@ function MatchLeaderboard({
         <div
           aria-busy="true"
           aria-label="正在加载候选人匹配结果"
-          className="match-candidate-list match-results-loading"
+          className="match-results-loading"
         >
           <span className="skeleton match-results-loading-card" />
           <span className="skeleton match-results-loading-card" />
           <span className="skeleton match-results-loading-card" />
         </div>
       ) : ranked.length ? (
-        <ol className="match-candidate-list">
-          {ranked.map((item) => (
-            <li key={item.match_id}>
-              <MatchLaneCandidate
-                lane={matchLane(item)}
-                match={item}
-                onOpenResume={onOpenResume}
-              />
-            </li>
-          ))}
-        </ol>
+        <div className="match-table-wrap">
+          <table className="match-table">
+            <thead>
+              <tr>
+                <th scope="col">排名</th>
+                <th scope="col">候选人</th>
+                <th scope="col">分档</th>
+                <th scope="col">硬条件</th>
+                <th scope="col">匹配度</th>
+                <th scope="col" className="match-open-column">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ranked.map((item, index) => (
+                <MatchLaneCandidate
+                  key={item.match_id}
+                  lane={matchLane(item)}
+                  match={item}
+                  rank={index + 1}
+                  onOpenResume={onOpenResume}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <div className="empty-state match-empty-state">
           <div className="empty-state-inner">
@@ -1169,14 +1138,15 @@ function MatchLeaderboard({
 function MatchLaneCandidate({
   match,
   lane,
+  rank,
   onOpenResume,
 }: {
   match: JobMatch;
   lane: MatchLane;
+  rank: number;
   onOpenResume: (match: JobMatch) => void;
 }) {
   const jdMatchScore = matchScore(match);
-  const confidence = matchConfidence(match);
   const hardStatus = match.hard_requirement_status ?? "unknown";
   const met = match.requirement_results.filter(
     (result) => result.outcome === "met",
@@ -1187,43 +1157,39 @@ function MatchLaneCandidate({
   const unknown = match.requirement_results.filter(
     (result) => result.outcome === "unknown",
   ).length;
+  const openResume = () => onOpenResume(match);
   return (
-    <article className="match-candidate-card">
-      <div className="match-candidate-heading">
-        <div>
-          <strong>{match.candidate_display_name?.trim() || "未命名候选人"}</strong>
-          <small>简历事实 v{match.facts_version}</small>
-        </div>
-        <div className="match-candidate-badges">
-          <span className={`match-lane-tag is-${lane}`}>{matchLaneLabel[lane]}</span>
-          <span className={`match-hard-status is-${hardStatus}`}>
-            {hardRequirementLabel[hardStatus] ?? "待确认"}
-          </span>
-        </div>
-      </div>
-      <dl className="match-candidate-metrics">
-        <div>
-          <dt>JD 匹配度</dt>
-          <dd>{jdMatchScore.toFixed(1)}%</dd>
-        </div>
-        <div>
-          <dt>匹配可信度</dt>
-          <dd>{confidence.toFixed(1)}%</dd>
-        </div>
-      </dl>
-      <div className="match-candidate-overview">
-        <span>满足 {met}</span>
-        <span>部分满足 {partial}</span>
-        {unknown > 0 && <span>待核实 {unknown}</span>}
-      </div>
-      <button
-        className="button button-ghost match-open-button"
-        onClick={() => onOpenResume(match)}
-        type="button"
-      >
-        <Icon name="document" size={15} />
-        查看简历
-      </button>
-    </article>
+    <tr className="match-candidate-row" onClick={openResume}>
+      <td className="match-rank">{rank}</td>
+      <td>
+        <strong>{match.candidate_display_name?.trim() || "未命名候选人"}</strong>
+        <small>
+          满足 {met} · 部分满足 {partial}
+          {unknown > 0 && <> · 未提及 {unknown}</>}
+        </small>
+      </td>
+      <td>
+        <span className={`match-lane-tag is-${lane}`}>{matchLaneLabel[lane]}</span>
+      </td>
+      <td>
+        <span className={`match-hard-status is-${hardStatus}`}>
+          {hardRequirementLabel[hardStatus] ?? "待确认"}
+        </span>
+      </td>
+      <td className="match-score">{jdMatchScore.toFixed(1)}%</td>
+      <td>
+        <button
+          className="button button-ghost match-open-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            openResume();
+          }}
+          type="button"
+        >
+          <Icon name="document" size={15} />
+          查看简历
+        </button>
+      </td>
+    </tr>
   );
 }

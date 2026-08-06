@@ -2119,7 +2119,6 @@ def _profile_match_result(match: JobMatch) -> TalentSearchProfileMatchResult:
         match_confidence=confidence,
         match_lane=classify_job_match_lane(
             hard_requirement_status=match.hard_requirement_status,
-            match_confidence=confidence,
         ),
         hard_requirement_status=match.hard_requirement_status,
         analysis=match.analysis or {},
@@ -2173,7 +2172,6 @@ def _profile_match_results(
             {"recommended": 0, "pending": 1, "unmet": 2}[
                 classify_job_match_lane(
                     hard_requirement_status=match.hard_requirement_status,
-                    match_confidence=match.evidence_coverage,
                 )
             ],
             -derive_job_match_score(

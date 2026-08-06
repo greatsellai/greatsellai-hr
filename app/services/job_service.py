@@ -69,14 +69,13 @@ class JobMatchNotFoundError(JobServiceError):
     pass
 
 
-# A JD match has two intentionally separate dimensions:
-# - match score: how well the requirements with actual evidence match;
-# - match confidence: how much of the JD has explicit evidence at all.
+# A JD match degree is the weighted total over ALL requirements (the JD
+# weights always sum to 10000, so a perfect match scores 100). Missing
+# evidence counts as not met (“没写就当作不会”) and is never normalized away,
+# because that would inflate resumes that only cover part of the JD.
 #
-# Keep the legacy `total_score` persisted for auditability and backwards
-# compatibility.  Its old semantics make unknown requirements contribute zero,
-# so it must not be used as the default ranking score.
-MATCH_CONFIDENCE_RECOMMENDED_THRESHOLD = 60.0
+# `evidence_coverage` is still persisted for audit and for the talent-search
+# / agent scoring helpers, but it is not part of the JD-match leaderboard.
 MATCH_LANE_RECOMMENDED = "recommended"
 MATCH_LANE_PENDING = "pending"
 MATCH_LANE_UNMET = "unmet"
@@ -929,13 +928,14 @@ def derive_job_match_score(
     total_score: float,
     evidence_coverage: float | None,
 ) -> float:
-    """Return the evidence-normalized JD match score on a 0–100 scale.
+    """Evidence-normalized score used by the talent-search / agent helpers.
 
-    `total_score` remains the old all-requirements score.  Since unknown
-    requirements used to contribute zero there, normalize it by the percentage
-    of requirements for which the model found enough evidence.  A resume with
-    no confirmed evidence deliberately receives a score of zero instead of a
-    division error or an artificial perfect score.
+    The JD-match leaderboard does NOT use this: it ranks by the raw weighted
+    total so that missing evidence counts as not met.  These downstream
+    helpers instead normalize by the share of the JD that had evidence, so
+    their scores stay comparable even when the coverage denominator differs.
+    A resume with no confirmed evidence deliberately receives zero instead of
+    a division error or an artificial perfect score.
     """
 
     if evidence_coverage is None or evidence_coverage <= 0:
@@ -946,34 +946,30 @@ def derive_job_match_score(
 def classify_job_match_lane(
     *,
     hard_requirement_status: str | None,
-    match_confidence: float | None,
 ) -> str:
     """Assign a match to one of the three HR review lanes.
 
-    An explicit failed hard requirement is the only route to the last lane.
-    A partially evidenced or unproven hard requirement is *not* a rejection,
-    but it also is not a recommendation. It stays in the review lane even
-    when other evidence coverage is high.
+    A failed hard requirement is the only route to the last lane. A resume
+    that simply never mentions a hard requirement is treated the same way
+    (“没写就当作不会”): the match degree already counts it as not met, so it
+    must never look like a recommendation. Only a fully-passed hard
+    requirement earns the recommended lane; a partially evidenced one stays
+    in the review lane.
     """
 
     if hard_requirement_status == "unmet":
         return MATCH_LANE_UNMET
-    if (
-        hard_requirement_status in {"pass", "not_applicable"}
-        and match_confidence is not None
-        and match_confidence >= MATCH_CONFIDENCE_RECOMMENDED_THRESHOLD
-    ):
+    if hard_requirement_status in {"pass", "not_applicable"}:
         return MATCH_LANE_RECOMMENDED
     return MATCH_LANE_PENDING
 
 
 def _job_match_ranking_key(job_match: JobMatch) -> tuple[int, float, float]:
-    """Default order for the JD workspace's three candidate lanes."""
+    """Default order for the JD workspace's candidate lanes."""
 
     match_confidence = job_match.evidence_coverage
     lane = classify_job_match_lane(
         hard_requirement_status=job_match.hard_requirement_status,
-        match_confidence=match_confidence,
     )
     lane_rank = {
         MATCH_LANE_RECOMMENDED: 0,
@@ -982,10 +978,7 @@ def _job_match_ranking_key(job_match: JobMatch) -> tuple[int, float, float]:
     }[lane]
     return (
         lane_rank,
-        -derive_job_match_score(
-            total_score=job_match.total_score,
-            evidence_coverage=match_confidence,
-        ),
+        -(job_match.total_score or 0.0),
         -(match_confidence or 0.0),
     )
 
@@ -1009,14 +1002,14 @@ def _match_response(job_match: JobMatch) -> JobMatchResponse:
         total_score=job_match.total_score,
         must_have_passed=job_match.must_have_passed,
         evidence_coverage=job_match.evidence_coverage,
-        match_score=derive_job_match_score(
-            total_score=job_match.total_score,
-            evidence_coverage=match_confidence,
-        ),
+        # JD match degree = the weighted total over ALL requirements (the JD
+        # weights always sum to 10000, so a perfect match scores 100). Missing
+        # evidence counts as not met — we deliberately do not normalize by
+        # evidence coverage, which would inflate thin resumes.
+        match_score=round(job_match.total_score or 0.0, 2),
         match_confidence=match_confidence,
         match_lane=classify_job_match_lane(
             hard_requirement_status=job_match.hard_requirement_status,
-            match_confidence=match_confidence,
         ),
         hard_requirement_status=job_match.hard_requirement_status,
         analysis=job_match.analysis or {},
@@ -1163,17 +1156,17 @@ def run_job_match(
     if not must_outcomes:
         hard_requirement_status = "not_applicable"
         must_have_passed: bool | None = None
-    elif any(outcome == "not_met" for outcome in must_outcomes):
+    elif any(outcome in {"not_met", "unknown"} for outcome in must_outcomes):
+        # “没写就当作不会”：a resume that never mentions a hard requirement
+        # counts as not meeting it, exactly like an explicit rejection. The
+        # match degree already gives it zero credit, so the lane must agree.
         hard_requirement_status = "unmet"
         must_have_passed: bool | None = False
-    elif any(outcome == "unknown" for outcome in must_outcomes):
-        hard_requirement_status = "information_insufficient"
-        must_have_passed = None
     elif any(outcome == "partial" for outcome in must_outcomes):
         # Partial evidence is a useful recruiter lead, but not proof that a
-        # mandatory requirement is met. Keeping it distinct from both
-        # ``unmet`` and ``information_insufficient`` lets the UI put it in
-        # the review lane without silently treating it as a pass.
+        # mandatory requirement is met. Keeping it distinct from ``unmet``
+        # lets the UI put it in the review lane without silently treating it
+        # as a pass.
         hard_requirement_status = "partial"
         must_have_passed = None
     else:
@@ -1183,8 +1176,10 @@ def run_job_match(
     job_match.evidence_coverage = round(known_weight / 100, 2)
     job_match.hard_requirement_status = hard_requirement_status
     job_match.must_have_passed = must_have_passed
+    # Missing evidence is now a definitive not-met, not a review trigger;
+    # only partial evidence (or the provider's own flag) needs a human eye.
     if provider_result["needs_human_review"] or any(
-        outcome in {"unknown", "partial"}
+        outcome == "partial"
         for outcomes in outcomes_by_priority.values()
         for outcome in outcomes
     ):

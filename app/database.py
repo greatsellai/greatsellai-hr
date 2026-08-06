@@ -59,6 +59,12 @@ def get_session(request: Request) -> Generator[Session, None, None]:
     database: Database = request.app.state.database
     session = database.session_factory()
     try:
+        # Acquire the pooled connection eagerly while this generator dependency
+        # runs in FastAPI's threadpool. A saturated pool then blocks a worker
+        # thread here instead of the single asyncio event loop; without this a
+        # burst of requests that exhausts the pool stalls the entire API for
+        # the pool timeout while an in-loop acquisition waits.
+        session.connection()
         yield session
     except Exception:
         session.rollback()

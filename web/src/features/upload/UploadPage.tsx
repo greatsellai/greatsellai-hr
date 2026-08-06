@@ -9,7 +9,6 @@ import { api, isApiError } from "../../api";
 import { Icon } from "../../icons";
 import type { ResumeDetail } from "../../types";
 import {
-  AI_STATUS_POLL_INTERVAL_MS,
   aiExtractionIsInProgress,
 } from "../../backoffice/utils/ai-extraction";
 import { formatFileSize } from "../../backoffice/utils/formatters";
@@ -28,6 +27,7 @@ import {
   fileFingerprint,
   MAX_BATCH_FILES,
   type UploadQueueItem,
+  UPLOAD_STATUS_POLL_GAP_MS,
   uploadStatusFromResponse,
   withLatestAiExtractionStatus,
 } from "./upload-model";
@@ -79,7 +79,7 @@ export function UploadPage({
   };
 
   useEffect(() => {
-    const resumeIds = uploads
+    const activeResumeIds = uploads
       .filter(
         (item) =>
           item.response &&
@@ -91,33 +91,25 @@ export function UploadPage({
           ),
       )
       .map((item) => item.response!.resume_id);
-    if (!resumeIds.length) return undefined;
+    if (!activeResumeIds.length) return undefined;
 
+    // Poll active resumes one at a time (round-robin single flight) instead of
+    // firing every active ID concurrently. A batch upload used to issue a
+    // fresh `Promise.all` over the whole set every interval; with up to 100
+    // active resumes that exceeded the API connection pool and froze the
+    // server. This keeps exactly one request in flight regardless of batch
+    // size, so the pool is never overwhelmed by the upload page.
     let cancelled = false;
-    const refreshAiStatuses = async () => {
-      const details = await Promise.all(
-        resumeIds.map(async (resumeId) => {
-          try {
-            return await api.getResume(resumeId);
-          } catch {
-            // A transient polling failure must not turn a saved resume into an
-            // upload failure. The worker will continue independently.
-            return null;
+    let pollTimeout: number | undefined;
+    let nextIndex = 0;
+
+    const applyDetail = (resumeId: string, detail: ResumeDetail) => {
+      setUploads((current) => {
+        let changed = false;
+        const next = current.map((item) => {
+          if (!item.response || item.response.resume_id !== resumeId) {
+            return item;
           }
-        }),
-      );
-      if (cancelled) return;
-      const byResumeId = new Map(
-        details
-          .filter((detail): detail is ResumeDetail => detail !== null)
-          .map((detail) => [detail.resume_id, detail]),
-      );
-      if (!byResumeId.size) return;
-      setUploads((current) =>
-        current.map((item) => {
-          if (!item.response) return item;
-          const detail = byResumeId.get(item.response.resume_id);
-          if (!detail) return item;
           const response = withLatestAiExtractionStatus(item.response, detail);
           const status = uploadStatusFromResponse(response);
           if (
@@ -132,20 +124,40 @@ export function UploadPage({
               response.candidate_name_extraction_error &&
             item.response.candidate_display_name ===
               response.candidate_display_name
-          )
+          ) {
             return item;
+          }
+          changed = true;
           return { ...item, response, status, error: undefined };
-        }),
-      );
+        });
+        // Return the previous array when nothing changed so React bails out
+        // and this effect does not restart into a busy loop on the same item.
+        return changed ? next : current;
+      });
     };
 
-    void refreshAiStatuses();
-    const interval = window.setInterval(() => {
-      void refreshAiStatuses();
-    }, AI_STATUS_POLL_INTERVAL_MS);
+    const pollNext = async () => {
+      if (cancelled) return;
+      if (nextIndex >= activeResumeIds.length) nextIndex = 0;
+      const resumeId = activeResumeIds[nextIndex];
+      nextIndex += 1;
+      try {
+        const detail = await api.getResume(resumeId);
+        if (!cancelled) applyDetail(resumeId, detail);
+      } catch {
+        // A transient polling failure must not turn a saved resume into an
+        // upload failure. The worker will continue independently.
+      }
+      if (cancelled) return;
+      pollTimeout = window.setTimeout(() => {
+        void pollNext();
+      }, UPLOAD_STATUS_POLL_GAP_MS);
+    };
+
+    void pollNext();
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      if (pollTimeout !== undefined) window.clearTimeout(pollTimeout);
     };
   }, [uploads]);
 

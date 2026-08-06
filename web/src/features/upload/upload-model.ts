@@ -23,6 +23,17 @@ export interface UploadQueueItem {
 export const BATCH_UPLOAD_CONCURRENCY = 1;
 export const MAX_BATCH_FILES = 100;
 
+/**
+ * Gap between consecutive single-flight status polls on the upload page.
+ *
+ * The poller fetches one active resume at a time, so this value is a pacing
+ * delay between requests rather than a concurrency window. It stays local to
+ * the upload page (deliberately separate from the shared
+ * {@link AI_STATUS_POLL_INTERVAL_MS} used by library/drawer surfaces, which
+ * poll a handful of rows and do not need this cadence).
+ */
+export const UPLOAD_STATUS_POLL_GAP_MS = 200;
+
 export function uploadStatusFromResponse(
   response: ResumeUploadResponse,
 ): UploadStatus {

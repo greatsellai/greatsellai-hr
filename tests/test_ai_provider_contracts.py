@@ -519,3 +519,17 @@ def test_fact_snapshot_validator_accepts_legacy_and_current_fact_snapshots() -> 
             "evidence_block_ids": ["page-002"],
         }
     ]
+
+
+def test_fact_snapshot_validator_accepts_demographic_derived_fields() -> None:
+    # #194 added gender/birth_date to the derived block written by
+    # _canonical_fact_payload. The validator must accept that current form as
+    # well as the pre-demographic four-key form covered above.
+    snapshot = _fact_snapshot()
+    derived = snapshot["derived"]
+    assert isinstance(derived, dict)
+    derived["gender"] = "male"
+    derived["birth_date"] = "2002-02-01"
+    validated, _ = _validate_fact_snapshot(snapshot)
+    assert validated["derived"]["gender"] == "male"
+    assert validated["derived"]["birth_date"] == "2002-02-01"

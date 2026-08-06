@@ -253,12 +253,28 @@ _SCHOLARSHIP_SNAPSHOT_KEYS = {
     "scholarship_level",
     "evidence_block_ids",
 }
-_DERIVED_SNAPSHOT_KEYS = {
-    "is_985_211",
-    "highest_degree",
-    "employment_months",
-    "employment_or_internship_months",
-}
+# Derived fields frozen into every fact snapshot.  #194 added gender and
+# birth_date for demographic screening; the pre-demographic four-key form
+# remains valid for historical append-only snapshots, so both key sets are
+# accepted by the contract validator.
+_DERIVED_SNAPSHOT_KEYS = frozenset(
+    {
+        "is_985_211",
+        "highest_degree",
+        "employment_months",
+        "employment_or_internship_months",
+        "gender",
+        "birth_date",
+    }
+)
+_LEGACY_DERIVED_SNAPSHOT_KEYS = frozenset(
+    {
+        "is_985_211",
+        "highest_degree",
+        "employment_months",
+        "employment_or_internship_months",
+    }
+)
 _FACT_ID_PATTERN = re.compile(
     r"^(education|experience|skill|language|scholarship)-\d{3}$"
 )
@@ -468,11 +484,11 @@ def _validate_fact_snapshot(
     )
     if not isinstance(snapshot["derived"], dict):
         raise _contract_error("snapshot_derived")
-    _require_exact_keys(
-        snapshot["derived"],
+    if frozenset(snapshot["derived"]) not in {
         _DERIVED_SNAPSHOT_KEYS,
-        code="snapshot_derived_fields",
-    )
+        _LEGACY_DERIVED_SNAPSHOT_KEYS,
+    }:
+        raise _contract_error("snapshot_derived_fields")
 
     fact_ids: list[str] = []
     seen_fact_ids: set[str] = set()

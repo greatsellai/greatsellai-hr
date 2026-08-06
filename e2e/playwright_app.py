@@ -348,13 +348,13 @@ def _seed_match(
 
     hard_status = {
         "recommended": "pass",
-        "pending": "information_insufficient",
+        "pending": "partial",
         "unmet": "unmet",
     }[lane]
     evidence_coverage = {
-        "recommended": 0.9,
-        "pending": 0.4,
-        "unmet": 0.8,
+        "recommended": 90,
+        "pending": 40,
+        "unmet": 80,
     }[lane]
     total_score = {
         "recommended": 78.0,
@@ -387,7 +387,7 @@ def _seed_match(
         outcome = (
             "met"
             if lane == "recommended"
-            else "unknown"
+            else "partial"
             if lane == "pending" and priority == "must_have"
             else "not_met"
             if lane == "unmet" and priority == "must_have"

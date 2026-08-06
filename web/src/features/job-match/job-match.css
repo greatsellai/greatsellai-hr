@@ -8,7 +8,7 @@
   align-items: center;
 }
 
-.backoffice-ui-root .job-match-workspace.is-jobs .page-layout {
+.backoffice-ui-root .job-match-workspace .page-layout {
   grid-template-columns: minmax(0, 1fr);
 }
 
@@ -133,6 +133,11 @@
   gap: 0.625rem;
 }
 
+.backoffice-ui-root .job-match-workspace .match-run-actions {
+  justify-content: flex-end;
+  margin-top: var(--space-md);
+}
+
 .backoffice-ui-root .job-match-workspace .requirements-list {
   display: grid;
   gap: 0.5rem;
@@ -249,19 +254,49 @@
   overflow: hidden;
 }
 
+.backoffice-ui-root .job-match-workspace .match-table-wrap {
+  min-width: 0;
+}
+
 .backoffice-ui-root .job-match-workspace .match-table {
-  min-width: 62rem;
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.backoffice-ui-root .job-match-workspace .match-table th {
+  height: 2.75rem;
+  padding: 0.5rem 0.875rem;
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  font-weight: 650;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
 }
 
 .backoffice-ui-root .job-match-workspace .match-table th:nth-child(1) { width: 4.5rem; }
-.backoffice-ui-root .job-match-workspace .match-table th:nth-child(2) { width: 22%; }
+.backoffice-ui-root .job-match-workspace .match-table th:nth-child(2) { width: 26%; }
 .backoffice-ui-root .job-match-workspace .match-table th:nth-child(3) { width: 7rem; }
-.backoffice-ui-root .job-match-workspace .match-table th:nth-child(4) { width: 10rem; }
-.backoffice-ui-root .job-match-workspace .match-table th:nth-child(5) { width: 16rem; }
+.backoffice-ui-root .job-match-workspace .match-table th:nth-child(4) { width: 9.5rem; }
+.backoffice-ui-root .job-match-workspace .match-table th:nth-child(5) { width: 7rem; }
 .backoffice-ui-root .job-match-workspace .match-table th:nth-child(6) { width: 8.5rem; }
 
 .backoffice-ui-root .job-match-workspace .match-table td {
-  height: 4.5rem;
+  height: 4.25rem;
+  padding: 0.5rem 0.875rem;
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.backoffice-ui-root .job-match-workspace .match-table td strong {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .backoffice-ui-root .job-match-workspace .match-table td small {
@@ -271,20 +306,20 @@
   font-size: 0.75rem;
 }
 
+.backoffice-ui-root .job-match-workspace .match-candidate-row {
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-out);
+}
+
+.backoffice-ui-root .job-match-workspace .match-candidate-row:hover {
+  background: #fff8f7;
+}
+
 .backoffice-ui-root .job-match-workspace .match-rank,
 .backoffice-ui-root .job-match-workspace .match-score {
   color: var(--ink);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-}
-
-.backoffice-ui-root .job-match-workspace .match-score {
-  display: inline-flex;
-  min-width: 3.5rem;
-  justify-content: center;
-  padding: 0.25rem 0.5rem;
-  background: var(--surface-muted);
-  border-radius: var(--radius-xs);
 }
 
 .backoffice-ui-root .job-match-workspace .match-hard-status {
@@ -320,14 +355,6 @@
   background: var(--amber-tint);
 }
 
-.backoffice-ui-root .job-match-workspace .match-overview {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 0.625rem;
-  color: var(--ink-soft);
-  font-size: 0.75rem;
-}
-
 .backoffice-ui-root .job-match-workspace .match-open-button {
   white-space: nowrap;
 }
@@ -336,7 +363,7 @@
   min-height: 14rem;
 }
 
-/* JD 匹配以证据分层呈现，避免把「信息未知」视觉上等同于不匹配。 */
+/* 平铺结果：单列表格从上往下排，分档身份用标签呈现，整行可点开简历。 */
 .backoffice-ui-root .job-match-workspace .match-leaderboard {
   overflow: visible;
 }
@@ -359,34 +386,7 @@
   font-weight: 700;
 }
 
-.backoffice-ui-root .job-match-workspace .match-result-confidence {
-  display: flex;
-  width: 100%;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.375rem 0.5rem;
-  color: var(--ink-soft);
-  font-size: 0.75rem;
-  background: var(--surface-muted);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
-}
-
-.backoffice-ui-root .job-match-workspace .match-result-confidence strong {
-  color: var(--ink);
-  font-size: 0.8125rem;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 平铺结果：分档身份用每张卡片上的标签呈现，不再按档位分栏。 */
-.backoffice-ui-root .job-match-workspace .match-candidate-badges {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 0.3125rem;
-  align-items: center;
-}
-
+/* 平铺结果：分档身份用标签呈现，不再按档位分栏。 */
 .backoffice-ui-root .job-match-workspace .match-lane-tag {
   display: inline-flex;
   min-height: 1.5rem;
@@ -415,116 +415,15 @@
   background: var(--red-tint);
 }
 
-.backoffice-ui-root .job-match-workspace .match-results-loading-card {
-  display: block;
-  height: 6rem;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-list {
+.backoffice-ui-root .job-match-workspace .match-results-loading {
   display: grid;
   gap: 0.5rem;
-  margin: 0;
-  padding: 0.625rem;
-  list-style: none;
+  padding: 0.625rem 0;
 }
 
-.backoffice-ui-root .job-match-workspace .match-candidate-card {
-  display: grid;
-  gap: 0.5625rem;
-  padding: 0.6875rem;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
-  transition: border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-card:hover {
-  border-color: var(--line-strong);
-  box-shadow: var(--shadow-sm);
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-heading {
-  display: flex;
-  min-width: 0;
-  gap: 0.375rem;
-  align-items: flex-start;
-  justify-content: space-between;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-heading > div {
-  min-width: 0;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-heading strong,
-.backoffice-ui-root .job-match-workspace .match-candidate-heading small {
+.backoffice-ui-root .job-match-workspace .match-results-loading-card {
   display: block;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-heading strong {
-  overflow: hidden;
-  color: var(--ink);
-  font-size: 0.8125rem;
-  font-weight: 720;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-heading small {
-  margin-top: 0.125rem;
-  color: var(--ink-soft);
-  font-size: 0.75rem;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-heading .match-hard-status {
-  flex: 0 0 auto;
-  line-height: 1.15;
-  text-align: center;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.375rem;
-  margin: 0;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-metrics div {
-  min-width: 0;
-  padding: 0.375rem 0.4375rem;
-  background: var(--surface-muted);
-  border-radius: var(--radius-xs);
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-metrics dt {
-  overflow: hidden;
-  color: var(--ink-soft);
-  font-size: 0.6875rem;
-  line-height: 1.3;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-metrics dd {
-  margin: 0.125rem 0 0;
-  color: var(--ink);
-  font-size: 0.875rem;
-  font-weight: 750;
-  font-variant-numeric: tabular-nums;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-overview {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.1875rem 0.5rem;
-  color: var(--ink-soft);
-  font-size: 0.75rem;
-}
-
-.backoffice-ui-root .job-match-workspace .match-candidate-card .match-open-button {
-  min-height: 2rem;
-  justify-self: start;
-  padding: 0.3125rem 0.5rem;
-  font-size: 0.75rem;
+  height: 3rem;
 }
 
 @media (max-width: 47rem) {

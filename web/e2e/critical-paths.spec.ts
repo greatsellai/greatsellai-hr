@@ -1122,6 +1122,8 @@ test.describe("招聘工作台关键路径", () => {
     await page.getByRole("button", { name: "开始岗位评分（全部可匹配简历）" }).click();
     const progress = page.getByRole("progressbar", { name: "岗位评估进度" });
     await expect(progress).toBeVisible();
+    await expect(progress).toHaveClass(/semi-progress/);
+    await expect(progress.locator(".semi-progress-track")).toBeVisible();
     await secondStatusRequest;
     await expect(progress).toHaveAttribute("aria-valuenow", "33");
 

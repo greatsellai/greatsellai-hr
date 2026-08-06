@@ -191,42 +191,9 @@
   border-top: 1px solid var(--line);
 }
 
-.backoffice-ui-root .job-match-workspace .match-batch-progress-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-sm);
+.backoffice-ui-root .job-match-workspace .match-batch-progress-label {
   color: var(--ink-soft);
   font-size: 0.75rem;
-}
-
-.backoffice-ui-root .job-match-workspace .match-batch-progress-heading strong {
-  color: var(--ink);
-  font-size: 0.8125rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.backoffice-ui-root .job-match-workspace .match-batch-progress-track {
-  height: 0.5rem;
-  overflow: hidden;
-  background: var(--surface-muted);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-}
-
-.backoffice-ui-root .job-match-workspace .match-batch-progress-value {
-  display: block;
-  width: var(--match-batch-progress);
-  height: 100%;
-  background: var(--blue);
-  border-radius: inherit;
-  transition: width 180ms var(--ease-out);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .backoffice-ui-root .job-match-workspace .match-batch-progress-value {
-    transition: none;
-  }
 }
 
 

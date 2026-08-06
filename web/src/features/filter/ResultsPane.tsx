@@ -238,10 +238,10 @@ function CandidateExperienceCell({ item }: { item: CandidateSearchItem }) {
               : "工作年限待核实"
           }
           className="candidate-profile-title"
-          title="工作年限累计有明确起止日期的工作或实习经历。"
+          title="工作年限按有明确起止日期的工作或实习经历累计计算。"
         >
           {hasVerifiedTenure
-            ? `${formatDuration(totalTenureMonths)} 工作年限`
+            ? `工作年限：${formatDuration(totalTenureMonths)}`
             : "工作年限待核实"}
         </span>
       </div>
@@ -520,14 +520,14 @@ export function ResultsPane({
         </div>
         <div className="results-toolbar">
           <BackofficeButton
-            ariaLabel={`交给 Agent 精筛当前 ${search.total_count} 位候选人`}
+            ariaLabel={`交给招聘 Agent 精筛当前 ${search.total_count} 位候选人`}
             className="results-agent-refine"
             disabled={searching || search.total_count === 0}
             icon={<Icon name="spark" size={16} />}
             onClick={onRefineWithAgent}
             tone="primary"
           >
-            交给 Agent 精筛当前 {search.total_count} 人
+            交给招聘 Agent 精筛当前 {search.total_count} 人
           </BackofficeButton>
           <div className="score-sort-control">
             <BackofficeSelect
@@ -759,7 +759,7 @@ export function ResultsPane({
               <h2>没有符合条件的已启用简历</h2>
               <p>
                 调整筛选条件，或上传一份简历。AI
-                提取完成后，它会自动进入筛选库。
+                提取完成后，它会自动进入简历库。
               </p>
               <button
                 className="button button-primary"

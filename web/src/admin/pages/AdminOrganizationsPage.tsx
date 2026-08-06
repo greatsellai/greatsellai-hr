@@ -105,7 +105,7 @@ function OrganizationDetailPanel({
         (nextTrialMinute !== null && currentTrialMinute !== null && nextTrialMinute < currentTrialMinute)
       );
       if (requiresConfirmation && confirmationName.trim() !== detail.name) {
-        setError(`请输入工作区名称“${detail.name}”确认高风险变更。`);
+        setError(`请输入工作区名称「${detail.name}」确认高风险变更。`);
         return;
       }
       const update: Parameters<typeof adminApi.updateOrganization>[1] = { reason: reason.trim() };
@@ -175,7 +175,7 @@ function OrganizationDetailPanel({
       </dl>
 
       <section className="admin-detail-section">
-        <div className="admin-detail-section-heading"><h3>当前方案</h3></div>
+        <div className="admin-detail-section-heading"><h3>当前套餐</h3></div>
         <dl className="admin-fact-list">
           <div><dt>套餐</dt><dd>{detail.plan_name || detail.plan_code || "未分配"}</dd></div>
           <div><dt>试用开始</dt><dd>{formatDate(detail.trial_started_at)}</dd></div>
@@ -259,7 +259,7 @@ function OrganizationDetailPanel({
               <li key={member.membership_id}>
                 <span className="admin-avatar" aria-hidden="true">{member.full_name.trim().slice(0, 1) || "用"}</span>
                 <span><strong>{member.full_name || "未命名用户"}</strong><small>{member.email}</small></span>
-                <span><small>{member.role === "admin" ? "管理员" : "招聘官"}</small><AdminStatus status={member.is_active && member.user_is_active ? "active" : "inactive"} /></span>
+                <span><small>{member.role === "admin" ? "工作区管理员" : "招聘官"}</small><AdminStatus status={member.is_active && member.user_is_active ? "active" : "inactive"} /></span>
               </li>
             ))}
           </ul>

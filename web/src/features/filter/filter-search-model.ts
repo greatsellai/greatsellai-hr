@@ -315,7 +315,7 @@ function savedInstitutionClassifications(
     return {
       classifications: [],
       error:
-        "该历史筛选含有已下线的“非 985/211”条件，无法无损迁移。请重新设置院校类型后保存。",
+        "该历史筛选含有已下线的“非 985/211”条件，无法直接转换。请重新设置院校类型后保存。",
     };
   }
 
@@ -327,7 +327,7 @@ function savedInstitutionClassifications(
       classifications: [],
       error: `该历史筛选包含已下线的院校层级（${unsupportedTiers
         .map((tier) => legacyInstitutionTierLabels[tier])
-        .join("、")}），无法无损迁移。请重新设置院校类型后保存。`,
+        .join("、")}），无法直接转换。请重新设置院校类型后保存。`,
     };
   }
 
@@ -336,7 +336,7 @@ function savedInstitutionClassifications(
       return {
         classifications: [],
         error:
-          "该历史筛选同时包含新旧院校条件，无法无损迁移。请重新设置院校类型后保存。",
+          "该历史筛选同时包含新旧院校条件，无法直接转换。请重新设置院校类型后保存。",
       };
     }
     if (
@@ -348,7 +348,7 @@ function savedInstitutionClassifications(
       return {
         classifications: [],
         error:
-          "该历史筛选同时包含旧版 985/211 与其他院校条件，无法无损迁移。请重新设置院校类型后保存。",
+          "该历史筛选同时包含旧版 985/211 与其他院校条件，无法直接转换。请重新设置院校类型后保存。",
       };
     }
     return {
@@ -364,7 +364,7 @@ function savedInstitutionClassifications(
     return {
       classifications: [],
       error:
-        "该历史筛选同时包含旧版 985/211 与其他院校条件，无法无损迁移。请重新设置院校类型后保存。",
+        "该历史筛选同时包含旧版 985/211 与其他院校条件，无法直接转换。请重新设置院校类型后保存。",
     };
   }
 

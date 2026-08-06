@@ -46,7 +46,7 @@ export function LoginPage({
   const canSubmit = Boolean(email.trim() && password);
   return (
     <AuthPageLayout
-      description="进入只属于你所在团队的招聘工作区。候选人、岗位、评分和原始文件按工作区分别管理。"
+      description="进入只属于你所在团队的招聘工作区。候选人、岗位、评分和原文件按工作区分别管理。"
       eyebrow="大卖智聘｜AI 招聘决策工作台"
       title="登录大卖智聘"
       workspaceHref={workspaceHref}
@@ -101,7 +101,7 @@ export function LoginPage({
           {loading ? <><i className="spinner" />正在登录</> : "登录工作台"}
         </button>
         <p className="auth-footer-copy">
-          还没有团队工作区？<a href={workspaceHref("/register")}>申请免费试用30天</a>
+          还没有团队工作区？<a href={workspaceHref("/register")}>申请免费试用 30 天</a>
         </p>
       </form>
     </AuthPageLayout>
@@ -169,7 +169,7 @@ export function RegistrationPage({
       eyebrow={offerLoading
         ? "30 天免费体验，含 1,000 次大模型调用"
         : `${registrationOffer.trial_days} 天${registrationOffer.plan_name}免费体验，含 ${formatWholeNumber(registrationOffer.llm_call_limit)} 次大模型调用`}
-      title="让招聘判断，从第一份简历开始更快"
+      title="从第一份简历起，招聘判断就更快"
       variant="registration"
       workspaceHref={workspaceHref}
     >
@@ -185,7 +185,7 @@ export function RegistrationPage({
           <div className="auth-registration-heading">
             <p>免费创建团队工作台</p>
             <h2>开始 {registrationOffer.trial_days} 天{registrationOffer.plan_name}体验</h2>
-            <span>试用期内最多 {formatWholeNumber(registrationOffer.llm_call_limit)} 次大模型调用，简历提取、评分、JD 处理和招聘助手统一计入。</span>
+            <span>试用期内最多 {formatWholeNumber(registrationOffer.llm_call_limit)} 次大模型调用，简历提取、评分、JD 处理和招聘 Agent 统一计入。</span>
           </div>
           <form
             className="auth-form auth-registration-form"
@@ -356,7 +356,7 @@ export function EmailVerificationPage({
             : token
               ? verificationInProgress
                 ? "正在确认你的邮箱"
-                : "验证链接未完成验证"
+                : "链接验证未通过"
               : "请查收验证邮件"}
         </h2>
         {verificationSucceeded ? (
@@ -364,7 +364,7 @@ export function EmailVerificationPage({
         ) : token ? (
           <p>
             {loading || verificationInProgress
-              ? "请稍候，正在安全地验证这条链接。"
+              ? "请稍候，正在验证这条链接。"
               : "验证链接无效或已失效时，你可以登录后重新发送邮件。"}
           </p>
         ) : (
@@ -611,7 +611,7 @@ function AuthPageLayout({
           <ul className="auth-assurance-list">
             {isRegistration ? (
               <>
-                <li><Icon name="spark" size={17} /><span>免费体验进阶版已开放能力，先使用再决定</span></li>
+                <li><Icon name="spark" size={17} /><span>免费体验进阶版已开放的功能，先试用再决定</span></li>
                 <li><Icon name="layers" size={17} /><span>简历、岗位与候选人资料仅限你的团队访问</span></li>
                 <li><Icon name="user" size={17} /><span>AI 先整理判断依据，是否推进始终由 HR 决定</span></li>
               </>

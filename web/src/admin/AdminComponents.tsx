@@ -83,7 +83,7 @@ export function AdminError({ message, onRetry }: { message: string; onRetry: () 
     <div className="admin-state admin-state-error" role="alert">
       <span className="admin-state-icon"><Icon name="refresh" size={20} /></span>
       <div>
-        <h2>数据没有加载完成</h2>
+        <h2>数据加载失败</h2>
         <p>{message}</p>
       </div>
       <button className="button" onClick={onRetry} type="button">重新加载</button>

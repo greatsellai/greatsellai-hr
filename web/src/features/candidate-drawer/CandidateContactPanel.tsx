@@ -56,7 +56,7 @@ export function CandidateContactPanel({
     <section aria-labelledby="candidate-contact-heading" className="drawer-contact-summary">
       <div className="drawer-contact-summary-heading">
         <h3 id="candidate-contact-heading">联系方式</h3>
-        <p>仅从简历原文提取，不参与筛选、评分、JD 匹配或招聘助手。</p>
+        <p>仅从简历原文提取，不参与筛选、评分、JD 匹配或招聘 Agent。</p>
       </div>
       <dl className="drawer-contact-list">
         {orderedContacts.map((contact, index) => {

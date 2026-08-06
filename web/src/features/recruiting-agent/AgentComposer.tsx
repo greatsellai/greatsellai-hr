@@ -154,7 +154,7 @@ export function AgentComposer({
     const applyEditorAccessibility = () => {
       const editor = host.querySelector<HTMLElement>("[contenteditable]");
       if (!editor) return;
-      editor.setAttribute("aria-label", "向招聘助手提问");
+      editor.setAttribute("aria-label", "向招聘 Agent 提问");
       editor.setAttribute("aria-multiline", "true");
       editor.setAttribute("role", "textbox");
       editor.setAttribute("aria-disabled", String(inputLocked));

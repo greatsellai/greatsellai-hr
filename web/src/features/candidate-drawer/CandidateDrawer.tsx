@@ -12,6 +12,7 @@ import { Icon } from "../../icons";
 import { RESUME_EXTRACTION_FAILED_LABEL } from "../../resume-extraction-user-messages";
 import { TableSkeleton } from "../../backoffice/ui/TableSkeleton";
 import { formatLibraryDate } from "../../backoffice/utils/formatters";
+import { experienceTypeOptions } from "../filter/filter-model";
 import {
   hasSourceTextQualityIssue,
   hasSupersededReparseVersion,
@@ -314,7 +315,7 @@ export function CandidateDrawer({
           <div aria-label="详情标签" className="tabs" role="tablist">
             {(
               [
-                ["original", "原始文件"],
+                ["original", "原文件"],
                 ["summary", "AI 总结"],
                 ["score", "评分详情"],
                 ["evidence", "提取依据"],
@@ -389,7 +390,7 @@ export function CandidateDrawer({
                 busy={reparsingSource}
                 onOpenEvidence={() => onTabChange("evidence")}
                 onReparse={onReparseSource}
-                reason={`${RESUME_EXTRACTION_FAILED_LABEL}。当前版本不会展示评分结论，请重新解析原件后重试。`}
+                reason={`${RESUME_EXTRACTION_FAILED_LABEL}。当前版本不会展示评分结论，请重新解析原文件后重试。`}
               />
             ) : supersededReparse ? (
               <ScoreDetailsUnavailable
@@ -639,7 +640,7 @@ function ScoreDetailsUnavailable({
               onClick={onReparse}
               type="button"
             >
-              {busy ? <><i className="spinner" />正在创建</> : <><Icon name="refresh" size={16} />重新解析为新版本</>}
+              {busy ? <><i className="spinner" />正在重新解析</> : <><Icon name="refresh" size={16} />重新解析为新版本</>}
             </button>
           )}
           <button className="button button-ghost" onClick={onOpenEvidence} type="button">
@@ -666,7 +667,7 @@ function SourceTextQualityNotice({
       <div className="source-quality-notice-copy">
         <strong>{RESUME_EXTRACTION_FAILED_LABEL}</strong>
         <p>
-          系统未能从当前原件中提取可用信息。请重新解析原件后重试，旧版本会保留供追溯。
+          系统未能从当前原文件中提取可用信息。请重新解析原文件后重试，旧版本会保留供追溯。
         </p>
       </div>
       <button
@@ -677,7 +678,7 @@ function SourceTextQualityNotice({
       >
         {busy ? (
           <>
-            <i className="spinner" />正在创建
+            <i className="spinner" />正在重新解析
           </>
         ) : (
           <>
@@ -706,7 +707,7 @@ function SourceTextQualityBlockedSummary({
         </span>
         <h2>{RESUME_EXTRACTION_FAILED_LABEL}</h2>
         <p>
-          当前版本不会展示 AI 结论。请重新解析原件后重试。
+          当前版本不会展示 AI 结论。请重新解析原文件后重试。
         </p>
         <div className="source-quality-summary-actions">
           <button
@@ -717,7 +718,7 @@ function SourceTextQualityBlockedSummary({
           >
             {busy ? (
               <>
-                <i className="spinner" />正在创建
+                <i className="spinner" />正在重新解析
               </>
             ) : (
               <>
@@ -802,7 +803,7 @@ function OriginalDocumentTab({
       <section className="original-file-access" aria-label="原文件访问">
         <div>
           <strong>原文件访问</strong>
-          <p>打开此标签时会自动加载一次预览，并写入工作区访问审计。</p>
+          <p>打开此标签时会自动加载一次预览，并记录到工作区访问审计中。</p>
         </div>
         <div className="original-file-access-actions">
           {canPreview && (
@@ -838,7 +839,7 @@ function OriginalDocumentTab({
           <div className="pdf-loading">
             <span className="loading-line">
               <i className="spinner" />
-              正在载入受保护的原始文件…
+              正在载入受保护的原文件…
             </span>
           </div>
         ) : error ? (
@@ -847,7 +848,7 @@ function OriginalDocumentTab({
               <span className="empty-glyph">
                 <Icon name="document" size={23} />
               </span>
-              <h2>无法载入原始文件</h2>
+              <h2>无法载入原文件</h2>
               <p>{error}</p>
             </div>
           </div>
@@ -862,14 +863,14 @@ function OriginalDocumentTab({
             <iframe
               sandbox={resumeFileExtension(filename) === ".html" || resumeFileExtension(filename) === ".htm" ? "" : undefined}
               src={pdfUrl}
-              title={filename ? `${filename} 原始文件` : "原始文件"}
+              title={filename ? `${filename} 原文件` : "原文件"}
             />
           )
         ) : !canPreview && review ? (
           <div className="empty-state">
             <div className="empty-state-inner">
               <span className="empty-glyph"><Icon name="document" size={23} /></span>
-              <h2>{resumeFileTypeLabel(filename)} 原件仅支持下载</h2>
+              <h2>{resumeFileTypeLabel(filename)} 原文件仅支持下载</h2>
               <p>浏览器不能安全预览此格式，请使用上方“下载原文件”查看。</p>
             </div>
           </div>
@@ -958,9 +959,9 @@ function DrawerSummary({
           </h2>
           <p>
             {generationInProgress
-              ? "系统会在候选人信息提取完成后自动生成，并在完成后显示在这里。"
+              ? "系统会在候选人信息提取完成后自动生成，并显示在这里。"
               : summaryReadyToLoad
-                ? "AI 已完成生成，正在同步可展示的总结内容。"
+                ? "AI 总结已生成，正在加载内容。"
               : retryable
                 ? summaryError?.trim() || "本次自动生成未完成，你可以重新尝试。"
                 : "系统会在候选人信息提取完成后自动生成，无需手动操作。"}
@@ -1220,7 +1221,7 @@ function EvidenceTab({
         <div className="panel-heading">
           <div>
             <h3>已提取的简历事实</h3>
-            <p>历史简历可按需补充英语、成绩、奖项等 V2 事实。</p>
+            <p>历史简历可按需补充英语、成绩、奖项等事实信息。</p>
           </div>
           {review.is_active && (
             <button className="button" disabled={enriching} onClick={onEnrich} type="button">
@@ -1297,7 +1298,7 @@ function EvidenceTab({
                 {item.organization_name_raw || item.experience_name_raw || "未命名经历"}
                 {item.title_raw ? ` · ${item.title_raw}` : ""}
               </strong>
-              <span>{item.experience_type} · {evidenceBlockLabel(item.evidence_block_ids)}</span>
+              <span>{experienceTypeOptions.find((option) => option.value === item.experience_type)?.label ?? item.experience_type} · {evidenceBlockLabel(item.evidence_block_ids)}</span>
               {(item.leadership_role || item.award_result_raw) && (
                 <span>
                   {item.leadership_role ? `管理角色：${item.leadership_role}` : ""}

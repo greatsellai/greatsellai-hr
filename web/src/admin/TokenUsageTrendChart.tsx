@@ -440,10 +440,10 @@ export function TokenUsageTrendChart({
         <div aria-label="Token 使用趋势图" className="admin-token-chart-frame">
           <EChartsTrendCanvas description={chartDescription} option={chartOption} />
         </div>
-      ) : <div className="admin-token-trend-empty"><Icon name="activity" size={18} /><span>{summary.invocationCount ? `当前范围内有 ${numberFormat(summary.invocationCount)} 次调用，但模型未返回 Token usage。` : "当前范围内没有模型调用。调整日期或模型后再查看趋势。"}</span></div>}
+      ) : <div className="admin-token-trend-empty"><Icon name="activity" size={18} /><span>{summary.invocationCount ? `当前范围内有 ${numberFormat(summary.invocationCount)} 次调用，但模型未返回 Token 用量。` : "当前范围内没有模型调用。调整日期或模型后再查看趋势。"}</span></div>}
 
       {points.length > 0 && <details className="admin-token-trend-details">
-        <summary>查看趋势明细（{points.length} 个{granularity === "hour" ? "小时" : "日期"}桶）</summary>
+        <summary>查看趋势明细（{points.length} {granularity === "hour" ? "小时" : "天"}）</summary>
         <div className="admin-data-table-scroll">
           <table className="admin-data-table admin-token-trend-table">
             <thead><tr><th>{granularity === "hour" ? "开始时间" : "日期"}</th><th>输入</th><th>输出及推理</th><th>缓存命中</th><th>缓存写入</th><th>总 Token</th><th>已返回用量 / 调用</th></tr></thead>

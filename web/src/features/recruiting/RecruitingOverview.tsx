@@ -130,7 +130,7 @@ export function RecruitingOverview({
           <div className="empty-state-inner">
             <span className="empty-glyph"><Icon name="briefcase" size={23} /></span>
             <h2>从第一个职位开始</h2>
-            <p>先创建或发布岗位 JD，再从人才库加入候选人。</p>
+            <p>先创建或发布岗位 JD，再从简历库加入候选人。</p>
             <button className="button button-primary" onClick={onCreateJob} type="button">
               <Icon name="plus" size={16} />创建职位 JD
             </button>

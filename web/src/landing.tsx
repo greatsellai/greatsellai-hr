@@ -36,7 +36,7 @@ const comparisons = [
   {
     label: "传统招聘方式",
     title: "时间花在翻资料",
-    description: "每收到一批简历，就重新经历一次下载、阅读、摘录和对照。",
+    description: "每收到一批简历，就又得重新下载、阅读、摘录和对照一遍。",
     image: "/landing/hr/comparison-manual.webp",
     imageAlt: "HR 人员手工翻阅大量简历的工作场景",
     items: ["手动下载附件再逐份归档", "通读简历才能提取关键信息", "依靠个人经验记录评分", "拿着 JD 再逐条核对"],
@@ -103,7 +103,7 @@ const capabilitySteps = [
     title: "带依据推进",
     description: "招聘 Agent 帮助查询、比较和解释结果；每个结论都能回到原文，由 HR 决定是否推进。",
     image: "/landing/hr/capability-agent-evidence.webp",
-    imageAlt: "HR 人员查看 AI 招聘助手给出的判断依据",
+    imageAlt: "HR 人员查看招聘 Agent 给出的判断依据",
   },
 ];
 
@@ -121,7 +121,7 @@ const pricing = [
     eyebrow: "适合希望减少简历整理与 JD 撰写工作的团队",
     audience: "3–5 人",
     featured: true,
-    items: ["包含基础版全部能力", "招聘邮箱自动收简历", "AI-JD 撰写与确认", "30 天免费试用默认版本"],
+    items: ["包含基础版全部能力", "招聘邮箱自动收简历", "AI-JD 撰写与确认", "新账号默认 30 天免费试用"],
   },
   {
     name: "专业版",
@@ -152,7 +152,7 @@ const faq = [
   },
   {
     question: "不同团队的简历会被混在一起吗？",
-    answer: "不会。注册后会建立独立工作区，候选人、原始文件和 AI 结论都按工作区隔离，并通过登录会话访问。",
+    answer: "不会。注册后会建立独立工作区，候选人、原文件和 AI 结论都按工作区隔离，需登录后按工作区访问。",
   },
   {
     question: "三个版本有什么区别？",
@@ -406,7 +406,7 @@ export function LandingPage({
 
         <section className="landing-section landing-pricing-section" id="pricing" aria-labelledby="pricing-title">
           <div className="landing-shell">
-            <p className="landing-section-kicker">按团队当前阶段开始</p>
+            <p className="landing-section-kicker">按团队当前阶段选择版本</p>
             <div className="landing-section-heading landing-pricing-heading">
               <h2 id="pricing-title">先免费体验，<br />把时间留给更重要的招聘判断</h2>
               <p>新账号可先免费试用 30 天进阶版；付费订阅与专业版会在正式开放后提供。</p>

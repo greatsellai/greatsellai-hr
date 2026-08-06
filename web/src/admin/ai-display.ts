@@ -26,8 +26,8 @@ const featureCopy: Record<string, { name: string; description: string }> = {
   jd_generate: { name: "JD 生成", description: "根据岗位需求生成职位描述。" },
   jd_requirements_extract: { name: "JD 要求提取", description: "将职位描述整理为评估要求。" },
   requirements_extract: { name: "JD 要求提取", description: "将职位描述整理为评估要求。" },
-  recruiting_agent_turn: { name: "招聘助手对话", description: "为招聘助手生成下一轮回复。" },
-  agent: { name: "招聘助手对话", description: "为招聘助手生成下一轮回复。" },
+  recruiting_agent_turn: { name: "招聘 Agent 对话", description: "为招聘 Agent 生成下一轮回复。" },
+  agent: { name: "招聘 Agent 对话", description: "为招聘 Agent 生成下一轮回复。" },
   resume_ocr_page: { name: "简历 OCR 识别", description: "识别扫描件或图片简历页面。" },
 };
 

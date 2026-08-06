@@ -57,7 +57,7 @@ export function MailboxChannelList({
                   <span className="mailbox-channel-provider">
                     {mailboxProviderDisplayName(config)} · {mailboxAuthenticationModeLabel(config.authentication_mode)}
                   </span>
-                  <span>{config.email_address || "尚未配置接收邮箱"}</span>
+                  <span>{config.email_address || "尚未配置收件邮箱"}</span>
                 </span>
                 <span className={`status-pill${mailboxChannelStatusClass(config)}`}>
                   {mailboxChannelStatus(config)}

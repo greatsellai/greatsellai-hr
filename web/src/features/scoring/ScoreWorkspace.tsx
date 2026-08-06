@@ -128,7 +128,7 @@ export function ScoreWorkspace({
       item.label.trim().replace(/\s+/g, " ").toLowerCase(),
     );
     if (new Set(normalizedLabels).size !== normalizedLabels.length) {
-      notify("error", "同一评分规则内不能使用重复的维度名称。");
+      notify("error", "同一评分模板内不能使用重复的维度名称。");
       return;
     }
     setSavingTemplate(true);
@@ -292,7 +292,7 @@ export function ScoreWorkspace({
             <div className="panel-heading">
               <div>
                 <h2>新建评分模板</h2>
-                <p>权重总和必须为 100。模板用于简历库的通用评分；按 JD 的岗位评估请在智能匹配中发起。</p>
+                <p>权重总和必须为 100。模板用于简历库的通用评分；基于 JD 的岗位评估请在智能匹配中发起。</p>
               </div>
               <BackofficeButton
                 icon={<Icon name="refresh" size={15} />}
@@ -310,10 +310,10 @@ export function ScoreWorkspace({
             )}
             <section aria-labelledby="score-preset-heading" className="score-template-preset-section">
               <div className="score-template-preset-copy">
-                <h3 id="score-preset-heading">从预置起点开始</h3>
-                <p>选择后仍可修改规则名称、维度、权重和评分说明。</p>
+                <h3 id="score-preset-heading">从预设模板开始</h3>
+                <p>选择后仍可修改模板名称、维度、权重和评分说明。</p>
               </div>
-              <div className="score-template-presets" role="group" aria-label="评分规则预置起点">
+              <div className="score-template-presets" role="group" aria-label="评分模板预置起点">
                 {scoreTemplatePresets.map((preset) => (
                   <button
                     aria-pressed={selectedPresetId === preset.id}
@@ -331,7 +331,7 @@ export function ScoreWorkspace({
             <div className="form-grid">
               <div className="field-stack span-full">
                 <label className="field-label" htmlFor="template-name">
-                  规则名称
+                  模板名称
                 </label>
                 <input
                   className="field"
@@ -484,7 +484,7 @@ export function ScoreWorkspace({
             <div className="panel-heading">
               <div>
                 <h2>批量生成通用评分</h2>
-                <p>按所选模板对当前工作区所有符合条件的启用简历评分。岗位 JD 匹配度请在智能匹配中运行。</p>
+                <p>按所选模板对当前工作区所有符合条件的启用简历评分。岗位 JD 匹配度请在智能匹配中查看。</p>
               </div>
             </div>
             <div className="field-stack">
@@ -657,7 +657,7 @@ function TemplateOptimizationPreview({
         <TemplateSnapshot isProposed template={proposedTemplate} title="AI 建议" />
       </div>
       <div className="score-template-improvement-notes">
-        <h5>AI 说明的改进点</h5>
+        <h5>AI 提出的改进点</h5>
         {optimization.improvement_notes.length ? (
           <ul>
             {optimization.improvement_notes.map((note, index) => (
@@ -676,7 +676,7 @@ function TemplateOptimizationPreview({
             icon={<Icon name="document" size={16} />}
             onClick={onLoadIntoDraft}
           >
-            载入编辑器后调整
+            载入编辑器修改
           </BackofficeButton>
           <BackofficeButton
             icon={<Icon name="check" size={16} />}

@@ -68,7 +68,7 @@ function FeedbackDetail({ item }: { item: PlatformWorkspaceFeedback | null }) {
 
       <dl className="admin-detail-metrics admin-feedback-metrics">
         <div><dt>提交时间</dt><dd>{formatDate(item.created_at, true)}</dd></div>
-        <div><dt>奖励调用</dt><dd>{numberFormat(Math.max(0, item.reward_call_count || 0))}</dd></div>
+        <div><dt>奖励发放次数</dt><dd>{numberFormat(Math.max(0, item.reward_call_count || 0))}</dd></div>
         <div><dt>待发放时间</dt><dd>{formatDate(item.reward_due_at, true)}</dd></div>
         <div><dt>发放时间</dt><dd>{formatDate(item.reward_granted_at, true)}</dd></div>
       </dl>

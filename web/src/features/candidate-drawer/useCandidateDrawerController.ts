@@ -410,12 +410,12 @@ export function useCandidateDrawerController({
       const downloadUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = downloadUrl;
-      link.download = review?.original_filename || "resume";
+      link.download = review?.original_filename || "未命名简历";
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
-      notify("success", "已开始下载原始文件，系统已记录本次访问。");
+      notify("success", "已开始下载原文件，系统已记录本次访问。");
     } catch (error) {
       notify("error", formatError(error));
     } finally {
@@ -532,7 +532,7 @@ export function useCandidateDrawerController({
       await refreshReview(parsed.resume_id);
       notify(
         "success",
-        "已创建新的解析版本，正在基于原件重新提取。原版本会保留，不会被覆盖。",
+        "已创建新的解析版本，正在基于原文件重新提取。原版本会保留，不会被覆盖。",
       );
     } catch (error) {
       notify("error", formatError(error));

@@ -322,11 +322,11 @@ export function UploadPage({
 
   const statusText = (item: UploadQueueItem): string => {
     if (item.status === "queued") return "等待上传";
-    if (item.status === "uploading") return "正在保存原件并提取文字";
+    if (item.status === "uploading") return "正在保存原文件并提取文字";
     if (item.status === "extracting") {
       return item.response?.ai_extraction_status === "running"
         ? "AI 正在提取候选人姓名、教育、经历和技能"
-        : "原件已保存，AI 正在排队提取候选人姓名和结构化事实";
+        : "原文件已保存，AI 正在排队提取候选人姓名和结构化事实";
     }
     if (item.status === "attention") {
       if (
@@ -346,7 +346,7 @@ export function UploadPage({
         ? RESUME_EXTRACTION_FAILED_LABEL
         : item.response?.quality_flags.length
         ? "AI 已提取并启用，存在解析提示"
-        : "AI 已提取并已进入筛选库";
+        : "AI 已提取并已进入简历库";
     }
     return item.error || "上传没有完成，请重试。";
   };

@@ -43,35 +43,35 @@ function humanizeAgentError(
 ): string {
   if (isApiError(error)) {
     const messages: Record<string, string> = {
-      agent_model_not_configured: "招聘助手尚未配置 AI 服务。",
-      agent_model_timeout: "招聘助手响应超时，请稍后重试。",
-      agent_model_network_error: "招聘助手暂时无法连接 AI 服务，请稍后重试。",
-      agent_model_unavailable: "招聘助手所用 AI 服务暂时不可用，请稍后重试。",
-      agent_model_request_rejected: "招聘助手当前配置暂时无法处理这类请求，请联系工作区管理员。",
-      agent_service_unavailable: "招聘助手暂时不可用，请稍后重试。",
+      agent_model_not_configured: "招聘 Agent 尚未配置 AI 服务。",
+      agent_model_timeout: "招聘 Agent 响应超时，请稍后重试。",
+      agent_model_network_error: "招聘 Agent 暂时无法连接 AI 服务，请稍后重试。",
+      agent_model_unavailable: "招聘 Agent 所用 AI 服务暂时不可用，请稍后重试。",
+      agent_model_request_rejected: "招聘 Agent 当前配置暂时无法处理这类请求，请联系工作区管理员。",
+      agent_service_unavailable: "招聘 Agent 暂时不可用，请稍后重试。",
       agent_talent_profile_unavailable: "人才画像暂时无法生成，请稍后重试。",
-      agent_model_invalid_response: "招聘助手暂时没有返回有效结果，请重新发送。",
-      agent_model_empty_response: "招聘助手暂时没有返回有效结果，请重新发送。",
-      agent_model_missing_final_answer: "招聘助手暂时没有完成回答，请重新发送。",
-      agent_model_invalid_tool_calls: "招聘助手的工具调用异常，请重新发送。",
-      agent_model_tool_loop_limit: "招聘助手本次处理步骤过多，请换一种说法后重试。",
-      agent_conversation_stale: "当前工作范围已在另一页面更新，请重新发送这条问题。",
-      agent_conversation_not_found: "上次的助手工作范围已失效，请重新发送这条问题。",
+      agent_model_invalid_response: "招聘 Agent 暂时没有返回有效结果，请重新发送。",
+      agent_model_empty_response: "招聘 Agent 暂时没有返回有效结果，请重新发送。",
+      agent_model_missing_final_answer: "招聘 Agent 暂时没有完成回答，请重新发送。",
+      agent_model_invalid_tool_calls: "招聘 Agent 的工具调用异常，请重新发送。",
+      agent_model_tool_loop_limit: "招聘 Agent 本次处理步骤过多，请换一种说法后重试。",
+      agent_conversation_stale: "当前工作范围已在另一页面更新，请重新发送这个问题。",
+      agent_conversation_not_found: "上次的招聘 Agent 工作范围已失效，请重新发送这个问题。",
       agent_context_reference_not_found: "本次人才画像结果已不可用，请重新开始找人。",
-      agent_filter_scope_not_found: "当前初筛范围已失效，请回到筛选结果后重新交给 Agent。",
-      agent_filter_scope_expired: "当前初筛范围已失效，请回到筛选结果后重新交给 Agent。",
+      agent_filter_scope_not_found: "当前初筛范围已失效，请回到筛选结果后重新交给招聘 Agent。",
+      agent_filter_scope_expired: "当前初筛范围已失效，请回到筛选结果后重新交给招聘 Agent。",
       agent_filter_scope_invalid: "当前初筛条件暂时无法冻结，请调整后重试。",
       agent_filter_scope_pagination_invalid: "当前初筛结果暂时无法完整读取，请稍后重试。",
-      candidate_filter_scope_not_found: "当前初筛范围已失效，请回到筛选结果后重新交给 Agent。",
+      candidate_filter_scope_not_found: "当前初筛范围已失效，请回到筛选结果后重新交给招聘 Agent。",
     };
     if (messages[error.message]) return messages[error.message];
     if (error.message.startsWith("agent_model_http_")) {
       return error.message === "agent_model_http_429"
-        ? "招聘助手请求过于频繁，请稍后重试。"
-        : "招聘助手暂时不可用，请稍后重试。";
+        ? "招聘 Agent 请求过于频繁，请稍后重试。"
+        : "招聘 Agent 暂时不可用，请稍后重试。";
     }
     if (error.status >= 500) {
-      return "招聘助手暂时不可用，请稍后重试。";
+      return "招聘 Agent 暂时不可用，请稍后重试。";
     }
   }
   if (
@@ -80,7 +80,7 @@ function humanizeAgentError(
       error.message,
     )
   ) {
-    return "招聘助手暂时不可用，请稍后重试。";
+    return "招聘 Agent 暂时不可用，请稍后重试。";
   }
   return formatError(error);
 }
@@ -363,7 +363,7 @@ function TalentSearchRunPanel({
   const isProcessing = run.status === "queued" || run.status === "running";
   const isHardFilterRecall = run.result_mode === "hard_filter_recall";
   const statusLabel = isHardFilterRecall
-    ? "硬筛已命中候选人"
+    ? "硬条件筛选已命中候选人"
     : (run.status === "queued"
       ? "已排队，等待 AI 核验"
       : run.status === "running"
@@ -383,7 +383,7 @@ function TalentSearchRunPanel({
           <small>
             严格召回 {run.total_recalled_count} 位候选人
             {isHardFilterRecall
-              ? "；本次只有明确硬条件，无需 AI 语义核验。"
+              ? "；本次仅应用了明确的硬条件，无需 AI 语义核验。"
               : run.job_match_batch_id
                 ? `；已完成 ${run.match_completed_count}/${run.match_total_count} 位 AI 核验。`
                 : "；当前没有候选人进入 AI 核验。"}
@@ -565,7 +565,7 @@ function TalentSearchProfileCard({
             {hardFilters.map((label) => <small key={label}>{label}</small>)}
           </div>
           <small className="talent-profile-filter-note">
-            院校类型内满足任一即可；它与学历、年限、经历、精确技能等其他硬条件同时生效。
+            院校类型满足其中一项即可；该条件与学历、年限、经历、精确技能等其他硬条件同时生效。
           </small>
         </div>
       )}
@@ -597,7 +597,7 @@ function TalentSearchProfileCard({
       )}
       {!!revision.aliases.length && (
         <div className="talent-profile-section">
-          <span>可识别表达</span>
+          <span>其他叫法</span>
           <div className="talent-profile-chips is-muted">
             {revision.aliases.map((alias) => <small key={alias}>{alias}</small>)}
           </div>
@@ -804,7 +804,7 @@ export function RecruitingAgentPage({
               id: Date.now() + 1,
               role: "assistant",
               content: profile.status === "confirmed"
-                ? "已恢复当前已确认的人才画像。需要发起找人时，请明确点击“开始找人”。"
+                ? "已恢复当前已确认的人才画像。需要开始找人时，请点击“开始找人”。"
                 : "已恢复当前人才画像草案。可直接补充条件，或确认后开始找人。",
               talentProfile: profile,
             },
@@ -1041,7 +1041,7 @@ export function RecruitingAgentPage({
       appendTalentProfileReply(
         profile,
         profile.status === "confirmed"
-          ? "已恢复这份已确认的人才画像。需要发起找人时，请明确点击“开始找人”。"
+          ? "已恢复这份已确认的人才画像。需要开始找人时，请点击“开始找人”。"
           : "已恢复这份人才画像草案。可直接补充条件，或确认后开始找人。",
       );
     } catch (error) {
@@ -1191,15 +1191,15 @@ export function RecruitingAgentPage({
         restoredChatHistoryConversationIdRef.current = null;
         const restored = await restoreConversation(conversation?.conversation_id);
         return restored
-          ? "当前工作范围已在另一页面更新，现已同步。请重新发送这条问题。"
-          : "上次的助手工作范围已失效，请重新发送这条问题。";
+          ? "当前工作范围已在另一页面更新，现已同步。请重新发送这个问题。"
+          : "上次的招聘 Agent 工作范围已失效，请重新发送这个问题。";
       } catch {
         return "当前工作范围已在另一页面更新，但暂时无法同步。请稍后重试。";
       }
     }
     if (error.status === 404 && error.message === "agent_conversation_not_found") {
       forgetConversation();
-      return "上次的助手工作范围已失效。下一条提问会创建新的工作范围。";
+      return "上次的招聘 Agent 工作范围已失效。您下一次提问会创建新的工作范围。";
     }
     return null;
   };

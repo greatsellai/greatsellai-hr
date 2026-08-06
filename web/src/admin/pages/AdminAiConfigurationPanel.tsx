@@ -42,9 +42,9 @@ const routeFeatures = [
   { value: "score_template_optimize", label: "评分模板优化", detail: "将已有评分标准完善为可复核的草案" },
   { value: "resume_summary", label: "简历总结", detail: "生成候选人概览与经历摘要" },
   { value: "jd_generate", label: "JD 生成", detail: "根据需求撰写岗位 JD" },
-  { value: "jd_requirements_extract", label: "JD 要求提取", detail: "将岗位 JD 归一为评分要求" },
+  { value: "jd_requirements_extract", label: "JD 要求提取", detail: "将岗位 JD 整理为评分要求" },
   { value: "jd_match", label: "JD 匹配", detail: "分析候选人与岗位的匹配度" },
-  { value: "recruiting_agent_turn", label: "招聘助手对话", detail: "为招聘助手生成下一轮回复" },
+  { value: "recruiting_agent_turn", label: "招聘 Agent 对话", detail: "为招聘 Agent 生成下一轮回复" },
   { value: "resume_ocr_page", label: "简历 OCR 识别", detail: "识别扫描件或图片简历页面" },
 ] as const;
 
@@ -90,6 +90,12 @@ const structuredRouteFeatures = new Set([
   "jd_requirements_extract",
   "jd_match",
 ]);
+
+const AI_CAPABILITY_LABELS: Record<AiModelCapability, string> = {
+  chat: "对话",
+  tools: "工具调用",
+  json_schema: "JSON Schema",
+};
 
 function routeCapabilityRequirements(feature: string): AiModelCapability[] {
   if (structuredRouteFeatures.has(feature)) return ["chat", "tools", "json_schema"];
@@ -281,7 +287,7 @@ export function AdminAiConfigurationPanel({
   const selectedRouteFeature = routeFeatures.find((feature) => feature.value === routeFeature) ?? routeFeatures[0];
   const currentRoute = routes.find((route) => route.feature === routeFeature) ?? null;
   const activeRouteVersion = latestRouteVersion(routeVersions);
-  const routeCapabilitiesLabel = routeCapabilities.join("、");
+  const routeCapabilitiesLabel = routeCapabilities.map((cap) => AI_CAPABILITY_LABELS[cap] ?? cap).join("、");
 
   useEffect(() => {
     if (!modelDraft.provider_slug && enabledProviders[0]) {
@@ -542,7 +548,7 @@ export function AdminAiConfigurationPanel({
   return (
     <div className="admin-ai-config-layout">
       <aside className="admin-panel admin-ai-config-guide" aria-label="配置发布说明">
-        <span className="admin-ai-config-kicker"><Icon name="gear" size={16} />平台 AI 控制面</span>
+        <span className="admin-ai-config-kicker"><Icon name="gear" size={16} />平台 AI 控制台</span>
         <h2>按顺序配置，再发布路由</h2>
         <ol>
           <li>接入模型服务，只填写服务端的凭据引用。</li>
@@ -562,7 +568,7 @@ export function AdminAiConfigurationPanel({
         <header className="admin-section-heading">
           <div>
             <h2 id="admin-ai-config-title">配置与发布</h2>
-            <p>创建记录后不可直接覆盖；模型与路由变更都会留下可审计版本。</p>
+            <p>记录创建后不可直接覆盖；模型与路由的每次变更都会留下可审计版本。</p>
           </div>
         </header>
         <div className="admin-segmented admin-ai-config-tabs" aria-label="AI 配置操作">
@@ -581,7 +587,7 @@ export function AdminAiConfigurationPanel({
           </div>
           <fieldset className="admin-toggle-group"><legend>模型服务状态</legend><label><input checked={providerDraft.is_enabled} onChange={(event) => setProviderDraft({ ...providerDraft, is_enabled: event.target.checked })} type="checkbox" /><span><strong>创建后立即启用</strong><small>启用后才可以被模型和功能规则使用。</small></span></label></fieldset>
           <label className="admin-reason-field"><span>变更原因</span><textarea className="textarea-field" maxLength={500} onChange={(event) => setProviderDraft({ ...providerDraft, reason: event.target.value })} placeholder="例如：新增备用模型服务商" required rows={3} value={providerDraft.reason} /></label>
-          <p className="admin-form-warning">高级请求参数暂不在浏览器配置，避免把鉴权或运行参数误写入持久化配置。</p>
+          <p className="admin-form-warning">高级请求参数暂不支持在浏览器中配置，以免鉴权或运行参数被误写入持久化配置。</p>
           {!!providers.length && <section className="admin-ai-provider-runtime" aria-label="模型服务连接状态">
             <div>
               <strong>已接入模型服务</strong>
@@ -604,7 +610,7 @@ export function AdminAiConfigurationPanel({
         </form>}
 
         {section === "model" && <form className="admin-management-form admin-ai-config-form" onSubmit={submitModel}>
-          <div className="admin-ai-form-heading"><div><h3>配置模型</h3><p>模型归属于一个已接入的模型服务，并声明功能调用所需的能力。</p></div><span className="admin-ai-step-count">{enabledProviders.length} 个已启用服务</span></div>
+          <div className="admin-ai-form-heading"><div><h3>配置模型</h3><p>模型归属于一个已接入的模型服务，并勾选其具备的功能调用能力。</p></div><span className="admin-ai-step-count">{enabledProviders.length} 个已启用服务</span></div>
           {!enabledProviders.length && <p className="admin-form-warning">请先接入并启用至少一个模型服务，才能配置模型。</p>}
           <div className="admin-form-grid">
             <label><span>所属模型服务</span><select className="select-field" disabled={!enabledProviders.length} onChange={(event) => setModelDraft({ ...modelDraft, provider_slug: event.target.value })} required value={modelDraft.provider_slug}>{!enabledProviders.length && <option value="">暂无可用模型服务</option>}{enabledProviders.map((provider) => <option key={provider.provider_id} value={provider.slug}>{providerDisplayName(provider)}</option>)}</select></label>
@@ -617,10 +623,10 @@ export function AdminAiConfigurationPanel({
           <fieldset className="admin-toggle-group"><legend>模型能力</legend>
             <label><input checked readOnly type="checkbox" /><span><strong>对话（chat）</strong><small>当前所有招聘功能都需要基础对话能力。</small></span></label>
             <label><input checked={modelDraft.tools} onChange={(event) => setModelDraft({ ...modelDraft, tools: event.target.checked, json_schema: event.target.checked ? modelDraft.json_schema : false })} type="checkbox" /><span><strong>工具调用（tools）</strong><small>支持结构化工具与函数调用。</small></span></label>
-            <label><input checked={modelDraft.json_schema} onChange={(event) => setModelDraft({ ...modelDraft, json_schema: event.target.checked, tools: event.target.checked ? true : modelDraft.tools })} type="checkbox" /><span><strong>JSON Schema</strong><small>提取、评分和匹配等结构化结果建议启用。</small></span></label>
-            <label><input checked={modelDraft.is_enabled} onChange={(event) => setModelDraft({ ...modelDraft, is_enabled: event.target.checked })} type="checkbox" /><span><strong>创建后立即启用</strong><small>禁用的模型无法被新路由发布使用。</small></span></label>
+            <label><input checked={modelDraft.json_schema} onChange={(event) => setModelDraft({ ...modelDraft, json_schema: event.target.checked, tools: event.target.checked ? true : modelDraft.tools })} type="checkbox" /><span><strong>JSON Schema</strong><small>建议启用，以支持提取、评分和匹配等结构化结果。</small></span></label>
+            <label><input checked={modelDraft.is_enabled} onChange={(event) => setModelDraft({ ...modelDraft, is_enabled: event.target.checked })} type="checkbox" /><span><strong>创建后立即启用</strong><small>禁用后，新发布的路由无法使用该模型。</small></span></label>
           </fieldset>
-          <label className="admin-reason-field"><span>变更原因</span><textarea className="textarea-field" maxLength={500} onChange={(event) => setModelDraft({ ...modelDraft, reason: event.target.value })} placeholder="例如：新增主用结构化提取模型" required rows={3} value={modelDraft.reason} /></label>
+          <label className="admin-reason-field"><span>变更原因</span><textarea className="textarea-field" maxLength={500} onChange={(event) => setModelDraft({ ...modelDraft, reason: event.target.value })} placeholder="例如：新增主力结构化提取模型" required rows={3} value={modelDraft.reason} /></label>
           {error && <p className="admin-form-error" role="alert">{error}</p>}{notice && <p className="admin-form-success" role="status">{notice}</p>}
           <div className="admin-form-actions"><button className="button button-primary" disabled={saving === "model" || !enabledProviders.length} type="submit">{saving === "model" ? <><i className="spinner" />正在创建</> : <><Icon name="plus" size={16} />创建模型</>}</button></div>
         </form>}
@@ -631,7 +637,7 @@ export function AdminAiConfigurationPanel({
           {routeVersionsState === "error" && <div className="admin-ai-route-load-error" role="alert"><span>当前路由版本加载失败：{routeVersionsError}</span><button className="button" onClick={() => void loadRouteVersions()} type="button">重新加载</button></div>}
 
           {!routeReview && <>
-            {!routeModels.length && <p className="admin-form-warning">当前功能需要 {routeCapabilitiesLabel} 能力。请先创建并启用兼容模型，并让对应模型服务显示为“已连接”，才能发布规则。</p>}
+            {!routeModels.length && <p className="admin-form-warning">当前功能需要 {routeCapabilitiesLabel} 能力。请先创建并启用兼容模型，并让对应模型服务显示为「已连接」，才能发布路由。</p>}
             <div className="admin-form-grid">
               <label><span>AI 功能</span><select className="select-field" onChange={(event) => selectRouteFeature(event.target.value as RouteFeature)} value={routeFeature}>{routeFeatures.map((feature) => <option key={feature.value} value={feature.value}>{feature.label}</option>)}</select><small>{selectedRouteFeature.detail}</small></label>
               <label><span>路由显示名称</span><input className="field" maxLength={120} onChange={(event) => updateRouteDraft((draft) => ({ ...draft, display_name: event.target.value }))} required value={routeDraft.display_name} /></label>
@@ -674,7 +680,7 @@ export function AdminAiConfigurationPanel({
             </div>
             <dl className="admin-ai-route-review-reason"><div><dt>发布原因</dt><dd>{routeReview.payload.reason}</dd></div></dl>
             <section aria-labelledby="admin-ai-route-change-title" className="admin-ai-route-change-warning">
-              <h5 id="admin-ai-route-change-title">变化警示</h5>
+              <h5 id="admin-ai-route-change-title">变更提示</h5>
               <ul>{routeReview.changes.map((change) => <li key={change}>{change}</li>)}</ul>
               <p>已发布的历史版本不会被改写。请确认模型顺序、重试和回退条件与变更原因一致。</p>
             </section>

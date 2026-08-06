@@ -327,7 +327,7 @@ export function CandidateDataLifecyclePage({
           <p>
             {embedded
               ? "先设置候选人资料的保留策略；可在“操作与记录”中处理可恢复删除、导出和审计记录。"
-              : "在工作区内管理候选人资料的保留期限、可恢复删除、导出文件和原件访问记录。所有清理操作先进入恢复期，不会直接做出招聘结论。"}
+              : "在工作区内管理候选人资料的保留期限、可恢复删除、导出文件和原文件访问记录。所有清理操作都会先进入恢复期，不会立即永久清除数据。"}
           </p>
         </div>
         <div className="candidate-data-page-actions">
@@ -411,7 +411,7 @@ export function CandidateDataLifecyclePage({
                 </div>
                 <div className="candidate-data-retention-preview-stats">
                   <span><strong>{preview.eligible_candidate_count}</strong> 位候选人可能到期</span>
-                  <span><strong>{preview.eligible_resume_count}</strong> 份简历关联</span>
+                  <span>关联 <strong>{preview.eligible_resume_count}</strong> 份简历</span>
                   <span><strong>{preview.held_candidate_count}</strong> 位被保留标记跳过</span>
                 </div>
               </section>
@@ -435,7 +435,7 @@ export function CandidateDataLifecyclePage({
             <div className="panel-heading">
               <div>
                 <h2>可恢复删除</h2>
-                <p>此处仅显示删除批次与数量，不重新展示已删除候选人的姓名或原始文件名。</p>
+                <p>此处仅显示删除批次与数量，不重新展示已删除候选人的姓名或原文件名。</p>
               </div>
               <span className="status-pill">{deletions.length} 条记录</span>
             </div>
@@ -481,7 +481,7 @@ export function CandidateDataLifecyclePage({
                   <tbody>
                     {exports.map((item) => (
                       <tr key={item.export_id}>
-                        <td>{item.item_count} 位候选人{item.include_originals ? " · 含原始文件" : " · 不含原始文件"}</td>
+                        <td>{item.item_count} 位候选人{item.include_originals ? " · 含原文件" : " · 不含原文件"}</td>
                         <td>{formatLibraryDate(item.requested_at)}</td>
                         <td>{item.expires_at ? formatLibraryDate(item.expires_at) : "—"}</td>
                         <td><span className={`status-pill ${candidateDataExportStatusClass(item.status)}`}>{candidateDataExportStatusLabel(item.status)}</span>{item.error_code && <small className="candidate-data-error-code">{item.error_code}</small>}</td>
@@ -503,7 +503,7 @@ export function CandidateDataLifecyclePage({
             <div className="panel-heading">
               <div>
                 <h2>访问与操作审计</h2>
-                <p>查看、下载原件与导出文件均会记录在此。</p>
+                <p>查看、下载原文件与导出文件均会记录在此。</p>
               </div>
             </div>
             {auditEvents.length ? (
@@ -516,7 +516,7 @@ export function CandidateDataLifecyclePage({
                   </li>
                 ))}
               </ol>
-            ) : <CandidateDataEmptyState title="暂无审计记录" description="后续的原件访问、导出和删除操作会显示在这里。" />}
+            ) : <CandidateDataEmptyState title="暂无审计记录" description="后续的原文件访问、导出和删除操作会显示在这里。" />}
           </section>
 
           <section className="panel candidate-data-cleanup-history">

@@ -147,7 +147,7 @@ const PLAN_FEATURE_LABELS: Record<string, string> = {
   ai_scoring: "AI 简历评分",
   ai_summary: "AI 简历总结",
   jd_matching: "JD 匹配",
-  recruiting_agent: "招聘智能助手",
+  recruiting_agent: "招聘 Agent",
   mailbox_import: "邮箱简历入库",
   ai_jd_generation: "AI 生成 JD",
   interview_questions: "面试题生成",
@@ -414,7 +414,7 @@ export function AdminPlansPage() {
 
   return (
     <section className="admin-page-frame" aria-labelledby="admin-plans-title">
-      <AdminPageHeader actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新套餐</button>} description="管理价格、默认试用期、注册可见性和版本功能范围。" title="套餐与试用" />
+      <AdminPageHeader actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新套餐</button>} description="管理价格、默认试用天数、注册开放选项和套餐功能范围。" title="套餐与试用" />
       {state === "loading" && <div className="admin-panel"><AdminLoading label="正在读取套餐…" /></div>}
       {state === "error" && <div className="admin-panel"><AdminError message={error} onRetry={() => void load()} /></div>}
       {state === "ready" && !plans.length && <div className="admin-panel"><AdminEmpty description="系统还没有可配置的产品套餐。" title="没有套餐" /></div>}
@@ -427,7 +427,7 @@ export function AdminPlansPage() {
             </button>
           ))}</nav>
           {draft && <form className="admin-panel admin-plan-editor" onSubmit={(event) => void save(event)}>
-            <div className="admin-section-heading"><div><h2>编辑 {draft.name}</h2><p>保存后立即成为服务端权威配置。</p></div><span>{draft.code}</span></div>
+            <div className="admin-section-heading"><div><h2>编辑 {draft.name}</h2><p>保存后立即生效为服务端的正式配置。</p></div><span>{draft.code}</span></div>
             <div className="admin-form-grid">
               <label><span>套餐名称</span><input className="field" maxLength={120} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required value={draft.name} /></label>
               <label><span>月价（人民币元）</span><input className="field" min="0" onChange={(event) => setPriceYuan(event.target.value)} required step="0.01" type="number" value={priceYuan} /></label>
@@ -946,7 +946,7 @@ export function AdminAiPage() {
       {state === "error" && <div className="admin-panel"><AdminError message={error} onRetry={() => void load()} /></div>}
       {state === "ready" && tab === "runs" && (
         <div className="admin-table-panel">
-          <div className="admin-table-note"><span>最近 {runs.length} 条运行</span><small>不含提示词、简历或模型输出；模型 Token 请在「Token 用量」按模型服务和模型查看。</small></div>
+          <div className="admin-table-note"><span>最近 {runs.length} 条运行</span><small>不含提示词、简历或模型输出；如需查看各模型的 Token，请在「Token 用量」中按模型服务和模型筛选。</small></div>
           {runs.length ? <div className="admin-data-table-scroll"><table className="admin-data-table"><thead><tr><th>开始时间</th><th>公司</th><th>功能</th><th>服务</th><th>状态</th><th>调用</th></tr></thead><tbody>{runs.map((run) => <tr key={run.run_id}><td>{formatDate(run.started_at, true)}</td><td>{companyName(run.organization_id)}</td><td>{featureName(run.feature)}</td><td>{serviceKindDisplayName(run.service_kind)}</td><td><AdminStatus status={run.status} /></td><td>{numberFormat(run.invocation_count)}</td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前筛选范围内没有 AI 运行记录。" />}
         </div>
       )}
@@ -962,7 +962,7 @@ export function AdminAiPage() {
           {usageTrendState === "ready" && <TokenUsageTrendChart buckets={usageTrend} granularity={usageTrendGranularity} rangeEnd={usageEnd} rangeLabel={usageRange} rangeStart={usageStart} scopeLabel={tokenUsageScopeLabel} />}
           <div className="admin-table-panel">
             <div className="admin-table-note"><span>按公司、功能与模型拆分</span><small>仅统计模型实际返回的 Token。</small></div>
-            {usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table admin-token-usage-table"><thead><tr><th>公司</th><th>功能</th><th>模型服务</th><th>模型</th><th>调用</th><th title="仅统计模型实际返回 usage 的调用">Token</th></tr></thead><tbody>{usage.map((item, index) => <tr key={`${item.organization_id}-${item.feature}-${item.provider_slug}-${item.model_slug}-${index}`}><td>{companyName(item.organization_id)}</td><td>{featureName(item.feature)}</td><td><strong>{providerNames.get(item.provider_slug) ?? "模型服务"}</strong></td><td><strong>{modelNames.get(item.model_slug) ?? "已归档模型"}</strong></td><td>{numberFormat(item.invocation_count)}</td><td><TokenUsageCell cachedReadInputTokens={item.cached_read_input_tokens} cachedWriteInputTokens={item.cached_write_input_tokens} inputTokens={item.input_tokens} invocationCount={item.invocation_count} outputTokens={item.output_tokens} reasoningTokens={item.reasoning_tokens} tokenUsageInvocationCount={item.token_usage_invocation_count} totalTokens={item.total_tokens} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前时间区间内没有可汇总的模型 Token 用量。" />}
+            {usage.length ? <div className="admin-data-table-scroll"><table className="admin-data-table admin-token-usage-table"><thead><tr><th>公司</th><th>功能</th><th>模型服务</th><th>模型</th><th>调用</th><th title="仅统计模型实际返回 Token 用量的调用">Token</th></tr></thead><tbody>{usage.map((item, index) => <tr key={`${item.organization_id}-${item.feature}-${item.provider_slug}-${item.model_slug}-${index}`}><td>{companyName(item.organization_id)}</td><td>{featureName(item.feature)}</td><td><strong>{providerNames.get(item.provider_slug) ?? "模型服务"}</strong></td><td><strong>{modelNames.get(item.model_slug) ?? "已归档模型"}</strong></td><td>{numberFormat(item.invocation_count)}</td><td><TokenUsageCell cachedReadInputTokens={item.cached_read_input_tokens} cachedWriteInputTokens={item.cached_write_input_tokens} inputTokens={item.input_tokens} invocationCount={item.invocation_count} outputTokens={item.output_tokens} reasoningTokens={item.reasoning_tokens} tokenUsageInvocationCount={item.token_usage_invocation_count} totalTokens={item.total_tokens} /></td></tr>)}</tbody></table></div> : <DataTableEmpty description="当前时间区间内没有可汇总的模型 Token 用量。" />}
           </div>
         </>
       )}
@@ -976,8 +976,8 @@ export function AdminAiPage() {
           {models.length ? <ul className="admin-resource-list">{models.map((item) => <li key={item.model_id}><span><strong>{modelDisplayName(item)}</strong><small>模型服务：{providerNames.get(item.provider_slug) ?? "模型服务"}</small></span><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} label={item.is_enabled ? "可用" : "已停用"} /></li>)}</ul> : <DataTableEmpty description="尚未配置模型。" />}
         </section>
         <section className="admin-table-panel">
-          <div className="admin-table-note"><span>功能调用规则</span><small>{routes.length} 项功能</small></div>
-          {routes.length ? <ul className="admin-resource-list">{routes.map((item) => <li key={item.policy_id}><span><strong>{routeDisplayName(item)}</strong><small>{routeDisplayDescription(item)} · 当前版本 {item.current_version ?? "—"}</small></span><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} label={item.is_enabled ? "已启用" : "已停用"} /></li>)}</ul> : <DataTableEmpty description="尚未发布功能调用规则。" />}
+          <div className="admin-table-note"><span>功能调用路由</span><small>{routes.length} 项功能</small></div>
+          {routes.length ? <ul className="admin-resource-list">{routes.map((item) => <li key={item.policy_id}><span><strong>{routeDisplayName(item)}</strong><small>{routeDisplayDescription(item)} · 当前版本 {item.current_version ?? "—"}</small></span><AdminStatus status={item.is_enabled ? "enabled" : "disabled"} label={item.is_enabled ? "已启用" : "已停用"} /></li>)}</ul> : <DataTableEmpty description="尚未发布功能调用路由。" />}
         </section>
       </div>}
       {state === "ready" && tab === "configure" && <AdminAiConfigurationPanel models={models} onChanged={refreshData} providers={providers} routes={routes} />}

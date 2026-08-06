@@ -61,12 +61,12 @@ const ANALYSIS_PHASE_DETAILS: Record<
 > = {
   source_reading: {
     step: "第 1 步 / 3",
-    label: "读取简历原件",
-    waitingLabel: "等待读取原件",
-    runningLabel: "AI 正在读取原件",
-    queuedActivity: "已进入队列，准备读取简历原件",
+    label: "读取简历原文件",
+    waitingLabel: "等待读取原文件",
+    runningLabel: "AI 正在读取原文件",
+    queuedActivity: "已进入队列，准备读取简历原文件",
     runningActivities: [
-      "正在读取简历原件",
+      "正在读取简历原文件",
       "正在识别文本与版式",
       "正在整理可读内容",
     ],
@@ -231,7 +231,7 @@ function waitEstimateHint(estimate: ResumeAnalysisWaitEstimate): string {
   const basis = estimate.confidence === "observed"
     ? "根据当前工作区队列和近期同类任务耗时估算。"
     : "当前工作区历史样本较少，先按安全范围估算。";
-  return `${target}${basis}时间会随队列刷新。`;
+  return `${target}${basis}该估算时长会随队列情况自动更新。`;
 }
 
 function AnalysisActivity({
@@ -677,7 +677,7 @@ export function ResumeLibraryPage({
                                 className={`library-status is-${status.tone}`}
                                 title={
                                   sourceTextIssue
-                                    ? `${RESUME_EXTRACTION_FAILED_LABEL}。请重新解析原件后重试。`
+                                    ? `${RESUME_EXTRACTION_FAILED_LABEL}。请重新解析原文件后重试。`
                                     : supersededReparse
                                       ? "候选人已有更新版本，此解析版本不会被启用。"
                                       : resumeExtractionStatusMessage(

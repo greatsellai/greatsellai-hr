@@ -89,7 +89,7 @@ function humanizeError(error: unknown): string {
       password_reset_invalid_or_expired: "这条重置链接无效、已过期或已被使用。请重新申请新的链接。",
       trial_expired: "试用期已结束。数据已保留，请联系 GreatSell AI 团队继续使用。",
       trial_llm_call_quota_exhausted:
-        "本工作区的 1,000 次试用大模型调用已用完。数据仍会保留，请联系 GreatSell AI 团队继续使用。",
+        "本工作区的试用大模型调用额度已用完。数据仍会保留，请联系 GreatSell AI 团队继续使用。",
       organization_access_suspended: "当前工作区暂不可用，请联系 GreatSell AI 团队。",
       deepseek_api_key_not_configured:
         "AI 服务尚未配置。请先在服务器环境变量中配置后重试。",
@@ -112,21 +112,21 @@ function humanizeError(error: unknown): string {
       talent_search_profile_service_unavailable:
         "人才画像服务暂时不可用，请稍后重试。",
       completed_resume_cannot_be_reextracted:
-        "这份简历已启用，不能被后台 AI 任务覆盖。",
+        "这份简历已是当前生效版本，不能被后台 AI 任务覆盖。",
       resume_must_be_active_and_ready_for_source_reparse:
-        "当前版本尚未准备完成，暂时不能创建新的解析版本。",
+        "当前版本尚未就绪，暂时不能创建新的解析版本。",
       source_resume_ai_extraction_already_running:
-        "当前版本仍在 AI 提取中，请完成后再创建新的解析版本。",
+        "当前版本仍在 AI 提取中，请等待提取完成后再创建新的解析版本。",
       source_resume_reparse_already_running:
         "这份简历已经在创建新的解析版本，请稍后刷新。",
       resume_original_hash_mismatch:
-        "原始文件校验未通过，暂时不能重新解析。请重新上传原件。",
+        "原文件校验未通过，暂时不能重新解析。请重新上传原文件。",
       resume_original_file_not_found:
-        "找不到这份简历的原始文件。请重新上传该文件。",
+        "找不到这份简历的原文件。请重新上传该文件。",
       content_type_not_supported: "仅支持 PDF、Word、图片、Excel 和 HTML 简历文件。",
       unsupported_document_type: "仅支持 PDF、Word、图片、Excel 和 HTML 简历文件。",
       file_too_large: "简历文件过大，请压缩后再上传。",
-      empty_upload: "这份简历是空文件。请重新选择原始文件后上传。",
+      empty_upload: "这份简历是空文件。请重新选择原文件后上传。",
       not_a_pdf: "文件内容不是有效的 PDF。请重新导出后上传。",
       database_conflict: "该简历与正在处理的请求冲突。请稍后重试。",
       invalid_idempotency_key: "上传请求标识无效。请重新选择该简历后重试。",
@@ -141,13 +141,13 @@ function humanizeError(error: unknown): string {
       workspace_feedback_idempotency_key_reused:
         "这次问卷提交已被其他内容使用，请刷新后重新填写。",
       workspace_feedback_use_case_required:
-        "请完整填写四个问卷问题后再提交。",
+        "请完整填写问卷中的四个问题后再提交。",
       workspace_feedback_intended_outcome_required:
-        "请完整填写四个问卷问题后再提交。",
+        "请完整填写问卷中的四个问题后再提交。",
       workspace_feedback_friction_required:
-        "请完整填写四个问卷问题后再提交。",
+        "请完整填写问卷中的四个问题后再提交。",
       workspace_feedback_desired_change_required:
-        "请完整填写四个问卷问题后再提交。",
+        "请完整填写问卷中的四个问题后再提交。",
       workspace_feedback_contact_phone_required: "请填写联系电话后再提交。",
       workspace_feedback_contact_phone_invalid: "请填写有效的联系电话。",
       workspace_feedback_answer_too_long:
@@ -188,7 +188,7 @@ function humanizeError(error: unknown): string {
       mailbox_oauth_connection_required: "请先完成邮箱网页授权后再同步。",
       mailbox_oauth_not_configured: "该邮箱服务商尚未在当前部署启用，请联系部署管理员。",
       mailbox_oauth_callback_origin_invalid:
-        "当前访问入口无法完成授权回调，请从正式招聘工作台重新发起授权。",
+        "当前访问入口无法完成授权回调，请从招聘工作台页面重新发起授权。",
       mailbox_oauth_reauthorization_required:
         "邮箱授权已失效，请重新授权。历史入库记录不会受影响。",
       mailbox_oauth_token_exchange_failed: "邮箱授权服务暂时不可用，请稍后重新授权。",
@@ -202,8 +202,8 @@ function humanizeError(error: unknown): string {
       mailbox_retention_policy_invalid: "内容保留策略无效，请重新选择后保存。",
       mailbox_retention_run_not_found: "这条清理记录已不存在或无法访问。",
       organization_admin_required: "仅工作区管理员可以修改保留策略或执行清理。",
-      candidate_data_file_access_purpose_invalid: "原件访问方式无效，请重新发起查看或下载。",
-      candidate_data_file_access_not_found: "这次原件访问已失效，请重新发起查看或下载。",
+      candidate_data_file_access_purpose_invalid: "原文件访问方式无效，请重新发起查看或下载。",
+      candidate_data_file_access_not_found: "这次原文件访问已失效，请重新发起查看或下载。",
       candidate_data_session_nonce_missing: "当前登录会话已更新，请刷新页面后重新操作。",
       candidate_data_deletion_batch_not_found: "这条删除记录已不存在或无法访问。",
       candidate_data_deletion_batch_not_restorable: "这条删除记录当前不能恢复。",
@@ -215,8 +215,8 @@ function humanizeError(error: unknown): string {
       candidate_data_export_download_not_found: "导出文件不可用或已过期，请重新创建导出。",
       candidate_data_export_candidate_selection_invalid: "请选择一位或多位可访问的候选人后再导出。",
       candidate_data_export_snapshot_unavailable: "导出所需的候选人快照已不可用，请重新创建导出。",
-      candidate_data_export_original_unavailable: "部分原始文件不可用，无法创建包含原件的导出。",
-      candidate_data_export_original_bytes_exceeded: "原始文件总量超过本次导出上限，请改为不含原件导出。",
+      candidate_data_export_original_unavailable: "部分原文件不可用，无法创建包含原文件的导出。",
+      candidate_data_export_original_bytes_exceeded: "原文件总量超过本次导出上限，请改为导出不含原文件的版本。",
       sensitive_candidate_keyword_not_supported:
         "匹配关键词不能包含年龄、性别或其他受保护个人属性。请改为岗位技能、经历或项目关键词。",
       ...mailboxImportErrorMessages,

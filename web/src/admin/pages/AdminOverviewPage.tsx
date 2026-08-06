@@ -95,12 +95,12 @@ export function AdminOverviewPage({ onNavigate }: { onNavigate: (view: AdminView
             <section className="admin-panel admin-attention-panel" aria-labelledby="attention-title">
               <div className="admin-section-heading">
                 <div><h2 id="attention-title">待处理事项</h2><p>只展示需要平台管理员介入的状态。</p></div>
-                <span>{dashboard.trials_expiring_within_7_days + dashboard.ai_runs_failed} 项信号</span>
+                <span>{dashboard.trials_expiring_within_7_days + dashboard.ai_runs_failed} 项待处理</span>
               </div>
               <div className="admin-attention-list">
                 <button onClick={() => onNavigate("organizations")} type="button">
                   <span className="admin-attention-icon is-warning"><Icon name="briefcase" size={18} /></span>
-                  <span><strong>7 天内到期的试用</strong><small>检查是否续期、升级或到期保留数据。</small></span>
+                  <span><strong>7 天内到期的试用</strong><small>检查是否续期、升级，或到期后保留数据。</small></span>
                   <b>{numberFormat(dashboard.trials_expiring_within_7_days)}</b>
                   <Icon name="chevron-right" size={17} />
                 </button>
@@ -134,7 +134,7 @@ export function AdminOverviewPage({ onNavigate }: { onNavigate: (view: AdminView
           <div className="admin-overview-grid admin-overview-grid-secondary">
             <section className="admin-panel" aria-labelledby="expiring-title">
               <div className="admin-section-heading">
-                <div><h2 id="expiring-title">临期工作区</h2><p>当前页可确认的 7 天内到期试用。</p></div>
+                <div><h2 id="expiring-title">临期工作区</h2><p>本页展示的 7 天内到期试用。</p></div>
                 <button className="text-button" onClick={() => onNavigate("organizations")} type="button">查看全部</button>
               </div>
               {expiringOrganizations.length ? (
@@ -150,7 +150,7 @@ export function AdminOverviewPage({ onNavigate }: { onNavigate: (view: AdminView
             </section>
             <section className="admin-panel" aria-labelledby="failed-run-title">
               <div className="admin-section-heading">
-                <div><h2 id="failed-run-title">最近失败运行</h2><p>运行记录不包含简历、Prompt 或模型输出。</p></div>
+                <div><h2 id="failed-run-title">最近失败运行</h2><p>运行记录不包含简历、提示词或模型输出。</p></div>
                 <button className="text-button" onClick={() => onNavigate("ai")} type="button">查看运行记录</button>
               </div>
               {failedRuns.length ? (

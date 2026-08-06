@@ -84,7 +84,7 @@ export function AdminRuntimePage() {
     <section className="admin-page-frame" aria-labelledby="admin-runtime-title">
       <AdminPageHeader
         actions={<button className="button" onClick={() => void load()} type="button"><Icon name="refresh" size={16} />刷新诊断</button>}
-        description="查看服务就绪、Worker 心跳与任务队列。所有信息均为安全运行元数据，不展示候选人内容。"
+        description="查看服务就绪、Worker 心跳与任务队列。所有信息均为不含候选人内容的运行元数据。"
         title="运行诊断"
       />
 
@@ -106,7 +106,7 @@ export function AdminRuntimePage() {
             <article>
               <span>处理中任务</span>
               <strong>{numberFormat(outstandingTasks)}</strong>
-              <small>{attentionQueues.length ? `${numberFormat(attentionQueues.length)} 个队列需要关注` : "当前没有积压信号"}</small>
+              <small>{attentionQueues.length ? `${numberFormat(attentionQueues.length)} 个队列需要关注` : "当前没有积压任务"}</small>
             </article>
           </div>
 
@@ -135,11 +135,11 @@ export function AdminRuntimePage() {
 
           <section className="admin-panel admin-runtime-panel" aria-labelledby="runtime-queue-title">
             <div className="admin-section-heading">
-              <div><h2 id="runtime-queue-title">任务队列</h2><p>失败和积压可在这里先定位到任务类别，再用诊断编号进入安全事件查询。</p></div>
+              <div><h2 id="runtime-queue-title">任务队列</h2><p>失败和积压可在这里先定位到任务类别，再凭诊断编号在安全事件查询中定位详情。</p></div>
             </div>
             <div className="admin-runtime-table-wrap">
               <table className="admin-runtime-table">
-                <thead><tr><th scope="col">队列</th><th scope="col">排队中</th><th scope="col">运行中</th><th scope="col">失败</th><th scope="col">最老待处理</th></tr></thead>
+                <thead><tr><th scope="col">队列</th><th scope="col">排队中</th><th scope="col">运行中</th><th scope="col">失败</th><th scope="col">积压最久</th></tr></thead>
                 <tbody>
                   {runtime.queues.map((queue) => (
                     <tr key={queue.queue_key}>

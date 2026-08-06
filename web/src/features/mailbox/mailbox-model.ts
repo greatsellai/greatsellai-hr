@@ -148,7 +148,7 @@ export const mailboxImportErrorMessages: Record<string, string> = {
   mailbox_import_not_found: "这条附件记录已不存在或无法访问。",
   mailbox_import_not_retryable: "这份附件当前不能重新入库。",
   mailbox_import_retry_in_progress: "这份附件正在重新入库，请稍后刷新。",
-  mailbox_import_retry_superseded: "这份附件已由更新的重试请求接管，请刷新后查看结果。",
+  mailbox_import_retry_superseded: "这份附件已有更新的重试请求在处理，请刷新后查看结果。",
   mailbox_background_job_failed: "后台任务暂时失败，系统会按队列策略再次尝试。",
   mailbox_background_job_lease_expired: "后台任务意外中断，系统正在重新安排处理。",
   mailbox_task_source_changed: "收件通道配置已变化，旧的同步任务已停止。",
@@ -167,7 +167,7 @@ export const mailboxImportErrorMessages: Record<string, string> = {
   mailbox_select_failed: "无法打开收件箱，请检查邮箱服务商和授权状态。",
   mailbox_status_failed: "无法读取收件箱状态，请检查邮箱服务商和授权状态后重试。",
   mailbox_source_epoch_changed: "邮箱来源标识已变化，通道已暂停，请归档后新建。",
-  mailbox_source_watermark_invalid: "邮箱 UID 水位线异常，通道已暂停，请归档后新建。",
+  mailbox_source_watermark_invalid: "邮箱 UID 同步标记异常，通道已暂停，请归档后新建。",
   mailbox_message_too_large: "邮件超过系统可处理大小，已跳过且不会重复下载。",
   mailbox_message_headers_too_large: "邮件头超过系统可处理范围，已安全跳过。",
   mailbox_mime_structure_too_complex: "邮件 MIME 结构过于复杂，已安全跳过。",
@@ -182,7 +182,7 @@ export const mailboxImportErrorMessages: Record<string, string> = {
   attachment_source_changed: "收件邮箱来源已变化，不能安全重试该附件。",
   attachment_source_unavailable: "原收件邮箱已不可用，不能重试该附件。",
   attachment_retry_interrupted: "上次重新入库被中断，可再次尝试。",
-  attachment_content_claim_expired: "相同附件的处理未完成，现可重新入库。",
+  attachment_content_claim_expired: "该附件此前的处理尚未完成，现在可以重新入库。",
 };
 
 export function mailboxImportErrorLabel(error: string | null): string {

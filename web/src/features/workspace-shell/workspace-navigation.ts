@@ -43,7 +43,7 @@ export const workspaceNavigationGroups: WorkspaceNavigationGroup[] = [
     label: "招聘运营",
     items: [
       { kind: "view", view: "jobs", label: "职位管理", icon: "briefcase" },
-      { kind: "view", view: "library", label: "人才库", icon: "folder" },
+      { kind: "view", view: "library", label: "简历库", icon: "folder" },
       { kind: "view", view: "match", label: "智能匹配", icon: "match" },
       { kind: "view", view: "filter", label: "条件筛选", icon: "filter" },
     ],

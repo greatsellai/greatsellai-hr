@@ -449,7 +449,7 @@ export function MatchWorkspace({
                   <p>
                     {isJobManagement
                       ? "每个岗位只显示一条，进入后可查看和切换其 JD 版本。"
-                      : "切换后将显示该岗位 JD 自己的候选人匹配结果。"}
+                      : "切换后将显示该岗位 JD 对应的候选人匹配结果。"}
                   </p>
                 </div>
                 <div className="jd-switcher-select">
@@ -705,13 +705,13 @@ export function MatchWorkspace({
                   <div className="requirement-row" key={`must-${index}-${requirement}`}>
                     <span className="priority-must">必须</span>
                     <input
-                      aria-label={`第 ${index + 1} 条必须条件`}
+                      aria-label={`第 ${index + 1} 条必备条件`}
                       className="field requirement-input"
                       onChange={(event) => updateGeneratedRequirement("must_have", index, event.target.value)}
                       value={requirement}
                     />
                     <button
-                      aria-label={`删除第 ${index + 1} 条必须条件`}
+                      aria-label={`删除第 ${index + 1} 条必备条件`}
                       className="icon-button requirement-remove"
                       onClick={() => removeGeneratedRequirement("must_have", index)}
                       type="button"
@@ -742,7 +742,7 @@ export function MatchWorkspace({
               </div>
               <div className="requirement-actions">
                 <button className="button button-ghost" onClick={() => addGeneratedRequirement("must_have")} type="button">
-                  <Icon name="plus" size={15} /> 添加必须条件
+                  <Icon name="plus" size={15} /> 添加必备条件
                 </button>
                 <button className="button button-ghost" onClick={() => addGeneratedRequirement("preferred")} type="button">
                   <Icon name="plus" size={15} /> 添加优先条件
@@ -939,7 +939,7 @@ function MatchResult({ match }: { match: JobMatch }) {
           <h2>匹配结果</h2>
           <p>
             岗位版本 {match.job_version} · 简历事实版本 {match.facts_version} ·{" "}
-            {hardRequirementLabel[hardStatus] ?? "待检查硬性要求"}
+            {hardRequirementLabel[hardStatus] ?? "硬条件待确认"}
           </p>
         </div>
       </div>
@@ -1129,7 +1129,7 @@ function MatchLeaderboard({
     {
       key: "recommended",
       title: "推荐候选人",
-      description: "可信度 ≥ 60%，硬性条件已通过或不适用",
+      description: "可信度 ≥ 60%，硬条件已通过或不适用",
       empty: "暂无满足推荐条件的候选人。",
       icon: "check",
     },
@@ -1143,8 +1143,8 @@ function MatchLeaderboard({
     {
       key: "unmet",
       title: "明确不匹配",
-      description: "至少一项硬性条件已有明确不满足的证据",
-      empty: "暂无明确不满足硬性条件的候选人。",
+      description: "至少一项硬条件已有明确不满足的证据",
+      empty: "暂无明确不满足硬条件的候选人。",
       icon: "close",
     },
   ];

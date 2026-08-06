@@ -535,7 +535,7 @@ export function MailboxPage({
       return;
     }
     if (!draft.emailAddress.trim()) {
-      notify("error", "请填写接收简历的邮箱。");
+      notify("error", "请填写收件邮箱。");
       return;
     }
     if (isCreating && !draftProvider) {
@@ -621,7 +621,7 @@ export function MailboxPage({
       return;
     }
     if (!draft.emailAddress.trim()) {
-      notify("error", "请填写接收简历的邮箱。");
+      notify("error", "请填写收件邮箱。");
       return;
     }
 
@@ -1025,7 +1025,7 @@ export function MailboxPage({
             />
           </div>
           <div className="field-stack">
-            <label className="field-label" htmlFor="imap-address">接收简历的邮箱</label>
+            <label className="field-label" htmlFor="imap-address">收件邮箱</label>
             <BackofficeInput
               autoComplete="email"
               disabled={!isCreating || selectedMailboxArchived || selectedSyncInProgress || authorizing}
@@ -1034,7 +1034,7 @@ export function MailboxPage({
               type="email"
               value={draft.emailAddress}
             />
-            {!isCreating && <p className="field-help">接收邮箱与服务商属于这个通道的来源身份。需要换邮箱时，请新建收件通道。</p>}
+            {!isCreating && <p className="field-help">收件邮箱与服务商属于这个通道的来源身份。需要换邮箱时，请新建收件通道。</p>}
           </div>
         </div>
       </section>
@@ -1317,7 +1317,7 @@ export function MailboxPage({
           ) : !sourceTagRulesError ? (
             <div className="mailbox-source-tag-empty">
               <strong>还没有投递渠道规则</strong>
-              <span>可先用下方规则把后续投递标记为招聘平台、内推或其他来源。</span>
+              <span>可先在下方添加规则，将后续投递标记为招聘平台、内推或其他来源。</span>
             </div>
           ) : null}
 
@@ -1448,7 +1448,7 @@ export function MailboxPage({
               <h2>{selectedConfig.display_name}</h2>
               <span className={`status-pill${mailboxChannelStatusClass(selectedConfig)}`}>{mailboxChannelStatus(selectedConfig)}</span>
             </div>
-            <p>{mailboxProviderDisplayName(selectedConfig)} · {selectedConfig.email_address || "尚未配置接收邮箱"}</p>
+            <p>{mailboxProviderDisplayName(selectedConfig)} · {selectedConfig.email_address || "尚未配置收件邮箱"}</p>
           </div>
         </div>
         <div className="mailbox-operation-actions">
@@ -1581,7 +1581,7 @@ export function MailboxPage({
               <div className="mailbox-sync-alert-item" key={config.mailbox_id}>
                 <div>
                   <strong>{config.display_name}</strong>
-                    <span>{config.authorization_status === "reauthorization_required" ? "邮箱授权已失效，重新授权后会恢复同步。" : `${mailboxSyncAlertTitle(config)}，连续失败的后台同步任务 ${alert.consecutive_failures} 次，最近一次 ${formatLibraryDate(alert.last_failed_at)}。`}</span>
+                    <span>{config.authorization_status === "reauthorization_required" ? "邮箱授权已失效，重新授权后会恢复同步。" : `${mailboxSyncAlertTitle(config)}，后台同步任务已连续失败 ${alert.consecutive_failures} 次，最近一次 ${formatLibraryDate(alert.last_failed_at)}。`}</span>
                     <small>{mailboxImportErrorLabel(alert.last_error_code)}</small>
                   </div>
                   {mailboxRequiresAuthorization(config) ? (
@@ -1631,7 +1631,7 @@ export function MailboxPage({
           <aside className="panel mailbox-setup-aside">
             <div className="mailbox-setup-aside-heading">
               <h2>接入后如何工作</h2>
-              <p>{hasMailboxChannels ? "先完成这个新通道的连接，已有通道和处理记录不会带入。" : "连接配置、同步状态和处理记录都只属于当前工作区。"}</p>
+              <p>{hasMailboxChannels ? "先完成这个新通道的连接，已有通道和处理记录不会被带进这个新通道。" : "连接配置、同步状态和处理记录都只属于当前工作区。"}</p>
             </div>
             <ol className="mailbox-setup-steps">
               <li>
@@ -1684,7 +1684,7 @@ export function MailboxPage({
                     <section className="mailbox-sync-alert-detail" role="alert">
                       <div>
                         <strong>{mailboxSyncAlertTitle(selectedConfig)}</strong>
-                        <span>连续失败的后台同步任务 {selectedConfig.active_sync_alert.consecutive_failures} 次，最近一次 {formatLibraryDate(selectedConfig.active_sync_alert.last_failed_at)}。</span>
+                        <span>后台同步任务已连续失败 {selectedConfig.active_sync_alert.consecutive_failures} 次，最近一次 {formatLibraryDate(selectedConfig.active_sync_alert.last_failed_at)}。</span>
                         <small>{mailboxImportErrorLabel(selectedConfig.active_sync_alert.last_error_code)}</small>
                       </div>
                       <BackofficeButton
@@ -1716,7 +1716,7 @@ export function MailboxPage({
                 </div>
                 </>
               ) : (
-                <div className="mailbox-status-empty"><Icon name="history" size={19} /><span>保存后会显示这个通道的接收起点、最近同步时间和异常状态。</span></div>
+                <div className="mailbox-status-empty"><Icon name="history" size={19} /><span>保存后会显示这个通道的收件起点、最近同步时间和异常状态。</span></div>
               )}
             </aside>
           </div>

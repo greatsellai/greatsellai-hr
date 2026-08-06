@@ -14,6 +14,7 @@ import type {
 } from "../../types";
 import { Icon, type IconName } from "../../icons";
 import { BackofficeButton } from "../../backoffice/ui/BackofficeButton";
+import { BackofficeProgress } from "../../backoffice/ui/BackofficeProgress";
 import { BackofficeSelect } from "../../backoffice/ui/BackofficeSelect";
 import { useJobMatchBatchPolling } from "./useJobMatchBatchPolling";
 import "./job-match.css";
@@ -1039,24 +1040,16 @@ function MatchBatchDetails({
         <span className={`status-pill ${batchStatus.tone}`}>{batchStatus.label}</span>
       </div>
       <div className="match-batch-progress">
-        <div className="match-batch-progress-heading">
-          <span>处理进度</span>
-          <strong aria-live="polite">{progressPercent}%</strong>
-        </div>
-        <div
+        <span className="match-batch-progress-label">处理进度</span>
+        <BackofficeProgress
           aria-label="岗位评估进度"
-          aria-valuemax={100}
-          aria-valuemin={0}
-          aria-valuenow={progressPercent}
           aria-valuetext={progressText}
-          className="match-batch-progress-track"
-          role="progressbar"
-        >
-          <span
-            className="match-batch-progress-value"
-            style={{ "--match-batch-progress": `${progressPercent}%` } as CSSProperties}
-          />
-        </div>
+          orbitStroke="var(--surface-muted)"
+          percent={progressPercent}
+          showInfo
+          size="large"
+          stroke="var(--blue)"
+        />
       </div>
       {failed.length ? (
         <div className="table-scroll">

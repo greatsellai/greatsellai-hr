@@ -1,5 +1,7 @@
 # 预发布与生产晋级
 
+> 当前流程使用腾讯云 TCR：CI 只交接小型 metadata，staging 与 production 按不可变 manifest digest 拉取同一镜像，不传输 Docker archive。配置见 [TCR 发布镜像配置](TCR_RELEASE_SETUP.md)。本说明优先于下文的历史 artifact/传输措辞。
+
 ## 发布链路
 
 ```text

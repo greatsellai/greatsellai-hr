@@ -1,6 +1,9 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useId,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -8,7 +11,18 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
+import type SemiAIChatInputInstance from "@douyinfe/semi-ui-19/lib/es/aiChatInput";
+import type {
+  Content,
+  MessageContent,
+  Reference,
+} from "@douyinfe/semi-ui-19/lib/es/aiChatInput/interface";
+import { IconAILoading } from "@douyinfe/semi-icons";
 import { Icon } from "../../icons";
+
+const SemiAIChatInput = lazy(
+  () => import("@douyinfe/semi-ui-19/lib/es/aiChatInput"),
+);
 
 export type AgentReferenceKind =
   | "candidate"
@@ -24,6 +38,10 @@ export interface AgentReference {
   description?: string;
 }
 
+export interface AgentComposerHandle {
+  focus: () => void;
+}
+
 const referenceKindLabel: Record<AgentReferenceKind, string> = {
   candidate: "候选人",
   job: "关联 JD",
@@ -36,11 +54,12 @@ interface AgentComposerProps {
   references: AgentReference[];
   availableReferences: AgentReference[];
   disabled: boolean;
-  inputRef: RefObject<HTMLTextAreaElement | null>;
+  generating: boolean;
+  inputRef: RefObject<AgentComposerHandle | null>;
   onChange: (value: string) => void;
   onRemoveReference: (referenceId: string) => void;
   onSelectReference: (reference: AgentReference) => void;
-  onSubmit: () => void;
+  onSubmit: (message: string) => void;
 }
 
 function referenceMatchesQuery(reference: AgentReference, query: string): boolean {
@@ -50,14 +69,33 @@ function referenceMatchesQuery(reference: AgentReference, query: string): boolea
     reference.label,
     reference.description,
     referenceKindLabel[reference.kind],
-  ].some((value) => value?.toLocaleLowerCase().includes(normalized));
+  ].some((item) => item?.toLocaleLowerCase().includes(normalized));
 }
 
-function referenceIcon(reference: AgentReference): "user" | "briefcase" | "filter" | "spark" {
+function referenceIcon(reference: Pick<AgentReference, "kind">): "user" | "briefcase" | "filter" | "spark" {
   if (reference.kind === "candidate") return "user";
   if (reference.kind === "job") return "briefcase";
   if (reference.kind === "filter") return "filter";
   return "spark";
+}
+
+function contentToPlainText(contents: Content[] | undefined): string {
+  return (contents ?? []).reduce((message, item) => (
+    item.type === "text" && typeof item.text === "string"
+      ? `${message}${item.text}`
+      : message
+  ), "");
+}
+
+function editorHtml(value: string): string {
+  if (!value) return "";
+  return value
+    .split("\n")
+    .map((line) => `<p>${line
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")}</p>`)
+    .join("");
 }
 
 export function AgentComposer({
@@ -65,6 +103,7 @@ export function AgentComposer({
   references,
   availableReferences,
   disabled,
+  generating,
   inputRef,
   onChange,
   onRemoveReference,
@@ -72,12 +111,16 @@ export function AgentComposer({
   onSubmit,
 }: AgentComposerProps) {
   const menuId = useId();
+  const aiInputRef = useRef<SemiAIChatInputInstance | null>(null);
+  const inputHostRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const lastEditorValueRef = useRef(value);
   const [menuOpen, setMenuOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const inputLocked = disabled || generating;
 
   const selectedIds = useMemo(
     () => new Set(references.map((reference) => reference.referenceId)),
@@ -92,6 +135,45 @@ export function AgentComposer({
   const activeOptionId = matches[activeIndex]
     ? `${menuId}-option-${activeIndex}`
     : undefined;
+  const inputReferences = useMemo<Reference[]>(() => references.map((reference) => ({
+    id: reference.referenceId,
+    type: "text",
+    content: reference.label,
+    kind: reference.kind,
+  })), [references]);
+
+  useImperativeHandle(inputRef, () => ({
+    focus: () => {
+      if (!inputLocked) aiInputRef.current?.focusEditor(0);
+    },
+  }), [inputLocked]);
+
+  useEffect(() => {
+    const host = inputHostRef.current;
+    if (!host) return undefined;
+    const applyEditorAccessibility = () => {
+      const editor = host.querySelector<HTMLElement>("[contenteditable]");
+      if (!editor) return;
+      editor.setAttribute("aria-label", "向招聘助手提问");
+      editor.setAttribute("aria-multiline", "true");
+      editor.setAttribute("role", "textbox");
+      editor.setAttribute("aria-disabled", String(inputLocked));
+      editor.setAttribute("contenteditable", String(!inputLocked));
+      aiInputRef.current?.getEditor()?.setEditable(!inputLocked);
+      host.querySelector<HTMLButtonElement>(".semi-aiChatInput-footer-action-send")
+        ?.setAttribute("aria-label", "发送提问");
+    };
+    applyEditorAccessibility();
+    const observer = new MutationObserver(applyEditorAccessibility);
+    observer.observe(host, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [inputLocked]);
+
+  useEffect(() => {
+    if (value === lastEditorValueRef.current) return;
+    lastEditorValueRef.current = value;
+    aiInputRef.current?.setContent(editorHtml(value));
+  }, [value]);
 
   const positionMenu = () => {
     const trigger = triggerRef.current;
@@ -114,11 +196,11 @@ export function AgentComposer({
     setMenuOpen(false);
     setQuery("");
     setActiveIndex(0);
-    if (restoreFocus) window.requestAnimationFrame(() => inputRef.current?.focus());
+    if (restoreFocus) window.requestAnimationFrame(() => aiInputRef.current?.focusEditor(0));
   };
 
   const openMenu = () => {
-    if (disabled) return;
+    if (disabled || generating) return;
     positionMenu();
     setMenuOpen(true);
     setActiveIndex(0);
@@ -136,11 +218,18 @@ export function AgentComposer({
       }
     };
     const reposition = () => positionMenu();
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeMenu(true);
+    };
     document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape, true);
     window.addEventListener("resize", reposition);
     window.addEventListener("scroll", reposition, true);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape, true);
       window.removeEventListener("resize", reposition);
       window.removeEventListener("scroll", reposition, true);
     };
@@ -153,48 +242,6 @@ export function AgentComposer({
   const selectReference = (reference: AgentReference) => {
     onSelectReference(reference);
     closeMenu(true);
-  };
-
-  const handleKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (menuOpen) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeMenu(true);
-        return;
-      }
-      if (event.key === "ArrowDown" && matches.length) {
-        event.preventDefault();
-        setActiveIndex((current) => (current + 1) % matches.length);
-        return;
-      }
-      if (event.key === "ArrowUp" && matches.length) {
-        event.preventDefault();
-        setActiveIndex((current) => (current - 1 + matches.length) % matches.length);
-        return;
-      }
-      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-        const active = matches[activeIndex];
-        if (active) {
-          event.preventDefault();
-          selectReference(active);
-          return;
-        }
-      }
-    }
-    if (event.key === "@" && !event.nativeEvent.isComposing) {
-      event.preventDefault();
-      openMenu();
-      return;
-    }
-    if (
-      event.key === "Enter"
-      && !event.shiftKey
-      && !event.repeat
-      && !event.nativeEvent.isComposing
-    ) {
-      event.preventDefault();
-      onSubmit();
-    }
   };
 
   const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -222,73 +269,122 @@ export function AgentComposer({
     }
   };
 
+  const handleInputKeyDownCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (inputLocked) {
+      if (event.key !== "Tab") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (event.nativeEvent.isComposing) {
+      event.stopPropagation();
+      return;
+    }
+    if (event.key === "@") {
+      event.preventDefault();
+      event.stopPropagation();
+      openMenu();
+    }
+  };
+
+  const handleMessageSend = ({ inputContents }: MessageContent) => {
+    const message = contentToPlainText(inputContents).trim();
+    if (!message || disabled || generating) return;
+    aiInputRef.current?.setContent("");
+    lastEditorValueRef.current = "";
+    onChange("");
+    onSubmit(message);
+  };
+
   return (
-    <div className="agent-composer">
-      <form
-        className="agent-input-row"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
+    <div className="agent-composer" data-testid="agent-composer">
+      <div
+        aria-disabled={inputLocked}
+        className="agent-composer-input-host"
+        onBeforeInputCapture={(event) => {
+          if (inputLocked) event.preventDefault();
         }}
+        onKeyDownCapture={handleInputKeyDownCapture}
+        onPasteCapture={(event) => {
+          if (inputLocked) event.preventDefault();
+        }}
+        ref={inputHostRef}
       >
-        <div className="agent-composer-surface">
-          {references.length > 0 && (
-            <div className="agent-reference-chip-list" aria-label="已引用内容">
-              {references.map((reference) => (
-                <span className="agent-reference-chip" key={reference.referenceId}>
-                  <Icon name={referenceIcon(reference)} size={14} />
-                  <span>{reference.label}</span>
+        <Suspense
+          fallback={<div aria-busy="true" className="agent-ai-chat-input-fallback">正在加载输入框</div>}
+        >
+          <SemiAIChatInput
+            canSend={inputLocked ? false : undefined}
+            className={`agent-ai-chat-input${inputLocked ? " is-pending" : ""}`}
+            clearContentOnGenerating={false}
+            generating={generating}
+            immediatelyRender={false}
+            onContentChange={(contents) => {
+              const nextValue = contentToPlainText(contents);
+              // AIChatInput reports its initial empty document while mounting.
+              // It is already represented by the controlled value, so avoid a
+              // redundant parent state update during the child mount.
+              if (nextValue === lastEditorValueRef.current) return;
+              lastEditorValueRef.current = nextValue;
+              onChange(nextValue);
+            }}
+            onMessageSend={handleMessageSend}
+            placeholder="描述要查找、比较或核验的内容，输入 @ 引用相关资料"
+            ref={aiInputRef}
+            references={inputReferences}
+            renderActionArea={({ className, menuItem }) => (
+              <div className={`${className} agent-ai-chat-input-actions`}>
+                <button
+                  aria-controls={`${menuId}-list`}
+                  aria-expanded={menuOpen}
+                  aria-haspopup="listbox"
+                  aria-label="添加引用"
+                  className="agent-reference-trigger"
+                  disabled={disabled || generating}
+                  onClick={openMenu}
+                  ref={triggerRef}
+                  type="button"
+                >
+                  @
+                </button>
+                {generating ? (
+                  <span aria-live="polite" className="agent-ai-input-generating">
+                    <IconAILoading aria-hidden="true" size="small" />
+                    <span>生成中</span>
+                  </span>
+                ) : (
+                  <>
+                    <span className="agent-composer-keyboard-hint" aria-hidden="true">Enter 发送</span>
+                    {menuItem}
+                  </>
+                )}
+              </div>
+            )}
+            renderReference={(reference) => {
+              const kind = reference.kind as AgentReferenceKind;
+              return (
+                <div className="agent-ai-reference" key={reference.id}>
+                  <Icon name={referenceIcon({ kind })} size={14} />
+                  <span>{typeof reference.content === "string" ? reference.content : "已引用资料"}</span>
                   <button
-                    aria-label={`移除引用：${reference.label}`}
-                    disabled={disabled}
-                    onClick={() => onRemoveReference(reference.referenceId)}
+                    aria-label={`移除引用：${typeof reference.content === "string" ? reference.content : "已引用资料"}`}
+                    disabled={disabled || generating}
+                    onClick={() => onRemoveReference(reference.id)}
                     type="button"
                   >
                     <Icon name="close" size={12} />
                   </button>
-                </span>
-              ))}
-            </div>
-          )}
-          <label className="sr-only" htmlFor="agent-message">向招聘助手提问</label>
-          <textarea
-            disabled={disabled}
-            id="agent-message"
-            onChange={(event) => onChange(event.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="描述要查找、比较或核验的内容，输入 @ 引用相关资料"
-            ref={inputRef}
-            rows={2}
-            value={value}
+                </div>
+              );
+            }}
+            round
+            sendHotKey="enter"
+            showUploadButton={false}
+            showUploadFile={false}
           />
-          <div className="agent-composer-actions">
-            <button
-              aria-controls={`${menuId}-list`}
-              aria-expanded={menuOpen}
-              aria-haspopup="listbox"
-              aria-label="添加引用"
-              className="agent-reference-trigger"
-              disabled={disabled}
-              onClick={openMenu}
-              ref={triggerRef}
-              type="button"
-            >
-              @
-            </button>
-            <span className="agent-composer-keyboard-hint" aria-hidden="true">
-              Enter 发送
-            </span>
-            <button
-              aria-label="发送提问"
-              className="button button-primary agent-send-button"
-              disabled={disabled || !value.trim()}
-              type="submit"
-            >
-              <Icon name="arrow-right" size={17} />
-            </button>
-          </div>
-        </div>
-      </form>
+        </Suspense>
+      </div>
       {menuOpen && (
         <div
           className="agent-reference-menu"

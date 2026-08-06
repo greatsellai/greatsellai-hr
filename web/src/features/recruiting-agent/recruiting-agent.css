@@ -1,6 +1,25 @@
 .backoffice-ui-root .recruiting-agent-view {
-  height: 100%;
-  min-height: 38rem;
+  height: auto;
+  min-height: 0;
+}
+
+.backoffice-ui-root .recruiting-agent-view:not([hidden]) {
+  display: grid;
+}
+
+.backoffice-ui-root .app-area:has(.recruiting-agent-view:not([hidden])) {
+  height: 100dvh;
+  min-height: 0;
+}
+
+.backoffice-ui-root .app-area:has(.recruiting-agent-view:not([hidden])) > .main-content {
+  grid-row: 3;
+}
+
+.backoffice-ui-root .main-content:has(.recruiting-agent-view:not([hidden])) {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .backoffice-ui-root .recruiting-agent-page {
@@ -9,7 +28,7 @@
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   height: 100%;
-  min-height: 38rem;
+  min-height: 0;
   overflow: hidden;
   background: var(--workspace-canvas);
 }
@@ -1183,7 +1202,7 @@
   font-size: inherit;
   background: rgb(255 255 255 / 0.7);
   border: 1px solid var(--line);
-  border-radius: 0.25rem;
+  border-radius: 0.625rem;
 }
 
 @keyframes agent-processing-sheen {
@@ -1213,7 +1232,7 @@
 @media (max-width: 47rem) {
   .backoffice-ui-root .recruiting-agent-view,
   .backoffice-ui-root .recruiting-agent-page {
-    min-height: calc(100dvh - 4rem);
+    min-height: 0;
   }
 
   .backoffice-ui-root .agent-header {
@@ -1287,7 +1306,7 @@
   height: 1.75rem;
   color: #fff;
   background: var(--red);
-  border-radius: 0.25rem;
+  border-radius: 0.625rem;
   box-shadow: none;
 }
 
@@ -1403,6 +1422,17 @@
   padding: 1.5rem clamp(1rem, 12vw, 13rem) 2.25rem;
 }
 
+.backoffice-ui-root .agent-message-row {
+  width: min(100%, 44rem);
+  max-width: 100%;
+  align-self: center;
+}
+
+.backoffice-ui-root .agent-message-row.is-user {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .backoffice-ui-root .agent-message {
   width: min(100%, 44rem);
   color: var(--ink-soft);
@@ -1415,7 +1445,7 @@
   padding: 0.625rem 0.75rem;
   background: #1c1d20;
   border: 0;
-  border-radius: 0.375rem;
+  border-radius: 1rem 1rem 0.375rem;
   box-shadow: none;
 }
 
@@ -1574,20 +1604,22 @@
 }
 
 .backoffice-ui-root .agent-loading {
-  gap: 0.25rem;
-  padding: 0.625rem 0;
+  display: flex;
+  align-items: center;
+  padding: 0;
   color: var(--ink-muted);
   background: transparent;
   border: 0;
-  border-top: 1px solid var(--line-strong);
   border-radius: 0;
   animation: none;
 }
 
 .backoffice-ui-root .agent-composer {
-  padding: 0.75rem clamp(1rem, 12vw, 13rem) 1rem;
-  background: #fff;
-  border-top: 1px solid var(--line-strong);
+  align-self: end;
+  z-index: 3;
+  padding: 0.75rem clamp(1rem, 12vw, 13rem) clamp(1.5rem, 3vh, 2.5rem);
+  background: transparent;
+  border: 0;
 }
 
 .backoffice-ui-root .agent-input-row {
@@ -1679,6 +1711,192 @@
   border-color: var(--red-pressed);
 }
 
+.backoffice-ui-root .agent-composer-input-host {
+  width: min(100%, 40rem);
+  margin: 0 auto;
+}
+
+.backoffice-ui-root .agent-ai-chat-input-fallback,
+.backoffice-ui-root .agent-ai-chat-input.semi-aiChatInput {
+  width: 100%;
+  box-sizing: border-box;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid #d4d5d7;
+  border-radius: 1.125rem;
+  box-shadow: 0 0.5rem 1.25rem rgb(16 24 40 / 0.06);
+}
+
+.backoffice-ui-root .agent-ai-chat-input-fallback {
+  padding: 0.875rem 1rem;
+  color: var(--ink-muted);
+  font-size: 0.8125rem;
+}
+
+.backoffice-ui-root .agent-ai-chat-input.semi-aiChatInput {
+  min-height: 0;
+  padding: 0.75rem 0.875rem 0.625rem;
+  transition: border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
+}
+
+.backoffice-ui-root .agent-ai-chat-input.semi-aiChatInput:focus-within {
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px rgb(215 22 24 / 0.1);
+}
+
+.backoffice-ui-root .agent-ai-chat-input.is-pending {
+  pointer-events: none;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-editor-content {
+  max-height: 7.5rem;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-editor-content .tiptap {
+  min-height: 2.75rem;
+  padding: 0.125rem 0.25rem;
+  color: var(--ink);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-editor-content .tiptap p.is-editor-empty:first-child::before {
+  color: #74777c;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-footer {
+  justify-content: flex-end;
+  margin-top: 0.5rem;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-footer-configure {
+  display: none;
+}
+
+.backoffice-ui-root .agent-ai-chat-input-actions {
+  min-width: 0;
+  gap: 0.375rem;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .agent-reference-trigger {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 700;
+  background: #f6f6f5;
+  border: 0;
+  border-radius: 999px;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .agent-reference-trigger:hover:not(:disabled),
+.backoffice-ui-root .agent-ai-chat-input .agent-reference-trigger[aria-expanded="true"] {
+  color: var(--red-pressed);
+  background: var(--red-tint);
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-footer-action-button {
+  width: 2rem;
+  height: 2rem;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-footer-action-send {
+  background: var(--red);
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-footer-action-send:hover:not(.semi-aiChatInput-footer-action-send-disabled) {
+  background: var(--red-pressed);
+}
+
+.backoffice-ui-root .agent-ai-chat-input .semi-aiChatInput-footer-action-send-disabled {
+  background: #dededc;
+}
+
+.backoffice-ui-root .agent-ai-chat-input .agent-composer-keyboard-hint {
+  margin-right: 0.125rem;
+  color: var(--ink-muted);
+  font-size: 0.625rem;
+}
+
+.backoffice-ui-root .agent-ai-input-generating,
+.backoffice-ui-root .agent-generating-status {
+  display: inline-flex;
+  gap: 0.4375rem;
+  align-items: center;
+}
+
+.backoffice-ui-root .agent-ai-input-generating {
+  padding: 0.25rem 0.5rem;
+  color: var(--ink-muted);
+  font-size: 0.6875rem;
+}
+
+.backoffice-ui-root .agent-generating-status {
+  padding: 0.5625rem 0.75rem;
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.backoffice-ui-root .agent-ai-input-generating .semi-icon,
+.backoffice-ui-root .agent-generating-status .semi-icon {
+  flex: 0 0 auto;
+  color: var(--red);
+  animation: agent-ai-loading 1s linear infinite;
+}
+
+.backoffice-ui-root .agent-ai-reference {
+  display: inline-flex;
+  min-width: 0;
+  gap: 0.3125rem;
+  align-items: center;
+  padding: 0.375rem 0.5rem;
+  color: var(--ink-soft);
+  background: #f4f4f3;
+  border: 1px solid #dededc;
+  border-radius: 999px;
+}
+
+.backoffice-ui-root .agent-ai-reference > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backoffice-ui-root .agent-ai-reference > svg {
+  flex: 0 0 auto;
+  color: var(--red-pressed);
+}
+
+.backoffice-ui-root .agent-ai-reference button {
+  display: inline-grid;
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: var(--ink-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+}
+
+.backoffice-ui-root .agent-ai-reference button:hover:not(:disabled) {
+  color: var(--red-pressed);
+  background: #fff;
+}
+
+@keyframes agent-ai-loading {
+  to { transform: rotate(360deg); }
+}
+
 .backoffice-ui-root .agent-reference-chip-list {
   display: flex;
   flex-wrap: wrap;
@@ -1735,7 +1953,7 @@
   color: var(--ink);
   background: #fff;
   border: 1px solid #cfd0d2;
-  border-radius: 0.5rem;
+  border-radius: 0.875rem;
   box-shadow: 0 1rem 2.5rem rgb(16 24 40 / 0.16);
 }
 
@@ -1797,7 +2015,7 @@
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: 0.25rem;
+  border-radius: 0.5rem;
 }
 
 .backoffice-ui-root .agent-reference-menu-list > button:hover,
@@ -1886,7 +2104,13 @@
 
 @media (prefers-reduced-motion: reduce) {
   .backoffice-ui-root .agent-composer-surface,
-  .backoffice-ui-root .agent-profile-history summary > svg {
+  .backoffice-ui-root .agent-profile-history summary > svg,
+  .backoffice-ui-root .agent-ai-chat-input.semi-aiChatInput {
     transition: none;
+  }
+
+  .backoffice-ui-root .agent-ai-input-generating .semi-icon,
+  .backoffice-ui-root .agent-generating-status .semi-icon {
+    animation: none;
   }
 }

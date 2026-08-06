@@ -23,7 +23,9 @@ jobs:
       staging_tag: ${{ steps.verified.outputs.staging_tag }}
       release_sha: ${{ steps.verified.outputs.release_sha }}
       archive_sha256: ${{ steps.verified.outputs.archive_sha256 }}
-      ci_image_archive_sha256: ${{ steps.verified.outputs.ci_image_archive_sha256 }}
+      image_metadata_sha256: ${{ steps.verified.outputs.image_metadata_sha256 }}
+      api_registry_image: ${{ steps.verified.outputs.api_registry_image }}
+      caddy_registry_image: ${{ steps.verified.outputs.caddy_registry_image }}
       api_image_config_digest: ${{ steps.verified.outputs.api_image_config_digest }}
       caddy_image_config_digest: ${{ steps.verified.outputs.caddy_image_config_digest }}
       ci_run_id: ${{ steps.verified.outputs.ci_run_id }}
@@ -105,10 +107,9 @@ jobs:
     name: Promote the completed staging image to production
     needs: verify-staging
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
-    # A CI image archive can exceed 400 MB.  Keep enough time for the exact
-    # archive to cross a low-bandwidth production link and for Docker to load
-    # it before the release runner tears down the SSH stream.
-    timeout-minutes: 90
+    # Images are pulled by immutable digest from TCR rather than streamed over
+    # SSH. Keep time for a private registry pull and the normal deploy checks.
+    timeout-minutes: 45
     # Do not acquire the deployment lock while this job is waiting for an
     # Environment reviewer; staging must remain available for newer main.
     concurrency:
@@ -119,7 +120,9 @@ jobs:
     env:
       RELEASE_SHA: ${{ needs.verify-staging.outputs.release_sha }}
       STAGING_TAG: ${{ needs.verify-staging.outputs.staging_tag }}
-      STAGING_CI_IMAGE_ARCHIVE_SHA256: ${{ needs.verify-staging.outputs.ci_image_archive_sha256 }}
+      STAGING_IMAGE_METADATA_SHA256: ${{ needs.verify-staging.outputs.image_metadata_sha256 }}
+      STAGING_API_REGISTRY_IMAGE: ${{ needs.verify-staging.outputs.api_registry_image }}
+      STAGING_CADDY_REGISTRY_IMAGE: ${{ needs.verify-staging.outputs.caddy_registry_image }}
       STAGING_API_IMAGE_CONFIG_DIGEST: ${{ needs.verify-staging.outputs.api_image_config_digest }}
       STAGING_CADDY_IMAGE_CONFIG_DIGEST: ${{ needs.verify-staging.outputs.caddy_image_config_digest }}
       CI_RUN_ID: ${{ needs.verify-staging.outputs.ci_run_id }}
@@ -174,37 +177,32 @@ jobs:
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
-      - name: Download completed staging CI images
-        uses: actions/download-artifact@v4
-        with:
-          name: release-images-${{ env.RELEASE_SHA }}-${{ env.CI_RUN_ID }}-${{ env.CI_RUN_ATTEMPT }}
-          path: ${{ runner.temp }}/greatsell-release-images
-          run-id: ${{ env.CI_RUN_ID }}
-          github-token: ${{ github.token }}
-      - name: Verify and load completed staging CI images
-        id: load_ci_images
-        run: |
-          set -Eeuo pipefail
-          scripts/load-verified-release-images.sh "$RELEASE_SHA" \
-            --artifact-dir "$RUNNER_TEMP/greatsell-release-images" \
-            --repository "$GITHUB_REPOSITORY" \
-            --ci-run-id "$CI_RUN_ID" \
-            --ci-run-attempt "$CI_RUN_ATTEMPT" \
-            --expected-ci-image-archive-sha256 "$STAGING_CI_IMAGE_ARCHIVE_SHA256" \
-            --expected-api-image-config-digest "$STAGING_API_IMAGE_CONFIG_DIGEST" \
-            --expected-caddy-image-config-digest "$STAGING_CADDY_IMAGE_CONFIG_DIGEST" \
-            --github-output "$GITHUB_OUTPUT"
-      - name: Transfer exact completed staging images to production
+      - name: Pull exact completed staging images from TCR
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+          TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
         run: |
           set -Eeuo pipefail
-          scripts/transfer-production-images.sh "$RELEASE_SHA" \
+          [[ "$STAGING_IMAGE_METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Completed staging metadata checksum is malformed." >&2
+            exit 1
+          }
+          : "${TCR_REGISTRY:?Missing repository variable TCR_REGISTRY}"
+          : "${TCR_USERNAME:?Missing repository secret TCR_USERNAME}"
+          : "${TCR_PASSWORD:?Missing repository secret TCR_PASSWORD}"
+          printf '%s\n' "$TCR_PASSWORD" | scripts/pull-tcr-release-images.sh "$RELEASE_SHA" \
             --host "$PROD_DEPLOY_HOST" \
-            --archive "$RUNNER_TEMP/greatsell-release-images/release-images-$RELEASE_SHA-$CI_RUN_ID-$CI_RUN_ATTEMPT.tar.gz" \
-            --archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}" \
+            --registry "$TCR_REGISTRY" \
+            --username "$TCR_USERNAME" \
+            --api-registry-image "$STAGING_API_REGISTRY_IMAGE" \
+            --caddy-registry-image "$STAGING_CADDY_REGISTRY_IMAGE" \
+            --api-image-config-digest "$STAGING_API_IMAGE_CONFIG_DIGEST" \
+            --caddy-image-config-digest "$STAGING_CADDY_IMAGE_CONFIG_DIGEST" \
             --expected-ci-run-id "$CI_RUN_ID" \
             --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
+            --password-stdin \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
       - name: Verify production host holds CI-attested images
         env:
@@ -213,6 +211,10 @@ jobs:
           set -Eeuo pipefail
           scripts/verify-release-images.sh "$RELEASE_SHA" \
             --host "$PROD_DEPLOY_HOST" \
+            --api-registry-image "$STAGING_API_REGISTRY_IMAGE" \
+            --caddy-registry-image "$STAGING_CADDY_REGISTRY_IMAGE" \
+            --api-image-config-digest "$STAGING_API_IMAGE_CONFIG_DIGEST" \
+            --caddy-image-config-digest "$STAGING_CADDY_IMAGE_CONFIG_DIGEST" \
             --expected-ci-run-id "$CI_RUN_ID" \
             --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
@@ -262,9 +264,3 @@ jobs:
             --history-dir "$PROD_HISTORY_DIR" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote" \
             --prebuilt-images
-      - name: Remove temporary CI images from release runner
-        if: always()
-        run: |
-          set -Eeuo pipefail
-          docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true
-          docker image rm -f "greatsellai-hr-caddy:$RELEASE_SHA" || true

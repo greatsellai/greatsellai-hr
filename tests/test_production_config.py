@@ -190,7 +190,7 @@ def test_compose_and_production_template_document_fair_worker_pool() -> None:
     )
     defaults = {
         "RESUME_V3_WORKER_CONCURRENCY": "1",
-        "RESUME_V3_WORKER_DATABASE_POOL_SIZE": "1",
+        "RESUME_V3_WORKER_DATABASE_POOL_SIZE": "2",
         "RESUME_V3_WORKER_DATABASE_MAX_OVERFLOW": "0",
         "RESUME_V3_WORKER_WORKSPACE_LANE_LEASE_SECONDS": "210",
     }

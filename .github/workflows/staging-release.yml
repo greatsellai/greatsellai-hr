@@ -249,46 +249,63 @@ jobs:
           }
           echo "run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
           echo "run_attempt=$ci_run_attempt" >> "$GITHUB_OUTPUT"
-          echo "name=release-images-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" >> "$GITHUB_OUTPUT"
-      - name: Download CI-verified images
+          echo "name=release-image-metadata-$RELEASE_SHA-$ci_run_id-$ci_run_attempt" >> "$GITHUB_OUTPUT"
+      - name: Download CI-verified TCR metadata
         if: steps.ready.outputs.stage == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.ci_artifact.outputs.name }}
-          path: ${{ runner.temp }}/greatsell-release-images
+          path: ${{ runner.temp }}/greatsell-release-image-metadata
           run-id: ${{ steps.ci_artifact.outputs.run_id }}
           github-token: ${{ github.token }}
-      - name: Verify and load CI-verified images
-        id: load_ci_images
+      - name: Verify CI-verified TCR metadata
+        id: verify_tcr_metadata
         if: steps.ready.outputs.stage == 'true'
         env:
           CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}
           CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}
+          TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
+          TCR_NAMESPACE: ${{ vars.TCR_NAMESPACE }}
         run: |
           set -Eeuo pipefail
-          scripts/load-verified-release-images.sh "$RELEASE_SHA" \
-            --artifact-dir "$RUNNER_TEMP/greatsell-release-images" \
+          : "${TCR_REGISTRY:?Missing repository variable TCR_REGISTRY}"
+          : "${TCR_NAMESPACE:?Missing repository variable TCR_NAMESPACE}"
+          scripts/verify-tcr-release-metadata.sh "$RELEASE_SHA" \
+            --artifact-dir "$RUNNER_TEMP/greatsell-release-image-metadata" \
             --repository "$GITHUB_REPOSITORY" \
             --ci-run-id "$CI_RUN_ID" \
             --ci-run-attempt "$CI_RUN_ATTEMPT" \
+            --registry "$TCR_REGISTRY" \
+            --namespace "$TCR_NAMESPACE" \
             --github-output "$GITHUB_OUTPUT"
-      - name: Transfer CI-verified images to staging
-        id: transfer_ci_images
+      - name: Pull exact CI-verified TCR images to staging
+        id: pull_tcr_images
         if: steps.ready.outputs.stage == 'true'
         env:
           STAGING_DEPLOY_HOST: ${{ vars.STAGING_DEPLOY_HOST }}
           CI_RUN_ID: ${{ steps.ci_artifact.outputs.run_id }}
           CI_RUN_ATTEMPT: ${{ steps.ci_artifact.outputs.run_attempt }}
+          TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
         run: |
           set -Eeuo pipefail
           [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Missing CI workflow run identity." >&2; exit 1; }
           [[ "$CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "Missing CI workflow run attempt." >&2; exit 1; }
-          scripts/transfer-production-images.sh "$RELEASE_SHA" \
+          : "${TCR_REGISTRY:?Missing repository variable TCR_REGISTRY}"
+          : "${TCR_USERNAME:?Missing repository secret TCR_USERNAME}"
+          : "${TCR_PASSWORD:?Missing repository secret TCR_PASSWORD}"
+          printf '%s\n' "$TCR_PASSWORD" | scripts/pull-tcr-release-images.sh "$RELEASE_SHA" \
             --host "$STAGING_DEPLOY_HOST" \
-            --archive "$RUNNER_TEMP/greatsell-release-images/release-images-$RELEASE_SHA-$CI_RUN_ID-$CI_RUN_ATTEMPT.tar.gz" \
-            --archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}" \
+            --registry "$TCR_REGISTRY" \
+            --username "$TCR_USERNAME" \
+            --api-registry-image "${{ steps.verify_tcr_metadata.outputs.api_registry_image }}" \
+            --caddy-registry-image "${{ steps.verify_tcr_metadata.outputs.caddy_registry_image }}" \
+            --api-image-config-digest "${{ steps.verify_tcr_metadata.outputs.api_image_config_digest }}" \
+            --caddy-image-config-digest "${{ steps.verify_tcr_metadata.outputs.caddy_image_config_digest }}" \
             --expected-ci-run-id "$CI_RUN_ID" \
             --expected-ci-run-attempt "$CI_RUN_ATTEMPT" \
+            --password-stdin \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
       - name: Deploy immutable candidate and run public smoke checks
         id: deploy_staging
@@ -307,21 +324,9 @@ jobs:
             --project-dir "$STAGING_PROJECT_DIR" \
             --history-dir "$STAGING_HISTORY_DIR" \
             --public-url "$STAGING_PUBLIC_URL" \
-            --ci-image-archive-sha256 "${{ steps.load_ci_images.outputs.ci_image_archive_sha256 }}" \
-            --api-image-config-digest "${{ steps.load_ci_images.outputs.api_image_config_digest }}" \
-            --caddy-image-config-digest "${{ steps.load_ci_images.outputs.caddy_image_config_digest }}" \
+            --image-metadata-sha256 "${{ steps.verify_tcr_metadata.outputs.image_metadata_sha256 }}" \
+            --api-registry-image "${{ steps.verify_tcr_metadata.outputs.api_registry_image }}" \
+            --caddy-registry-image "${{ steps.verify_tcr_metadata.outputs.caddy_registry_image }}" \
+            --api-image-config-digest "${{ steps.verify_tcr_metadata.outputs.api_image_config_digest }}" \
+            --caddy-image-config-digest "${{ steps.verify_tcr_metadata.outputs.caddy_image_config_digest }}" \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
-      - name: Remove CI images after successful staging deployment
-        # The CI artifact remains available for its short retention window when
-        # preflight, transfer, deployment or public smoke fails. Only the
-        # temporary images loaded into this runner are cleaned here after a
-        # completed staging deployment (or a superseded candidate).
-        if: >-
-          always() &&
-          (steps.target.outputs.stage == 'false' ||
-           steps.ready.outputs.stage == 'false' ||
-           steps.deploy_staging.outcome == 'success')
-        run: |
-          set -Eeuo pipefail
-          docker image rm -f "greatsellai-hr-api:$RELEASE_SHA" || true
-          docker image rm -f "greatsellai-hr-caddy:$RELEASE_SHA" || true

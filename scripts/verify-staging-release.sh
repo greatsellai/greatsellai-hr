@@ -17,8 +17,8 @@ Options:
   --github-output <path>    Write verified non-secret identifiers for a workflow job
 
 The command only accepts a completed public-smoke-tested staging record with
-the exact tag, source checksum, portable CI image identities, and image
-revisions.
+the exact tag, source checksum, CI-attested TCR manifest references, image
+config identities, and image revisions.
 EOF
 }
 
@@ -89,6 +89,13 @@ image_id() { sudo -n docker image inspect --format '{{.Id}}' "$1"; }
 image_revision() { sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$1"; }
 image_ci_run_id() { sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_id" }}' "$1"; }
 image_ci_run_attempt() { sudo -n docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.workflow_run_attempt" }}' "$1"; }
+has_registry_image() {
+  local image="$1" expected="$2" observed
+  while IFS= read -r observed; do
+    [[ "$observed" == "$expected" ]] && return 0
+  done < <(sudo -n docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image")
+  return 1
+}
 
 [[ "$project_dir" == /home/ubuntu/* && "$project_dir" == *staging* && "$project_dir" != /home/ubuntu/ ]] || die "Unsafe staging project directory."
 [[ "$history_dir" == /home/ubuntu/* && "$history_dir" == *staging* && "$history_dir" != /home/ubuntu/ ]] || die "Unsafe staging history directory."
@@ -104,10 +111,15 @@ test -f "$record"
 [[ "$(record_value "$record" private_api_health_check)" == "pass" ]] || die "Staging private API health was not recorded as passing."
 [[ "$(record_value "$record" private_edge_health_check)" == "pass" ]] || die "Staging private edge health was not recorded as passing."
 [[ "$(record_value "$record" public_smoke_check)" == "pass" ]] || die "Staging public smoke check was not recorded as passing."
-ci_image_archive_sha256="$(record_value "$record" ci_image_archive_sha256)"
+image_metadata_sha256="$(record_value "$record" image_metadata_sha256)"
+api_registry_image="$(record_value "$record" api_registry_image)"
+caddy_registry_image="$(record_value "$record" caddy_registry_image)"
 api_image_config_digest="$(record_value "$record" api_image_config_digest)"
 caddy_image_config_digest="$(record_value "$record" caddy_image_config_digest)"
-[[ "$ci_image_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Staging CI image archive checksum is invalid."
+[[ "$image_metadata_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Staging CI image metadata checksum is invalid."
+[[ "$api_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Staging API TCR registry image is invalid."
+[[ "$caddy_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Staging Caddy TCR registry image is invalid."
+[[ "$api_registry_image" != "$caddy_registry_image" ]] || die "Staging TCR registry images must differ."
 [[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging API image config digest is invalid."
 [[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging Caddy image config digest is invalid."
 
@@ -117,6 +129,10 @@ api_image_id="$(image_id "$api_image")" || die "Staging API image is unavailable
 caddy_image_id="$(image_id "$caddy_image")" || die "Staging Caddy image is unavailable."
 [[ "$api_image_id" == "$(record_value "$record" api_image_id)" ]] || die "Staging API image identity no longer matches its attestation."
 [[ "$caddy_image_id" == "$(record_value "$record" caddy_image_id)" ]] || die "Staging Caddy image identity no longer matches its attestation."
+[[ "$api_image_id" == "$api_image_config_digest" ]] || die "Staging API image config identity differs from CI TCR metadata."
+[[ "$caddy_image_id" == "$caddy_image_config_digest" ]] || die "Staging Caddy image config identity differs from CI TCR metadata."
+has_registry_image "$api_image" "$api_registry_image" || die "Staging API image is not associated with its exact TCR manifest."
+has_registry_image "$caddy_image" "$caddy_registry_image" || die "Staging Caddy image is not associated with its exact TCR manifest."
 [[ "$(image_revision "$api_image")" == "$release_commit" ]] || die "Staging API image revision is invalid."
 [[ "$(image_revision "$caddy_image")" == "$release_commit" ]] || die "Staging Caddy image revision is invalid."
 api_ci_run_id="$(image_ci_run_id "$api_image")"
@@ -132,7 +148,9 @@ caddy_container="$(sudo -n env "RESUME_V3_RELEASE_IMAGE_TAG=$release_commit" doc
 [[ "$(sudo -n docker inspect --format '{{.Image}}' "$api_container")" == "$api_image_id" ]] || die "Staging API container differs from attested image."
 [[ "$(sudo -n docker inspect --format '{{.Image}}' "$caddy_container")" == "$caddy_image_id" ]] || die "Staging Caddy container differs from attested image."
 
-printf 'ci_image_archive_sha256=%s\n' "$ci_image_archive_sha256"
+printf 'image_metadata_sha256=%s\n' "$image_metadata_sha256"
+printf 'api_registry_image=%s\n' "$api_registry_image"
+printf 'caddy_registry_image=%s\n' "$caddy_registry_image"
 printf 'api_image_config_digest=%s\n' "$api_image_config_digest"
 printf 'caddy_image_config_digest=%s\n' "$caddy_image_config_digest"
 printf 'ci_run_id=%s\n' "$api_ci_run_id"
@@ -142,12 +160,17 @@ EOF
 
 verification="$(ssh "${ssh_options[@]}" "$remote_host" \
   "bash -c $(shell_quote "$remote_verify_script") -- $(shell_quote "$project_dir") $(shell_quote "$history_dir") $(shell_quote "$tag") $(shell_quote "$release_commit") $(shell_quote "$archive_sha256")")"
-ci_image_archive_sha256="$(printf '%s\n' "$verification" | sed -n 's/^ci_image_archive_sha256=//p' | tail -n 1)"
+image_metadata_sha256="$(printf '%s\n' "$verification" | sed -n 's/^image_metadata_sha256=//p' | tail -n 1)"
+api_registry_image="$(printf '%s\n' "$verification" | sed -n 's/^api_registry_image=//p' | tail -n 1)"
+caddy_registry_image="$(printf '%s\n' "$verification" | sed -n 's/^caddy_registry_image=//p' | tail -n 1)"
 api_image_config_digest="$(printf '%s\n' "$verification" | sed -n 's/^api_image_config_digest=//p' | tail -n 1)"
 caddy_image_config_digest="$(printf '%s\n' "$verification" | sed -n 's/^caddy_image_config_digest=//p' | tail -n 1)"
 ci_run_id="$(printf '%s\n' "$verification" | sed -n 's/^ci_run_id=//p' | tail -n 1)"
 ci_run_attempt="$(printf '%s\n' "$verification" | sed -n 's/^ci_run_attempt=//p' | tail -n 1)"
-[[ "$ci_image_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Staging CI image archive checksum is malformed."
+[[ "$image_metadata_sha256" =~ ^[0-9a-f]{64}$ ]] || die "Staging CI image metadata checksum is malformed."
+[[ "$api_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Staging API TCR registry image is malformed."
+[[ "$caddy_registry_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || die "Staging Caddy TCR registry image is malformed."
+[[ "$api_registry_image" != "$caddy_registry_image" ]] || die "Staging TCR registry images must differ."
 [[ "$api_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging API image config digest is malformed."
 [[ "$caddy_image_config_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Staging Caddy image config digest is malformed."
 [[ "$ci_run_id" =~ ^[0-9]+$ ]] || die "Staging CI workflow run ID is malformed."
@@ -158,7 +181,9 @@ if [[ -n "$github_output" ]]; then
     printf 'staging_tag=%s\n' "$tag"
     printf 'release_sha=%s\n' "$release_commit"
     printf 'archive_sha256=%s\n' "$archive_sha256"
-    printf 'ci_image_archive_sha256=%s\n' "$ci_image_archive_sha256"
+    printf 'image_metadata_sha256=%s\n' "$image_metadata_sha256"
+    printf 'api_registry_image=%s\n' "$api_registry_image"
+    printf 'caddy_registry_image=%s\n' "$caddy_registry_image"
     printf 'api_image_config_digest=%s\n' "$api_image_config_digest"
     printf 'caddy_image_config_digest=%s\n' "$caddy_image_config_digest"
     printf 'ci_run_id=%s\n' "$ci_run_id"

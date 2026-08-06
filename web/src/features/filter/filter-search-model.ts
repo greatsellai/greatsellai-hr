@@ -409,6 +409,9 @@ export function searchRequestToDraft(
     freshGraduateEndMonth:
       request.fresh_graduate_end_month ?? defaults.freshGraduateEndMonth,
   } as const;
+  const savedGenders = (request.gender_in ?? []).filter(
+    (gender): gender is Gender => gender === "male" || gender === "female",
+  );
   return {
     draft: {
       ...defaults,
@@ -433,9 +436,12 @@ export function searchRequestToDraft(
       ),
       maxRankPercent: clampPercentage(savedEducation?.max_rank_percent ?? 0),
       sourceTagIds: [...new Set(request.source_tag_ids_any_of ?? [])],
-      gender: (request.gender_in ?? []).find(
-        (gender) => gender === "male" || gender === "female",
-      ) ?? "any",
+      // Historical saved filters could select both 男 and 女 under the old
+      // multi-select (OR semantics), which is equivalent to no gender
+      // constraint. A single value maps to itself; any other selection
+      // collapses to 不限 rather than silently narrowing to an arbitrary
+      // first value.
+      gender: savedGenders.length === 1 ? savedGenders[0] : "any",
       ...normalizeAgeBounds(request.age_min ?? 0, request.age_max ?? 0),
       keywords: [...new Set(savedKeywords)],
       keywordsMode: keywordMode,

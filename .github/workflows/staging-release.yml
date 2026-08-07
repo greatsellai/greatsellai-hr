@@ -302,12 +302,14 @@ jobs:
           RELEASE_SHA: ${{ env.RELEASE_SHA }}
         run: |
           set -Eeuo pipefail
-          ssh -i "$RUNNER_TEMP/greatsell-staging-deploy" -o StrictHostKeyChecking=yes \
+          # Best-effort housekeeping: keep only the newly deployed SHA images so
+          # staging never holds two generations at once. A rollback can re-pull
+          # from TCR or re-run a direct deployment. The deploy + smoke steps
+          # already succeeded, so a pre-connection ssh flake (255) or a remote
+          # cleanup error must only warn, never fail the whole release.
+          if ssh -i "$RUNNER_TEMP/greatsell-staging-deploy" -o StrictHostKeyChecking=yes \
             "RELEASE_SHA=$RELEASE_SHA bash -s" <<'REMOTE'
           set -Eeuo pipefail
-          # Keep only the newly deployed SHA images so staging never holds two
-          # generations of app images at once. A rollback can re-pull from TCR
-          # or re-run a direct deployment.
           sudo -n docker image ls --format '{{.Repository}}:{{.Tag}}' \
             | grep -E '^greatsellai-hr-(api|caddy):' \
             | grep -v ":${RELEASE_SHA}$" \
@@ -319,3 +321,9 @@ jobs:
           sudo -n docker image ls --format '{{.Repository}}:{{.Tag}}' \
             | grep -E '^greatsellai-hr-(api|caddy):' || echo "none"
           REMOTE
+          then
+            echo "--- superseded staging images removed ---"
+          else
+            rc=$?
+            echo "WARNING: could not remove superseded staging images (ssh exit $rc); deploy already succeeded, release continues" >&2
+          fi

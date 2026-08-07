@@ -3,8 +3,9 @@
 A signed-in member (admin *or* recruiter) can read and write which
 "初筛条件板块" (filter panel sections) stay visible under
 ``/v1/settings/filter-sections``. Like the display-field preference it is
-per ``(user_id, organization_id)``; an empty selection keeps the panel's
-product default of showing every section.
+per ``(user_id, organization_id)``; a member with no saved selection sees every
+section (the product default), and an explicitly saved empty list hides the
+whole panel.
 """
 from __future__ import annotations
 
@@ -101,11 +102,20 @@ def _create_same_workspace_member_client(
     return member_client
 
 
-def test_filter_sections_defaults_empty(client):
+def test_filter_sections_defaults_to_all_sections(client):
     c = _member_client(client)
     response = c.get("/v1/settings/filter-sections")
     assert response.status_code == 200, response.text
-    assert response.json() == {"filter_section_keys": []}
+    assert response.json()["filter_section_keys"] == [
+        "condition_mode",
+        "institution",
+        "basic_profile",
+        "academic",
+        "graduation",
+        "experience",
+        "source_channel",
+        "keywords",
+    ]
 
 
 def test_filter_sections_save_and_read(client):
@@ -208,10 +218,19 @@ def test_filter_sections_per_user_isolation(client):
             "experience",
         ]
 
-        # The colleague in the same workspace keeps the empty default.
+        # The colleague in the same workspace keeps the full-section default.
         colleague_defaults = colleague_client.get("/v1/settings/filter-sections")
         assert colleague_defaults.status_code == 200, colleague_defaults.text
-        assert colleague_defaults.json()["filter_section_keys"] == []
+        assert colleague_defaults.json()["filter_section_keys"] == [
+            "condition_mode",
+            "institution",
+            "basic_profile",
+            "academic",
+            "graduation",
+            "experience",
+            "source_channel",
+            "keywords",
+        ]
 
         # The colleague can save their own independent selection.
         colleague_saved = colleague_client.put(

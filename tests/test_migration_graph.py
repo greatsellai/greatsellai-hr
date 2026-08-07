@@ -43,7 +43,7 @@ from app.models import (
 def test_alembic_history_has_one_canonical_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert script.get_heads() == ["20260806_0061"]
+    assert script.get_heads() == ["20260806_0063"]
 
 
 def test_migration_revision_identifiers_are_unique() -> None:

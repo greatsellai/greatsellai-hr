@@ -7,8 +7,9 @@ Create Date: 2026-08-07
 Adds a filter_section_keys JSON array to the existing per-user filter
 preference row so the same (user, organization) scope that already holds the
 result-table column selection can also hold which "初筛条件板块" sections the
-filter panel keeps visible. Existing rows backfill to an empty array, which is
-the "show every section" product default.
+filter panel keeps visible. Existing rows backfill to the full section list,
+which is the "show every section" product default; a stored empty array only
+arises from an explicit save and means "hide the whole panel".
 """
 from __future__ import annotations
 
@@ -27,14 +28,20 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # JSON arrays are stored as TEXT on SQLite; batch mode rebuilds the table
     # there (and issues plain DDL on PostgreSQL). server_default backfills the
-    # new NOT NULL column for rows written before the column existed.
+    # new NOT NULL column for rows written before the column existed. The
+    # default is the full section list (product default = every section shown);
+    # an empty list is reserved for an explicit "hide the whole panel" save.
+    default_sections = (
+        '["condition_mode","institution","basic_profile","academic",'
+        '"graduation","experience","source_channel","keywords"]'
+    )
     with op.batch_alter_table("user_filter_display_preferences") as batch_op:
         batch_op.add_column(
             sa.Column(
                 "filter_section_keys",
                 sa.JSON(),
                 nullable=False,
-                server_default=sa.text("'[]'"),
+                server_default=sa.text(f"'{default_sections}'"),
             )
         )
 

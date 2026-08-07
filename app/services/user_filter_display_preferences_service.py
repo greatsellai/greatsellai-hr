@@ -11,9 +11,11 @@ and workspace, never by a caller-supplied ID, so a request cannot touch
 another user's (or another workspace's) row even if it guesses a primary key.
 
 The same row also carries ``filter_section_keys``: which "初筛条件板块" (filter
-panel sections) the user keeps visible. An empty selection keeps the panel at
-its product default (every section shown); the section keys mirror
-``web/src/features/filter/filter-section-options.ts``.
+panel sections) the user keeps visible. A freshly created row (and every row
+backfilled by the 0063 migration) carries the full section set, which is the
+product default of showing every section. An explicitly saved empty list is the
+one meaning of "hide every section" (the settings panel's "全不选则隐藏整个初筛条件
+面板"); the section keys mirror ``web/src/features/filter/filter-section-options.ts``.
 """
 from __future__ import annotations
 
@@ -71,6 +73,20 @@ VALID_FILTER_SECTION_KEYS = frozenset(
     }
 )
 
+# Canonical order mirrors ``ALL_FILTER_SECTION_KEYS`` in the frontend, so a
+# default (fresh row or migrated backfill) renders in the same order as the
+# settings panel checkbox list.
+DEFAULT_FILTER_SECTION_KEYS = (
+    "condition_mode",
+    "institution",
+    "basic_profile",
+    "academic",
+    "graduation",
+    "experience",
+    "source_channel",
+    "keywords",
+)
+
 
 def _row_for_user(
     session: Session,
@@ -90,7 +106,7 @@ def _row_for_user(
         user_id=user_id,
         organization_id=organization_id,
         display_field_keys=[],
-        filter_section_keys=[],
+        filter_section_keys=list(DEFAULT_FILTER_SECTION_KEYS),
     )
     session.add(row)
     return row

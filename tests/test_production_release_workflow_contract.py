@@ -33,10 +33,10 @@ def test_production_is_a_manual_promotion_of_a_completed_staging_candidate() -> 
         workflow,
     )
     assert promote is not None
-    assert "timeout-minutes: 45" in promote.group("body")
+    assert "timeout-minutes: 75" in promote.group("body")
     assert "actions: read" in workflow
     assert "scripts/verify-staging-release.sh" in workflow
-    assert "scripts/verify-preloaded-production-images.sh" in workflow
+    assert "scripts/verify-preloaded-production-images.sh" not in workflow
     assert "scripts/pull-tcr-release-images.sh" not in workflow
     assert "scripts/verify-release-images.sh" not in workflow
     assert "mapfile -t staging_tags" in workflow
@@ -44,23 +44,18 @@ def test_production_is_a_manual_promotion_of_a_completed_staging_candidate() -> 
     assert "Expected exactly one staging tag for current main" in workflow
 
     preflight = workflow.index("Preflight production configuration before tagging")
-    verify_preloaded = workflow.index("Verify production host holds preloaded staging images")
     create_tag = workflow.index("Create immutable production tag for the staged candidate")
-    deploy = workflow.index("Deploy tagged release from the exact staged images")
-    assert preflight < verify_preloaded < create_tag < deploy
+    deploy = workflow.index("Build and deploy tagged release on the production host")
+    assert preflight < create_tag < deploy
     assert 'scripts/preflight-production-release.sh "$RELEASE_SHA"' in workflow
-    assert "--prebuilt-images" in workflow
+    # Production images are built on the production host from the tagged source
+    # (deploy-production.sh image_mode=build, Tencent mirror defaults); nothing
+    # is preloaded and the deploy step must not use the retired prebuilt path.
+    assert "--prebuilt-images" not in workflow
     assert 'scripts/transfer-production-images.sh' not in workflow
     assert 'scripts/load-verified-release-images.sh' not in workflow
-    # Images are silent-preloaded to the production host by the release runner
-    # (see the staging-release preload step); promotion only verifies their
-    # content IDs equal the completed staging record.
-    assert '--api-image-id "$STAGING_API_IMAGE_ID"' in workflow
-    assert '--caddy-image-id "$STAGING_CADDY_IMAGE_ID"' in workflow
-    assert "api_image_id: ${{ steps.verified.outputs.api_image_id }}" in workflow
-    assert "caddy_image_id: ${{ steps.verified.outputs.caddy_image_id }}" in workflow
-    assert "STAGING_API_IMAGE_ID: ${{ needs.verify-staging.outputs.api_image_id }}" in workflow
-    assert "STAGING_CADDY_IMAGE_ID: ${{ needs.verify-staging.outputs.caddy_image_id }}" in workflow
+    assert "STAGING_API_IMAGE_ID" not in workflow
+    assert "STAGING_CADDY_IMAGE_ID" not in workflow
     assert "TCR_PASSWORD" not in workflow
     assert "STAGING_API_REGISTRY_IMAGE" not in workflow
     assert "image_metadata_sha256" not in workflow
@@ -77,7 +72,9 @@ def test_retry_deploy_is_manual_and_uses_current_reviewed_tooling() -> None:
     assert "workflow_dispatch:" in workflow
     assert "ref: main" in workflow
     assert 'git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"' in workflow
-    assert "--prebuilt-images" in workflow
+    # Retried deployments also build on the production host; the retired
+    # prebuilt-image path must not be used.
+    assert "--prebuilt-images" not in workflow
     assert "scripts/transfer-production-images.sh" not in workflow
     assert "scripts/ensure-staging-gateway.sh" not in workflow
 
@@ -205,47 +202,12 @@ def test_public_repository_routes_all_release_orchestration_to_hosted_runners() 
         ".github/workflows/production-legacy-reconcile.yml",
         ".github/workflows/production-bootstrap-import.yml",
         ".github/workflows/production-bootstrap-restore.yml",
-        ".github/workflows/relay-bootstrap.yml",
     )
 
     for workflow_path in workflow_paths:
         workflow = (ROOT / workflow_path).read_text(encoding="utf-8")
         assert "runs-on: [self-hosted, Linux, X64, greatsell-ci]" not in workflow
         assert runner_selector in workflow
-
-
-def test_relay_bootstrap_is_a_manual_production_environment_installer() -> None:
-    relay = (ROOT / ".github" / "workflows" / "relay-bootstrap.yml").read_text(
-        encoding="utf-8"
-    )
-    allow = (ROOT / "scripts" / "relay-allow.sh").read_text(encoding="utf-8")
-
-    # Manual-only, from the production Environment, never on push/PR; it is an
-    # authorized_keys installer, not a release path.
-    assert "workflow_dispatch" in relay
-    assert "pull_request" not in relay
-    assert "environment:\n      name: production" in relay
-    assert "PROMOTE" not in relay
-
-    # Installs the reviewed whitelist wrapper via forced `command=`, never a
-    # raw `docker load` line, and disables forwarding / pty / agent.
-    assert "scripts/relay-allow.sh" in relay
-    assert "/home/ubuntu/.relay-allow.sh" in relay
-    assert "authorized_keys" in relay
-    assert "command=\"/home/ubuntu/.relay-allow.sh\"" in relay or 'command=\\"/home/ubuntu/.relay-allow.sh\\"' in relay
-    assert "no-port-forwarding" in relay
-    assert "no-agent-forwarding" in relay
-    assert "no-X11-forwarding" in relay
-    assert "no-pty" in relay
-
-    # The whitelist wrapper only permits reachability, docker load, and the
-    # content-ID inspection of greatsellai-hr images; everything else is denied.
-    assert "SSH_ORIGINAL_COMMAND" in allow
-    assert "docker load" in allow
-    assert "docker image inspect --format" in allow
-    assert "greatsellai-hr-api" in allow
-    assert "greatsellai-hr-caddy" in allow
-    assert "not allowed" in allow
 
 
 def test_cross_host_production_edge_never_claims_the_legacy_staging_gateway() -> None:
@@ -319,7 +281,7 @@ def test_main_ci_no_longer_builds_or_publishes_tcr_images() -> None:
     assert "TCR release metadata artifact is incomplete." in metadata
 
 
-def test_production_verifies_preloaded_images_while_staging_streams_direct() -> None:
+def test_production_builds_images_on_host_while_staging_streams_direct() -> None:
     staging = (ROOT / ".github" / "workflows" / "staging-release.yml").read_text(
         encoding="utf-8"
     )
@@ -329,17 +291,12 @@ def test_production_verifies_preloaded_images_while_staging_streams_direct() -> 
     staging_verify = (ROOT / "scripts" / "verify-staging-release.sh").read_text(
         encoding="utf-8"
     )
-    preloaded_verify = (
-        ROOT / "scripts" / "verify-preloaded-production-images.sh"
-    ).read_text(encoding="utf-8")
-    stream = (ROOT / "scripts" / "stream-images-to-production.sh").read_text(
-        encoding="utf-8"
-    )
 
-    # Production promotion no longer pulls TCR images or re-verifies CI image
-    # identity. The release runner silent-preloaded the smoke-tested images to
-    # the production host; promotion only verifies their content IDs equal the
-    # completed staging record, then tags and deploys the exact images.
+    # Production promotion no longer pulls TCR images or consumes preloaded
+    # images. It builds the API/Caddy images directly on the production host
+    # from the tagged source (deploy-production.sh image_mode=build, Tencent
+    # mirror defaults), then tags and deploys. No image is transferred or
+    # preloaded across the border.
     assert "scripts/pull-tcr-release-images.sh" not in production
     assert "scripts/verify-release-images.sh" not in production
     assert "TCR_USERNAME" not in production
@@ -347,19 +304,19 @@ def test_production_verifies_preloaded_images_while_staging_streams_direct() -> 
     assert "--api-registry-image" not in production
     assert "--caddy-registry-image" not in production
     assert "--password-stdin" not in production
-    assert "scripts/verify-preloaded-production-images.sh" in production
-    assert "--api-image-id \"$STAGING_API_IMAGE_ID\"" in production
-    assert "--caddy-image-id \"$STAGING_CADDY_IMAGE_ID\"" in production
+    assert "scripts/verify-preloaded-production-images.sh" not in production
+    assert "STAGING_API_IMAGE_ID" not in production
+    assert "STAGING_CADDY_IMAGE_ID" not in production
+    assert "--prebuilt-images" not in production
     assert "transfer-production-images.sh" not in production
     assert "load-verified-release-images.sh" not in production
     assert "release-images-" not in production
+    assert "timeout-minutes: 75" in production
 
     # Staging builds the exact commit images on the US release runner and
     # streams them straight to the US staging host; it must never touch TCR
-    # credentials or the CI metadata artifact handoff. After the public smoke
-    # check, the same release runner streams the verified images directly to
-    # production over the whitelist-limited relay key held in the staging
-    # environment (no staging-host relay).
+    # credentials, the CI metadata artifact handoff, or the production host.
+    # Production image building stays a manual production-Environment step.
     assert "scripts/pull-tcr-release-images.sh" not in staging
     assert "scripts/verify-tcr-release-metadata.sh" not in staging
     assert "TCR_USERNAME" not in staging
@@ -371,16 +328,11 @@ def test_production_verifies_preloaded_images_while_staging_streams_direct() -> 
     assert "load-verified-release-images.sh" not in staging
     assert "--delivery direct" in staging
     assert "sudo -n docker load" in staging
-    assert "Pre-load verified images to production host" in staging
-    assert "scripts/stream-images-to-production.sh" in staging
-    # The preload step runs on the runner with the staging-environment relay
-    # credentials; it does not ssh into the staging host to run the old relay.
-    assert 'scripts/stream-images-to-production.sh "$RELEASE_SHA"' in staging
-    assert '--host "$PROD_RELAY_HOST"' in staging
-    assert '--ssh-key "$RUNNER_TEMP/greatsell-prod-relay"' in staging
-    assert '--known-hosts "$RUNNER_TEMP/known_hosts_prod"' in staging
-    assert "PROD_RELAY_SSH_PRIVATE_KEY" in staging
-    assert "PROD_RELAY_SSH_KNOWN_HOSTS" in staging
+    assert "Pre-load verified images to production host" not in staging
+    assert "scripts/stream-images-to-production.sh" not in staging
+    assert "PROD_RELAY_HOST" not in staging
+    assert "PROD_RELAY_SSH_PRIVATE_KEY" not in staging
+    assert "PROD_RELAY_SSH_KNOWN_HOSTS" not in staging
     assert "bash -s $RELEASE_SHA" not in staging
 
     # verify-staging-release.sh branches on image_delivery: direct records are
@@ -391,26 +343,6 @@ def test_production_verifies_preloaded_images_while_staging_streams_direct() -> 
     assert "api_registry_image" in staging_verify
     assert "caddy_registry_image" in staging_verify
     assert "RepoDigests" in staging_verify
-    assert "timeout-minutes: 45" in production
-
-    # The production preload verifier fails closed: image IDs must equal the
-    # completed staging record, revision must match, and platform is amd64.
-    assert "--api-image-id" in preloaded_verify
-    assert "--caddy-image-id" in preloaded_verify
-    assert "linux/amd64" in preloaded_verify
-    assert "org.opencontainers.image.revision" in preloaded_verify
-    assert "ID does not equal the completed staging record" in preloaded_verify
-    assert "revision does not match" in preloaded_verify
-
-    # The runner-direct relay streams save|gzip|tee, loads via seekable file
-    # input, and re-verifies the loaded ID against the local image.
-    assert "docker save" in stream
-    assert "docker load" in stream
-    assert "pv" in stream
-    assert "revision" in stream
-    assert "--host" in stream
-    assert "--ssh-key" in stream
-    assert "--known-hosts" in stream
 
 
 def test_tcr_docker_auth_writer_creates_private_standard_credentials(

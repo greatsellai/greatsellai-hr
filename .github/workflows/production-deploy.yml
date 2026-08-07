@@ -19,7 +19,7 @@ jobs:
   deploy:
     name: Deploy production tag
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     concurrency:
       group: greatsellai-hr-release-lane
       cancel-in-progress: false
@@ -81,9 +81,11 @@ jobs:
           : "${PROD_DEPLOY_HOST:?Missing production variable PROD_DEPLOY_HOST}"
           : "${PROD_PROJECT_DIR:?Missing production variable PROD_PROJECT_DIR}"
           : "${PROD_HISTORY_DIR:?Missing production variable PROD_HISTORY_DIR}"
+          # deploy-production.sh defaults to image_mode=build: it streams the
+          # tagged source to the production host and runs `compose build api
+          # caddy` there with the Dockerfile's Tencent mirror defaults.
           scripts/deploy-production.sh "$RELEASE_TAG" \
             --host "$PROD_DEPLOY_HOST" \
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy" \
-            --prebuilt-images
+            --ssh-key "$RUNNER_TEMP/greatsell-production-deploy"

@@ -26,7 +26,7 @@ jobs:
        github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
-    timeout-minutes: 120
+    timeout-minutes: 45
     # This lock starts only when the deployment job runs. An unapproved
     # production Environment must not block newer main commits from staging.
     concurrency:
@@ -295,50 +295,6 @@ jobs:
             --public-url "$STAGING_PUBLIC_URL" \
             --delivery direct \
             --ssh-key "$RUNNER_TEMP/greatsell-staging-deploy"
-      - name: Configure production relay SSH
-        # The relay key is whitelist-limited (scripts/relay-allow.sh) so the
-        # automatic staging-release job holds it in the staging environment.
-        # The unrestricted production deploy key stays in the production
-        # Environment only and is never used by this job.
-        if: steps.ready.outputs.stage == 'true'
-        env:
-          PROD_RELAY_HOST: ${{ vars.PROD_RELAY_HOST }}
-          PROD_RELAY_SSH_PRIVATE_KEY: ${{ secrets.PROD_RELAY_SSH_PRIVATE_KEY }}
-          PROD_RELAY_SSH_KNOWN_HOSTS: ${{ secrets.PROD_RELAY_SSH_KNOWN_HOSTS }}
-        run: |
-          set -Eeuo pipefail
-          : "${PROD_RELAY_HOST:?Missing staging-env variable PROD_RELAY_HOST}"
-          : "${PROD_RELAY_SSH_PRIVATE_KEY:?Missing staging-env secret PROD_RELAY_SSH_PRIVATE_KEY}"
-          : "${PROD_RELAY_SSH_KNOWN_HOSTS:?Missing staging-env secret PROD_RELAY_SSH_KNOWN_HOSTS}"
-          # A variable pasted with a trailing newline must not break host
-          # matching (ssh-keygen -F) or the ssh target below.
-          PROD_RELAY_HOST="${PROD_RELAY_HOST%"${PROD_RELAY_HOST##*[![:space:]]}"}"
-          umask 077
-          printf '%s\n' "$PROD_RELAY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/greatsell-prod-relay"
-          chmod 600 "$RUNNER_TEMP/greatsell-prod-relay"
-          printf '%s\n' "$PROD_RELAY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts_prod"
-          ssh-keygen -F "${PROD_RELAY_HOST#*@}" -f "$RUNNER_TEMP/known_hosts_prod" >/dev/null || {
-            echo "Production known_hosts does not contain the configured relay host." >&2
-            exit 1
-          }
-      - name: Pre-load verified images to production host
-        # Silent pull: the release runner streams the smoke-tested images
-        # directly to the production host via the whitelist-limited relay key,
-        # without publishing. It never touches compose, migrations, or running
-        # services; publishing stays a manual Production promotion. If the prod
-        # relay is not yet configured this step fails the run but leaves the
-        # staging deployment and record intact.
-        if: steps.ready.outputs.stage == 'true'
-        env:
-          PROD_RELAY_HOST: ${{ vars.PROD_RELAY_HOST }}
-          RELEASE_SHA: ${{ env.RELEASE_SHA }}
-        run: |
-          set -Eeuo pipefail
-          PROD_RELAY_HOST="${PROD_RELAY_HOST%"${PROD_RELAY_HOST##*[![:space:]]}"}"
-          scripts/stream-images-to-production.sh "$RELEASE_SHA" \
-            --host "$PROD_RELAY_HOST" \
-            --ssh-key "$RUNNER_TEMP/greatsell-prod-relay" \
-            --known-hosts "$RUNNER_TEMP/known_hosts_prod"
       - name: Remove superseded staging images
         if: steps.ready.outputs.stage == 'true'
         env:

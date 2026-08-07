@@ -23,8 +23,6 @@ jobs:
       staging_tag: ${{ steps.verified.outputs.staging_tag }}
       release_sha: ${{ steps.verified.outputs.release_sha }}
       archive_sha256: ${{ steps.verified.outputs.archive_sha256 }}
-      api_image_id: ${{ steps.verified.outputs.api_image_id }}
-      caddy_image_id: ${{ steps.verified.outputs.caddy_image_id }}
     steps:
       - name: Validate promotion request
         env:
@@ -98,12 +96,13 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
   promote:
-    name: Promote the completed staging image to production
+    name: Promote the completed staging candidate to production
     needs: verify-staging
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "X64", "greatsell-ci"]') || 'ubuntu-latest' }}
-    # Images were silent-preloaded to the production host by the staging relay;
-    # this job only verifies their content IDs, tags a release, and deploys.
-    timeout-minutes: 45
+    # Production images are built on the production host from the staged
+    # source (compose build, Tencent mirror defaults); this job tags the
+    # verified candidate and deploys it. Nothing crosses the border.
+    timeout-minutes: 75
     # Do not acquire the deployment lock while this job is waiting for an
     # Environment reviewer; staging must remain available for newer main.
     concurrency:
@@ -114,8 +113,6 @@ jobs:
     env:
       RELEASE_SHA: ${{ needs.verify-staging.outputs.release_sha }}
       STAGING_TAG: ${{ needs.verify-staging.outputs.staging_tag }}
-      STAGING_API_IMAGE_ID: ${{ needs.verify-staging.outputs.api_image_id }}
-      STAGING_CADDY_IMAGE_ID: ${{ needs.verify-staging.outputs.caddy_image_id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -166,16 +163,6 @@ jobs:
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
             --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
-      - name: Verify production host holds preloaded staging images
-        env:
-          PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
-        run: |
-          set -Eeuo pipefail
-          scripts/verify-preloaded-production-images.sh "$RELEASE_SHA" \
-            --host "$PROD_DEPLOY_HOST" \
-            --api-image-id "$STAGING_API_IMAGE_ID" \
-            --caddy-image-id "$STAGING_CADDY_IMAGE_ID" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"
       - name: Reconfirm promotion target before production tagging
         run: |
           set -Eeuo pipefail
@@ -214,7 +201,7 @@ jobs:
             scripts/create-production-tag.sh "$tag"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Deploy tagged release from the exact staged images
+      - name: Build and deploy tagged release on the production host
         env:
           PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
           PROD_HISTORY_DIR: ${{ vars.PROD_HISTORY_DIR }}
@@ -222,9 +209,11 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -Eeuo pipefail
+          # deploy-production.sh defaults to image_mode=build: it streams the
+          # tagged source to the production host and runs `compose build api
+          # caddy` there with the Dockerfile's Tencent mirror defaults.
           scripts/deploy-production.sh "$RELEASE_TAG" \
             --host "$PROD_DEPLOY_HOST" \
             --project-dir "$PROD_PROJECT_DIR" \
             --history-dir "$PROD_HISTORY_DIR" \
-            --ssh-key "$RUNNER_TEMP/greatsell-production-promote" \
-            --prebuilt-images
+            --ssh-key "$RUNNER_TEMP/greatsell-production-promote"

@@ -9,6 +9,7 @@ import type {
   JobMatch,
   JobMatchBatch,
   JobMatchBatchItem,
+  JobMatchRequirementResult,
   JobRequirements,
   JobVersion,
 } from "../../types";
@@ -1135,6 +1136,21 @@ function MatchLeaderboard({
   );
 }
 
+function matchOutcomeLabel(outcome: JobMatchRequirementResult["outcome"]): string {
+  if (outcome === "met") return "已满足";
+  if (outcome === "partial") return "部分满足";
+  if (outcome === "not_met") return "未满足";
+  return "未提及";
+}
+
+function factReferenceText(item: JobMatchRequirementResult): string {
+  const readable = item.fact_evidence?.length
+    ? item.fact_evidence.map((fact) => fact.summary).join("、")
+    : "";
+  const cited = readable || item.fact_ids.join("、");
+  return cited ? `事实依据：${cited}` : "未发现可验证的简历事实";
+}
+
 function MatchLaneCandidate({
   match,
   lane,
@@ -1157,39 +1173,92 @@ function MatchLaneCandidate({
   const unknown = match.requirement_results.filter(
     (result) => result.outcome === "unknown",
   ).length;
+  const [expanded, setExpanded] = useState(false);
   const openResume = () => onOpenResume(match);
   return (
-    <tr className="match-candidate-row" onClick={openResume}>
-      <td className="match-rank">{rank}</td>
-      <td>
-        <strong>{match.candidate_display_name?.trim() || "未命名候选人"}</strong>
-        <small>
-          满足 {met} · 部分满足 {partial}
-          {unknown > 0 && <> · 未提及 {unknown}</>}
-        </small>
-      </td>
-      <td>
-        <span className={`match-lane-tag is-${lane}`}>{matchLaneLabel[lane]}</span>
-      </td>
-      <td>
-        <span className={`match-hard-status is-${hardStatus}`}>
-          {hardRequirementLabel[hardStatus] ?? "待确认"}
-        </span>
-      </td>
-      <td className="match-score">{jdMatchScore.toFixed(1)}%</td>
-      <td>
-        <button
-          className="button button-ghost match-open-button"
-          onClick={(event) => {
-            event.stopPropagation();
-            openResume();
-          }}
-          type="button"
-        >
-          <Icon name="document" size={15} />
-          查看简历
-        </button>
-      </td>
-    </tr>
+    <>
+      <tr className="match-candidate-row" onClick={openResume}>
+        <td className="match-rank">
+          <button
+            aria-expanded={expanded}
+            aria-label={expanded ? "收起匹配证据明细" : "展开匹配证据明细"}
+            className="button button-ghost match-expand-button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setExpanded((current) => !current);
+            }}
+            type="button"
+          >
+            <Icon name={expanded ? "chevron-down" : "chevron-right"} size={15} />
+          </button>
+          <span className="match-rank-number">{rank}</span>
+        </td>
+        <td>
+          <strong>{match.candidate_display_name?.trim() || "未命名候选人"}</strong>
+          <small>
+            满足 {met} · 部分满足 {partial}
+            {unknown > 0 && <> · 未提及 {unknown}</>}
+          </small>
+        </td>
+        <td>
+          <span className={`match-lane-tag is-${lane}`}>{matchLaneLabel[lane]}</span>
+        </td>
+        <td>
+          <span className={`match-hard-status is-${hardStatus}`}>
+            {hardRequirementLabel[hardStatus] ?? "待确认"}
+          </span>
+        </td>
+        <td className="match-score">{jdMatchScore.toFixed(1)}%</td>
+        <td>
+          <button
+            className="button button-ghost match-open-button"
+            onClick={(event) => {
+              event.stopPropagation();
+              openResume();
+            }}
+            type="button"
+          >
+            <Icon name="document" size={15} />
+            查看简历
+          </button>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="match-detail-row">
+          <td colSpan={6}>
+            <div className="match-detail-inner">
+              <h3 className="match-detail-title">逐条匹配依据</h3>
+              {match.requirement_results.map((item) => (
+                <div className="requirement-row" key={item.requirement_id}>
+                  <span className={`outcome-${item.outcome.replace("_", "-")}`}>
+                    {matchOutcomeLabel(item.outcome)}
+                  </span>
+                  <p>
+                    <b>{item.requirement_text}</b>
+                    <br />
+                    {item.reason}
+                    {item.missing_or_uncertain
+                      ? ` · 待确认：${item.missing_or_uncertain}`
+                      : ""}
+                    <small className="match-fact-reference">
+                      {factReferenceText(item)}
+                    </small>
+                  </p>
+                  <span
+                    className={
+                      item.priority === "must_have"
+                        ? "priority-must"
+                        : "priority-preferred"
+                    }
+                  >
+                    {item.priority === "must_have" ? "必须" : "优先"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }

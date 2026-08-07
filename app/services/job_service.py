@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import AppSettings
 from app.models import (
@@ -41,6 +41,10 @@ from app.services.deepseek_provider import (
     extract_jd_requirements_from_clauses,
     generate_jd_from_brief,
     match_resume_fact_snapshot_against_requirements,
+)
+from app.services.fact_evidence import (
+    fact_evidence_map,
+    resolve_fact_evidence_from_map,
 )
 from app.services.ai_gateway_service import (
     AiExecutionSpec,
@@ -985,6 +989,7 @@ def _job_match_ranking_key(job_match: JobMatch) -> tuple[int, float, float]:
 
 def _match_response(job_match: JobMatch) -> JobMatchResponse:
     match_confidence = job_match.evidence_coverage
+    fact_evidence_by_id = fact_evidence_map(job_match.fact_snapshot)
     return JobMatchResponse(
         match_id=job_match.id,
         job_id=job_match.job_id,
@@ -1023,6 +1028,10 @@ def _match_response(job_match: JobMatch) -> JobMatchResponse:
                 outcome=result.outcome,
                 reason=result.reason,
                 fact_ids=result.fact_ids or [],
+                fact_evidence=resolve_fact_evidence_from_map(
+                    fact_evidence_by_id,
+                    result.fact_ids or [],
+                ),
                 missing_or_uncertain=result.missing_or_uncertain,
                 score_contribution=result.score_contribution,
             )
@@ -1193,6 +1202,12 @@ def get_job_match(session: Session, *, match_id: str) -> JobMatchResponse:
         select(JobMatch)
         .join(Resume, Resume.id == JobMatch.resume_id)
         .join(Job, Job.id == JobMatch.job_id)
+        .options(
+            selectinload(JobMatch.fact_snapshot),
+            selectinload(JobMatch.requirement_results).selectinload(
+                JobMatchRequirementResult.requirement
+            ),
+        )
         .where(JobMatch.id == match_id, Job.kind == "job")
     )
     if job_match is None:
@@ -1211,6 +1226,12 @@ def list_resume_job_matches(
         select(JobMatch)
         .join(Resume, Resume.id == JobMatch.resume_id)
         .join(Job, Job.id == JobMatch.job_id)
+        .options(
+            selectinload(JobMatch.fact_snapshot),
+            selectinload(JobMatch.requirement_results).selectinload(
+                JobMatchRequirementResult.requirement
+            ),
+        )
         .where(JobMatch.resume_id == resume_id, Job.kind == "job")
         .order_by(JobMatch.created_at.desc(), JobMatch.id.desc())
     ).all()
@@ -1233,6 +1254,12 @@ def list_job_version_matches(
         select(JobMatch)
         .join(Resume, Resume.id == JobMatch.resume_id)
         .join(Job, Job.id == JobMatch.job_id)
+        .options(
+            selectinload(JobMatch.fact_snapshot),
+            selectinload(JobMatch.requirement_results).selectinload(
+                JobMatchRequirementResult.requirement
+            ),
+        )
         .where(JobMatch.job_version_id == job_version_id, Job.kind == "job")
         .order_by(JobMatch.created_at.desc(), JobMatch.id.desc())
     ).all()

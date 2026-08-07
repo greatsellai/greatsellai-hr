@@ -1090,6 +1090,22 @@ test.describe("招聘工作台关键路径", () => {
     await expect(page.locator(".match-lane-tag.is-pending").first()).toBeVisible();
     await expect(page.locator(".match-lane-tag.is-unmet").first()).toBeVisible();
 
+    // 榜单行内展开：逐条展示匹配依据，并把事实 ID 解析成可读摘要。
+    // 展开后 aria-label 会从「展开」变为「收起」，所以用稳定的 class 定位。
+    const firstExpandButton = page.locator(".match-expand-button").first();
+    await expect(firstExpandButton).toBeVisible();
+    await expect(firstExpandButton).toHaveAttribute("aria-expanded", "false");
+    await firstExpandButton.click();
+    const detailRow = page.locator(".match-detail-row").first();
+    await expect(detailRow.getByText("逐条匹配依据", { exact: true })).toBeVisible();
+    await expect(
+      detailRow.getByText("事实依据：Python", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(detailRow.locator(".outcome-met").first()).toBeVisible();
+    await expect(firstExpandButton).toHaveAttribute("aria-expanded", "true");
+    await firstExpandButton.click();
+    await expect(detailRow).toHaveCount(0);
+
     const forbiddenCandidateRequests: string[] = [];
     const observeCandidateRequests = (request: import("@playwright/test").Request) => {
       const { pathname } = new URL(request.url());

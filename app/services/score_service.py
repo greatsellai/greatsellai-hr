@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Literal, Mapping
+from typing import Mapping
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -37,6 +37,7 @@ from app.services.deepseek_provider import (
     optimize_score_template,
     score_resume_fact_snapshot,
 )
+from app.services.fact_evidence import fact_evidence_map
 from app.services.ai_gateway_service import (
     AiExecutionSpec,
     AiGatewayError,
@@ -328,72 +329,6 @@ def _optional_int(value: object) -> int | None:
     return value
 
 
-def _score_fact_summary(*, fact_type: str, entry: Mapping[str, object]) -> str:
-    """Build a concise, structured fact label without exposing raw PDF text."""
-
-    def text(key: str) -> str | None:
-        return _optional_string(entry.get(key))
-
-    if fact_type == "education":
-        values = [text("school_name_raw"), text("degree"), text("major_raw")]
-    elif fact_type == "experience":
-        values = [
-            text("experience_type"),
-            text("organization_name_raw"),
-            text("title_raw"),
-            text("experience_name_raw"),
-        ]
-    else:
-        values = [text("skill_display")]
-    summary = " · ".join(value for value in values if value)
-    return summary or "已提取简历事实"
-
-
-def _fact_evidence_by_id(score: ResumeScore) -> dict[str, ResumeScoreFactEvidence]:
-    """Resolve score citations using the exact immutable snapshot scored by AI.
-
-    This is intentionally a small projection of persisted facts.  It gives the
-    UI enough context to explain a score while preserving the score's original
-    facts version even after a resume is updated.
-    """
-
-    snapshot = score.fact_snapshot
-    if snapshot is None:
-        return {}
-    try:
-        payload = json.loads(snapshot.canonical_facts_json)
-    except (TypeError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-
-    evidence: dict[str, ResumeScoreFactEvidence] = {}
-    categories: tuple[
-        tuple[str, Literal["education", "experience", "skill"]], ...
-    ] = (
-        ("education", "education"),
-        ("experiences", "experience"),
-        ("skills", "skill"),
-    )
-    for field, fact_type in categories:
-        entries = payload.get(field)
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            fact_id = _optional_string(entry.get("fact_id"))
-            if fact_id is None:
-                continue
-            evidence[fact_id] = ResumeScoreFactEvidence(
-                fact_id=fact_id,
-                fact_type=fact_type,
-                summary=_score_fact_summary(fact_type=fact_type, entry=entry),
-                evidence_block_ids=_string_list(entry.get("evidence_block_ids")),
-            )
-    return evidence
-
-
 def _score_audit_entries(
     session: Session,
     *,
@@ -546,7 +481,7 @@ def _analysis_response(
 
 
 def _score_response(session: Session, score: ResumeScore) -> ResumeScoreResponse:
-    fact_evidence_by_id = _fact_evidence_by_id(score)
+    fact_evidence_by_id = fact_evidence_map(score.fact_snapshot)
     audit_trail = _score_audit_entries(session, score=score)
     latest_audit_by_dimension = {
         entry.dimension_key: entry

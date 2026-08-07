@@ -3119,7 +3119,9 @@ class ResumeScoreFactEvidence(ApiModel):
     """
 
     fact_id: str
-    fact_type: Literal["education", "experience", "skill", "unknown"]
+    fact_type: Literal[
+        "education", "experience", "skill", "language", "scholarship", "unknown"
+    ]
     summary: str
     evidence_block_ids: list[str]
 
@@ -3750,6 +3752,9 @@ class JobMatchRequirementResponse(ApiModel):
     outcome: Literal["met", "partial", "not_met", "unknown"]
     reason: str
     fact_ids: list[str]
+    # Resolved, readable summaries of the cited fact_ids against the immutable
+    # match snapshot, so the UI can explain a decision without re-resolving.
+    fact_evidence: list[ResumeScoreFactEvidence] = Field(default_factory=list)
     missing_or_uncertain: str | None
     score_contribution: float
 

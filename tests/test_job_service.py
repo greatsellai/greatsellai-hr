@@ -635,6 +635,14 @@ def test_snapshot_match_persists_evidence_and_unknown_hard_requirement(
         persisted = job_service.get_job_match(session, match_id=matched.match_id)
     assert persisted.fact_snapshot_id == matched.fact_snapshot_id
     assert persisted.requirement_results[0].fact_ids == ["skill-001"]
+    cited_evidence = persisted.requirement_results[0].fact_evidence
+    assert [item.fact_id for item in cited_evidence] == ["skill-001"]
+    assert cited_evidence[0].fact_type == "skill"
+    assert "Python" in cited_evidence[0].summary
+    assert cited_evidence[0].evidence_block_ids
+    # A requirement without citations keeps an empty evidence list, so the UI
+    # falls back to "未发现可验证的简历事实" instead of inventing evidence.
+    assert persisted.requirement_results[1].fact_evidence == []
 
 
 def test_jd_ai_operations_require_a_server_side_key(client) -> None:

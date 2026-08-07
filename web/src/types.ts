@@ -1618,7 +1618,13 @@ export interface ResumeScoreDimension {
 
 export interface ResumeScoreFactEvidence {
   fact_id: string;
-  fact_type: "education" | "experience" | "skill" | "unknown";
+  fact_type:
+    | "education"
+    | "experience"
+    | "skill"
+    | "language"
+    | "scholarship"
+    | "unknown";
   summary: string;
   evidence_block_ids: string[];
 }
@@ -2010,6 +2016,10 @@ export interface JobMatchRequirementResult {
   outcome: JobMatchOutcome;
   reason: string;
   fact_ids: string[];
+  /** Readable summaries of the cited fact_ids, resolved server-side against the
+   * immutable match snapshot. Absent in older API responses; fall back to
+   * fact_ids in that case. */
+  fact_evidence?: ResumeScoreFactEvidence[];
   missing_or_uncertain: string | null;
   score_contribution: number;
 }

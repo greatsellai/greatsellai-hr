@@ -16,7 +16,7 @@ def test_document_ocr_metrics_upgrade_and_downgrade_are_sqlite_safe(tmp_path) ->
     config.cmd_opts = SimpleNamespace(x=[f"database_url={database_url}"])
 
     command.upgrade(config, "20260731_0053")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
 
     engine = create_engine(database_url)
     try:

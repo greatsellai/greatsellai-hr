@@ -16,6 +16,8 @@ interface UseWorkspaceAuthOptions {
   authRoute: string | null;
   formatError: (error: unknown) => string;
   onLogoutCleanup: () => void;
+  /** A same-origin, validated one-shot handoff such as OAuth consent. */
+  postAuthenticationHref?: () => string | null;
   rootWorkspaceBasePath: string;
   workspaceHref: (path?: string) => string;
 }
@@ -24,6 +26,7 @@ export function useWorkspaceAuth({
   authRoute,
   formatError,
   onLogoutCleanup,
+  postAuthenticationHref,
   rootWorkspaceBasePath,
   workspaceHref,
 }: UseWorkspaceAuthOptions) {
@@ -145,13 +148,16 @@ export function useWorkspaceAuth({
           window.location.assign(nextPath);
           return session;
         }
+        const postAuthentication = session.email_verification_required
+          ? null
+          : postAuthenticationHref?.();
         window.location.assign(
-          workspaceHref(session.email_verification_required ? "/verify-email" : ""),
+          postAuthentication || workspaceHref(session.email_verification_required ? "/verify-email" : ""),
         );
       }
       return session;
     },
-    [applyAuthSession, rootWorkspaceBasePath, workspaceHref],
+    [applyAuthSession, postAuthenticationHref, rootWorkspaceBasePath, workspaceHref],
   );
 
   const login = useCallback(

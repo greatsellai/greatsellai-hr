@@ -18,7 +18,7 @@ def test_user_filter_display_preferences_upgrade_and_downgrade_are_sqlite_safe(
     config.cmd_opts = SimpleNamespace(x=[f"database_url={database_url}"])
 
     command.upgrade(config, "20260806_0059")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
 
     engine = create_engine(database_url)
     try:
@@ -60,7 +60,7 @@ def test_user_filter_section_preferences_column_round_trips(tmp_path) -> None:
     config.cmd_opts = SimpleNamespace(x=[f"database_url={database_url}"])
 
     command.upgrade(config, "20260806_0062")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
 
     engine = create_engine(database_url)
     try:

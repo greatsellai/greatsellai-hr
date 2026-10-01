@@ -46,11 +46,11 @@ def _mailbox_values(*, mailbox_id: str, oauth: bool, archived: bool) -> dict[str
     }
 
 
-def _upgrade_to_head(tmp_path) -> tuple[str, Config]:
+def _upgrade_to_latest_reversible_revision(tmp_path) -> tuple[str, Config]:
     database_path = tmp_path / "mailbox-oauth-downgrade-guard.sqlite"
     database_url = f"sqlite:///{database_path.as_posix()}"
     config = _alembic_config(database_url)
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
     return database_url, config
 
 
@@ -66,7 +66,7 @@ def test_oauth_downgrade_guard_preserves_unsafe_0037_state(
     has_refresh_credential: bool,
     has_active_oauth_mailbox: bool,
 ) -> None:
-    database_url, config = _upgrade_to_head(tmp_path)
+    database_url, config = _upgrade_to_latest_reversible_revision(tmp_path)
     engine = create_engine(database_url)
     try:
         metadata = MetaData()
@@ -140,7 +140,7 @@ def test_oauth_downgrade_guard_preserves_unsafe_0037_state(
 
 
 def test_oauth_downgrade_guard_allows_safe_legacy_channel_rollback(tmp_path) -> None:
-    database_url, config = _upgrade_to_head(tmp_path)
+    database_url, config = _upgrade_to_latest_reversible_revision(tmp_path)
     engine = create_engine(database_url)
     try:
         metadata = MetaData()

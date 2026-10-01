@@ -7,10 +7,9 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from ipaddress import ip_address, ip_network
 import logging
 import mimetypes
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Callable, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -39,6 +38,11 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import AppSettings
 from app.database import Database, get_session
 from app.filter_options import filter_options_payload
+from app.integration_analysis_browser_router import router as integration_analysis_browser_router
+from app.integration_mcp import create_integration_mcp_app, integration_mcp_lifespan
+from app.integration_oauth_router import router as integration_oauth_router
+from app.integration_router import router as integration_router
+from app.integration_settings_router import router as integration_settings_router
 from app.models import (
     Candidate,
     MailboxConfig,
@@ -282,6 +286,7 @@ from app.tenant_scope import (
     organization_context_id,
     set_organization_context,
 )
+from app.trusted_proxy import client_rate_limit_identifier
 from app.services.institution_service import (
     is_institution_registry_seeded,
     seed_institution_registry,
@@ -1814,37 +1819,8 @@ def _deliver_email_verification(
 
 
 def _registration_client_identifier(request: Request, settings: AppSettings) -> str:
-    """Return a safe public-auth throttle key without trusting spoofed headers.
-
-    Registration, login, and password reset intentionally share this
-    trusted-proxy resolver. It only accepts Caddy's appended final
-    X-Forwarded-For value when the direct ASGI peer is explicitly trusted.
-    """
-
-    direct_peer = request.client.host if request.client is not None else "unknown"
-    if not _is_trusted_proxy(direct_peer, settings.trusted_proxy_cidrs):
-        return f"peer:{direct_peer}"
-
-    # Caddy appends the remote address to X-Forwarded-For.  Reading the last
-    # valid value preserves the actual browser address even if an earlier,
-    # client-supplied value reached Caddy.  The header is ignored entirely
-    # unless the direct TCP peer is explicitly trusted above.
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        candidate = forwarded_for.rsplit(",", maxsplit=1)[-1].strip()
-        try:
-            return f"ip:{ip_address(candidate).compressed}"
-        except ValueError:
-            pass
-    return f"peer:{direct_peer}"
-
-
-def _is_trusted_proxy(host: str, cidrs: tuple[str, ...]) -> bool:
-    try:
-        address = ip_address(host)
-    except ValueError:
-        return False
-    return any(address in ip_network(cidr, strict=False) for cidr in cidrs)
+    """Resolve public-auth throttling through the verified proxy boundary."""
+    return client_rate_limit_identifier(request, settings.trusted_proxy_cidrs)
 
 
 def _password_reset_rate_limit_email_key(value: str) -> str:
@@ -2245,8 +2221,20 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
         )
         app.state.upload_persistence_executor = upload_persistence_executor
         try:
-            yield
+            async with AsyncExitStack() as integration_lifespan:
+                built_mcp = create_integration_mcp_app(database=database, settings=settings)
+                app.state.integration_mcp_app = None
+                if built_mcp is not None:
+                    mcp_server, mcp_app = built_mcp
+                    await integration_lifespan.enter_async_context(integration_mcp_lifespan(mcp_server))
+                    app.state.integration_mcp_app = mcp_app
+                    # Local test launchers may append routes after create_app.
+                    # Preserve their order and keep the SDK catch-all last.
+                    sdk_mounts = [route for route in app.router.routes if getattr(route, "name", None) == "integration-mcp"]
+                    app.router.routes[:] = [route for route in app.router.routes if route not in sdk_mounts] + sdk_mounts
+                yield
         finally:
+            app.state.integration_mcp_app = None
             # Finish an already accepted durable write before disposing its DB
             # engine. Pending units are cancelled; running fsync/commit calls
             # are allowed to cleanly finish their all-or-nothing unit.
@@ -7552,6 +7540,26 @@ def create_app(settings_override: AppSettings | None = None) -> FastAPI:
             return get_job_match(session, match_id=match_id)
         except JobMatchNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    # Integration administration is deliberately cookie-only. External bearer
+    # credentials use separate routers and never inherit browser permissions.
+    app.include_router(integration_settings_router)
+    app.include_router(integration_analysis_browser_router)
+    app.include_router(integration_oauth_router)
+    app.include_router(integration_router)
+
+    if settings.integrations_enabled and settings.integrations_mcp_enabled:
+        # The SDK owns exact /v1/mcp and protected-resource discovery routes.
+        # Root mounting must be last; database creation and SDK session manager
+        # startup remain in the owning FastAPI lifespan, including test restarts.
+        async def integration_mcp_dispatch(scope, receive, send):
+            mcp_app = getattr(app.state, "integration_mcp_app", None)
+            if mcp_app is None:
+                await Response(status_code=503, headers={"Cache-Control": "no-store"})(scope, receive, send)
+                return
+            await mcp_app(scope, receive, send)
+
+        app.mount("/", integration_mcp_dispatch, name="integration-mcp")
 
     return app
 

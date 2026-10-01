@@ -334,7 +334,7 @@ def test_retirement_adopts_every_eligible_platform_admin_and_preserves_history(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
 
     engine = create_engine(database_url)
     try:

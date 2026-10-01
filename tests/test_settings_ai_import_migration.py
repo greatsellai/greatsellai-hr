@@ -20,7 +20,7 @@ def test_workspace_ai_import_settings_upgrade_and_downgrade_are_sqlite_safe(
     config.cmd_opts = SimpleNamespace(x=[f"database_url={database_url}"])
 
     command.upgrade(config, "20260805_0057")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
 
     engine = create_engine(database_url)
     try:
@@ -92,7 +92,7 @@ def test_workspace_ai_import_single_template_backfilled_to_array(tmp_path) -> No
         )
     engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
     engine = create_engine(database_url)
     try:
         with engine.connect() as connection:

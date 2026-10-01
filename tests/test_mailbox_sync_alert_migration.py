@@ -12,7 +12,7 @@ def test_mailbox_sync_alert_upgrade_and_downgrade(tmp_path, monkeypatch) -> None
     config = Config("alembic.ini")
 
     command.upgrade(config, "20260721_0024")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
 
     engine = create_engine(database_url)
     try:

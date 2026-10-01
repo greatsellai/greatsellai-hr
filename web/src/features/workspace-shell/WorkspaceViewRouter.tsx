@@ -47,6 +47,8 @@ type FilterWorkspaceController = Pick<
 type ToastKind = "success" | "error";
 
 export interface WorkspaceViewRouterProps {
+  /** Authenticated user + workspace identity; never derived from UI cache. */
+  workspaceIdentityKey: string | null;
   agent: {
     conversationStorageScope: string | null;
     pendingFilterScope: RecruitingAgentFilterScopeRequest | null;
@@ -112,6 +114,7 @@ export interface WorkspaceViewRouterProps {
  * component only connects each feature page to their stable callbacks.
  */
 export function WorkspaceViewRouter({
+  workspaceIdentityKey,
   agent,
   feedback,
   filter,
@@ -256,6 +259,7 @@ export function WorkspaceViewRouter({
       )}
       {view === "settings" && permissions.canManageSettings && (
         <WorkspaceSettingsPage
+          workspaceIdentityKey={workspaceIdentityKey}
           activeSection={settingsSection}
           canManageCandidateData={permissions.canManageCandidateData}
           canManageMailbox={permissions.canManageMailbox}

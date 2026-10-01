@@ -3,6 +3,9 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -56,6 +59,62 @@ from app.services.source_tag_service import (
 # score exists at all.
 _CURRENT_SCORE_STATUSES = {"succeeded", "needs_review", "overridden"}
 _SUMMARY_PREVIEW_MAX_CHARS = 180
+_source_projection: ContextVar[Callable[[Resume, str], str] | None] = ContextVar(
+    "screening_source_projection", default=None,
+)
+_skill_projection: ContextVar[Callable[[Resume, str], str] | None] = ContextVar(
+    "screening_skill_projection", default=None,
+)
+
+
+@contextmanager
+def projected_search_sources(project: Callable[[Resume, str], str]) -> Iterator[None]:
+    """Apply a caller's stricter text boundary without changing stored facts.
+
+    External integrations search their privacy projection, not hidden original
+    identity fields. ContextVar isolation and reset preserve ordinary web and
+    worker searches, including on exceptions and concurrent requests.
+    """
+    token = _source_projection.set(project)
+    try:
+        yield
+    finally:
+        _source_projection.reset(token)
+
+
+@contextmanager
+def projected_search_skills(project: Callable[[Resume, str], str]) -> Iterator[None]:
+    """Apply a caller's stricter projection to skill filters and labels.
+
+    Skill keys are derived from extracted display text and can accidentally
+    contain a candidate's name. External integrations must filter the same
+    projected text they are allowed to return, rather than the hidden key.
+    """
+    token = _skill_projection.set(project)
+    try:
+        yield
+    finally:
+        _skill_projection.reset(token)
+
+
+def _projected_skill_display(resume: Resume, skill: object) -> str:
+    display = getattr(skill, "skill_display", "")
+    project = _skill_projection.get()
+    if project is not None:
+        return project(resume, display if isinstance(display, str) else "")
+    return display if isinstance(display, str) else ""
+
+
+def _projected_skill_key(resume: Resume, skill: object) -> str:
+    if _skill_projection.get() is not None:
+        return normalized_key(_projected_skill_display(resume, skill))
+    skill_key = getattr(skill, "skill_key", "")
+    return skill_key if isinstance(skill_key, str) else ""
+
+
+def _project_source_block(resume: Resume, text: str) -> str:
+    project = _source_projection.get()
+    return project(resume, text) if project is not None else redact_contact_values(text)
 _AMBIGUOUS_LANGUAGE_SOURCE_ALIASES = {
     normalized_key("四级"),
     normalized_key("六级"),
@@ -923,7 +982,7 @@ def _matching_keyword_block_ids(resume: Resume, keywords: list[str]) -> list[str
     return sorted(
         block.block_id
         for block in resume.source_blocks
-        if any(key in normalized_key(redact_contact_values(block.text)) for key in keys)
+        if any(key in normalized_key(_project_source_block(resume, block.text)) for key in keys)
     )
 
 
@@ -939,7 +998,7 @@ def _matching_v2_keyword_block_ids(
             block.block_id
             for block in resume.source_blocks
             if any(
-                key in normalized_key(redact_contact_values(block.text))
+                key in normalized_key(_project_source_block(resume, block.text))
                 for key in keyword_keys
             )
         )
@@ -962,7 +1021,7 @@ def _matching_v2_keyword_block_ids(
         block.block_id
         for block in resume.source_blocks
         if any(
-            key in normalized_key(redact_contact_values(block.text))
+            key in normalized_key(_project_source_block(resume, block.text))
             for key in source_keys
         )
     )
@@ -973,7 +1032,7 @@ def _screening_source_text(resume: Resume) -> str:
     """Return source text stripped of contact values for search and Agent tools."""
 
     return "\n".join(
-        redact_contact_values(block.text) for block in resume.source_blocks
+        _project_source_block(resume, block.text) for block in resume.source_blocks
     )
 
 
@@ -1775,7 +1834,7 @@ def _fuzzy_filter_evaluations(
                 )
             )
 
-    skill_keys = {skill.skill_key for skill in resume.skills}
+    skill_keys = {_projected_skill_key(resume, skill) for skill in resume.skills}
     if request.skills_all_of:
         required_skill_keys = {normalized_key(item) for item in request.skills_all_of}
         missing_skills = [
@@ -1784,7 +1843,8 @@ def _fuzzy_filter_evaluations(
             if normalized_key(skill) not in skill_keys
         ]
         matching_skills = [
-            skill for skill in resume.skills if skill.skill_key in required_skill_keys
+            skill for skill in resume.skills
+            if _projected_skill_key(resume, skill) in required_skill_keys
         ]
         label = "全部技能：" + "、".join(request.skills_all_of)
         if not missing_skills:
@@ -1817,7 +1877,8 @@ def _fuzzy_filter_evaluations(
     if request.skills_any_of:
         optional_skill_keys = {normalized_key(item) for item in request.skills_any_of}
         matching_skills = [
-            skill for skill in resume.skills if skill.skill_key in optional_skill_keys
+            skill for skill in resume.skills
+            if _projected_skill_key(resume, skill) in optional_skill_keys
         ]
         label = "任一技能：" + "、".join(request.skills_any_of)
         if matching_skills:
@@ -2348,9 +2409,9 @@ def _fuzzy_candidate_item(
     latest_experience = _latest_relevant_experience(resume)
     skill_highlights = sorted(
         {
-            skill.skill_display.strip()
+            _projected_skill_display(resume, skill).strip()
             for skill in resume.skills
-            if isinstance(skill.skill_display, str) and skill.skill_display.strip()
+            if _projected_skill_display(resume, skill).strip()
         },
         key=normalized_key,
     )
@@ -3134,7 +3195,10 @@ def search_candidates(
             _add_display_field(
                 display_field_values,
                 key="skills",
-                values=[skill.skill_display for skill in matching_category_skills],
+                values=[
+                    _projected_skill_display(resume, skill)
+                    for skill in matching_category_skills
+                ],
                 evidence_block_ids=[
                     block_id
                     for skill in matching_category_skills
@@ -3144,14 +3208,14 @@ def search_candidates(
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="skill_categories_any_of",
-                    label=skill.skill_display,
+                    label=_projected_skill_display(resume, skill),
                     fact_type="skill",
                     evidence_block_ids=skill.evidence_block_ids or [],
                 )
                 for skill in matching_category_skills
             )
 
-        skill_keys = {skill.skill_key for skill in resume.skills}
+        skill_keys = {_projected_skill_key(resume, skill) for skill in resume.skills}
         required_skill_keys = {normalized_key(item) for item in request.skills_all_of}
         optional_skill_keys = {normalized_key(item) for item in request.skills_any_of}
         if required_skill_keys and not required_skill_keys.issubset(skill_keys):
@@ -3163,12 +3227,15 @@ def search_candidates(
             matching_required_skills = [
                 skill
                 for skill in resume.skills
-                if skill.skill_key in required_skill_keys
+                if _projected_skill_key(resume, skill) in required_skill_keys
             ]
             _add_display_field(
                 display_field_values,
                 key="skills",
-                values=[skill.skill_display for skill in matching_required_skills],
+                values=[
+                    _projected_skill_display(resume, skill)
+                    for skill in matching_required_skills
+                ],
                 evidence_block_ids=[
                     block_id
                     for skill in matching_required_skills
@@ -3178,24 +3245,27 @@ def search_candidates(
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="skills_all_of",
-                    label=skill.skill_display,
+                    label=_projected_skill_display(resume, skill),
                     fact_type="skill",
                     evidence_block_ids=skill.evidence_block_ids or [],
                 )
                 for skill in resume.skills
-                if skill.skill_key in required_skill_keys
+                if _projected_skill_key(resume, skill) in required_skill_keys
             )
         if optional_skill_keys:
             matched_filters.append("skills_any_of")
             matching_optional_skills = [
                 skill
                 for skill in resume.skills
-                if skill.skill_key in optional_skill_keys
+                if _projected_skill_key(resume, skill) in optional_skill_keys
             ]
             _add_display_field(
                 display_field_values,
                 key="skills",
-                values=[skill.skill_display for skill in matching_optional_skills],
+                values=[
+                    _projected_skill_display(resume, skill)
+                    for skill in matching_optional_skills
+                ],
                 evidence_block_ids=[
                     block_id
                     for skill in matching_optional_skills
@@ -3205,12 +3275,12 @@ def search_candidates(
             matched_evidence.extend(
                 CandidateSearchMatch(
                     filter_key="skills_any_of",
-                    label=skill.skill_display,
+                    label=_projected_skill_display(resume, skill),
                     fact_type="skill",
                     evidence_block_ids=skill.evidence_block_ids or [],
                 )
                 for skill in resume.skills
-                if skill.skill_key in optional_skill_keys
+                if _projected_skill_key(resume, skill) in optional_skill_keys
             )
 
         if request.language_credentials_any_of:
@@ -3534,9 +3604,9 @@ def search_candidates(
         latest_experience = _latest_relevant_experience(resume)
         skill_highlights = sorted(
             {
-                skill.skill_display.strip()
+                _projected_skill_display(resume, skill).strip()
                 for skill in resume.skills
-                if isinstance(skill.skill_display, str) and skill.skill_display.strip()
+                if _projected_skill_display(resume, skill).strip()
             },
             key=normalized_key,
         )

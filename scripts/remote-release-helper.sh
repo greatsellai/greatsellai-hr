@@ -115,6 +115,56 @@ database_schema_revision() {
       "SELECT version_num FROM alembic_version ORDER BY version_num;" </dev/null
 }
 
+integration_runtime_flags_status() {
+  local source_dir="$1" environment_dir="$2" image_tag="$3"
+  # Return a single non-sensitive state. Do not print the complete container
+  # environment: it contains production credentials.
+  compose_run "$source_dir" "$environment_dir" "$image_tag" exec -T api \
+    python -c 'import os; keys=("RESUME_V3_INTEGRATIONS_ENABLED", "RESUME_V3_INTEGRATIONS_MCP_ENABLED", "RESUME_V3_INTEGRATIONS_ANALYSIS_ENABLED", "RESUME_V3_INTEGRATIONS_OAUTH_ENABLED"); active={"1", "true", "yes", "on"}; print("enabled" if any(os.getenv(key, "0").strip().lower() in active for key in keys) else "disabled")' </dev/null
+}
+
+integration_analysis_reference_table_exists() {
+  local source_dir="$1" environment_dir="$2" image_tag="$3"
+  compose_run "$source_dir" "$environment_dir" "$image_tag" exec -T db \
+    psql -X -qAt -v ON_ERROR_STOP=1 -U resume_v3 -d resume_v3 -c \
+      "SELECT to_regclass('public.integration_analysis_references') IS NOT NULL;" </dev/null
+}
+
+integration_analysis_references_exist() {
+  local source_dir="$1" environment_dir="$2" image_tag="$3"
+  compose_run "$source_dir" "$environment_dir" "$image_tag" exec -T db \
+    psql -X -qAt -v ON_ERROR_STOP=1 -U resume_v3 -d resume_v3 -c \
+      "SELECT EXISTS (SELECT 1 FROM public.integration_analysis_references LIMIT 1);" </dev/null
+}
+
+require_application_rollback_compatibility() {
+  local current_source_dir="$1" environment_dir="$2" current_commit="$3"
+  local mode="$4" migration_changed="$5" skip_migrate="$6"
+  local flags table_exists references_exist
+  [[ "$mode" == "rollback" && "$migration_changed" == "1" && "$skip_migrate" == "1" ]] || return 0
+
+  flags="$(integration_runtime_flags_status "$current_source_dir" "$environment_dir" "$current_commit")" || \
+    die "Unable to verify integration feature flags; refusing schema-ahead application rollback."
+  [[ "$flags" == "disabled" ]] || \
+    die "Disable all API/MCP integration feature flags before rolling back across schema changes."
+
+  table_exists="$(integration_analysis_reference_table_exists "$current_source_dir" "$environment_dir" "$current_commit")" || \
+    die "Unable to verify integration analysis schema; refusing schema-ahead application rollback."
+  case "$table_exists" in
+    f) return 0 ;;
+    t) ;;
+    *) die "Integration analysis schema check returned an unknown state; refusing application rollback." ;;
+  esac
+
+  references_exist="$(integration_analysis_references_exist "$current_source_dir" "$environment_dir" "$current_commit")" || \
+    die "Unable to verify integration analysis references; refusing schema-ahead application rollback."
+  case "$references_exist" in
+    f) ;;
+    t) die "Application rollback blocked: integration analysis drafts still reference candidate data; use code that understands these references." ;;
+    *) die "Integration analysis reference check returned an unknown state; refusing application rollback." ;;
+  esac
+}
+
 uploads_volume_exists() {
   sudo -n docker volume inspect "$uploads_volume_name" >/dev/null 2>&1
 }
@@ -1254,6 +1304,10 @@ release_unlocked() {
   [[ "$mode" == "deploy" || "$mode" == "rollback" ]] || die "Invalid release mode."
   [[ "$migration_changed" == "0" || "$migration_changed" == "1" ]] || die "Invalid migration flag."
   [[ "$skip_migrate" == "0" || "$skip_migrate" == "1" ]] || die "Invalid skip-migrate flag."
+  if [[ "$skip_migrate" == "1" ]]; then
+    [[ "$mode" == "rollback" && "$migration_changed" == "1" ]] || \
+      die "Skipping migrations is allowed only for an explicit rollback across schema changes."
+  fi
   [[ "$image_mode" == "build" || "$image_mode" == "prebuilt" ]] || die "Invalid production image mode."
   mkdir -p "$history_dir/releases" "$history_dir/backups"
   chmod 700 "$history_dir" "$history_dir/releases" "$history_dir/backups"
@@ -1266,6 +1320,8 @@ release_unlocked() {
   release_phase "Stage immutable source"
   target_source_dir="$(stage_target_source "$history_dir" "$target_commit" "$archive_sha256" "$stage_tool")"
   release_phase_end
+  require_application_rollback_compatibility "$current_source_dir" "$environment_dir" "$current_commit" \
+    "$mode" "$migration_changed" "$skip_migrate"
   if [[ "$image_mode" == "prebuilt" ]]; then
     release_phase "Verify CI-transferred images"
   else

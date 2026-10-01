@@ -43,6 +43,7 @@ import {
   RegistrationPage,
   ResetPasswordPage,
 } from "./features/auth/AuthPages";
+import { OAuthConsentPage } from "./features/integrations/OAuthConsentPage";
 import type {
   CandidateDrawerTab as DrawerTab,
 } from "./features/candidate-drawer/candidate-drawer-types";
@@ -59,7 +60,7 @@ type AuthRoute = "login" | "register" | "forgot-password" | "reset-password" | "
 type AppSurface =
   | { kind: "landing" }
   | { kind: "platform" }
-  | { kind: "workspace"; authRoute: AuthRoute | null };
+  | { kind: "workspace"; authRoute: AuthRoute | null; oauthConsentRequestId: string | null };
 
 interface ToastMessage {
   id: number;
@@ -265,6 +266,8 @@ function isHrApplicationHost(hostname: string) {
 }
 
 const HR_WORKSPACE_BASE_PATH = "/workspace";
+const OAUTH_CONSENT_PATH = "/settings/integrations/authorize";
+const OAUTH_CONSENT_REQUEST_ID = /^[A-Za-z0-9_-]{43}$/;
 
 function workspaceHref(path = "") {
   const normalizedPath = path && !path.startsWith("/") ? `/${path}` : path;
@@ -312,6 +315,27 @@ function authRouteFromPath(pathname: string): AuthRoute | null {
   return null;
 }
 
+/** The browser route may carry only the short-lived opaque consent request id. */
+function oauthConsentRequestId(pathname: string, authRoute: AuthRoute | null): string | null {
+  const normalized = pathname.replace(/\/+$/, "") || "/";
+  const parameter = normalized === OAUTH_CONSENT_PATH
+    ? "request_id"
+    : authRoute === "login"
+      ? "oauth_consent_request_id"
+      : null;
+  if (!parameter) return null;
+  const requestId = new URLSearchParams(window.location.search).get(parameter);
+  return requestId && OAUTH_CONSENT_REQUEST_ID.test(requestId) ? requestId : null;
+}
+
+function oauthConsentHref(requestId: string): string {
+  return workspaceHref(`${OAUTH_CONSENT_PATH}?request_id=${encodeURIComponent(requestId)}`);
+}
+
+function oauthConsentLoginHref(requestId: string): string {
+  return workspaceHref(`/login?oauth_consent_request_id=${encodeURIComponent(requestId)}`);
+}
+
 function resolveAppSurface(): AppSurface {
   const { hostname, pathname } = window.location;
   const compatibilityPlatformPath = `${ROOT_WORKSPACE_BASE_PATH}/platform`;
@@ -335,7 +359,8 @@ function resolveAppSurface(): AppSurface {
 
   if (isWorkspacePath) {
     const nestedPath = pathname.slice(ROOT_WORKSPACE_BASE_PATH.length).replace(/\/+$/, "") || "/";
-    return { kind: "workspace", authRoute: authRouteFromPath(nestedPath) };
+    const authRoute = authRouteFromPath(nestedPath);
+    return { kind: "workspace", authRoute, oauthConsentRequestId: oauthConsentRequestId(nestedPath, authRoute) };
   }
 
   if (isHrApplicationHost(hostname)) {
@@ -343,11 +368,13 @@ function resolveAppSurface(): AppSurface {
     const nestedPath = pathname.startsWith(HR_WORKSPACE_BASE_PATH)
       ? pathname.slice(HR_WORKSPACE_BASE_PATH.length)
       : pathname;
-    return { kind: "workspace", authRoute: authRouteFromPath(nestedPath) };
+    const authRoute = authRouteFromPath(nestedPath);
+    return { kind: "workspace", authRoute, oauthConsentRequestId: oauthConsentRequestId(nestedPath, authRoute) };
   }
 
   if (isLocalDevelopmentHost(hostname)) {
-    return { kind: "workspace", authRoute: authRouteFromPath(pathname) };
+    const authRoute = authRouteFromPath(pathname);
+    return { kind: "workspace", authRoute, oauthConsentRequestId: oauthConsentRequestId(pathname, authRoute) };
   }
 
   return { kind: "landing" };
@@ -412,13 +439,19 @@ function App() {
       )}
     >
       <BackofficeUiProvider>
-        <WorkspaceApp authRoute={surface.authRoute} />
+        <WorkspaceApp authRoute={surface.authRoute} oauthConsentRequestId={surface.oauthConsentRequestId} />
       </BackofficeUiProvider>
     </Suspense>
   );
 }
 
-function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
+function WorkspaceApp({
+  authRoute,
+  oauthConsentRequestId,
+}: {
+  authRoute: AuthRoute | null;
+  oauthConsentRequestId: string | null;
+}) {
   const [pendingAgentFilterScope, setPendingAgentFilterScope] =
     useState<RecruitingAgentFilterScopeRequest | null>(null);
   const agentScopeRequestIdRef = useRef(0);
@@ -483,6 +516,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
     authRoute,
     formatError: humanizeError,
     onLogoutCleanup: clearWorkspaceAfterLogout,
+    postAuthenticationHref: oauthConsentRequestId
+      ? () => oauthConsentHref(oauthConsentRequestId)
+      : undefined,
     rootWorkspaceBasePath: ROOT_WORKSPACE_BASE_PATH,
     workspaceHref,
   });
@@ -574,12 +610,14 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       "reset-password": "设置新密码｜大卖智聘",
       "verify-email": "验证邮箱｜大卖智聘",
     };
-    document.title = authRoute
+    document.title = oauthConsentRequestId
+      ? "授权外部工具｜大卖智聘"
+      : authRoute
       ? titles[authRoute]
       : view === "agent"
         ? "招聘 Agent｜大卖智聘"
         : "大卖智聘｜AI 招聘决策工作台";
-  }, [authRoute, view]);
+  }, [authRoute, oauthConsentRequestId, view]);
 
   useEffect(() => {
     if (
@@ -588,9 +626,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
       authRoute !== "verify-email" &&
       !authSession?.email_verification_required
     ) {
-      window.location.replace(workspaceHref());
+      window.location.replace(oauthConsentRequestId ? oauthConsentHref(oauthConsentRequestId) : workspaceHref());
     }
-  }, [authRoute, authSession?.email_verification_required, authState]);
+  }, [authRoute, authSession?.email_verification_required, authState, oauthConsentRequestId]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -680,7 +718,7 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
   }
 
   if (authState !== "authenticated" && !authRoute) {
-    return <ExternalRedirect href={workspaceHref("/login")} />;
+    return <ExternalRedirect href={oauthConsentRequestId ? oauthConsentLoginHref(oauthConsentRequestId) : workspaceHref("/login")} />;
   }
 
   // A recovery link may be opened in a browser that still has an unrelated
@@ -707,7 +745,9 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         onExit={logout}
         onRefreshSession={refreshAuthSession}
         onResend={resendEmailVerification}
-        workspaceHref={workspaceHref}
+        workspaceHref={oauthConsentRequestId
+          ? (path) => path ? workspaceHref(path) : oauthConsentHref(oauthConsentRequestId)
+          : workspaceHref}
       />
     );
   }
@@ -739,6 +779,21 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         loading={authLoading}
         onLogin={login}
         workspaceHref={workspaceHref}
+      />
+    );
+  }
+
+  if (oauthConsentRequestId) {
+    const workspaceIdentityKey = authSession?.user?.user_id && authSession.organization?.organization_id
+      ? JSON.stringify([authSession.user.user_id, authSession.organization.organization_id])
+      : null;
+    return (
+      <OAuthConsentPage
+        accountEmail={authSession?.user?.email ?? null}
+        key={workspaceIdentityKey ?? oauthConsentRequestId}
+        requestId={oauthConsentRequestId}
+        userId={authSession?.user?.user_id ?? null}
+        workspaceId={authSession?.organization?.organization_id ?? null}
       />
     );
   }
@@ -782,6 +837,11 @@ function WorkspaceApp({ authRoute }: { authRoute: AuthRoute | null }) {
         <TrialStatusBanner trial={authSession?.trial ?? null} />
         <main className="main-content" id="main-content">
           <WorkspaceViewRouter
+            workspaceIdentityKey={
+              authSession?.user?.user_id && authSession.organization?.organization_id
+                ? JSON.stringify([authSession.user.user_id, authSession.organization.organization_id])
+                : null
+            }
             agent={{
               conversationStorageScope:
                 authSession?.organization?.organization_id && authSession.user?.user_id

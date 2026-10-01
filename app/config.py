@@ -64,6 +64,18 @@ class AppSettings:
     session_secret: str | None = field(default=None, repr=False)
     session_cookie_secure: bool = False
     allow_unauthenticated: bool = False
+    integrations_enabled: bool = False
+    integrations_mcp_enabled: bool = False
+    integrations_analysis_enabled: bool = False
+    integrations_oauth_enabled: bool = False
+    integrations_pilot_organization_ids: tuple[str, ...] = ()
+    integrations_grant_requests_per_minute: int = 60
+    integrations_workspace_requests_per_minute: int = 180
+    integrations_grant_concurrency: int = 3
+    integrations_workspace_concurrency: int = 10
+    integrations_grant_daily_candidates: int = 500
+    integrations_workspace_daily_candidates: int = 2000
+    integrations_request_lease_seconds: int = 120
     deepseek_api_key: str | None = field(default=None, repr=False)
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_timeout_seconds: int = 90
@@ -304,6 +316,18 @@ class AppSettings:
                 default=environment in {"production", "prod"},
             ),
             allow_unauthenticated=os.getenv("RESUME_V3_ALLOW_UNAUTHENTICATED") == "1",
+            integrations_enabled=_environment_flag("RESUME_V3_INTEGRATIONS_ENABLED", default=False),
+            integrations_mcp_enabled=_environment_flag("RESUME_V3_INTEGRATIONS_MCP_ENABLED", default=False),
+            integrations_analysis_enabled=_environment_flag("RESUME_V3_INTEGRATIONS_ANALYSIS_ENABLED", default=False),
+            integrations_oauth_enabled=_environment_flag("RESUME_V3_INTEGRATIONS_OAUTH_ENABLED", default=False),
+            integrations_pilot_organization_ids=_comma_separated_values(os.getenv("RESUME_V3_INTEGRATIONS_PILOT_ORGANIZATION_IDS", "")),
+            integrations_grant_requests_per_minute=int(os.getenv("RESUME_V3_INTEGRATIONS_GRANT_REQUESTS_PER_MINUTE", "60")),
+            integrations_workspace_requests_per_minute=int(os.getenv("RESUME_V3_INTEGRATIONS_WORKSPACE_REQUESTS_PER_MINUTE", "180")),
+            integrations_grant_concurrency=int(os.getenv("RESUME_V3_INTEGRATIONS_GRANT_CONCURRENCY", "3")),
+            integrations_workspace_concurrency=int(os.getenv("RESUME_V3_INTEGRATIONS_WORKSPACE_CONCURRENCY", "10")),
+            integrations_grant_daily_candidates=int(os.getenv("RESUME_V3_INTEGRATIONS_GRANT_DAILY_CANDIDATES", "500")),
+            integrations_workspace_daily_candidates=int(os.getenv("RESUME_V3_INTEGRATIONS_WORKSPACE_DAILY_CANDIDATES", "2000")),
+            integrations_request_lease_seconds=int(os.getenv("RESUME_V3_INTEGRATIONS_REQUEST_LEASE_SECONDS", "120")),
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY") or None,
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
             deepseek_timeout_seconds=int(
@@ -613,6 +637,35 @@ class AppSettings:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
     def validate_runtime(self) -> None:
+        for name, maximum in (
+            ("integrations_grant_requests_per_minute", 60),
+            ("integrations_workspace_requests_per_minute", 180),
+            ("integrations_grant_concurrency", 3),
+            ("integrations_workspace_concurrency", 10),
+            ("integrations_grant_daily_candidates", 500),
+            ("integrations_workspace_daily_candidates", 2000),
+            ("integrations_request_lease_seconds", 300),
+        ):
+            if not 1 <= getattr(self, name) <= maximum:
+                raise ValueError(f"{name} must be between 1 and {maximum}")
+        if self.integrations_oauth_enabled and not self.public_app_url:
+            raise ValueError("integrations_public_app_url_required")
+        if self.integrations_enabled:
+            parsed = urlparse(self.public_app_url or "")
+            if (
+                parsed.scheme not in {"https", "http"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or parsed.params
+                or parsed.path not in {"", "/"}
+                or any(character.isspace() for character in (self.public_app_url or ""))
+            ):
+                raise ValueError("integrations_require_canonical_public_app_url")
+            try:
+                parsed.port
+            except ValueError as exc:
+                raise ValueError("integrations_require_canonical_public_app_url") from exc
+            if self.environment in {"production", "prod"} and parsed.scheme != "https":
+                raise ValueError("production_integrations_require_https")
         if self.database_pool_size < 1:
             raise ValueError("RESUME_V3_DATABASE_POOL_SIZE must be at least 1")
         if self.database_max_overflow < 0:

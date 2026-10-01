@@ -7,6 +7,7 @@ import { MailboxPage } from "../mailbox/MailboxPage";
 import { AiImportSettingsPanel } from "./AiImportSettingsPanel";
 import { DisplayFieldsSettingsPanel } from "./DisplayFieldsSettingsPanel";
 import { FilterSectionsSettingsPanel } from "./FilterSectionsSettingsPanel";
+import { IntegrationSettingsPanel } from "../integrations/IntegrationSettingsPanel";
 import type { WorkspaceSettingsSection } from "../workspace-shell/workspace-navigation-types";
 
 const SemiTag = lazy(() => import("@douyinfe/semi-ui-19/lib/es/tag"));
@@ -32,7 +33,9 @@ function settingsNavItems(
   canManageCandidateData: boolean,
   canManageAiImport: boolean,
 ): SettingsNavItem[] {
-  const items: SettingsNavItem[] = [];
+  const items: SettingsNavItem[] = [
+    { key: "integrations", label: "API 与 AI 工具连接", icon: "spark" },
+  ];
   if (canManageMailbox) {
     items.push({ key: "mailbox", label: "收件邮箱", icon: "inbox" });
   }
@@ -48,6 +51,7 @@ function settingsNavItems(
 }
 
 export function WorkspaceSettingsPage({
+  workspaceIdentityKey,
   activeSection,
   canManageCandidateData,
   canManageMailbox,
@@ -58,6 +62,8 @@ export function WorkspaceSettingsPage({
   onSelectSection,
   role,
 }: {
+  /** Remount private integration state whenever the server identity changes. */
+  workspaceIdentityKey: string | null;
   activeSection: WorkspaceSettingsSection;
   canManageCandidateData: boolean;
   canManageMailbox: boolean;
@@ -114,6 +120,11 @@ export function WorkspaceSettingsPage({
               </SemiNavigation>
             </SemiLayout.Sider>
             <SemiLayout.Content className="settings-content">
+              {currentSection === "integrations" && (
+                workspaceIdentityKey
+                  ? <IntegrationSettingsPanel identityKey={workspaceIdentityKey} key={workspaceIdentityKey} />
+                  : <SemiParagraph>无法确认当前账户与工作区，请刷新页面后重试。</SemiParagraph>
+              )}
               {currentSection === "mailbox" && (
                 <MailboxPage
                   embedded

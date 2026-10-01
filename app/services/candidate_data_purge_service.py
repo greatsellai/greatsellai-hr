@@ -865,6 +865,20 @@ def _process_claimed_purge_job(
                     )
                 ).all() if resume_ids else []
 
+                # An older queued deletion may predate integration draft
+                # hooks. Release its retained draft copies before touching
+                # files, so new provenance FKs cannot cause a partial purge.
+                from app.services.integration_retention_service import invalidate_analysis_reports_for_sources
+
+                invalidate_analysis_reports_for_sources(
+                    session, organization_id=claimed.organization_id,
+                    resume_ids=tuple(resume.id for resume in resumes),
+                    candidate_ids=tuple(item.candidate_id for item in items)
+                    if batch.trigger_type != "manual_resume" else (),
+                    now=now,
+                )
+                session.flush()
+
                 # Do filesystem work before removing the corresponding
                 # storage_key from the database.  A missing file is already
                 # clean; a failure leaves all candidate data hidden and the

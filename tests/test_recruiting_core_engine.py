@@ -600,7 +600,7 @@ def test_migration_backfills_existing_jobs_with_a_published_default_workflow(
                 },
             )
 
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260806_0063")
         metadata = MetaData()
         jobs = Table("jobs", metadata, autoload_with=engine)
         workflow_versions = Table(

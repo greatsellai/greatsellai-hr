@@ -1,4 +1,12 @@
 (common_api) {
+	# Route only the OAuth and MCP discovery endpoints to the API. Keep this
+	# Allow only the two discovery endpoints used by the integration clients.
+	# routes that are intentionally served by the SPA or denied.
+	@integration_discovery path /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource/v1/mcp
+	handle @integration_discovery {
+		reverse_proxy api:8000
+	}
+
 	@api path /v1 /v1/*
 	handle @api {
 		reverse_proxy api:8000

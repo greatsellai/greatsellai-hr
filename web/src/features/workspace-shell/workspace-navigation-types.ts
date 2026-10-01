@@ -17,6 +17,7 @@ export type WorkspaceNavigationView =
 export type WorkspaceView = WorkspaceNavigationView | "settings" | "feedback";
 
 export type WorkspaceSettingsSection =
+  | "integrations"
   | "mailbox"
   | "data"
   | "ai-import"

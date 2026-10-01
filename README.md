@@ -5,6 +5,7 @@
 - [产品需求文档](docs/PRD.md)
 - [产品命名与文案对齐规范](docs/PRODUCT_NAMING_GUIDE.md)
 - [全项目实施计划](docs/IMPLEMENTATION_PLAN.md)
+- [API 与 MCP 外部连接说明](docs/API_MCP_INTEGRATIONS.md)
 - [AI 提取后台任务](docs/AI_EXTRACTION_WORKER.md)
 - [简历文本提取与 OCR 质量策略](docs/OCR_EXTRACTION_POLICY.md)
 - [邮箱服务商接入说明](docs/MAILBOX_PROVIDER_SETUP.md)

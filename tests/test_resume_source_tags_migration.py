@@ -18,7 +18,7 @@ def test_resume_source_tags_migration_adds_workspace_bound_audit_and_projection_
     config.cmd_opts = SimpleNamespace(x=[f"database_url={database_url}"])
 
     command.upgrade(config, "20260803_0054")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
 
     engine = create_engine(database_url)
     try:

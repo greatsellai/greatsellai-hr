@@ -5,6 +5,13 @@
 :80 {
 	encode zstd gzip
 
+	# Match the production allowlist exactly so OAuth/MCP discovery cannot fall
+	# through to the SPA during acceptance.
+	@integration_discovery path /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource/v1/mcp
+	handle @integration_discovery {
+		reverse_proxy api:8000
+	}
+
 	@api path /v1 /v1/*
 	handle @api {
 		reverse_proxy api:8000

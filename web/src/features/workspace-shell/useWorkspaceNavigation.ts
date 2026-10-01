@@ -27,6 +27,7 @@ function settingsSectionFromHash(
     .toLowerCase();
 
   if (value === "settings/mailbox" || value === "inbox") return "mailbox";
+  if (value === "settings/integrations" || value === "integrations") return "integrations";
   if (value === "settings/data" || value === "data") return "data";
   if (value === "settings/ai-import" || value === "ai-import") return "ai-import";
   if (value === "settings/display-fields" || value === "display-fields") return "display-fields";
@@ -188,6 +189,7 @@ export function useWorkspaceNavigation({
   useEffect(() => {
     if (!hasSession || view !== "settings") return;
     const sectionAllowed =
+      settingsSection === "integrations" ||
       (settingsSection === "mailbox" && canManageMailbox) ||
       (settingsSection === "data" && canManageCandidateData) ||
       (settingsSection === "ai-import" && canManageAiImport) ||

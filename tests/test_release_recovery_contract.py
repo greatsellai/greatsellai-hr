@@ -951,6 +951,72 @@ def test_release_transaction_prepares_target_before_quiescing_current_runtime() 
     assert "refusing to treat persistent data as an initial deployment" in helper.lower()
 
 
+def test_schema_ahead_application_rollback_fails_closed_for_integrations() -> None:
+    helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
+        encoding="utf-8"
+    )
+    definitions, separator, _ = helper.partition('case "${1:-}" in')
+    assert separator, "remote helper dispatch block is missing"
+    release = helper.split("release_unlocked()", maxsplit=1)[1].split(
+        "with_release_lock()", maxsplit=1
+    )[0]
+
+    assert release.index("require_application_rollback_compatibility") < release.index(
+        "prepare_target_images"
+    ) < release.index("create_backup_bundle")
+    assert "Skipping migrations is allowed only for an explicit rollback" in release
+
+    bash = shutil.which("bash")
+    if os.name != "posix" or bash is None:
+        pytest.skip("the remote Bash helper contract is exercised in Linux CI")
+
+    scenarios = (
+        # A database without the integration reference table is compatible.
+        ("disabled", "f", "f", False, "rollback", "1", "1", 0),
+        # Empty references allow rollback only after all integrations are off.
+        ("disabled", "t", "f", False, "rollback", "1", "1", 0),
+        ("enabled", "f", "f", False, "rollback", "1", "1", 1),
+        ("disabled", "t", "t", False, "rollback", "1", "1", 1),
+        ("disabled", "unknown", "f", False, "rollback", "1", "1", 1),
+        ("disabled", "t", "f", True, "rollback", "1", "1", 1),
+        # Forward release does not consult rollback probes.
+        ("unknown", "unknown", "unknown", True, "deploy", "1", "0", 0),
+    )
+    for flags, table, references, probe_failure, mode, changed, skip_migrate, expected in scenarios:
+        script = (
+            definitions
+            + "\n"
+            + "integration_runtime_flags_status() {\n"
+            + '  [[ "${PROBE_FAILURE:-0}" != "1" ]] || return 7\n'
+            + '  printf "%s\\n" "$FLAGS"\n'
+            + "}\n"
+            + "integration_analysis_reference_table_exists() {\n"
+            + '  [[ "${PROBE_FAILURE:-0}" != "1" ]] || return 7\n'
+            + '  printf "%s\\n" "$TABLE"\n'
+            + "}\n"
+            + "integration_analysis_references_exist() {\n"
+            + '  [[ "${PROBE_FAILURE:-0}" != "1" ]] || return 7\n'
+            + '  printf "%s\\n" "$REFERENCES"\n'
+            + "}\n"
+            + "require_application_rollback_compatibility synthetic-source synthetic-env synthetic-commit "
+            + f"{mode} {changed} {skip_migrate}\n"
+        )
+        result = subprocess.run(
+            [bash, "-c", script],
+            env={
+                **os.environ,
+                "FLAGS": flags,
+                "TABLE": table,
+                "REFERENCES": references,
+                "PROBE_FAILURE": "1" if probe_failure else "0",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert (0 if result.returncode == 0 else 1) == expected, result.stderr
+
+
 def test_current_release_record_commits_before_the_complete_history_record() -> None:
     helper = (REPOSITORY_ROOT / "scripts" / "remote-release-helper.sh").read_text(
         encoding="utf-8"

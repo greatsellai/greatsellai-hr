@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -322,6 +322,7 @@ class OrganizationMembership(Base):
     __tablename__ = "organization_memberships"
     __table_args__ = (
         UniqueConstraint("organization_id", "user_id", name="uq_organization_membership"),
+        Index("uq_integration_membership_binding", "id", "organization_id", "user_id", unique=True),
         Index("ix_organization_memberships_user_active", "user_id", "is_active"),
     )
 
@@ -894,6 +895,7 @@ class WorkspaceFeedbackImageAttachment(OrganizationScoped, Base):
 class Candidate(OrganizationScoped, CandidateDataLifecycle, Base):
     __tablename__ = "candidates"
     __table_args__ = (
+        Index("uq_integration_candidate_org", "id", "organization_id", unique=True),
         Index("ix_candidates_organization_created", "organization_id", "created_at"),
         Index(
             "ix_candidates_organization_lifecycle",
@@ -962,6 +964,7 @@ class CandidateFavorite(OrganizationScoped, Base):
 class Resume(OrganizationScoped, CandidateDataLifecycle, Base):
     __tablename__ = "resumes"
     __table_args__ = (
+        Index("uq_integration_resume_binding", "id", "organization_id", "candidate_id", unique=True),
         # The redundant tenant key is intentional: source-tag projections use
         # it to enforce that a tag can only point at a resume in the same
         # workspace, even when a write bypasses service-layer scoping.
@@ -3096,6 +3099,7 @@ class ResumeFactSnapshot(OrganizationScoped, Base):
 
     __tablename__ = "resume_fact_snapshots"
     __table_args__ = (
+        Index("uq_integration_snapshot_binding", "id", "organization_id", "resume_id", "facts_version", unique=True),
         UniqueConstraint("resume_id", "facts_version", name="uq_resume_fact_snapshot_version"),
         Index("ix_resume_fact_snapshot_sha256", "facts_sha256"),
         Index("ix_resume_fact_snapshot_organization_created", "organization_id", "created_at"),
@@ -4150,6 +4154,7 @@ class Job(OrganizationScoped, Base):
 class JobVersion(OrganizationScoped, Base):
     __tablename__ = "job_versions"
     __table_args__ = (
+        Index("uq_integration_job_version_binding", "id", "organization_id", "job_id", unique=True),
         UniqueConstraint("job_id", "version", name="uq_job_version"),
         Index("ix_job_versions_organization_status", "organization_id", "status"),
     )
@@ -5020,6 +5025,335 @@ class ApiInvocation(OrganizationScoped, Base):
     price_version: Mapped[AiModelPriceVersion | None] = relationship(
         back_populates="api_invocations",
     )
+
+
+class IntegrationWorkspacePolicy(OrganizationScoped, Base):
+    """Explicit opt-in and shared database serialization point for integrations."""
+
+    __tablename__ = "integration_workspace_policies"
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    allowed_scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    policy_version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"))
+    lock_version: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntegrationGrant(OrganizationScoped, Base):
+    """Immutable owner/workspace/audience binding; credentials can be rotated."""
+
+    __tablename__ = "integration_grants"
+    __table_args__ = (
+        UniqueConstraint("id", "organization_id", name="uq_integration_grant_org"),
+        Index("uq_integration_grant_owner_binding", "id", "organization_id", "user_id", "membership_id", unique=True),
+        Index("uq_integration_grant_audience_binding", "id", "organization_id", "user_id", "membership_id", "audience", unique=True),
+        ForeignKeyConstraint(
+            ["membership_id", "organization_id", "user_id"],
+            ["organization_memberships.id", "organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_integration_grant_membership",
+        ),
+        CheckConstraint("audience IN ('rest', 'mcp')", name="ck_integration_grant_audience"),
+        CheckConstraint("kind IN ('pat', 'oauth')", name="ck_integration_grant_kind"),
+        Index("ix_integration_grant_owner", "organization_id", "user_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"))
+    membership_id: Mapped[str] = mapped_column(String(36))
+    audience: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(80))
+    kind: Mapped[str] = mapped_column(String(16), default="pat", server_default=text("'pat'"))
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntegrationCredential(OrganizationScoped, Base):
+    """High-entropy opaque PATs are stored as SHA-256 digests only."""
+
+    __tablename__ = "integration_credentials"
+    __table_args__ = (
+        ForeignKeyConstraint(["grant_id", "organization_id"], ["integration_grants.id", "integration_grants.organization_id"], name="fk_integration_credential_grant"),
+        UniqueConstraint("id", "organization_id", name="uq_integration_credential_org"),
+        UniqueConstraint("token_digest", name="uq_integration_credential_digest"),
+        CheckConstraint("kind IN ('pat', 'oauth')", name="ck_integration_credential_kind"),
+        Index("ix_integration_credential_grant", "organization_id", "grant_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    grant_id: Mapped[str] = mapped_column(String(36))
+    token_digest: Mapped[str] = mapped_column(String(64))
+    token_prefix: Mapped[str] = mapped_column(String(24))
+    kind: Mapped[str] = mapped_column(String(16), default="pat", server_default=text("'pat'"))
+    auth_session_version: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegrationAuditEvent(OrganizationScoped, Base):
+    """Fixed, content-free audit metadata. Never token, name, query or body."""
+
+    __tablename__ = "integration_audit_events"
+    __table_args__ = (Index("ix_integration_audit_owner", "organization_id", "actor_user_id", "created_at", "id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"))
+    grant_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    credential_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    action: Mapped[str] = mapped_column(String(64))
+    resource_type: Mapped[str] = mapped_column(String(32))
+    resource_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    resource_count: Mapped[int] = mapped_column(Integer, default=0)
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    request_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    result: Mapped[str] = mapped_column(String(24))
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class IntegrationRateLimitBucket(OrganizationScoped, Base):
+    __tablename__ = "integration_rate_limit_buckets"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "scope_kind", "scope_id", "window_started_at", name="uq_integration_rate_bucket"),
+        CheckConstraint("request_count >= 0", name="ck_integration_rate_nonnegative"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scope_kind: Mapped[str] = mapped_column(String(16))
+    scope_id: Mapped[str] = mapped_column(String(36))
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class IntegrationRequestLease(OrganizationScoped, Base):
+    __tablename__ = "integration_request_leases"
+    __table_args__ = (
+        ForeignKeyConstraint(["grant_id", "organization_id"], ["integration_grants.id", "integration_grants.organization_id"], name="fk_integration_lease_grant"),
+        Index("ix_integration_lease_active", "organization_id", "grant_id", "released_at", "expires_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    grant_id: Mapped[str] = mapped_column(String(36))
+    credential_id: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegrationDailyCandidateAccess(OrganizationScoped, Base):
+    """Distinct disclosed IDs, not candidate bodies; short-lived quota ledger."""
+
+    __tablename__ = "integration_daily_candidate_accesses"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "scope_kind", "scope_id", "day", "candidate_id", name="uq_integration_daily_candidate"),
+        Index("ix_integration_daily_scope", "organization_id", "scope_kind", "scope_id", "day"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scope_kind: Mapped[str] = mapped_column(String(16))
+    scope_id: Mapped[str] = mapped_column(String(36))
+    day: Mapped[date] = mapped_column(Date)
+    candidate_id: Mapped[str] = mapped_column(String(36))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class IntegrationAnalysisReport(OrganizationScoped, Base):
+    """Owner-private, explicitly retained draft, never a hiring decision."""
+
+    __tablename__ = "integration_analysis_reports"
+    __table_args__ = (
+        UniqueConstraint("id", "organization_id", name="uq_integration_report_org"),
+        UniqueConstraint("id", "organization_id", "owner_user_id", "membership_id", name="uq_integration_report_owner"),
+        ForeignKeyConstraint(["membership_id", "organization_id", "owner_user_id"],
+            ["organization_memberships.id", "organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_integration_report_membership", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["source_grant_id", "organization_id", "owner_user_id", "membership_id"],
+            ["integration_grants.id", "integration_grants.organization_id", "integration_grants.user_id", "integration_grants.membership_id"],
+            name="fk_integration_report_source_grant", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["job_version_id", "organization_id", "job_id"],
+            ["job_versions.id", "job_versions.organization_id", "job_versions.job_id"],
+            name="fk_integration_report_job_version", ondelete="RESTRICT"),
+        CheckConstraint("version >= 1", name="ck_integration_report_version"),
+        CheckConstraint("(job_id IS NULL AND job_version_id IS NULL) OR (job_id IS NOT NULL AND job_version_id IS NOT NULL)", name="ck_integration_report_job_pair"),
+        CheckConstraint(
+            "confirmed_at IS NOT NULL OR (source_credential_id IS NOT NULL AND "
+            "source_audience IN ('rest', 'mcp') AND source_auth_session_version IS NOT NULL)",
+            name="ck_integration_report_pending_confirmation_binding",
+        ),
+        Index("ix_integration_report_owner_updated", "organization_id", "owner_user_id", "membership_id", "updated_at", "id"),
+        Index("ix_integration_report_pending", "organization_id", "owner_user_id", "membership_id", "confirmed_at", "expires_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"))
+    membership_id: Mapped[str] = mapped_column(String(36))
+    source_grant_id: Mapped[str] = mapped_column(String(36))
+    source_credential_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_audience: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    source_auth_session_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    job_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    title: Mapped[str] = mapped_column(String(120))
+    content_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict, server_default=text("'{}'"))
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: utcnow() + timedelta(days=180), index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    invalidation_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class IntegrationAnalysisReference(OrganizationScoped, Base):
+    """Pinned provenance; restrict deletion until its entire report is scrubbed."""
+
+    __tablename__ = "integration_analysis_references"
+    __table_args__ = (
+        UniqueConstraint("report_id", "candidate_id", name="uq_integration_reference_candidate"),
+        ForeignKeyConstraint(["report_id", "organization_id"], ["integration_analysis_reports.id", "integration_analysis_reports.organization_id"], name="fk_integration_reference_report", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["candidate_id", "organization_id"], ["candidates.id", "candidates.organization_id"], name="fk_integration_reference_candidate", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["resume_id", "organization_id", "candidate_id"], ["resumes.id", "resumes.organization_id", "resumes.candidate_id"], name="fk_integration_reference_resume", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["fact_snapshot_id", "organization_id", "resume_id", "facts_version"],
+            ["resume_fact_snapshots.id", "resume_fact_snapshots.organization_id", "resume_fact_snapshots.resume_id", "resume_fact_snapshots.facts_version"],
+            name="fk_integration_reference_snapshot", ondelete="RESTRICT"),
+        CheckConstraint("facts_version >= 0", name="ck_integration_reference_facts_version"),
+        CheckConstraint("candidate_lifecycle_version >= 1 AND resume_lifecycle_version >= 1", name="ck_integration_reference_lifecycle"),
+        Index("ix_integration_reference_candidate", "organization_id", "candidate_id"),
+        Index("ix_integration_reference_resume", "organization_id", "resume_id"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    report_id: Mapped[str] = mapped_column(String(36))
+    candidate_id: Mapped[str] = mapped_column(String(36))
+    resume_id: Mapped[str] = mapped_column(String(36))
+    fact_snapshot_id: Mapped[str] = mapped_column(String(36))
+    facts_version: Mapped[int] = mapped_column(Integer)
+    candidate_lifecycle_version: Mapped[int] = mapped_column(Integer)
+    resume_lifecycle_version: Mapped[int] = mapped_column(Integer)
+    fact_ids: Mapped[list[str]] = mapped_column(JSON, default=list, server_default=text("'[]'"))
+    source_block_ids: Mapped[list[str]] = mapped_column(JSON, default=list, server_default=text("'[]'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntegrationIdempotencyRecord(OrganizationScoped, Base):
+    """One grant/audience/operation result reference, with no cached report body."""
+
+    __tablename__ = "integration_idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "user_id", "membership_id", "grant_id", "audience", "operation", "key_digest", name="uq_integration_idempotency_key"),
+        ForeignKeyConstraint(["grant_id", "organization_id", "user_id", "membership_id", "audience"],
+            ["integration_grants.id", "integration_grants.organization_id", "integration_grants.user_id", "integration_grants.membership_id", "integration_grants.audience"],
+            name="fk_integration_idempotency_grant", ondelete="RESTRICT"),
+        ForeignKeyConstraint(["report_id", "organization_id", "user_id", "membership_id"],
+            ["integration_analysis_reports.id", "integration_analysis_reports.organization_id", "integration_analysis_reports.owner_user_id", "integration_analysis_reports.membership_id"],
+            name="fk_integration_idempotency_report", ondelete="RESTRICT"),
+        CheckConstraint("audience IN ('rest', 'mcp')", name="ck_integration_idempotency_audience"),
+        CheckConstraint("report_version >= 1", name="ck_integration_idempotency_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(36))
+    membership_id: Mapped[str] = mapped_column(String(36))
+    grant_id: Mapped[str] = mapped_column(String(36))
+    audience: Mapped[str] = mapped_column(String(16))
+    operation: Mapped[str] = mapped_column(String(64))
+    key_digest: Mapped[str] = mapped_column(String(64))
+    request_digest: Mapped[str] = mapped_column(String(64))
+    report_id: Mapped[str] = mapped_column(String(36))
+    report_version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: utcnow() + timedelta(hours=24), index=True)
+
+
+class IntegrationOAuthClient(Base):
+    """Public clients only; registration never fetches any client-supplied URL."""
+    __tablename__ = "integration_oauth_clients"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80))
+    redirect_uris: Mapped[list[str]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegrationOAuthConsent(Base):
+    """Ten-minute opaque handoff. No cookies/tokens and no arbitrary return URL."""
+    __tablename__ = "integration_oauth_consents"
+    __table_args__ = (
+        ForeignKeyConstraint(["membership_id", "organization_id", "user_id"],
+            ["organization_memberships.id", "organization_memberships.organization_id", "organization_memberships.user_id"], name="fk_integration_oauth_consent_member"),
+        CheckConstraint("audience IN ('rest', 'mcp')", name="ck_integration_oauth_consent_audience"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    request_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    client_id: Mapped[str] = mapped_column(ForeignKey("integration_oauth_clients.id"))
+    redirect_uri: Mapped[str] = mapped_column(String(2048))
+    resource: Mapped[str] = mapped_column(String(2048))
+    audience: Mapped[str] = mapped_column(String(16))
+    scopes: Mapped[list[str]] = mapped_column(JSON)
+    state: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    code_challenge: Mapped[str] = mapped_column(String(43))
+    organization_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    membership_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    auth_session_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    session_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegrationOAuthFamily(OrganizationScoped, Base):
+    __tablename__ = "integration_oauth_families"
+    __table_args__ = (
+        UniqueConstraint("id", "organization_id", name="uq_integration_oauth_family_org"),
+        UniqueConstraint("grant_id", name="uq_integration_oauth_family_grant"),
+        ForeignKeyConstraint(["grant_id", "organization_id"], ["integration_grants.id", "integration_grants.organization_id"], name="fk_integration_oauth_family_grant"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    grant_id: Mapped[str] = mapped_column(String(36))
+    client_id: Mapped[str] = mapped_column(ForeignKey("integration_oauth_clients.id"))
+    auth_session_version: Mapped[int] = mapped_column(Integer)
+    resource: Mapped[str] = mapped_column(String(2048))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntegrationOAuthCode(OrganizationScoped, Base):
+    __tablename__ = "integration_oauth_codes"
+    __table_args__ = (ForeignKeyConstraint(["family_id", "organization_id"], ["integration_oauth_families.id", "integration_oauth_families.organization_id"], name="fk_integration_oauth_code_family"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    family_id: Mapped[str] = mapped_column(String(36))
+    code_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    redirect_uri: Mapped[str] = mapped_column(String(2048))
+    code_challenge: Mapped[str] = mapped_column(String(43))
+    code_challenge_method: Mapped[str] = mapped_column(String(8), default="S256")
+    scopes: Mapped[list[str]] = mapped_column(JSON)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    def get_redirect_uri(self):
+        return self.redirect_uri
+
+    def get_scope(self):
+        return " ".join(self.scopes)
+
+
+class IntegrationOAuthRefresh(OrganizationScoped, Base):
+    __tablename__ = "integration_oauth_refresh_tokens"
+    __table_args__ = (ForeignKeyConstraint(["family_id", "organization_id"], ["integration_oauth_families.id", "integration_oauth_families.organization_id"], name="fk_integration_oauth_refresh_family"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    family_id: Mapped[str] = mapped_column(String(36))
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntegrationOAuthRateBucket(Base):
+    """Global pre-auth abuse budget; stores a keyed peer digest, never an IP."""
+    __tablename__ = "integration_oauth_rate_buckets"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    request_count: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 # Register the session-level tenant criteria only after every mapped business

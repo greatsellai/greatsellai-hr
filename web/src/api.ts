@@ -281,7 +281,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
 
   return {
     getAuthSession(): Promise<AuthSession> {
-      return request<AuthSession>("/auth/session");
+      return request<AuthSession>("/auth/session", { cache: "no-store" });
     },
 
     listAuthWorkspaces(): Promise<AuthWorkspaceMembershipList> {

@@ -52,6 +52,7 @@ from app.schemas import (
     CandidateDataRetentionPreviewResponse,
 )
 from app.services.resume_service import ResumeServiceError, resolve_uploaded_resume_path
+from app.services.integration_retention_service import invalidate_analysis_reports_for_sources
 from app.tenant_scope import (
     clear_organization_context,
     organization_context_id,
@@ -815,6 +816,9 @@ def delete_resume(
             replacement = _replacement_ready_resume(session, candidate_id=candidate_id)
             if replacement is not None:
                 replacement.is_active = True
+        invalidate_analysis_reports_for_sources(
+            session, organization_id=organization_id, resume_ids=(resume.id,), now=now,
+        )
         _cancel_resume_async_work(session, resume_ids=(resume.id,), now=now)
         _revoke_resume_access_grants(session, resume_ids=(resume.id,), now=now)
         _revoke_workspace_candidate_exports(
@@ -926,6 +930,9 @@ def delete_candidate(
             resume_ids=resume_ids,
             deletion_batch_id=batch.id,
             now=now,
+        )
+        invalidate_analysis_reports_for_sources(
+            session, organization_id=organization_id, candidate_ids=(candidate_id,), now=now,
         )
         _cancel_resume_async_work(session, resume_ids=resume_ids, now=now)
         _revoke_resume_access_grants(session, resume_ids=resume_ids, now=now)

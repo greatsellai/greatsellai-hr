@@ -33,6 +33,7 @@ from app.services.candidate_data_lifecycle_service import (
 from app.services.candidate_data_purge_service import (
     run_candidate_data_purge_worker_once,
 )
+from app.services.integration_retention_service import cleanup_expired_integration_records
 from app.services.candidate_data_export_service import (
     cleanup_expired_candidate_data_exports,
     run_candidate_data_export_worker_once,
@@ -464,6 +465,7 @@ def run_forever(settings: AppSettings) -> None:
                 worker_id=worker_id,
                 last_heartbeat_monotonic=last_heartbeat_monotonic,
             )
+            cleaned_integration_records = cleanup_expired_integration_records(database)
             ran_candidate_data_purge = run_candidate_data_purge_worker_once(
                 database,
                 settings=settings,
@@ -519,6 +521,7 @@ def run_forever(settings: AppSettings) -> None:
                 and not ran_mailbox_retention_cleanup
                 and not ran_candidate_data_retention_cleanup
                 and not ran_candidate_data_purge
+                and not cleaned_integration_records
                 and not ran_candidate_data_export
                 and not cleaned_candidate_data_exports
                 and not purged_recruiting_agent_contexts
@@ -629,6 +632,7 @@ def main() -> None:
         enqueue_due_mailbox_sync_jobs(database=database, settings=settings)
         cleanup_due_mailbox_retention(database=database, settings=settings)
         run_due_candidate_data_retention_cleanup(database, settings=settings)
+        cleanup_expired_integration_records(database)
         run_candidate_data_purge_worker_once(
             database,
             settings=settings,

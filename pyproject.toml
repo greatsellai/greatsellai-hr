@@ -5,11 +5,13 @@ description = "Clean-room resume ingestion and condition-filtering foundation."
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.14,<2",
+  "Authlib==1.8.0",
   "beautifulsoup4>=4.12,<5",
   "cryptography>=43,<47",
   "fastapi>=0.115,<1",
   "itsdangerous>=2.2,<3",
   "langgraph>=1.2,<2",
+  "mcp==2.2.0",
   "pydantic>=2.9,<3",
   "openpyxl>=3.1,<4",
   "python-docx>=1.1,<2",

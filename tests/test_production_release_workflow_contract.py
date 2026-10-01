@@ -409,6 +409,14 @@ def test_tcr_metadata_verifier_rejects_tampering_and_returns_digest_pinned_refer
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("Bash is required for the TCR metadata contract")
+    bash_version = subprocess.run(
+        [bash, "--version"], text=True, capture_output=True, check=False
+    ).stdout
+    version_match = re.search(r"version\s+(\d+)\.", bash_version)
+    if version_match is None or int(version_match.group(1)) < 4:
+        pytest.skip("the TCR verifier requires Bash 4+, available in Linux CI")
+    if shutil.which("sha256sum") is None:
+        pytest.skip("the TCR verifier requires sha256sum, available in Linux CI")
 
     release_commit = "a" * 40
     ci_run_id = "123456789"
@@ -534,8 +542,10 @@ def test_remote_preflight_template_uses_its_stdin_compose_and_removes_it(
         )
     )
     (fake_bin / "docker").write_text(fake_docker, encoding="utf-8")
+    (fake_bin / "flock").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     for command in (fake_bin / "sudo", fake_bin / "docker"):
         command.chmod(0o755)
+    (fake_bin / "flock").chmod(0o755)
 
     environment = os.environ | {
         "PATH": f"{fake_bin}:{os.environ['PATH']}",

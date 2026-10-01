@@ -14,7 +14,7 @@ def test_mailbox_background_jobs_upgrade_from_retention_schema(tmp_path, monkeyp
     config = Config("alembic.ini")
 
     command.upgrade(config, "20260720_0020")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260806_0063")
 
     engine = create_engine(database_url)
     try:

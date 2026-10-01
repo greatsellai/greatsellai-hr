@@ -68,11 +68,12 @@ GitHub 的 `main` 是唯一的团队代码基线；本地开发通过功能分�
 `main`，生产服务器只部署已经合并并打了 `prod-*` 标签的提交。服务器绝不是
 日常开发源，也不能把服务器文件反向覆盖 GitHub。
 
-每一个可验证的步骤都应先提交并推送到 GitHub 分支。完成需求后，先运行后端
-测试与前端构建，再创建 PR。PR 合并到 `main` 后，GitHub Actions 会在该提交的 CI
-全部通过后，会先对服务器既有生产环境做无副作用配置预检；通过后才自动创建不可变的
-`prod-YYYYMMDD-<commit短码>` 标签并部署。标签表示经过 CI 与预检的发布候选，只有服务器
-`current-release.env` 记录写入后才表示实际上线；详情见 [GitHub Actions CI/CD](docs/CI_CD.md)。
+每一个可验证的步骤都应先提交并推送到 GitHub 分支。完成需求后，运行后端测试与前端
+构建，再创建 PR；PR 必须通过完整 CI。合并到 `main` 后，GitHub Actions 会校验 PR
+验证溯源并自动发布到隔离 staging。只有当前 `main` 对应的 staging 候选完成验收后，负责人才可
+手动运行 **Production promotion**，输入 `PROMOTE` 并通过 `production` Environment 审批，
+由工作流创建 `prod-*` 标签并部署。合并到 `main` 不会自动连接或部署生产环境；详情见
+[GitHub Actions CI/CD](docs/CI_CD.md) 和 [预发布与生产晋级](docs/STAGING_RELEASE.md)。
 本地标签和部署脚本仅用于受控的应急重试。
 部署始终只打包 Git 受控源码，不会传输或删除 `.env.production`、数据库、候选人 PDF、
 Docker 卷或其他生产数据。
@@ -99,8 +100,8 @@ scripts/rollback-production.sh prod-YYYYMMDD-<commit短码> \
 git pull --ff-only origin main
 ```
 
-不得直接推送 `main` 或直接修改服务器业务代码。紧急修复也必须回到本地分支、
-推送 GitHub、经 PR 合并，并由成功 CI 自动创建新的生产标签。
+不得直接推送 `main` 或直接修改服务器业务代码。紧急修复也必须回到本地分支，
+推送 GitHub 并经 PR 合并；成功 CI 后仍须完成 staging 验收，再通过受控的人工生产晋级流程发布。
 
 ## 已实现的 API 闭环
 

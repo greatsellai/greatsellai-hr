@@ -81,7 +81,7 @@ from app.services.resume_eligibility import is_resume_screening_eligible
 from app.services.search_service import (
     SearchValidationError,
     projected_search_skills,
-    projected_search_sources,
+    projected_search_source_blocks,
     search_candidates as search_internal_candidates,
 )
 from app.tenant_scope import organization_context_id
@@ -147,6 +147,322 @@ _IDENTITY_DOCUMENT = re.compile(
     r"(?i)身份证|证件号|护照号|(?<!\w)(?:\d{17}[\dX]|\d{15})(?!\w)|"
     r"(?<!\w)\d{3}-\d{2}-\d{4}(?!\w)"
 )
+_UNLABELLED_DASH_CHARS = r"[-‐‑‒–—―−]"
+_UNLABELLED_DASH_RUN = _UNLABELLED_DASH_CHARS + r"+"
+_UNPUNCTUATED_CJK_ADDRESS_NUMBER = (
+    r"(?:\d{1,6}|"
+    r"[〇零一二三四五六七八九十百千万两兩壹贰叁參肆伍陆陸柒捌玖拾佰仟万萬]{1,12})"
+)
+_UNPUNCTUATED_CJK_ADDRESS_UNIT = r"(?:号|號|栋|棟|幢|单元|單元|层|層|室|座|楼|樓)"
+_UNPUNCTUATED_CJK_ADDRESS_PRE_NUMBER_UNIT = r"(?:栋|棟|幢|单元|單元|层|層|室|座|楼|樓)"
+_UNPUNCTUATED_CJK_LETTERED_UNIT_SUFFIX = (
+    r"[A-Za-z]{1,4}\s*(?:栋|棟|幢|单元|單元|层|層|室|座|楼|樓)"
+)
+_UNPUNCTUATED_CJK_ADDRESS_BOUNDARY = (
+    r"(?=\s*(?:$|[，,、;；.!?。！？…⋯]|[0-9]|"
+    + _UNPUNCTUATED_CJK_ADDRESS_UNIT + r"|"
+    + _UNPUNCTUATED_CJK_LETTERED_UNIT_SUFFIX + r"))"
+)
+_CHINESE_PROVINCE_OR_REGION_NAMES = (
+    r"(?:北京|天津|河北|山西|内蒙古|辽宁|吉林|黑龙江|上海|江苏|浙江|安徽|福建|江西|山东|河南|湖北|"
+    r"湖南|广东|广西|海南|重庆|四川|贵州|云南|西藏|陕西|甘肃|青海|宁夏|新疆|台湾|香港|澳门)"
+)
+_UNLABELLED_CJK_LOCALITY_PREFIX = (
+    r"(?:" + _CHINESE_PROVINCE_OR_REGION_NAMES
+    + r"(?:省|市|自治区|特别行政区)?\s*)?"
+    r"(?:[\u3400-\u9fff]{1,16}(?:市|地区|盟)\s*)?"
+    r"(?:[\u3400-\u9fff]{1,16}(?:区|县|旗)\s*)?"
+)
+_UNLABELLED_ADDRESS_ROW_PREFIX = (
+    r"^\s*(?:(?:[•●▪◦*|]|" + _UNLABELLED_DASH_RUN + r")\s*)?"
+)
+_UNLABELLED_CJK_ADDRESS_PHASE = (
+    r"(?:[ \t]*(?:[A-Za-z]{1,2}|[0-9]{1,3}|"
+    r"[一二三四五六七八九十]{1,3})(?:期|区|座|楼|栋|幢|单元)|"
+    r"[ \t]*[东南西北中]区){0,2}"
+)
+_UNLABELLED_CJK_COMPOUND_ADDRESS_INLINE_VALUE = (
+    _UNLABELLED_CJK_LOCALITY_PREFIX
+    + r"[\u3400-\u9fff]{0,4}(?:花园|小区|公寓|社区|家园|苑|大厦|广场|科技园|工业园|"
+    r"产业园|软件园|创业园|开发区|高新区)"
+    + _UNLABELLED_CJK_ADDRESS_PHASE
+    + r"[ \t]*"
+    + r"(?:" + _UNPUNCTUATED_CJK_ADDRESS_NUMBER + r"\s*"
+    + _UNPUNCTUATED_CJK_ADDRESS_UNIT + r"|"
+    + _UNPUNCTUATED_CJK_ADDRESS_PRE_NUMBER_UNIT + r"\s*"
+    + _UNPUNCTUATED_CJK_ADDRESS_NUMBER + r")"
+)
+_UNLABELLED_CJK_STREET_ADDRESS_INLINE_VALUE = (
+    _UNLABELLED_CJK_LOCALITY_PREFIX
+    + r"[\u3400-\u9fff]{1,32}(?:大道|大街|路|巷|弄)\s*"
+    + _UNPUNCTUATED_CJK_ADDRESS_NUMBER + r"\s*"
+    + _UNPUNCTUATED_CJK_ADDRESS_UNIT
+)
+_UNLABELLED_CJK_ADDRESS_COMPONENT = (
+    r"(?>(?:[A-Za-z]{1,2}[ \t]*\d{1,6}|\d{1,6}|"
+    r"[一二三四五六七八九十]{1,6}|[A-Za-z]{1,2}))"
+)
+_UNLABELLED_CJK_ADDRESS_COMPONENT_UNIT = (
+    r"(?:栋|棟|幢|单元|單元|层|層|室|座|楼|樓|号|號)"
+)
+_UNLABELLED_CJK_ADDRESS_ROW_SUFFIX = (
+    r"(?:[,，]?[ \t]*(?:"
+    + _UNLABELLED_CJK_ADDRESS_COMPONENT
+    + r"[ \t]*)?"
+    + _UNLABELLED_CJK_ADDRESS_COMPONENT_UNIT
+    + r"){0,3}"
+)
+_UNLABELLED_CJK_INLINE_ADDRESS_VALUE = re.compile(
+    r"(?:"
+    + _UNLABELLED_CJK_COMPOUND_ADDRESS_INLINE_VALUE
+    + _UNPUNCTUATED_CJK_ADDRESS_BOUNDARY
+    + r"|"
+    + _UNLABELLED_CJK_STREET_ADDRESS_INLINE_VALUE
+    + _UNPUNCTUATED_CJK_ADDRESS_BOUNDARY
+    + r")"
+)
+_UNLABELLED_CJK_RESIDENCE_ADDRESS_VALUE = re.compile(
+    r"(?:"
+    + _UNLABELLED_CJK_COMPOUND_ADDRESS_INLINE_VALUE
+    + r"|"
+    + _UNLABELLED_CJK_STREET_ADDRESS_INLINE_VALUE
+    + r")"
+)
+_UNLABELLED_CJK_COMPOUND_ADDRESS_ROW = re.compile(
+    _UNLABELLED_ADDRESS_ROW_PREFIX + r"(?:"
+    + _UNLABELLED_CJK_COMPOUND_ADDRESS_INLINE_VALUE
+    + r"|"
+    + _UNLABELLED_CJK_STREET_ADDRESS_INLINE_VALUE
+    + r")"
+    + _UNLABELLED_CJK_ADDRESS_ROW_SUFFIX
+    + r"[ \t]*[,，、;；.!?。！？…⋯]*$"
+)
+_UNLABELLED_CJK_ADDRESS_ROW_TAIL = re.compile(
+    r"(?:"
+    + _UNLABELLED_CJK_COMPOUND_ADDRESS_INLINE_VALUE
+    + r"|"
+    + _UNLABELLED_CJK_STREET_ADDRESS_INLINE_VALUE
+    + r")"
+    + _UNLABELLED_CJK_ADDRESS_ROW_SUFFIX
+    + r"[ \t]*[,，、;；.!?。！？…⋯]*$"
+)
+_UNLABELLED_ENGLISH_STREET_ADDRESS_VALUE = (
+    r"\d{1,6}[A-Za-z]?(?:[-/]\d{1,6}[A-Za-z]?)?[ \t]+"
+    r"[A-Za-z0-9#.'-]{1,40}(?:[ \t]+[A-Za-z0-9#.'-]{1,40}){0,5}[ \t]+"
+    r"(?:street|st\.?|road|rd\.?|avenue|ave\.?|boulevard|blvd\.?|"
+    r"lane|ln\.?|drive|dr\.?|court|ct\.?|place|pl\.?|highway|hwy\.?|"
+    r"parkway|pkwy\.?)"
+)
+_UNLABELLED_ENGLISH_STREET_ADDRESS_LABEL_TAIL = re.compile(
+    _UNLABELLED_ENGLISH_STREET_ADDRESS_VALUE
+    + r"[ \t]*[,;.!?。！？…⋯]*$",
+    re.IGNORECASE,
+)
+_UNLABELLED_ENGLISH_COUNTRY_NAME = (
+    r"(?:U\.?S\.?(?:A\.?)?|United States(?:\s+of\s+America)?)"
+)
+_UNLABELLED_ENGLISH_STATE_CODE = (
+    r"(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|"
+    r"MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|"
+    r"UT|VT|VA|WA|WV|WI|WY|DC)"
+)
+_UNLABELLED_ENGLISH_STATE_CODE_UPPER = (
+    r"(?-i:" + _UNLABELLED_ENGLISH_STATE_CODE + r")"
+)
+_UNLABELLED_ENGLISH_CITY_STATE_CONTINUATION = (
+    r"(?:[A-Za-z][A-Za-z .'-]{1,48},[ \t]*"
+    + _UNLABELLED_ENGLISH_STATE_CODE
+    + r"[ \t]+\d{5}(?:-\d{4})?|"
+    r"[A-Za-z][A-Za-z .'-]{1,48}[ \t]+"
+    + _UNLABELLED_ENGLISH_STATE_CODE
+    + r"[ \t]+\d{5}(?:-\d{4})?|"
+    r"(?=[A-Za-z .'-]*(?-i:[a-z]))[A-Za-z][A-Za-z .'-]{1,48},[ \t]*"
+    + _UNLABELLED_ENGLISH_STATE_CODE_UPPER
+    + r"|(?=[A-Z .'-]{4,},)[A-Z][A-Z .'-]{3,},[ \t]*"
+    + _UNLABELLED_ENGLISH_STATE_CODE_UPPER
+    + r")"
+)
+_UNLABELLED_ENGLISH_ADDRESS_UNIT_FULL_VALUE = r"[A-Za-z0-9-]+"
+_UNLABELLED_ENGLISH_ADDRESS_UNIT_CONTINUATION_VALUE = (
+    r"(?:(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]+|[A-Z]|"
+    r"(?:PH|PENTHOUSE)(?:-[A-Za-z0-9]{1,6})?)"
+)
+_UNLABELLED_ENGLISH_LOCALITY_ROW = re.compile(
+    r"^(?:[A-Za-z][A-Za-z .'-]{1,48},[ \t]*"
+    + _UNLABELLED_ENGLISH_STATE_CODE
+    + r"[ \t]+\d{5}(?:-\d{4})?|"
+    r"[A-Za-z][A-Za-z .'-]{1,48}[ \t]+"
+    + _UNLABELLED_ENGLISH_STATE_CODE
+    + r"[ \t]+\d{5}(?:-\d{4})?)"
+    + r"(?:[,;]\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r")?"
+    + r"(?:[ \t]*\(\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r"\s*\))?"
+    + r"[ \t]*[,;.!?。！？…⋯]*$",
+    re.IGNORECASE,
+)
+_UNLABELLED_ENGLISH_STREET_ADDRESS_ROW = re.compile(
+    _UNLABELLED_ADDRESS_ROW_PREFIX
+    + _UNLABELLED_ENGLISH_STREET_ADDRESS_VALUE
+    + r"(?=$|[ \t]*[,;.!?。！？…⋯]|[ \t]*\(|[ \t]+(?:apt\.?|apartment|unit|suite|floor|#)\b)"
+    + r"(?:(?:[ \t]+|[,;][ \t]*)(?:apt\.?|apartment|unit|suite|floor|#)\s*"
+    + _UNLABELLED_ENGLISH_ADDRESS_UNIT_FULL_VALUE
+    + r")?"
+    + r"(?:[,;]\s*[A-Za-z][A-Za-z .'-]{0,48}"
+    + r"(?:[, \t]+[A-Z]{2}(?:\s+\d{5}(?:-\d{4})?)?)?"
+    + r"(?:[,;]\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r")?"
+    + r")?"
+    + r"(?:[ \t]*\(\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r"\s*\))?"
+    + r"[ \t]*[,;.!?。！？…⋯]*$",
+    re.IGNORECASE,
+)
+_UNLABELLED_ENGLISH_STREET_ADDRESS_INLINE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    + _UNLABELLED_ENGLISH_STREET_ADDRESS_VALUE
+    + r"(?:"
+    + r"(?:(?:[ \t]+|[,;][ \t]*)(?:apt\.?|apartment|unit|suite|floor|#)\s*"
+    + _UNLABELLED_ENGLISH_ADDRESS_UNIT_FULL_VALUE
+    + r"(?:[,;]\s*[A-Za-z][A-Za-z .'-]{0,48}[, \t]+[A-Z]{2}(?:\s+\d{5}(?:-\d{4})?)?)?"
+    + r"|[,;]\s*[A-Za-z][A-Za-z .'-]{0,48}[, \t]+[A-Z]{2}(?:\s+\d{5}(?:-\d{4})?)?)"
+    + r"(?:[,;]\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r")?"
+    + r"(?:[ \t]*\(\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r"\s*\))?"
+    + r"|[,;]\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME
+    + r"|[ \t]*\(\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r"\s*\))"
+    + r"(?=$|[ \t]*[.!?。！？…⋯])",
+    re.IGNORECASE,
+)
+_UNLABELLED_ENGLISH_ADDRESS_CONTINUATION_ROW = re.compile(
+    r"^(?:"
+    + r"(?:apt\.?|apartment|unit|suite|floor|#)\s*"
+    + _UNLABELLED_ENGLISH_ADDRESS_UNIT_CONTINUATION_VALUE
+    + r"|"
+    + _UNLABELLED_ENGLISH_CITY_STATE_CONTINUATION
+    + r"(?:[,;]\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r")?"
+    + r"(?:[ \t]*\(\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r"\s*\))?"
+    + r"|\d{5}(?:-\d{4})?|"
+    + _UNLABELLED_ENGLISH_COUNTRY_NAME
+    + r"|\(\s*" + _UNLABELLED_ENGLISH_COUNTRY_NAME + r"\s*\)"
+    + r")[ \t]*[,;.!?。！？…⋯]*$",
+    re.IGNORECASE,
+)
+_UNLABELLED_ENGLISH_NONLOCALITY_CONTINUATION = re.compile(
+    r"^certificate\s+authority\s*,\s*"
+    + _UNLABELLED_ENGLISH_STATE_CODE_UPPER
+    + r"[ \t]*[,;.!?。！？…⋯]*$",
+    re.IGNORECASE,
+)
+_ADDRESS_LABEL_VALUE_ON_NEXT_LINE = re.compile(
+    r"(?:地址|住址|(?<![A-Za-z])(?:home\s+)?address)"
+    r"(?:\s*[:=]\s*|\s*)$",
+    re.IGNORECASE,
+)
+_ADDRESS_FIELD_LABEL = re.compile(
+    r"(?<![A-Za-z])(?:地址|住址|(?:home\s+)?address)\s*[:=]",
+    re.IGNORECASE,
+)
+_UNPUNCTUATED_ENGLISH_ADDRESS_LABEL_VALUE = re.compile(
+    r"^(?:home\s+)?address\s+(.+)$",
+    re.IGNORECASE,
+)
+_UNPUNCTUATED_CJK_ADDRESS_LABEL_VALUE = re.compile(r"^(?:地址|住址)\s+(.+)$")
+_UNPUNCTUATED_INLINE_ADDRESS_LABEL = re.compile(
+    r"(?<![A-Za-z])(?:home\s+)?address\s+|(?:地址|住址)\s*[:=]?\s*",
+    re.IGNORECASE,
+)
+_UNLABELLED_ENGLISH_RESIDENCE_CUE = re.compile(
+    r"\b(?:live|lives|living|lived|reside|resides|resided|residing)"
+    r"\s+(?:at|in|near|on)\b|\b(?:home\s+)?(?:address|residence)\s+(?:is|at)\b",
+    re.IGNORECASE,
+)
+_UNLABELLED_CJK_RESIDENCE_CUE = re.compile(
+    r"(?:目前|当前|现在|现)?(?:居(?:住)?(?:在|于)|住在|家住)"
+)
+_UNLABELLED_ENGLISH_ADDRESS_AFTER_CUE = re.compile(
+    _UNLABELLED_ENGLISH_STREET_ADDRESS_VALUE
+    + r"(?=$|[ \t,;.!?。！？…⋯])",
+    re.IGNORECASE,
+)
+_UNLABELLED_INLINE_ADDRESS_PREFIX = re.compile(
+    r"(?:[•●▪◦*|]|(?>(?:"
+    + _UNLABELLED_DASH_CHARS
+    + r")+))[ \t]*"
+)
+_UNLABELLED_INLINE_ADDRESS_SEPARATOR = re.compile(
+    r"[;；|｜•●▪◦*]"
+    r"|(?<=\s)[-‐‑‒–—―−]{1,32}(?=\s)"
+    r"|(?<=[A-Za-z0-9\u3400-\u9fff])(?>(?:"
+    + _UNLABELLED_DASH_CHARS
+    + r")+)(?=[ \t]*[\d\u3400-\u9fff])"
+    r"|(?<=\s)(?>(?:"
+    + _UNLABELLED_DASH_CHARS
+    + r")+)(?=[ \t]*[\d\u3400-\u9fff])"
+)
+
+
+def _contains_unlabelled_inline_address(value: str) -> bool:
+    """Detect high-confidence addresses embedded in a prose line."""
+    for label in _UNPUNCTUATED_INLINE_ADDRESS_LABEL.finditer(value):
+        address_start = label.end()
+        while address_start < len(value) and value[address_start] in " \t:：,，":
+            address_start += 1
+        if (
+            _UNLABELLED_ENGLISH_STREET_ADDRESS_LABEL_TAIL.fullmatch(value, address_start)
+            or _UNLABELLED_CJK_ADDRESS_ROW_TAIL.fullmatch(value, address_start)
+            or _UNLABELLED_ENGLISH_STREET_ADDRESS_INLINE.match(value, address_start)
+            or _UNLABELLED_CJK_INLINE_ADDRESS_VALUE.match(value, address_start)
+        ):
+            return True
+    for cue in _UNLABELLED_CJK_RESIDENCE_CUE.finditer(value):
+        address_start = cue.end()
+        while address_start < len(value) and value[address_start] in " \t:：,，":
+            address_start += 1
+        if _UNLABELLED_CJK_RESIDENCE_ADDRESS_VALUE.match(value, address_start):
+            return True
+    for cue in _UNLABELLED_ENGLISH_RESIDENCE_CUE.finditer(value):
+        address_start = cue.end()
+        while address_start < len(value) and value[address_start] in " \t:：,，":
+            address_start += 1
+        if _UNLABELLED_ENGLISH_ADDRESS_AFTER_CUE.match(value, address_start):
+            return True
+    for separator in _UNLABELLED_INLINE_ADDRESS_SEPARATOR.finditer(value):
+        address_start = separator.end()
+        while address_start < len(value) and value[address_start].isspace():
+            address_start += 1
+        prefix = _UNLABELLED_INLINE_ADDRESS_PREFIX.match(value, address_start)
+        if prefix:
+            address_start = prefix.end()
+        if (
+            _UNLABELLED_CJK_INLINE_ADDRESS_VALUE.match(value, address_start)
+            or _UNLABELLED_ENGLISH_STREET_ADDRESS_INLINE.match(value, address_start)
+            or _UNLABELLED_CJK_ADDRESS_ROW_TAIL.fullmatch(value, address_start)
+            or _UNLABELLED_ENGLISH_STREET_ADDRESS_LABEL_TAIL.fullmatch(value, address_start)
+        ):
+            return True
+    return False
+
+
+def _is_unlabelled_english_address_continuation(value: str) -> bool:
+    return bool(
+        _UNLABELLED_ENGLISH_ADDRESS_CONTINUATION_ROW.fullmatch(value)
+        and not _UNLABELLED_ENGLISH_NONLOCALITY_CONTINUATION.fullmatch(value)
+    )
+
+
+_UNLABELLED_CJK_ADDRESS_CONTINUATION_ROW = re.compile(
+    r"^(?:"
+    + _UNLABELLED_CJK_ADDRESS_COMPONENT
+    + r"[ \t]*(?:期|区|座|楼|栋|幢|单元|层|室|号)|"
+    + r"(?:期|区|座|楼|栋|幢|单元|层|室|号))"
+    + r"(?:[,，]?[ \t]*"
+    + _UNLABELLED_CJK_ADDRESS_COMPONENT
+    + r"[ \t]*(?:期|区|座|楼|栋|幢|单元|层|室|号))*"
+    + r"[,，。.!?；;]*$"
+)
+
+
+def _is_unlabelled_address_continuation(value: str) -> bool:
+    return (
+        _is_unlabelled_english_address_continuation(value)
+        or bool(_UNLABELLED_CJK_ADDRESS_CONTINUATION_ROW.fullmatch(value))
+    )
 
 
 class IntegrationReadError(RuntimeError):
@@ -162,6 +478,13 @@ class _CurrentCandidate:
     resume: Resume
     snapshot: ResumeFactSnapshot
     payload: dict[str, Any]
+
+
+@dataclass
+class _IntegrationSanitizationState:
+    omit_next_value: bool = False
+    pending_address_label: bool = False
+    omit_address_continuation: bool = False
 
 
 def _assert_read_context(session: Session) -> None:
@@ -250,38 +573,118 @@ def sanitize_integration_text(
 
     if not isinstance(value, str):
         return None, False
+    safe_lines = _sanitize_integration_lines(value, _IntegrationSanitizationState())
+    return _finish_sanitized_integration_lines(
+        safe_lines, candidate_name=candidate_name, max_chars=max_chars,
+    )
+
+
+def sanitize_integration_text_blocks(
+    blocks: Collection[tuple[str, int, str]],
+    *,
+    candidate_name: str | None = None,
+    max_chars: int,
+) -> dict[str, tuple[str | None, bool]]:
+    """Sanitize ordered source blocks with address context shared per resume."""
+    state = _IntegrationSanitizationState()
+    result: dict[str, tuple[str | None, bool]] = {}
+    for block_id, page_no, value in sorted(blocks, key=lambda item: (item[1], item[0])):
+        safe_lines = _sanitize_integration_lines(value, state)
+        result[block_id] = _finish_sanitized_integration_lines(
+            safe_lines, candidate_name=candidate_name, max_chars=max_chars,
+        )
+    return result
+
+
+def _sanitize_integration_lines(
+    value: object,
+    state: _IntegrationSanitizationState,
+) -> list[str]:
+    if not isinstance(value, str):
+        return []
     # Normalize full-width labels/digits and omit entire unsafe physical lines;
     # removing just a label would leave its private value in the response.
     text = "".join(character for character in value if unicodedata.category(character) != "Cf")
     text = unicodedata.normalize("NFKC", text)
     text = _CONTROL_CHARACTERS.sub(" ", text)
     safe_lines: list[str] = []
-    omit_next_value = False
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
+        if state.omit_address_continuation:
+            if _is_unlabelled_address_continuation(stripped):
+                continue
+            state.omit_address_continuation = False
         # Some PDF/text extractors omit punctuation after a private label
         # (for example, "性别 男" or "Gender Female"). Omit the full line.
         if _PRIVATE_LABEL_WHITESPACE_VALUE.fullmatch(stripped):
+            state.omit_next_value = False
+            state.pending_address_label = False
+            address_value = (
+                _UNPUNCTUATED_ENGLISH_ADDRESS_LABEL_VALUE.fullmatch(stripped)
+                or _UNPUNCTUATED_CJK_ADDRESS_LABEL_VALUE.fullmatch(stripped)
+            )
+            if address_value:
+                value_text = address_value.group(1).strip()
+                state.omit_address_continuation = bool(
+                    _UNLABELLED_ENGLISH_STREET_ADDRESS_ROW.fullmatch(value_text)
+                    or _UNLABELLED_CJK_COMPOUND_ADDRESS_ROW.fullmatch(value_text)
+                )
             continue
         # PDF extraction can put a label and its value on separate lines.
         # Dropping only the label would disclose the following contact value.
         if (_PRIVATE_LABEL_VALUE_ON_NEXT_LINE.search(stripped)
                 or _AMBIGUOUS_SOCIAL_LABEL_ONLY.fullmatch(stripped)):
-            omit_next_value = True
+            state.omit_next_value = True
+            state.pending_address_label = bool(_ADDRESS_LABEL_VALUE_ON_NEXT_LINE.search(stripped))
             continue
         label = _PRIVATE_LABEL.search(line)
         if label:
-            omit_next_value = not line[label.end():].strip()
+            value_after_label = line[label.end():].strip()
+            state.omit_next_value = not value_after_label
+            address_label = _ADDRESS_FIELD_LABEL.search(line)
+            state.pending_address_label = bool(address_label and not value_after_label)
+            if address_label and value_after_label:
+                address_value = line[address_label.end():].strip()
+                state.omit_address_continuation = bool(
+                    _UNLABELLED_ENGLISH_STREET_ADDRESS_ROW.fullmatch(address_value)
+                    or _UNLABELLED_CJK_COMPOUND_ADDRESS_ROW.fullmatch(address_value)
+                )
             continue
-        if omit_next_value:
-            omit_next_value = False
+        if state.omit_next_value:
+            state.omit_next_value = False
+            state.omit_address_continuation = bool(
+                state.pending_address_label
+                and (
+                    _UNLABELLED_ENGLISH_STREET_ADDRESS_ROW.fullmatch(stripped)
+                    or _UNLABELLED_CJK_COMPOUND_ADDRESS_ROW.fullmatch(stripped)
+                )
+            )
+            state.pending_address_label = False
+            continue
+        english_address_row = _UNLABELLED_ENGLISH_STREET_ADDRESS_ROW.fullmatch(stripped)
+        inline_address = _contains_unlabelled_inline_address(stripped)
+        if (
+            _UNLABELLED_CJK_COMPOUND_ADDRESS_ROW.fullmatch(stripped)
+            or english_address_row
+            or inline_address
+        ):
+            state.omit_address_continuation = True
             continue
         if (_SOCIAL_CONTACT_VALUE.search(line) or _PRIVATE_CONTACT_URL.search(line)
                 or _IDENTITY_DOCUMENT.search(line)):
             continue
         safe_lines.append(line)
+    return safe_lines
+
+
+def _finish_sanitized_integration_lines(
+    safe_lines: list[str],
+    *,
+    candidate_name: str | None,
+    max_chars: int,
+) -> tuple[str | None, bool]:
     text = "\n".join(safe_lines)
     text = redact_nonessential_personal_data(text)
     if candidate_name and candidate_name.strip():
@@ -843,11 +1246,16 @@ def _validate_external_free_text(
             )
 
 
-def _external_search_source(resume: Resume, text: str) -> str:
-    projected, _ = sanitize_integration_text(
-        text, candidate_name=resume.candidate.display_name, max_chars=100_000,
+def _external_search_source_blocks(resume: Resume) -> dict[str, str]:
+    projected = sanitize_integration_text_blocks(
+        [
+            (block.block_id, block.page_no, block.text)
+            for block in resume.source_blocks
+        ],
+        candidate_name=resume.candidate.display_name,
+        max_chars=100_000,
     )
-    return projected or ""
+    return {block_id: text or "" for block_id, (text, _truncated) in projected.items()}
 
 
 def _external_search_skill(resume: Resume, text: str) -> str:
@@ -942,7 +1350,7 @@ def search_candidates(
     )
     try:
         with (
-            projected_search_sources(_external_search_source),
+            projected_search_source_blocks(_external_search_source_blocks),
             projected_search_skills(_external_search_skill),
         ):
             internal = search_internal_candidates(
@@ -1081,14 +1489,19 @@ def get_candidate_evidence(
     blocks = {
         block.block_id: block
         for block in session.scalars(
-            select(ResumeSourceBlock).where(
-                ResumeSourceBlock.resume_id == current.resume.id,
-                ResumeSourceBlock.block_id.in_(request.source_block_ids),
-            )
+            select(ResumeSourceBlock).where(ResumeSourceBlock.resume_id == current.resume.id)
         ).all()
     }
-    if set(blocks) != requested:
+    if not requested <= set(blocks):
         raise IntegrationReadError("integration_evidence_not_found", 404)
+    projected_blocks = sanitize_integration_text_blocks(
+        [
+            (block.block_id, block.page_no, block.text)
+            for block in blocks.values()
+        ],
+        candidate_name=current.candidate.display_name,
+        max_chars=_EVIDENCE_BLOCK_MAX_CHARS,
+    )
     remaining = _EVIDENCE_RESPONSE_MAX_CHARS
     excerpts: list[IntegrationEvidenceExcerpt] = []
     for block_id in request.source_block_ids:
@@ -1106,11 +1519,14 @@ def get_candidate_evidence(
             )
             continue
         max_chars = min(_EVIDENCE_BLOCK_MAX_CHARS, remaining)
-        text, truncated = sanitize_integration_text(
-            block.text,
-            candidate_name=current.candidate.display_name,
-            max_chars=max_chars,
-        )
+        full_text, was_truncated = projected_blocks.get(block_id, (None, False))
+        if full_text is None:
+            text, truncated = None, False
+        else:
+            text = full_text[:max_chars]
+            truncated = was_truncated or len(full_text) > max_chars
+            if truncated and len(text) == max_chars:
+                text = f"{text[:-1].rstrip()}…"
         if text is None:
             excerpts.append(
                 IntegrationEvidenceExcerpt(

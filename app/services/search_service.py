@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -65,6 +65,12 @@ _source_projection: ContextVar[Callable[[Resume, str], str] | None] = ContextVar
 _skill_projection: ContextVar[Callable[[Resume, str], str] | None] = ContextVar(
     "screening_skill_projection", default=None,
 )
+_source_block_projection: ContextVar[Callable[[Resume], Mapping[str, str]] | None] = ContextVar(
+    "screening_source_block_projection", default=None,
+)
+_source_block_projection_cache: ContextVar[dict[str, Mapping[str, str]] | None] = ContextVar(
+    "screening_source_block_projection_cache", default=None,
+)
 
 
 @contextmanager
@@ -97,6 +103,25 @@ def projected_search_skills(project: Callable[[Resume, str], str]) -> Iterator[N
         _skill_projection.reset(token)
 
 
+@contextmanager
+def projected_search_source_blocks(
+    project: Callable[[Resume], Mapping[str, str]],
+) -> Iterator[None]:
+    """Project every source block once per resume and search request.
+
+    Address and other cross-block privacy rules need ordered context from the
+    full resume. The cache is held only in this ContextVar scope and is reset
+    even if screening raises, so no projection can bleed across requests.
+    """
+    projection_token = _source_block_projection.set(project)
+    cache_token = _source_block_projection_cache.set({})
+    try:
+        yield
+    finally:
+        _source_block_projection_cache.reset(cache_token)
+        _source_block_projection.reset(projection_token)
+
+
 def _projected_skill_display(resume: Resume, skill: object) -> str:
     display = getattr(skill, "skill_display", "")
     project = _skill_projection.get()
@@ -112,7 +137,19 @@ def _projected_skill_key(resume: Resume, skill: object) -> str:
     return skill_key if isinstance(skill_key, str) else ""
 
 
-def _project_source_block(resume: Resume, text: str) -> str:
+def _project_source_block(resume: Resume, text: str, block_id: str | None = None) -> str:
+    project_blocks = _source_block_projection.get()
+    if project_blocks is not None:
+        if not block_id:
+            return ""
+        cache = _source_block_projection_cache.get()
+        if cache is None:
+            return ""
+        projected = cache.get(resume.id)
+        if projected is None:
+            projected = project_blocks(resume)
+            cache[resume.id] = projected
+        return projected.get(block_id, "")
     project = _source_projection.get()
     return project(resume, text) if project is not None else redact_contact_values(text)
 _AMBIGUOUS_LANGUAGE_SOURCE_ALIASES = {
@@ -982,7 +1019,7 @@ def _matching_keyword_block_ids(resume: Resume, keywords: list[str]) -> list[str
     return sorted(
         block.block_id
         for block in resume.source_blocks
-        if any(key in normalized_key(_project_source_block(resume, block.text)) for key in keys)
+        if any(key in normalized_key(_project_source_block(resume, block.text, block.block_id)) for key in keys)
     )
 
 
@@ -998,7 +1035,7 @@ def _matching_v2_keyword_block_ids(
             block.block_id
             for block in resume.source_blocks
             if any(
-                key in normalized_key(_project_source_block(resume, block.text))
+                key in normalized_key(_project_source_block(resume, block.text, block.block_id))
                 for key in keyword_keys
             )
         )
@@ -1021,7 +1058,7 @@ def _matching_v2_keyword_block_ids(
         block.block_id
         for block in resume.source_blocks
         if any(
-            key in normalized_key(_project_source_block(resume, block.text))
+            key in normalized_key(_project_source_block(resume, block.text, block.block_id))
             for key in source_keys
         )
     )
@@ -1032,7 +1069,7 @@ def _screening_source_text(resume: Resume) -> str:
     """Return source text stripped of contact values for search and Agent tools."""
 
     return "\n".join(
-        _project_source_block(resume, block.text) for block in resume.source_blocks
+        _project_source_block(resume, block.text, block.block_id) for block in resume.source_blocks
     )
 
 

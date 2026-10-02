@@ -7,7 +7,10 @@ from sqlalchemy import select
 from app.integration_schemas import IntegrationGrantCreate, IntegrationPolicyPatch
 from app.models import IntegrationAuditEvent, Resume, ResumeFactSnapshot, ResumeSourceBlock
 from app.services.integration_management_service import create_integration_grant, update_integration_policy
-from app.services.integration_read_service import sanitize_integration_text
+from app.services.integration_read_service import (
+    sanitize_integration_text,
+    sanitize_integration_text_blocks,
+)
 from app.services.search_service import _screening_source_text, projected_search_sources
 from app.tenant_scope import set_organization_context
 from test_integration_auth_helpers import make_context, named_auth
@@ -97,6 +100,113 @@ def test_whitespace_delimited_private_labels_drop_full_line(private_line):
         f"{private_line}\n项目交付完成\n技能 Python", max_chars=500,
     )
     assert text == "项目交付完成 技能 Python"
+
+
+@pytest.mark.parametrize("address", [
+    "南山区合成科技园18号",
+    "• 合成花园88栋501室",
+    "合成花园88栋 501 室",
+    "合成花园88号楼501室",
+    "合成花园88栋，501室",
+    "12A Synthetic Road",
+    "Currently live at 123 Synthetic Road, Apt 12A-3, Springfield, IL 62704",
+    "Built work— Address 123 Synthetic Road",
+])
+def test_unlabelled_high_confidence_address_lines_are_omitted(address):
+    assert sanitize_integration_text(address, max_chars=500)[0] is None
+
+
+@pytest.mark.parametrize("text", [
+    "项目规范；科技园18号SOP流程",
+    "memory-address 64 bit indexes",
+    "Built 2024 Google Drive integration project",
+    "Certificate Authority, CA",
+    "Unit testing",
+])
+def test_address_rules_preserve_ordinary_work_text(text):
+    assert sanitize_integration_text(text, max_chars=500)[0] == text
+
+
+def test_ordered_source_block_sanitization_carries_address_context():
+    projected = sanitize_integration_text_blocks(
+        [
+            ("page-1", 1, "Address:\n123 Synthetic Road,"),
+            ("page-2", 2, "Apt 12A-3\nSpringfield, IL 62704\nSkills Python"),
+        ],
+        max_chars=500,
+    )
+    assert projected["page-1"][0] is None
+    assert projected["page-2"][0] == "Skills Python"
+
+
+def test_ordered_source_block_sanitization_drops_cjk_address_continuation():
+    projected = sanitize_integration_text_blocks(
+        [
+            ("page-1", 1, "合成路123号"),
+            ("page-2", 2, "1室\n技能 Python"),
+        ],
+        max_chars=500,
+    )
+    assert projected["page-1"][0] is None
+    assert projected["page-2"][0] == "技能 Python"
+
+
+def test_evidence_omits_address_context_in_unrequested_prior_block(privacy_context):
+    context = privacy_context
+    with context.database.session_factory() as session:
+        set_organization_context(session, context.organization_id)
+        resume = session.scalar(select(Resume).where(Resume.candidate_id == context.ids["alpha"]))
+        main = session.scalar(select(ResumeSourceBlock).where(
+            ResumeSourceBlock.resume_id == resume.id,
+            ResumeSourceBlock.block_id == "alpha-main",
+        ))
+        continuation = session.scalar(select(ResumeSourceBlock).where(
+            ResumeSourceBlock.resume_id == resume.id,
+            ResumeSourceBlock.block_id == "alpha-identity",
+        ))
+        main.page_no = 1
+        main.text = "Address:\n123 Synthetic Road,"
+        continuation.page_no = 2
+        continuation.text = "Apt 12A-3\nSpringfield, IL 62704\nSkills Python"
+        session.commit()
+    with _client(context) as client:
+        response = client.post(
+            f"/v1/integrations/candidates/{context.ids['alpha']}/evidence",
+            headers={"Authorization": f"Bearer {context.token}"},
+            json={"source_block_ids": ["alpha-identity"]},
+        )
+    assert response.status_code == 200
+    assert "Synthetic Road" not in response.text
+    assert "Springfield" not in response.text
+    assert "Skills Python" in response.text
+
+
+def test_search_cannot_locate_candidate_by_address_continuation(privacy_context):
+    context = privacy_context
+    with context.database.session_factory() as session:
+        set_organization_context(session, context.organization_id)
+        resume = session.scalar(select(Resume).where(Resume.candidate_id == context.ids["alpha"]))
+        main = session.scalar(select(ResumeSourceBlock).where(
+            ResumeSourceBlock.resume_id == resume.id,
+            ResumeSourceBlock.block_id == "alpha-main",
+        ))
+        continuation = session.scalar(select(ResumeSourceBlock).where(
+            ResumeSourceBlock.resume_id == resume.id,
+            ResumeSourceBlock.block_id == "alpha-identity",
+        ))
+        main.page_no = 1
+        main.text = "Address:\n123 Synthetic Road,"
+        continuation.page_no = 2
+        continuation.text = "Apt 12A-3\nSpringfield, IL 62704\nSkills Python"
+        session.commit()
+    with _client(context) as client:
+        response = client.post(
+            "/v1/integrations/candidates/search",
+            headers={"Authorization": f"Bearer {context.token}"},
+            json={"keywords_all_of": ["Springfield"]},
+        )
+    assert response.status_code == 200
+    assert response.json()["total_count"] == 0
 
 
 def test_candidate_profile_does_not_expose_internal_resume_fingerprint(privacy_context):
